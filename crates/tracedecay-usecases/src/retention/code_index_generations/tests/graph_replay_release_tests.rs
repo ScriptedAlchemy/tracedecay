@@ -16,6 +16,7 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
         plan,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(10),
+        None,
     )
     .expect("apply retention");
 
@@ -54,6 +55,7 @@ fn graph_release_queue_pages_more_than_one_retention_batch() {
             plan,
             CodeGenerationRetentionModeV1::Apply,
             UtcMicros(10),
+            None,
         )
         .expect("apply retention");
     }
@@ -91,6 +93,7 @@ fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
         plan,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(10),
+        None,
     )
     .expect("apply retention");
     let release_path = std::fs::read_dir(store.path().join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))
@@ -133,6 +136,7 @@ fn graph_release_queue_rejects_symlink_evidence() {
         plan,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(10),
+        None,
     )
     .expect("apply retention");
     let release_path = std::fs::read_dir(store.path().join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))

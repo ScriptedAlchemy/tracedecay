@@ -304,11 +304,13 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         &graph.store_layout().data_root.join("code-index-v1"),
         &canonical_root,
     );
+    let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
     let plan = prepare_next_code_generation_retention_cancellable(
         &code_store_root,
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        Some(&graph_replay_pool_root),
     )
     .expect("code generation retention plan");
     let first_candidate = plan

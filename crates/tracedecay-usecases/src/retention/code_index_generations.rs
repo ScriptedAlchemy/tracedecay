@@ -526,11 +526,12 @@ pub fn prepare_next_code_generation_retention_cancellable(
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     rollback_floor: usize,
     is_cancelled: &dyn Fn() -> bool,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    recover_code_generation_retention(store_root, vector_readable_sources)?;
+    recover_code_generation_retention(store_root, vector_readable_sources, graph_replay_pool_root)?;
     plan_next_code_generation_retention_cancellable(
         store_root,
         vector_readable_sources,
@@ -712,11 +713,17 @@ fn plan_code_generation_retention_with_verification_cancellable(
     })
 }
 
+/// `graph_replay_pool_root` is the project graph's replay pool. When present,
+/// every retired generation survives retention as a hard-linked pool entry
+/// until the graph projection durably confirms it is no longer needed (the
+/// replay release queue's existing contract); `None` deletes retired files
+/// outright and is only sound for stores with no graph projection.
 pub fn execute_code_generation_retention(
     store_root: &Path,
     plan: CodeGenerationRetentionPlanV1,
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
     if mode == CodeGenerationRetentionModeV1::DryRun {
         return Ok(CodeGenerationRetentionReportV1 {
@@ -781,13 +788,21 @@ pub fn execute_code_generation_retention(
                 "active generation changed while retention candidates were quarantined".to_owned(),
             ));
         }
+        if let Some(pool_root) = graph_replay_pool_root {
+            expose_staged_generations_to_graph_replay_pool(store_root, &transaction, pool_root)?;
+        }
         write_receipt(store_root, &receipt)?;
-        cleanup_committed_transaction(store_root, &transaction, &vector_readable_sources)?;
+        cleanup_committed_transaction(
+            store_root,
+            &transaction,
+            &vector_readable_sources,
+            graph_replay_pool_root,
+        )?;
         clear_transaction(store_root)
     })();
     if let Err(error) = result {
         if !receipt_is_durable(store_root, &receipt)? {
-            rollback_staged_transaction(store_root, &transaction)?;
+            rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;
             clear_transaction(store_root)?;
         }
         return Err(error);
@@ -803,9 +818,14 @@ pub fn execute_code_generation_retention(
 pub fn recover_code_generation_retention(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let _store_lock = acquire_code_generation_store_lock(store_root)?;
-    recover_pending_transaction_unlocked(store_root, vector_readable_sources)
+    recover_pending_transaction_unlocked(
+        store_root,
+        vector_readable_sources,
+        graph_replay_pool_root,
+    )
 }
 
 pub fn run_code_generation_retention(
@@ -814,6 +834,7 @@ pub fn run_code_generation_retention(
     rollback_floor: usize,
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
     // Apply must sweep the same census dry-run reports (bounded by the batch
     // cap), not the single-unit "next" plan: that truncation exists for daemon
@@ -821,14 +842,18 @@ pub fn run_code_generation_retention(
     // transaction never holds more than one collection unit.
     let plan = match mode {
         CodeGenerationRetentionModeV1::Apply => {
-            recover_code_generation_retention(store_root, vector_readable_sources)?;
+            recover_code_generation_retention(
+                store_root,
+                vector_readable_sources,
+                graph_replay_pool_root,
+            )?;
             plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
         }
         CodeGenerationRetentionModeV1::DryRun => {
             plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
         }
     };
-    execute_code_generation_retention(store_root, plan, mode, completed_at)
+    execute_code_generation_retention(store_root, plan, mode, completed_at, graph_replay_pool_root)
 }
 
 pub fn observe_code_generation_retention(
@@ -894,15 +919,21 @@ pub fn observe_code_generation_retention(
 fn recover_pending_transaction_unlocked(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let Some(transaction) = load_transaction(store_root)? else {
         return Ok(());
     };
 
     if receipt_is_durable(store_root, &transaction.receipt)? {
-        cleanup_committed_transaction(store_root, &transaction, vector_readable_sources)?;
+        cleanup_committed_transaction(
+            store_root,
+            &transaction,
+            vector_readable_sources,
+            graph_replay_pool_root,
+        )?;
     } else {
-        rollback_staged_transaction(store_root, &transaction)?;
+        rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;
     }
     clear_transaction(store_root)
 }
@@ -1108,9 +1139,65 @@ fn stage_collectable_generations(
     Ok(())
 }
 
+/// Expose every quarantined generation to the graph replay pool by hard link
+/// before its release event becomes durable. The pool entry is the sealed
+/// generation's survival path once the canonical file is unlinked; linking
+/// before `write_receipt` publishes the release events guarantees the replay
+/// reconciler can never observe an event whose pool copy is still missing and
+/// complete it early, which would strand a later-linked copy as an
+/// unreclaimable orphan. A digest-named destination that already exists is
+/// the same sealed content and is left in place.
+fn expose_staged_generations_to_graph_replay_pool(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+    pool_root: &Path,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
+    std::fs::create_dir_all(pool_root).map_err(storage)?;
+    let mut linked = false;
+    for generation in &transaction.receipt.deleted_generations {
+        let staged = stage_root.join(&generation.generation_file);
+        if !regular_file_exists(&staged)? {
+            continue;
+        }
+        match std::fs::hard_link(&staged, pool_root.join(&generation.generation_file)) {
+            Ok(()) => linked = true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(storage(error)),
+        }
+    }
+    if linked {
+        sync_directory(pool_root)?;
+    }
+    Ok(())
+}
+
+/// Withdraw a rolled-back transaction's pool exposure. The canonical files
+/// are restored by the rollback rename, so the graph replay path resolves
+/// them from the generation directory again; a same-digest entry left by the
+/// eager staging path is equally safe to remove for the same reason.
+fn withdraw_generations_from_graph_replay_pool(
+    transaction: &CodeGenerationRetentionTransactionV1,
+    pool_root: &Path,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let mut removed = false;
+    for generation in &transaction.receipt.deleted_generations {
+        match std::fs::remove_file(pool_root.join(&generation.generation_file)) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage(error)),
+        }
+    }
+    if removed {
+        sync_directory(pool_root)?;
+    }
+    Ok(())
+}
+
 fn rollback_staged_transaction(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let stage_root = transaction_stage_root(store_root, &transaction.receipt);
@@ -1138,6 +1225,9 @@ fn rollback_staged_transaction(
             }
         }
     }
+    if let Some(pool_root) = graph_replay_pool_root {
+        withdraw_generations_from_graph_replay_pool(transaction, pool_root)?;
+    }
     graph_replay_release::remove_events(store_root, &transaction.receipt)?;
     remove_empty_stage_root(&stage_root)
 }
@@ -1146,8 +1236,12 @@ fn cleanup_committed_transaction(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    graph_replay_pool_root: Option<&Path>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     ensure_transaction_liveness(store_root, transaction, vector_readable_sources)?;
+    if let Some(pool_root) = graph_replay_pool_root {
+        expose_staged_generations_to_graph_replay_pool(store_root, transaction, pool_root)?;
+    }
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let stage_root = transaction_stage_root(store_root, &transaction.receipt);
     for generation in &transaction.receipt.deleted_generations {
@@ -3095,6 +3189,7 @@ mod tests {
             &BTreeSet::new(),
             DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2,
+            None,
         )
         .expect_err("cancellation must interrupt full-file verification");
 
@@ -3120,6 +3215,7 @@ mod tests {
             plan,
             CodeGenerationRetentionModeV1::Apply,
             UtcMicros(99),
+            None,
         )
         .expect("execute one retention unit");
 
@@ -3156,6 +3252,7 @@ mod tests {
             plan,
             CodeGenerationRetentionModeV1::Apply,
             UtcMicros(100),
+            None,
         )
         .expect_err("receipt commit must fail");
 
@@ -3204,7 +3301,7 @@ mod tests {
         assert!(!generations_root.join(&collectable.generation_file).exists());
         assert!(staged_root.join(&collectable.generation_file).is_file());
 
-        recover_code_generation_retention(store.path(), &vector_readable_sources)
+        recover_code_generation_retention(store.path(), &vector_readable_sources, None)
             .expect("recover uncommitted transaction");
 
         assert!(
@@ -3214,6 +3311,84 @@ mod tests {
         );
         assert!(!transaction_path(store.path()).exists());
         assert!(!staged_root.exists());
+    }
+
+    #[test]
+    fn apply_retires_collectable_generations_into_the_graph_replay_pool() {
+        let (store, _generations) = fixture_store(5);
+        let pool_root = store.path().join("graph-replay-pool");
+        let plan =
+            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+                .expect("plan retention");
+        assert_eq!(plan.collectable_generations.len(), 1);
+        let collectable = plan.collectable_generations[0].clone();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let source_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
+            .expect("read collectable bytes");
+
+        let report = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(102),
+            Some(&pool_root),
+        )
+        .expect("apply retention");
+
+        assert_eq!(report.deleted_generations.len(), 1);
+        assert!(!generations_root.join(&collectable.generation_file).exists());
+        assert_eq!(
+            std::fs::read(pool_root.join(&collectable.generation_file))
+                .expect("retired generation survives in the graph replay pool"),
+            source_bytes,
+        );
+        let queued_releases =
+            std::fs::read_dir(store.path().join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))
+                .expect("release queue exists")
+                .count();
+        assert_eq!(
+            queued_releases, 1,
+            "the retired generation's release event is queued for the graph reconciler"
+        );
+    }
+
+    #[test]
+    fn failed_receipt_commit_withdraws_the_graph_replay_pool_exposure() {
+        let (store, _generations) = fixture_store(5);
+        let pool_root = store.path().join("graph-replay-pool");
+        let plan =
+            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+                .expect("plan retention");
+        let collectable = plan.collectable_generations[0].clone();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+
+        std::fs::write(store.path().join(RECEIPTS_DIRECTORY), b"not a directory")
+            .expect("block receipt directory");
+        let error = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(103),
+            Some(&pool_root),
+        )
+        .expect_err("receipt commit must fail");
+
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Storage(_)));
+        assert!(
+            generations_root
+                .join(&collectable.generation_file)
+                .is_file(),
+            "rollback must restore the canonical generation"
+        );
+        assert!(
+            !pool_root.join(&collectable.generation_file).exists(),
+            "rollback must withdraw the graph replay pool exposure"
+        );
+        let queued_releases = store.path().join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY);
+        let queued = std::fs::read_dir(&queued_releases)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(queued, 0, "rollback must remove the queued release events");
     }
 
     #[test]
@@ -3707,6 +3882,7 @@ mod tests {
             plan,
             CodeGenerationRetentionModeV1::Apply,
             UtcMicros(14),
+            None,
         )
         .expect_err("unlinking evidence requires proven content digests");
 
