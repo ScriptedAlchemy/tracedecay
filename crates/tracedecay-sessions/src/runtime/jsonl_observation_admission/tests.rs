@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::json;
 use tracedecay_domain::{
@@ -43,6 +43,7 @@ struct SeamSpyAdmission {
     inner: MemoryHostAdmission,
     scripted_capture_error: Mutex<Option<HostAdmissionOutcome>>,
     report_no_cursor: AtomicBool,
+    capture_calls: AtomicU64,
     cover_past_advances: Mutex<Vec<ObservationCursorAdvance>>,
 }
 
@@ -54,6 +55,10 @@ impl SeamSpyAdmission {
     fn cover_past_advances(&self) -> Vec<ObservationCursorAdvance> {
         self.cover_past_advances.lock().unwrap().clone()
     }
+
+    fn capture_count(&self) -> u64 {
+        self.capture_calls.load(Ordering::Relaxed)
+    }
 }
 
 impl HostAdmission for SeamSpyAdmission {
@@ -62,6 +67,7 @@ impl HostAdmission for SeamSpyAdmission {
         request: CaptureObservationRequest,
     ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
         Box::pin(async move {
+            self.capture_calls.fetch_add(1, Ordering::Relaxed);
             if let Some(outcome) = *self.scripted_capture_error.lock().unwrap() {
                 return Err(outcome);
             }
@@ -267,6 +273,11 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
             .expect("deterministic content refusals must not block the source");
 
     assert_eq!(progress.bytes_consumed, len);
+    assert_eq!(
+        spy.capture_count(),
+        2,
+        "both source frames reached the fully materialized admission boundary exactly once"
+    );
     let advances = spy.cover_past_advances();
     assert_eq!(advances.len(), 2, "both refused frames must be covered");
     for advance in &advances {
@@ -285,6 +296,11 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
             .await
             .expect("a covered stream must converge");
     assert_eq!(replay.bytes_consumed, 0);
+    assert_eq!(
+        spy.capture_count(),
+        2,
+        "a settled FileBytes cursor must prevent subsequent deserialize, native/canonical ID derivation, and payload hashing"
+    );
     assert_eq!(
         spy.cover_past_advances().len(),
         2,
