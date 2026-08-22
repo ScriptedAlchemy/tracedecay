@@ -225,7 +225,7 @@ fn classifies_backend_failures_for_retry_policy() {
         ),
         (
             "config error: codex app-server closed stdout before completing",
-            AgentTaskFailureClass::Unavailable,
+            AgentTaskFailureClass::Disconnected,
             true,
         ),
         (
@@ -269,7 +269,7 @@ fn failure_disposition_heals_stale_recorded_retryability() {
 
     assert_eq!(
         disposition.classification,
-        Some(AgentTaskFailureClass::Unavailable)
+        Some(AgentTaskFailureClass::Disconnected)
     );
     assert_eq!(disposition.retryable, Some(true));
     assert!(!disposition.is_non_retryable());
