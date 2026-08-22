@@ -31,6 +31,7 @@ struct RealPageFixture {
     provider: String,
     session_id: String,
     message_id: String,
+    projected_message_id: String,
     text: String,
     anchor_id: RetrievalAnchorId,
     active_generation: u64,
@@ -188,6 +189,11 @@ async fn seed_real_page_fixture(
     let ordinal = u64::try_from(rank).expect("ordinal");
     let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
     let record_id = ObservationId::new(format!("record.page.{rank:02}")).expect("record id");
+    let projected_message_id = if provider == "claude" {
+        record_id.as_str().to_owned()
+    } else {
+        message_id.clone()
+    };
     let relations = CanonicalObservationRelationsV1::new(session)
         .with_message_id(ObservationId::new(message_id.clone()).expect("message id"));
     let envelope = CanonicalObservationEnvelopeV1::new(
@@ -293,6 +299,7 @@ async fn seed_real_page_fixture(
         provider,
         session_id,
         message_id,
+        projected_message_id,
         text,
         anchor_id: derive_exact_observation_anchor_id(
             observation.scope(),
@@ -383,6 +390,8 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
         ("unavailable.page", HydrationStateV1::RetainedButUnavailable),
     ] {
         let fixture = &fixtures[0];
+        let mut candidate = real_page_candidate(fixture);
+        candidate.stable_id = stable_id.to_owned();
         items.push(real_page_kernel(
             real_page_snapshot(
                 &fixture.session_id,
@@ -390,7 +399,7 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
                 root.clone(),
                 false,
             ),
-            vec![real_page_candidate(fixture)],
+            vec![candidate],
             vec![TemporalHydratedResult::unavailable_for_test(
                 0,
                 stable_id,
@@ -430,7 +439,7 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
             .collect::<Vec<_>>(),
         fixtures
             .iter()
-            .map(|fixture| fixture.message_id.as_str())
+            .map(|fixture| fixture.projected_message_id.as_str())
             .collect::<Vec<_>>(),
         "available messages retain their rank order without promotion"
     );
