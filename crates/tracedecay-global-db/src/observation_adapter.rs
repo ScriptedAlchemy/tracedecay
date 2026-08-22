@@ -8,8 +8,7 @@ use tracedecay_domain::{
     classify_observation_collision, is_canonical_payload_revision_replay,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCoverageV1,
-    ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1, DurabilityClassV1,
@@ -114,17 +113,24 @@ impl ObservationStore for GlobalDbObservationStore {
         let candidate = write.observation().clone();
         let candidate_cursor = write.next_cursor().clone();
         // A previously refused identity collision is deterministic and
-        // terminal: the typed cursor-advance ledger already covers this exact
-        // record. Short-circuit on the durable marker alone — two bare-column
-        // reads — so late catch-up passes and temporal triggers never repeat
-        // the stored-row decode, collision classification, payload
-        // canonicalization, or digest work the first refusal already paid for.
-        if let Some(existing_digest) =
-            read_refused_admission_terminal(&self.database, &write).await?
+        // terminal. The refusal authority is its own retained table keyed by
+        // the exact refused candidate signature `(observation_id,
+        // refused_payload_digest)`, so cursor-advance retention can never
+        // reclaim it and a candidate with any OTHER payload digest — e.g. a
+        // recognized canonical payload revision replay — falls through to the
+        // full path untouched. Answering from the marker is one bare-column
+        // read: no stored-row decode, no identity re-derivation, no payload
+        // canonicalization, no hashing.
+        if let Some(retained_digest) = read_admission_refusal(
+            &self.database,
+            &observation_id,
+            candidate.payload_reference().digest(),
+        )
+        .await?
         {
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
-                existing_digest: Box::new(existing_digest),
+                existing_digest: Box::new(retained_digest),
                 candidate_digest: Box::new(candidate.payload_reference().digest().clone()),
                 outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             });
@@ -152,45 +158,80 @@ impl ObservationStore for GlobalDbObservationStore {
             };
             // Durable terminal coverage: the refusal is deterministic (the
             // identity is content-derived and already owned by a different
-            // payload), so record it in the same typed cursor/coverage story
-            // the rest of ingest uses — an `admission_refused` advance in the
-            // `source_cursor_advances` ledger that moves the source cursor
-            // past the refused record. Catch-up then never re-reads it, and
-            // the short-circuit above answers any re-admitted candidate. The
-            // retained observation row is never touched. A candidate whose
-            // range the cursor already covers cannot form a valid advance;
-            // its refusal stays typed and terminal without a ledger row.
+            // payload). Two records land together, in this order:
+            //
+            // 1. the refused candidate signature in the retained
+            //    `observation_admission_refusals` authority, which answers any
+            //    re-admitted identical candidate without decode or hash work;
+            // 2. an `admission_refused` advance in the typed
+            //    `source_cursor_advances` ledger that moves the source cursor
+            //    past the refused record so catch-up never re-reads it.
+            //
+            // The retained observation row is never touched. Both records are
+            // written only for the shape that actually loops in production —
+            // a sequential scan standing exactly at the refused record: the
+            // durable cursor has NOT covered it, the caller's expected cursor
+            // matches the durable one, and the record either continues the
+            // current generation contiguously or restarts a new generation
+            // from position zero. A gap or a stale expected cursor proves the
+            // caller's view is NOT the scan frontier, so nothing is recorded
+            // and the refusal stays typed and fail-closed with all
+            // authoritative state — rows, cursor, ledger — left untouched;
+            // an already-covered candidate is a replayed verification probe
+            // and is likewise left untouched.
             let identity = candidate.identity();
-            match ObservationCursorAdvance::for_ordering(
-                identity.source().clone(),
-                identity.scope().clone(),
-                identity.generation(),
-                identity.ordering_domain(),
-                write.expected_cursor().cloned(),
-                identity.position(),
-                ObservationCoverageReason::AdmissionRefused,
-            ) {
-                Ok(mut advance) => {
-                    match (
-                        write.next_cursor().file_identity(),
-                        write.next_cursor().resume_fingerprint(),
-                    ) {
-                        (Some(file_identity), Some(resume_fingerprint)) => {
-                            advance =
-                                advance.with_resume_checkpoint(file_identity, resume_fingerprint);
-                        }
-                        (None, None) => {}
-                        _ => {
-                            return Err(runtime_storage_error(
-                                "record refused admission coverage",
-                                "cursor resume checkpoint is incomplete",
-                            ));
-                        }
-                    }
-                    self.advance_source_cursor(advance).await?;
+            let actual_cursor =
+                read_runtime_source_cursor(runtime, identity.source(), identity.scope())?;
+            let candidate_covered = actual_cursor.as_ref().is_some_and(|cursor| {
+                cursor.generation() == identity.generation()
+                    && cursor.ordering_domain() == identity.ordering_domain()
+                    && cursor.position() >= identity.position().end()
+            });
+            let scan_contiguous = match write.expected_cursor() {
+                Some(cursor)
+                    if cursor.generation() == identity.generation()
+                        && cursor.ordering_domain() == identity.ordering_domain() =>
+                {
+                    cursor.position() == identity.position().start()
                 }
-                Err(ObservationStoreError::CursorCoverageMismatch) => {}
-                Err(error) => return Err(error),
+                Some(_) | None => identity.position().start() == 0,
+            };
+            if !candidate_covered
+                && scan_contiguous
+                && actual_cursor.as_ref() == write.expected_cursor()
+            {
+                record_admission_refusal(
+                    &self.database,
+                    &observation_id,
+                    candidate.payload_reference().digest(),
+                    existing.observation().payload_reference().digest(),
+                )
+                .await?;
+                let mut advance = ObservationCursorAdvance::for_ordering(
+                    identity.source().clone(),
+                    identity.scope().clone(),
+                    identity.generation(),
+                    identity.ordering_domain(),
+                    write.expected_cursor().cloned(),
+                    identity.position(),
+                    ObservationCoverageReason::AdmissionRefused,
+                )?;
+                match (
+                    write.next_cursor().file_identity(),
+                    write.next_cursor().resume_fingerprint(),
+                ) {
+                    (Some(file_identity), Some(resume_fingerprint)) => {
+                        advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(runtime_storage_error(
+                            "record refused admission coverage",
+                            "cursor resume checkpoint is incomplete",
+                        ));
+                    }
+                }
+                self.advance_source_cursor(advance).await?;
             }
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
@@ -209,6 +250,33 @@ impl ObservationStore for GlobalDbObservationStore {
                 ));
             };
             let identity = candidate.identity();
+            // A revision replay whose range the durable cursor already covers
+            // has no missing coverage to restore. Advancing anyway would
+            // collide with whatever advance already covers that range — e.g.
+            // the admission-refused advance recorded for an earlier invalid
+            // rewrite of the same record — and turn a recognized revision
+            // into a permanent cursor-advance collision.
+            let actual_cursor =
+                read_runtime_source_cursor(runtime, identity.source(), identity.scope())?;
+            let revision_covered = actual_cursor.as_ref().is_some_and(|cursor| {
+                cursor.generation() == identity.generation()
+                    && cursor.ordering_domain() == identity.ordering_domain()
+                    && cursor.position() >= identity.position().end()
+            });
+            if revision_covered {
+                return Ok(ObservationPersistOutcome::CoveredDuplicate(
+                    ObservationCommitReceipt::new(
+                        existing.sequence(),
+                        existing.observation().clone(),
+                        candidate_cursor,
+                        existing.retrieval_anchor().clone(),
+                        existing.projection_generation().clone(),
+                    )?
+                    .with_repository_provenance_attachment(
+                        existing.repository_provenance_attachment().clone(),
+                    )?,
+                ));
+            }
             let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
                 identity.source().clone(),
                 identity.scope().clone(),
@@ -644,82 +712,85 @@ fn read_runtime_retrieval_anchor_by_alias(
 
 /// Durable terminal marker for a previously refused identity collision.
 ///
-/// Keyed by the exact primary key the runtime writes to the typed
-/// cursor-advance ledger — `(source_json, scope_json, coverage_json)` with the
-/// `admission_refused` reason — plus the retained row's bare `payload_digest`
-/// column. Neither read decodes an observation, re-derives an identity, or
-/// hashes anything: the candidate's own digest arrives precomputed in the
-/// write and the coverage key is a plain serialization of three small typed
-/// fields. Returns the retained digest only when it genuinely differs from
-/// the candidate's, so exact replays and revision replays fall through to the
-/// full path untouched.
-async fn read_refused_admission_terminal(
+/// Keyed by the exact refused candidate signature `(observation_id,
+/// refused_payload_digest)` in the retained `observation_admission_refusals`
+/// authority. The read is one bare-column lookup: it never decodes an
+/// observation, re-derives an identity, or hashes anything — the candidate's
+/// digest arrives precomputed in the write. A candidate carrying any other
+/// payload digest (an exact replay of the retained row, or a canonical
+/// payload revision replay) misses the key and falls through to the full
+/// path untouched.
+async fn read_admission_refusal(
     database: &Database,
-    write: &AnchoredObservationWrite,
+    observation_id: &CanonicalObservationIdV1,
+    refused_digest: &PayloadDigestV1,
 ) -> ObservationStoreResult<Option<PayloadDigestV1>> {
-    const OPERATION: &str = "read refused admission terminal";
-    let candidate = write.observation();
-    let identity = candidate.identity();
-    let source_json = serde_json::to_string(candidate.source())
-        .map_err(|error| runtime_storage_error(OPERATION, error))?;
-    let scope_json = serde_json::to_string(candidate.scope())
-        .map_err(|error| runtime_storage_error(OPERATION, error))?;
-    let coverage_json = serde_json::to_string(&ObservationCoverageV1::new(
-        identity.generation(),
-        identity.ordering_domain(),
-        identity.position(),
-    ))
-    .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    const OPERATION: &str = "read admission refusal terminal";
     let snapshot = database
         .begin_engine_read_snapshot(OPERATION)
         .await
         .map_err(|error| runtime_storage_error(OPERATION, error))?;
-    let mut marker_rows = snapshot
+    let mut rows = snapshot
         .query(
-            "SELECT 1 FROM source_cursor_advances
-             WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3
-               AND reason = ?4",
+            "SELECT retained_payload_digest FROM observation_admission_refusals
+             WHERE observation_id = ?1 AND refused_payload_digest = ?2",
             tracedecay_runtime_core::db::engine::params![
-                source_json,
-                scope_json,
-                coverage_json,
-                ObservationCoverageReason::AdmissionRefused.as_str()
+                observation_id.as_str(),
+                refused_digest.as_str()
             ],
         )
         .await
         .map_err(|error| runtime_storage_error(OPERATION, error))?;
-    if marker_rows
-        .next()
-        .await
-        .map_err(|error| runtime_storage_error(OPERATION, error))?
-        .is_none()
-    {
-        return Ok(None);
-    }
-    drop(marker_rows);
-    let mut digest_rows = snapshot
-        .query(
-            "SELECT payload_digest FROM observations WHERE observation_id = ?1",
-            tracedecay_runtime_core::db::engine::params![candidate.observation_id().as_str()],
-        )
-        .await
-        .map_err(|error| runtime_storage_error(OPERATION, error))?;
-    let Some(row) = digest_rows
+    let Some(row) = rows
         .next()
         .await
         .map_err(|error| runtime_storage_error(OPERATION, error))?
     else {
         return Ok(None);
     };
-    let digest = PayloadDigestV1::new(
+    PayloadDigestV1::new(
         row.get::<String>(0)
             .map_err(|error| runtime_storage_error(OPERATION, error))?,
     )
-    .map_err(ObservationStoreError::Contract)?;
-    if &digest == candidate.payload_reference().digest() {
-        return Ok(None);
-    }
-    Ok(Some(digest))
+    .map(Some)
+    .map_err(ObservationStoreError::Contract)
+}
+
+/// Records one refused candidate signature in the retained refusal authority.
+///
+/// Idempotent: a replayed refusal conflicts on the primary key and changes
+/// nothing, which also keeps the row immutable under its schema triggers.
+async fn record_admission_refusal(
+    database: &Database,
+    observation_id: &CanonicalObservationIdV1,
+    refused_digest: &PayloadDigestV1,
+    retained_digest: &PayloadDigestV1,
+) -> ObservationStoreResult<()> {
+    const OPERATION: &str = "record admission refusal terminal";
+    let transaction = database
+        .begin_write_transaction(OPERATION)
+        .await
+        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    transaction
+        .execute(
+            "INSERT INTO observation_admission_refusals (
+                observation_id, refused_payload_digest, retained_payload_digest, refused_at
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT DO NOTHING",
+            tracedecay_runtime_core::db::engine::params![
+                observation_id.as_str(),
+                refused_digest.as_str(),
+                retained_digest.as_str(),
+                now_micros().0
+            ],
+        )
+        .await
+        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    Ok(())
 }
 
 fn read_runtime_stored_observation(
