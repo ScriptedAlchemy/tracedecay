@@ -647,14 +647,16 @@ pub(super) async fn dispatch_git_tools(
                 git::handle_commit_context(cg, &graph, args).await
             }
             "tracedecay_pr_context" => {
-                let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
+                let deadline = options.application_deadline.clone();
+                let cancellation = options.application_cancellation.clone();
+                let registered_project_session_db = options.registered_project_session_db.clone();
                 git::handle_pr_context(
                     cg,
-                    &graph,
+                    admitted_graph_query(cg, &options, "file_dependents"),
                     args,
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
-                    options.registered_project_session_db.clone(),
+                    deadline,
+                    cancellation,
+                    registered_project_session_db,
                 )
                 .await
             }
