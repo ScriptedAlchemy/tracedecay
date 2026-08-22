@@ -30,14 +30,52 @@ cat >"$fake_bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ "$*" == *"https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest"* ]]
-printf '%s\n' '{"tag_name":"v0.0.33"}'
+case "$*" in
+  *"https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest"*)
+    printf '%s\n' '{"tag_name":"v0.0.33","draft":false,"prerelease":false}'
+    ;;
+  *"https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/tags/v0.1.0-beta.34"*)
+    case "${FAKE_RELEASE_STATE:-published}" in
+      draft)
+        printf '%s\n' '{"tag_name":"v0.1.0-beta.34","draft":true,"prerelease":true}'
+        ;;
+      stable)
+        printf '%s\n' '{"tag_name":"v0.1.0-beta.34","draft":false,"prerelease":false}'
+        ;;
+      published)
+        printf '%s\n' '{"tag_name":"v0.1.0-beta.34","draft":false,"prerelease":true}'
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected GitHub release endpoint: $*" >&2
+    exit 1
+    ;;
+esac
 SH
 chmod +x "$fake_bin/curl"
 
 gate_run env PATH="$fake_bin:$PATH" "$SCRIPT" --repo "$same_repo"
 gate_expect_success "GitHub release lookup"
 gate_output_contains "GitHub release lookup" "release versions are aligned: 0.0.33"
+
+prerelease_repo="$(write_repo 0.1.0-beta.34)"
+gate_run env PATH="$fake_bin:$PATH" "$SCRIPT" --repo "$prerelease_repo"
+gate_expect_success "published prerelease lookup"
+gate_output_contains "published prerelease lookup" \
+  "release versions are aligned: 0.1.0-beta.34"
+
+gate_run env FAKE_RELEASE_STATE=draft PATH="$fake_bin:$PATH" \
+  "$SCRIPT" --repo "$prerelease_repo"
+gate_expect_status "draft prerelease" 1
+gate_output_contains "draft prerelease" \
+  "GitHub prerelease v0.1.0-beta.34 is not published"
+
+gate_run env FAKE_RELEASE_STATE=stable PATH="$fake_bin:$PATH" \
+  "$SCRIPT" --repo "$prerelease_repo"
+gate_expect_status "release with wrong channel" 1
+gate_output_contains "release with wrong channel" \
+  "GitHub prerelease v0.1.0-beta.34 is not published"
 
 ahead_repo="$(write_repo 0.0.34)"
 gate_run "$SCRIPT" --repo "$ahead_repo" --release-version v0.0.33
