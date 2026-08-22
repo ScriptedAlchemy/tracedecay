@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
@@ -11,7 +12,7 @@ use tracedecay_domain::{
     FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId,
+    SourceOccurrenceId, validate_code_logical_path,
 };
 
 use super::{
@@ -23,7 +24,18 @@ use crate::retrieval::ports::{
     RetrievalPortError, contract_error,
 };
 
+mod artifact;
 mod postings;
+
+pub use artifact::{
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactMountMetadataV1, CodeLexicalArtifactOccurrenceV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalArtifactSectionDigestV1,
+    CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
+};
 
 use postings::{ByteNgramBudget, ByteNgramPostings, FuzzyTermIndex};
 
@@ -65,7 +77,8 @@ fn check_projection_build_deadline(deadline: Instant) -> Result<(), RetrievalPor
 }
 
 /// Generation and source metadata bound to one immutable lexical projection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CodeLexicalProjectionMetadataV1 {
     pub generation: CodeGenerationId,
     pub repository_id: Option<RepositoryId>,
@@ -84,11 +97,7 @@ impl CodeLexicalProjectionMetadataV1 {
         }
         for (file, path) in &self.logical_paths {
             file.validate().map_err(contract_error)?;
-            if path.is_empty() {
-                return Err(RetrievalPortError::Contract(
-                    "lexical projection logical paths must not be empty".to_owned(),
-                ));
-            }
+            validate_code_logical_path(path).map_err(contract_error)?;
         }
         self.freshness
             .source_namespace
@@ -1382,6 +1391,23 @@ fn exact_matches(
     Vec<crate::retrieval::exact::ExactLiteralV1>,
     Vec<ExactTechnicalTermKindV1>,
 ) {
+    exact_matches_fields(
+        &row.exact_terms,
+        &row.sanitized_text,
+        &row.logical_path,
+        request,
+    )
+}
+
+fn exact_matches_fields(
+    exact_terms: &[ExactTechnicalTermV1],
+    sanitized_text: &BoundedSanitizedText,
+    logical_path: &str,
+    request: &ExactLaneRequest,
+) -> (
+    Vec<crate::retrieval::exact::ExactLiteralV1>,
+    Vec<ExactTechnicalTermKindV1>,
+) {
     let mut matched_literals = Vec::new();
     let mut matched_kinds = BTreeSet::new();
     for literal in &request.literals {
@@ -1392,18 +1418,15 @@ fn exact_matches(
                 | ExactFieldV1::DiagnosticText
                 | ExactFieldV1::CompilerOrRuntimeError
         ) {
-            matched = contains_bytes(
-                row.sanitized_text.as_str().as_bytes(),
-                &literal.original_bytes,
-            );
+            matched = contains_bytes(sanitized_text.as_str().as_bytes(), &literal.original_bytes);
         }
         if literal.field == ExactFieldV1::Path
-            && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
+            && logical_path.as_bytes() == literal.canonical_bytes.as_slice()
         {
             matched = true;
             matched_kinds.insert(ExactTechnicalTermKindV1::Path);
         }
-        for term in &row.exact_terms {
+        for term in exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field
                 && canonical_projected_exact_term(term).as_ref()
                     == literal.canonical_bytes.as_slice()
@@ -1464,7 +1487,15 @@ fn collect_term_kinds(
     normalized_term: &str,
     kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
 ) {
-    for term in &row.exact_terms {
+    collect_term_kinds_fields(&row.exact_terms, normalized_term, kinds);
+}
+
+fn collect_term_kinds_fields(
+    exact_terms: &[ExactTechnicalTermV1],
+    normalized_term: &str,
+    kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
+) {
+    for term in exact_terms {
         if std::str::from_utf8(term.canonical_bytes())
             .is_ok_and(|value| normalize_lexical(value) == normalized_term)
         {

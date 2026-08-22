@@ -1,8 +1,8 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
-    io::Cursor,
-    sync::atomic::{AtomicBool, Ordering},
+    io::{Cursor, Read, Seek, SeekFrom},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -21,7 +21,7 @@ use tracedecay_code_index::{
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
         VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-        sealed_generation_payload_digest,
+        VerifiedSealedLexicalPageV1, sealed_generation_payload_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -996,11 +996,11 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
             panic!("fixture must emit at least one lexical page")
         }
     };
-    assert_eq!(first.page_ordinal, 0);
-    assert_eq!(first.chunk_count, 1);
-    assert_eq!(first.chunks.len(), 1);
-    assert!(first.payload_bytes > 0);
-    assert!(first.payload_bytes <= 1024 * 1024);
+    assert_eq!(first.page_ordinal(), 0);
+    assert_eq!(first.chunk_count(), 1);
+    assert_eq!(first.chunks().len(), 1);
+    assert!(first.payload_bytes() > 0);
+    assert!(first.payload_bytes() <= 1024 * 1024);
 
     control.cancel();
     let cursor_before_cancel = source.cursor().clone();
@@ -1015,19 +1015,19 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     control.resume();
 
     let mut observed = first
-        .chunks
-        .into_iter()
-        .map(|chunk| chunk.into_chunk())
+        .chunks()
+        .iter()
+        .map(|chunk| chunk.chunk().clone())
         .collect::<Vec<_>>();
-    let mut final_page_digest = first.cumulative_digest;
+    let mut final_page_digest = first.cumulative_digest().clone();
     let receipt = loop {
         match source.next_page(&control).expect("resumed page read") {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
-                assert_eq!(page.chunk_count, 1);
-                assert_eq!(page.chunks.len(), 1);
-                assert!(page.payload_bytes <= 1024 * 1024);
-                final_page_digest = page.cumulative_digest.clone();
-                observed.extend(page.chunks.into_iter().map(|chunk| chunk.into_chunk()));
+                assert_eq!(page.chunk_count(), 1);
+                assert_eq!(page.chunks().len(), 1);
+                assert!(page.payload_bytes() <= 1024 * 1024);
+                final_page_digest = page.cumulative_digest().clone();
+                observed.extend(page.chunks().iter().map(|chunk| chunk.chunk().clone()));
             }
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
@@ -1042,12 +1042,12 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     observed.sort_by(|left, right| left.id.cmp(&right.id));
     expected.sort_by(|left, right| left.id.cmp(&right.id));
     assert_eq!(observed, expected);
-    assert_eq!(receipt.total_chunks, expected.len() as u64);
-    assert_eq!(receipt.page_count, expected.len() as u64);
-    assert_eq!(receipt.cumulative_digest, final_page_digest);
-    assert_eq!(receipt.source_state_digest, expected_state_digest);
+    assert_eq!(receipt.total_chunks(), expected.len() as u64);
+    assert_eq!(receipt.page_count(), expected.len() as u64);
+    assert_eq!(receipt.cumulative_digest(), &final_page_digest);
+    assert_eq!(receipt.source_state_digest(), &expected_state_digest);
     assert_eq!(
-        receipt.format_revision,
+        receipt.format_revision(),
         SEALED_GENERATION_FORMAT_REVISION_V1
     );
 }
@@ -1075,6 +1075,69 @@ fn verified_sealed_lexical_source_refuses_a_foreign_state_digest() {
             .to_string()
             .contains("state digest does not match the admitted source"),
         "unexpected digest error: {error}"
+    );
+}
+
+#[test]
+fn verified_sealed_lexical_decode_budget_refuses_before_a_second_payload_read() {
+    struct ObservedReader {
+        inner: Cursor<Vec<u8>>,
+        bytes_read: Arc<AtomicUsize>,
+    }
+
+    impl Read for ObservedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.bytes_read.fetch_add(read, Ordering::SeqCst);
+            Ok(read)
+        }
+    }
+
+    impl Seek for ObservedReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.lexical-budget", 1_262_000), &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let expected_state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let bytes_read = Arc::new(AtomicUsize::new(0));
+    let error = VerifiedSealedLexicalPageSourceV1::open_with_memory_budget(
+        ObservedReader {
+            inner: Cursor::new(sealed.clone()),
+            bytes_read: bytes_read.clone(),
+        },
+        u64::try_from(sealed.len()).expect("sealed length"),
+        expected_state_digest,
+        16,
+        1024 * 1024,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect_err("the decode/page reservation must be denied");
+    assert!(
+        error.to_string().contains("reservation"),
+        "unexpected memory denial: {error}"
+    );
+    assert_eq!(
+        bytes_read.load(Ordering::SeqCst),
+        sealed.len(),
+        "budget denial may perform the bounded verification scan, but must not seek back and read a file payload for decode"
     );
 }
 
@@ -1131,15 +1194,15 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
                 .expect("verified import page")
             {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
-                    assert_eq!(page.import_count, page.imports.len() as u64);
+                    assert_eq!(page.import_count(), page.imports().len() as u64);
                     assert!(
-                        page.payload_bytes + page.import_payload_bytes <= 1024 * 1024,
+                        page.payload_bytes() + page.import_payload_bytes() <= 1024 * 1024,
                         "chunks and imports share one page byte bound"
                     );
-                    if page.import_count > 0 {
-                        assert!(page.import_payload_bytes > 0);
+                    if page.import_count() > 0 {
+                        assert!(page.import_payload_bytes() > 0);
                     }
-                    imports.extend(page.imports);
+                    imports.extend(page.imports().iter().cloned());
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
             }
@@ -1152,22 +1215,232 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
     assert_eq!(split_imports, generation.imports());
     assert_eq!(wide_imports, generation.imports());
     assert_eq!(
-        split_receipt.total_imports,
+        split_receipt.total_imports(),
         generation.imports().len() as u64
     );
-    assert!(split_receipt.import_payload_bytes > 0);
+    assert!(split_receipt.import_payload_bytes() > 0);
     assert_eq!(
-        split_receipt.import_dictionary_digest, wide_receipt.import_dictionary_digest,
+        split_receipt.import_dictionary_digest(),
+        wide_receipt.import_dictionary_digest(),
         "the exact import dictionary cannot depend on page boundaries"
     );
     assert_eq!(
-        split_receipt.import_payload_bytes,
-        wide_receipt.import_payload_bytes
+        split_receipt.import_payload_bytes(),
+        wide_receipt.import_payload_bytes()
     );
 }
 
 #[test]
-fn verified_sealed_lexical_page_retained_bytes_track_owned_capacity_growth() {
+fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files() {
+    let first_source = "import type { Beta } from \"./beta\";\nexport type Alpha = Beta;\n";
+    let second_source = "import type { Alpha } from \"./alpha\";\nexport type Beta = Alpha;\n";
+    let mut request = request_with_source(
+        "file.lexical-order.alpha",
+        1_266_000,
+        "commit.lexical-order",
+        "tree.lexical-order",
+        first_source,
+    );
+    request.snapshot.files[0].logical_path = "src/alpha.ts".to_owned();
+    request.snapshot.files[0].language = Some(id::<LanguageId>("typescript"));
+    let second_file = SanitizedCodeFileV1 {
+        file_occurrence_id: id::<FileOccurrenceId>("file.lexical-order.beta"),
+        logical_path: "src/beta.ts".to_owned(),
+        language: Some(id::<LanguageId>("typescript")),
+        content_digest: content_digest(second_source.as_bytes()),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    request.snapshot.files.push(second_file.clone());
+    request.snapshot.content_identity =
+        content_digest(format!("{first_source}{second_source}").as_bytes());
+    request.captured_files.push(CodeIndexCapturedFileV1 {
+        file_occurrence_id: second_file.file_occurrence_id.clone(),
+        sanitized_bytes: second_source.as_bytes().to_vec(),
+        sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+    });
+    request.changed_files.clear();
+    request.changed_files.insert("src/alpha.ts".to_owned());
+    request.changed_files.insert("src/beta.ts".to_owned());
+    request
+        .snapshot
+        .validate()
+        .expect("two-file TypeScript snapshot is canonical");
+
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    let import_files = generation
+        .imports()
+        .iter()
+        .map(|evidence| evidence.file_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        import_files.len(),
+        2,
+        "both files must contribute parser-backed import evidence"
+    );
+
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        state_digest,
+        usize::MAX,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("verified page source opens");
+    let mut previous_cursor = None;
+    let mut observed_chunks = Vec::new();
+    let mut observed_imports = Vec::new();
+    let receipt = loop {
+        match source.next_page(&ActiveControl).expect("verified page") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                assert!(page.payload_bytes() + page.import_payload_bytes() <= 1024 * 1024);
+                page.verify_transition(previous_cursor.as_ref())
+                    .expect("a source-minted cross-file page must verify");
+                previous_cursor = Some(page.next_cursor().clone());
+                observed_chunks.extend(page.chunks().iter().map(|chunk| chunk.chunk().clone()));
+                observed_imports.extend(page.imports().iter().cloned());
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    receipt
+        .verify_completion(previous_cursor.as_ref())
+        .expect("all verified pages must complete the source receipt");
+
+    let chunk_files = observed_chunks
+        .iter()
+        .map(|chunk| chunk.anchor.file_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    let page_import_files = observed_imports
+        .iter()
+        .map(|evidence| evidence.file_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(chunk_files.len(), 2, "pages must retain both files' chunks");
+    assert_eq!(page_import_files, import_files);
+    let mut expected_chunks = generation
+        .admitted_chunks()
+        .expect("generation admits exact chunks")
+        .iter()
+        .map(|chunk| chunk.chunk().clone())
+        .collect::<Vec<_>>();
+    observed_chunks.sort_by(|left, right| left.id.cmp(&right.id));
+    expected_chunks.sort_by(|left, right| left.id.cmp(&right.id));
+    assert_eq!(observed_chunks, expected_chunks);
+    assert_eq!(observed_imports, generation.imports());
+}
+
+#[test]
+fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.lexical-admission", 1_266_500), &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        state_digest,
+        usize::MAX,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("verified page source opens");
+    let cursor_before = source
+        .cursor()
+        .persisted_bytes()
+        .expect("initial cursor persists");
+    let mut rejected_page_bytes = None;
+    let rejected = source
+        .next_page_if(&ActiveControl, |page| {
+            page.verify_transition(None)
+                .expect("source-minted page verifies before admission");
+            rejected_page_bytes = Some(sealed_lexical_page_bytes(page));
+            Err::<(), _>("builder memory budget exhausted")
+        })
+        .expect("source read succeeds");
+    assert_eq!(
+        rejected.expect_err("caller admission must reject the page"),
+        "builder memory budget exhausted"
+    );
+    assert_eq!(
+        source
+            .cursor()
+            .persisted_bytes()
+            .expect("rejected cursor persists"),
+        cursor_before,
+        "caller rejection must not advance any persisted source authority"
+    );
+
+    let mut accepted_page_bytes = None;
+    let accepted = source
+        .next_page_if(&ActiveControl, |page| {
+            page.verify_transition(None)
+                .expect("retried source-minted page verifies");
+            accepted_page_bytes = Some(sealed_lexical_page_bytes(page));
+            Ok::<(), &str>(())
+        })
+        .expect("retried source read succeeds")
+        .expect("caller admits the retried page");
+    let VerifiedSealedLexicalPageReadV1::Page(page) = accepted else {
+        panic!("the first admitted read must be a page")
+    };
+    assert_eq!(rejected_page_bytes, accepted_page_bytes);
+    assert_eq!(page.next_cursor().next_page_ordinal(), 1);
+    assert_eq!(source.cursor(), page.next_cursor());
+    assert_eq!(source.cursor().emitted_chunks(), page.chunk_count());
+    assert_eq!(
+        source.cursor().emitted_payload_bytes(),
+        page.payload_bytes()
+    );
+}
+
+fn sealed_lexical_page_bytes(page: &VerifiedSealedLexicalPageV1) -> Vec<u8> {
+    let chunks = page
+        .chunks()
+        .iter()
+        .map(|chunk| chunk.chunk())
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&(
+        page.page_ordinal(),
+        page.chunk_count(),
+        page.payload_bytes(),
+        page.import_count(),
+        page.import_payload_bytes(),
+        page.page_digest().as_str(),
+        page.cumulative_digest().as_str(),
+        page.next_cursor()
+            .persisted_bytes()
+            .expect("page cursor persists"),
+        chunks,
+        page.imports(),
+    ))
+    .expect("page observation serializes")
+}
+
+#[test]
+fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("production owner");
@@ -1206,41 +1479,24 @@ fn verified_sealed_lexical_page_retained_bytes_track_owned_capacity_growth() {
         &ActiveControl,
     )
     .expect("verified page source opens");
-    let mut page = match source.next_page(&ActiveControl).expect("verified page") {
+    let page = match source.next_page(&ActiveControl).expect("verified page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a page"),
     };
-    assert!(!page.chunks.is_empty());
-    assert!(!page.imports.is_empty());
+    assert!(!page.chunks().is_empty());
+    assert!(!page.imports().is_empty());
 
-    let before = page.retained_owned_bytes();
-    let chunk_capacity = page.chunks.capacity();
-    let import_capacity = page.imports.capacity();
-    let module_capacity = page.imports[0].module_specifier.capacity();
-    page.chunks.reserve(32);
-    page.imports.reserve(32);
-    page.imports[0].module_specifier.reserve(4_096);
-    let expected_growth = page
-        .chunks
-        .capacity()
-        .saturating_sub(chunk_capacity)
+    let vector_and_module_capacity_floor = page
+        .chunk_capacity()
         .saturating_mul(std::mem::size_of::<ExtractionAdmittedCodeSearchChunkV1>())
         .saturating_add(
-            page.imports
-                .capacity()
-                .saturating_sub(import_capacity)
+            page.import_capacity()
                 .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
         )
-        .saturating_add(
-            page.imports[0]
-                .module_specifier
-                .capacity()
-                .saturating_sub(module_capacity),
-        );
-    assert!(expected_growth > 0, "the fixture must grow owned capacity");
-    assert_eq!(
-        page.retained_owned_bytes(),
-        before.saturating_add(expected_growth)
+        .saturating_add(page.imports()[0].module_specifier.capacity());
+    assert!(
+        page.retained_owned_bytes() >= vector_and_module_capacity_floor,
+        "real source page accounting must include its actual vector and string capacities"
     );
 }
 
@@ -1273,13 +1529,13 @@ fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_resto
     let receipt = loop {
         match source.next_page(&ActiveControl).expect("legacy page read") {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
-                assert!(!page.chunks.is_empty() || !page.imports.is_empty())
+                assert!(!page.chunks().is_empty() || !page.imports().is_empty())
             }
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
     };
-    assert_eq!(receipt.format_revision, 5);
-    assert!(receipt.total_chunks > 0);
+    assert_eq!(receipt.format_revision(), 5);
+    assert!(receipt.total_chunks() > 0);
 }
 
 /// The published-generation integrity gate is an amortized load-time check.

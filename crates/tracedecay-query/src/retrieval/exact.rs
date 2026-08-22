@@ -709,7 +709,16 @@ where
         let examined = batch.coverage.examined.max(batch.candidates.len() as u64);
         let truncated = admitted.len().saturating_sub(cap);
         admitted.truncate(cap);
-        let eligible = admitted.len() as u64 + truncated as u64;
+        // Preserve the port's own truncation accounting: a port that already
+        // capped its batch reported every eligible row and its surplus, so a
+        // pre-capped search must stay capped and non-exhausted here instead
+        // of being reported complete.
+        let eligible = batch
+            .coverage
+            .eligible
+            .max((admitted.len() + truncated) as u64);
+        let capped = batch.coverage.capped.saturating_add(truncated as u64);
+        let exhausted = truncated == 0 && batch.coverage.capped == 0;
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence)) in admitted.into_iter().enumerate() {
@@ -729,13 +738,13 @@ where
                 examined,
                 eligible,
                 excluded: batch.coverage.excluded,
-                capped: truncated as u64,
+                capped,
                 unknown: batch.coverage.unknown,
             },
             continuation: Some(RetrieverContinuation {
                 lane: RetrieverKind::ExactLiteral,
                 checkpoint_digest,
-                exhausted: truncated == 0,
+                exhausted,
             }),
         };
         rebuilt.validate().map_err(contract_error)?;

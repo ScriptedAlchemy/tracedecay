@@ -26,9 +26,16 @@ use super::ports::{
 mod projection;
 
 pub use self::projection::{
-    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1,
-    CodeLexicalProjectionBuildV1, CodeLexicalProjectionMetadataV1,
-    LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1, lexical_projection_build_deadline_micros,
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+    CodeExactProjectionAdapterV1, CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactErrorV1, CodeLexicalArtifactMountMetadataV1,
+    CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
+    CodeLexicalArtifactSectionDigestV1, CodeLexicalImportMembershipWitnessV1,
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+    CodeLexicalProjectionMetadataV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
+    VerifiedCodeLexicalArtifactV1, lexical_projection_build_deadline_micros,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared
@@ -421,7 +428,14 @@ where
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
-        let eligible = candidates.len() as u64 + truncated as u64;
+        // Preserve the port's own truncation accounting: a port that already
+        // capped its batch reported every eligible row and its surplus, so a
+        // pre-capped search must stay capped and non-exhausted here instead
+        // of being reported complete.
+        let seen = (candidates.len() + truncated) as u64 + excluded;
+        let eligible = batch.coverage.eligible.max(seen).saturating_sub(excluded);
+        let capped = batch.coverage.capped.saturating_add(truncated as u64);
+        let exhausted = truncated == 0 && batch.coverage.capped == 0;
         let checkpoint_digest = lexical_checkpoint_digest(&request.generation, &candidates)?;
         let rebuilt = RetrieverBatch {
             candidates,
@@ -430,13 +444,13 @@ where
                 examined,
                 eligible,
                 excluded: batch.coverage.excluded.saturating_add(excluded),
-                capped: truncated as u64,
+                capped,
                 unknown: batch.coverage.unknown,
             },
             continuation: Some(RetrieverContinuation {
                 lane: RetrieverKind::Lexical,
                 checkpoint_digest,
-                exhausted: truncated == 0,
+                exhausted,
             }),
         };
         rebuilt.validate().map_err(contract_error)?;
