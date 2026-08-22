@@ -11,6 +11,8 @@ use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
 };
 
+use super::ObservabilityProducerIdentityV1;
+
 const MAX_PENDING_RECEIPTS: usize = 16_384;
 const MAX_RECEIPT_BYTES: usize = 8 * 1024;
 const RECEIPT_SUFFIX: &str = ".delivery.v1.json";
@@ -22,16 +24,28 @@ const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 pub(super) struct DeliveryRecorderSourceReceiptV1 {
     pub receipt_id: [u8; 16],
     pub settlement: DeliverySettlementV1,
+    /// Exact linked-root emission identity selected at admission. Receipts
+    /// written before policy-specific frontends omit this and replay through
+    /// the recorder's store-core identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission_identity: Option<ObservabilityProducerIdentityV1>,
 }
 
 impl DeliveryRecorderSourceReceiptV1 {
-    pub fn new(settlement: DeliverySettlementV1) -> Result<Self, DeliveryRecorderSpoolError> {
+    pub fn new(
+        settlement: DeliverySettlementV1,
+        emission_identity: ObservabilityProducerIdentityV1,
+    ) -> Result<Self, DeliveryRecorderSpoolError> {
         settlement
             .validate()
             .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
+        emission_identity
+            .validate()
+            .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
         let digest = canonical_sha256(&(
-            "tracedecay.delivery-recorder-source-receipt.v1",
+            "tracedecay.delivery-recorder-source-receipt.v2",
             &settlement,
+            &emission_identity,
         ))
         .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
         let hex = digest
@@ -43,6 +57,7 @@ impl DeliveryRecorderSourceReceiptV1 {
         Ok(Self {
             receipt_id,
             settlement,
+            emission_identity: Some(emission_identity),
         })
     }
 
@@ -50,12 +65,33 @@ impl DeliveryRecorderSourceReceiptV1 {
         if self.receipt_id == [0; 16] {
             return Err(DeliveryRecorderSpoolError::InvalidReceipt);
         }
-        let expected = Self::new(self.settlement.clone())?;
-        if expected.receipt_id != self.receipt_id {
+        self.settlement
+            .validate()
+            .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
+        let expected_receipt_id = if let Some(emission_identity) = &self.emission_identity {
+            Self::new(self.settlement.clone(), emission_identity.clone())?.receipt_id
+        } else {
+            legacy_receipt_id(&self.settlement)?
+        };
+        if expected_receipt_id != self.receipt_id {
             return Err(DeliveryRecorderSpoolError::InvalidReceipt);
         }
         Ok(())
     }
+}
+
+fn legacy_receipt_id(
+    settlement: &DeliverySettlementV1,
+) -> Result<[u8; 16], DeliveryRecorderSpoolError> {
+    let digest = canonical_sha256(&("tracedecay.delivery-recorder-source-receipt.v1", settlement))
+        .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
+    let mut receipt_id = [0_u8; 16];
+    decode_hex_prefix(hex, &mut receipt_id)?;
+    Ok(receipt_id)
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -324,5 +360,61 @@ fn decode_nibble(byte: u8) -> Result<u8, DeliveryRecorderSpoolError> {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         _ => Err(DeliveryRecorderSpoolError::InvalidReceipt),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{
+        DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
+        DeliverySettlementOutcomeV1, DeliverySurfaceFamilyV1, UtcMicros,
+    };
+
+    use super::*;
+
+    fn settlement() -> DeliverySettlementV1 {
+        DeliverySettlementV1 {
+            attempt: DeliverySettlementAttemptV1 {
+                owner_event_id: "work:delivery-spool:test".to_owned(),
+                event_class: DeliveryEventClassV1::OperationTerminal,
+                channel: DeliveryChannelIdentityV1 {
+                    surface: DeliverySurfaceFamilyV1::Mcp,
+                    channel_ref: "mcp:delivery-spool:test".to_owned(),
+                },
+                work_attempt: None,
+                eligible: 1,
+                valid_at: UtcMicros(100),
+                attempted_at: UtcMicros(110),
+            },
+            outcome: DeliverySettlementOutcomeV1::Delivered,
+            settled_at: UtcMicros(120),
+            drop_reason: None,
+        }
+    }
+
+    fn identity() -> ObservabilityProducerIdentityV1 {
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: "project.delivery-spool".to_owned(),
+            process_boot_id: "boot:delivery-spool".to_owned(),
+            producer_revision: "delivery-spool-producer.v1".to_owned(),
+            configuration_revision: "delivery-spool-config.v1".to_owned(),
+            policy_revision: "delivery-spool-policy.v1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn v2_receipt_refuses_tampered_emission_identity() {
+        let mut receipt =
+            DeliveryRecorderSourceReceiptV1::new(settlement(), identity()).expect("v2 receipt");
+        receipt
+            .emission_identity
+            .as_mut()
+            .expect("v2 emission identity")
+            .policy_revision = "delivery-spool-tampered-policy.v1".to_owned();
+
+        assert_eq!(
+            receipt.validate(),
+            Err(DeliveryRecorderSpoolError::InvalidReceipt)
+        );
     }
 }

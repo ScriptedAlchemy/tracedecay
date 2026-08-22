@@ -77,7 +77,7 @@ use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCase
 
 use super::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
+    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityRegistryV1,
 };
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
@@ -290,6 +290,11 @@ pub(crate) struct DaemonInvocationService {
     /// Every per-project component, published together under one lock. See
     /// [`ProjectRuntimeRegistryV1`] for why these are not twelve maps.
     project_runtimes: ProjectRuntimeRegistryV1,
+    /// Observability owners keyed by exact registered-store authority.
+    /// Project roots registered in [`Self::project_runtimes`] hold aliases
+    /// onto these, so linked worktrees share one producer and one
+    /// store-keyed delivery settlement recorder.
+    store_observability: StoreObservabilityRegistryV1,
     operation_events: OperationEventAuthority,
     github_stack_coordinator:
         Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1>,
@@ -331,6 +336,7 @@ impl DaemonInvocationService {
             authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),
+            store_observability: StoreObservabilityRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
             github_stack_coordinator: Arc::new(
                 tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1::default(),

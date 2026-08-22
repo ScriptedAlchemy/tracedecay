@@ -60,6 +60,30 @@ impl DeliverySettlementAuthorityV1 {
         })
     }
 
+    pub const fn identity(&self) -> &ObservabilityProducerIdentityV1 {
+        &self.identity
+    }
+
+    /// Retain this store authority while selecting one linked root's policy
+    /// identity for the resulting observability envelope.
+    pub fn alias_with_policy_identity(
+        &self,
+        identity: ObservabilityProducerIdentityV1,
+    ) -> Result<Self, &'static str> {
+        let producer = Arc::new(self.producer.alias_with_policy_identity(identity.clone())?);
+        Self::new(self.db.clone(), producer, identity)
+    }
+
+    /// Replay one authenticated durable receipt through the current process
+    /// owner while retaining the policy selected when the receipt was admitted.
+    pub(super) fn alias_for_durable_replay(
+        &self,
+        admitted_identity: &ObservabilityProducerIdentityV1,
+    ) -> Result<Self, &'static str> {
+        let identity = durable_replay_identity(&self.identity, admitted_identity)?;
+        self.alias_with_policy_identity(identity)
+    }
+
     pub async fn begin(
         &self,
         attempt: &DeliverySettlementAttemptV1,
@@ -168,6 +192,21 @@ impl DeliverySettlementAuthorityV1 {
     }
 }
 
+fn durable_replay_identity(
+    current_identity: &ObservabilityProducerIdentityV1,
+    admitted_identity: &ObservabilityProducerIdentityV1,
+) -> Result<ObservabilityProducerIdentityV1, &'static str> {
+    current_identity.validate()?;
+    admitted_identity.validate()?;
+    if admitted_identity.authorized_scope_ref != current_identity.authorized_scope_ref {
+        return Err("delivery_settlement_replay_scope");
+    }
+    Ok(ObservabilityProducerIdentityV1 {
+        policy_revision: admitted_identity.policy_revision.clone(),
+        ..current_identity.clone()
+    })
+}
+
 const fn surface_name(surface: tracedecay_domain::DeliverySurfaceFamilyV1) -> &'static str {
     match surface {
         tracedecay_domain::DeliverySurfaceFamilyV1::Hook => "hook",
@@ -176,5 +215,48 @@ const fn surface_name(surface: tracedecay_domain::DeliverySurfaceFamilyV1) -> &'
         tracedecay_domain::DeliverySurfaceFamilyV1::Dashboard => "dashboard",
         tracedecay_domain::DeliverySurfaceFamilyV1::Cli => "cli",
         tracedecay_domain::DeliverySurfaceFamilyV1::Other => "other",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(scope: &str, boot: &str, policy: &str) -> ObservabilityProducerIdentityV1 {
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: scope.to_owned(),
+            process_boot_id: boot.to_owned(),
+            producer_revision: format!("producer:{boot}"),
+            configuration_revision: format!("config:{boot}"),
+            policy_revision: policy.to_owned(),
+        }
+    }
+
+    #[test]
+    fn durable_replay_identity_uses_current_process_and_admitted_policy() {
+        let current = identity("project.delivery", "boot:new", "policy:new-core");
+        let admitted = identity("project.delivery", "boot:old", "policy:linked-b");
+
+        let replay = durable_replay_identity(&current, &admitted).expect("durable replay identity");
+
+        assert_eq!(replay.authorized_scope_ref, current.authorized_scope_ref);
+        assert_eq!(replay.process_boot_id, current.process_boot_id);
+        assert_eq!(replay.producer_revision, current.producer_revision);
+        assert_eq!(
+            replay.configuration_revision,
+            current.configuration_revision
+        );
+        assert_eq!(replay.policy_revision, admitted.policy_revision);
+    }
+
+    #[test]
+    fn durable_replay_identity_refuses_foreign_scope() {
+        let current = identity("project.delivery", "boot:new", "policy:new-core");
+        let foreign = identity("project.foreign", "boot:old", "policy:linked-b");
+
+        assert_eq!(
+            durable_replay_identity(&current, &foreign),
+            Err("delivery_settlement_replay_scope")
+        );
     }
 }

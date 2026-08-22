@@ -13,12 +13,23 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
-use tracedecay_domain::ProjectId;
-use tracedecay_graph_db::GraphProjectorRevision;
+use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_graph_db::{
+    GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
+};
+use tracedecay_store::{
+    GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
+    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
+    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
+};
 use tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1;
 
 use super::super::DaemonSessionRuntimeRegistryV1;
+use super::{AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1};
 use crate::daemon::code_index_scheduler::{
     CodeGraphReplayBindingV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
     scoped_code_index_store_root,
@@ -38,8 +49,157 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn with_publication_context<T>(
+    label: &str,
+    operation: impl FnOnce(&GraphPublicationOperationContextV1<'_>) -> T,
+) -> T {
+    let cancellation = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new(format!("{label}-cancellation"))
+            .expect("test cancellation id"),
+        generation: 1,
+    };
+    let deadline = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new(format!("{label}-deadline"))
+            .expect("test deadline id"),
+    };
+    let request_cancelled = Arc::new(AtomicBool::new(false));
+    let request_cancellation: Arc<dyn GraphCancellation> = Arc::new(
+        AtomicGraphCancellationV1::new(Arc::clone(&request_cancelled)),
+    );
+    let probe = GraphPublicationProbeV1 {
+        request_cancellation,
+        lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
+        deadline_at: Instant::now() + Duration::from_secs(30),
+        cancellation: cancellation.clone(),
+        deadline: deadline.clone(),
+        commit_started: AtomicBool::new(false),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+        deadline,
+        cancellation,
+    };
+    let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        .expect("test publication context");
+    operation(&context)
+}
+
+fn publication_replay(
+    runtime: &RetainedCodeGraphRuntimeV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+) -> (
+    GraphProjectionIdentityV1,
+    GraphPublicationKeyV1,
+    tracedecay_store::GraphPublicationReplayV1,
+) {
+    let projector_revision = GraphProjectorRevision::try_from(
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+        runtime.authority.namespace().clone(),
+    )
+    .expect("code graph projection");
+    let manifest =
+        tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
+            projection.clone(),
+            generation,
+            &projector_revision,
+            &|| Ok(()),
+        )
+        .expect("published graph manifest");
+    let relational_projection = GraphProjectionIdentityV1 {
+        shard_id: runtime.authority.binding().shard_id.clone(),
+        namespace: tracedecay_store::GraphNamespaceV1::new(runtime.authority.namespace().as_str())
+            .expect("relational namespace"),
+        projection: GraphProjectionIdV1::new(projection.projection.as_str())
+            .expect("relational projection"),
+    };
+    let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+        &runtime.generation_id,
+        &projector_revision,
+    )
+    .expect("publication idempotency key");
+    let publication_key = GraphPublicationKeyV1::new(
+        relational_projection.clone(),
+        GraphGenerationIdV1::new(manifest.generation.as_str()).expect("relational generation"),
+        GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
+            .expect("relational idempotency key"),
+    );
+    let source = SealedCodeGenerationReplay {
+        repository: runtime.repository_id.clone(),
+        generation: runtime.generation_id.clone(),
+        sealed_state_digest: runtime.sealed_state_digest.clone(),
+        projector_revision,
+    };
+    let input = canonical_sha256(&(
+        "tracedecay.code-graph-publication-input.v1",
+        &source,
+        &manifest.generation,
+        &manifest.source_generation,
+        &manifest.watermark,
+    ))
+    .expect("publication input digest");
+    let replay = manifest
+        .relational_sealed_replay(
+            runtime.authority.binding().shard_id.clone(),
+            idempotency_key,
+            GraphPublicationInputDigestV1::new(input.as_str()).expect("publication input digest"),
+            None,
+            source,
+            &|| Ok(()),
+        )
+        .expect("sealed publication replay");
+    (relational_projection, publication_key, replay)
+}
+
+fn assert_unverified_publication_state(
+    runtime: &RetainedCodeGraphRuntimeV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    expected_replay: bool,
+) {
+    let (projection, key, _) = publication_replay(runtime, generation);
+    with_publication_context("inspect-sealed-publication", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        let replay = storage.replay(&key, context).expect("publication replay");
+        if expected_replay {
+            assert!(matches!(replay, GraphPublicationReplayLookupV1::Active(_)));
+        } else {
+            assert!(matches!(replay, GraphPublicationReplayLookupV1::Missing));
+        }
+        assert!(
+            storage
+                .verified_head(&projection, context)
+                .expect("verified graph head")
+                .is_none()
+        );
+    });
+}
+
+fn journal_publication_without_head(
+    runtime: &RetainedCodeGraphRuntimeV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+) {
+    let (_, _, replay) = publication_replay(runtime, generation);
+    with_publication_context("journal-sealed-publication", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .append_replay(&replay, context)
+                .expect("append sealed publication replay"),
+            GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph() {
+async fn sealed_generation_publishes_and_republishes_without_eager_replay_payload() {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
     let root = temporary
         .path()
@@ -108,6 +268,26 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
         .project_memory(project_id.clone(), [canonical_project.clone()])
         .await
         .expect("project graph database");
+    let replay_root = project_database
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("private graph replay root");
+    let digest = pointer
+        .state_digest
+        .strip_prefix("sha256:")
+        .expect("sha256 state digest");
+    let foreign_destination = replay_root.join(format!("generation-{digest}.json"));
+    std::fs::create_dir(&foreign_destination).expect("foreign digest-named directory");
+    let sentinel = foreign_destination.join("sentinel");
+    std::fs::write(&sentinel, b"foreign replay evidence").expect("foreign replay sentinel");
+    let canonical_seal = scoped_store
+        .join("code-generations-v1")
+        .join(format!("generation-{digest}.json"));
+    let intact_seal = std::fs::read(&canonical_seal).expect("canonical sealed generation");
+    let mut mutated_seal = intact_seal.clone();
+    let mutation_offset = mutated_seal.len() / 2;
+    mutated_seal[mutation_offset] ^= 1;
 
     let runtime = registry
         .retain_code_graph_runtime(
@@ -121,6 +301,54 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
         )
         .await
         .expect("retain code graph runtime");
+
+    std::fs::write(&canonical_seal, &mutated_seal).expect("mutate sealed generation in place");
+    assert!(matches!(
+        runtime.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+        Err(GraphDbError::Corrupt { .. })
+    ));
+    assert_unverified_publication_state(&runtime, latest.generation(), false);
+    std::fs::write(&canonical_seal, &intact_seal).expect("restore sealed generation bytes");
+
+    let retained_seal = canonical_seal.with_extension("retained-test-evidence");
+    std::fs::rename(&canonical_seal, &retained_seal).expect("retain original sealed inode");
+    std::fs::write(&canonical_seal, &mutated_seal).expect("replace canonical sealed inode");
+    assert!(matches!(
+        runtime.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+        Err(GraphDbError::Corrupt { .. })
+    ));
+    assert_unverified_publication_state(&runtime, latest.generation(), false);
+    std::fs::remove_file(&canonical_seal).expect("remove replacement sealed inode");
+    std::fs::rename(&retained_seal, &canonical_seal).expect("restore original sealed inode");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        std::fs::rename(&canonical_seal, &retained_seal).expect("retain symlink target evidence");
+        symlink(&retained_seal, &canonical_seal).expect("swap canonical seal for symlink");
+        assert!(matches!(
+            runtime
+                .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+        assert_unverified_publication_state(&runtime, latest.generation(), false);
+        std::fs::remove_file(&canonical_seal).expect("remove sealed generation symlink");
+        std::fs::rename(&retained_seal, &canonical_seal)
+            .expect("restore sealed generation after symlink refusal");
+    }
+
+    journal_publication_without_head(&runtime, latest.generation());
+    std::fs::write(&canonical_seal, &mutated_seal)
+        .expect("mutate source before active replay completion");
+    assert!(matches!(
+        runtime.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+        Err(GraphDbError::Corrupt { .. })
+    ));
+    assert_unverified_publication_state(&runtime, latest.generation(), true);
+    std::fs::write(&canonical_seal, &intact_seal)
+        .expect("restore source before active replay completion");
+
     let snapshot = runtime
         .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
         .expect("the sealed generation must publish as the verified code graph");
@@ -135,6 +363,31 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
     assert_eq!(snapshot.generation(), &expected_generation);
     let head = snapshot.verified_head().clone();
     drop(snapshot);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("foreign replay evidence survives first publication"),
+        b"foreign replay evidence"
+    );
+    let first_publish_payload_bytes = std::fs::read_dir(&replay_root)
+        .expect("read graph replay root after first publication")
+        .map(|entry| entry.expect("graph replay entry"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("generation-")
+                && entry
+                    .file_type()
+                    .expect("graph replay entry type")
+                    .is_file()
+        })
+        .map(|entry| {
+            entry
+                .metadata()
+                .expect("graph replay payload metadata")
+                .len()
+        })
+        .sum::<u64>();
+    assert_eq!(first_publish_payload_bytes, 0);
 
     // A retained-seat retry of the same sealed artifact resumes to the same
     // verified head instead of conflicting with its own journaled replay.
@@ -155,4 +408,29 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
         .expect("a repeated activation must resume the exact publication");
     assert_eq!(resumed.generation(), &expected_generation);
     assert_eq!(resumed.verified_head(), &head);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("foreign replay evidence survives active republish"),
+        b"foreign replay evidence"
+    );
+    let active_republish_payload_bytes = std::fs::read_dir(&replay_root)
+        .expect("read graph replay root after active republish")
+        .map(|entry| entry.expect("graph replay entry"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("generation-")
+                && entry
+                    .file_type()
+                    .expect("graph replay entry type")
+                    .is_file()
+        })
+        .map(|entry| {
+            entry
+                .metadata()
+                .expect("graph replay payload metadata")
+                .len()
+        })
+        .sum::<u64>();
+    assert_eq!(active_republish_payload_bytes, 0);
 }

@@ -55,16 +55,17 @@ impl BoundedObservabilityProducerV1 {
     ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
         match self.data.try_send(QueuedObservation {
             envelope,
-            carried_drop: None,
+            carried_drops: Vec::new(),
             owner_fact: Some(QueuedOwnerFact {
                 json: owner_fact_json,
                 durable_claimed: false,
+                emission_identity: self.identity.clone(),
             }),
         }) {
             Ok(()) => Ok(ObservabilityEmissionOutcomeV1::Enqueued),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
-                self.record_capacity_drop(sequence);
+                self.record_capacity_drop(sequence)?;
                 Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err("observability_producer_closed"),
@@ -163,10 +164,11 @@ impl BoundedObservabilityProducerV1 {
                 Some(permit) => {
                     permit.send(QueuedObservation {
                         envelope: delivery,
-                        carried_drop: None,
+                        carried_drops: Vec::new(),
                         owner_fact: Some(QueuedOwnerFact {
                             json: owner_fact_json,
                             durable_claimed: true,
+                            emission_identity: self.identity.clone(),
                         }),
                     });
                     Ok(ObservabilityOwnerEmissionOutcomeV1::Enqueued)

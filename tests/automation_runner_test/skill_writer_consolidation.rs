@@ -172,12 +172,9 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
         archived_source.metadata.absorbed_into.as_deref(),
         Some("automation-run-review")
     );
-    assert!(
-        archived_source
-            .metadata
-            .archived_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("overlap"))
+    assert_eq!(
+        archived_source.metadata.archived_reason.as_deref(),
+        Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
     );
     let updated_target = load_managed_skill(&profile_root, "automation-run-review")
         .await

@@ -30,9 +30,7 @@ pub mod registered_schema {
     use std::pin::Pin;
     use std::sync::OnceLock;
 
-    use crate::db::engine::{
-        Connection, Executor, QueryExecutor, Transaction, TransactionBehavior,
-    };
+    use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction};
     use crate::errors::{Result, TraceDecayError};
     use tracedecay_store::StoreRuntimeBindingV1;
 
@@ -47,9 +45,10 @@ pub mod registered_schema {
         connection: Connection,
     }
 
-    /// An immediate schema-installation transaction tied to its initializing
+    /// An atomic schema-installation transaction tied to its initializing
     /// capability. The lifetime keeps the authorized installation connection
-    /// alive through commit, rollback, or drop.
+    /// alive through commit, rollback, or drop, while long-running batches
+    /// continuously revalidate the same write authority.
     pub struct RegisteredSchemaInstallationTransactionV1<'a> {
         transaction: Transaction,
         _installation: &'a RegisteredSchemaInstallationV1,
@@ -90,13 +89,17 @@ pub mod registered_schema {
             self.connection.execute_batch(sql).await
         }
 
-        /// Begins the only ordinary write transaction available to a
-        /// registered-schema installer.
-        pub async fn begin_immediate(
+        /// Begins the authority-bound transaction used for one atomic schema
+        /// installation.
+        ///
+        /// The long lease renews only when bounded work makes progress.
+        /// Shutdown, idleness, and authority revocation remain cancellation
+        /// conditions; this does not widen any statement or lease timeout.
+        pub async fn begin_atomic_schema_transaction(
             &self,
         ) -> crate::db::engine::Result<RegisteredSchemaInstallationTransactionV1<'_>> {
             self.connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .authorized_long_lease_transaction()
                 .await
                 .map(|transaction| RegisteredSchemaInstallationTransactionV1 {
                     transaction,
@@ -169,7 +172,9 @@ pub mod registered_schema {
         }
 
         pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
-            self.transaction.execute_batch(sql).await
+            self.transaction
+                .execute_authority_revalidated_batch(sql)
+                .await
         }
 
         pub async fn commit(self) -> crate::db::engine::Result<()> {
@@ -297,7 +302,32 @@ pub mod registered_schema {
 
     #[cfg(test)]
     mod tests {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use tracedecay_rusqlite_runtime::exact_sql::{
+            ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
+        };
+
         use super::*;
+
+        struct CountingSchemaAuthority {
+            batch_checks: AtomicUsize,
+        }
+
+        impl ExactSqlWriteAuthority for CountingSchemaAuthority {
+            fn verify(
+                &self,
+                intent: ExactSqlWriteIntent,
+            ) -> std::result::Result<(), ExactSqlError> {
+                if intent == ExactSqlWriteIntent::ExecuteBatch {
+                    self.batch_checks.fetch_add(1, Ordering::AcqRel);
+                }
+                Ok(())
+            }
+        }
 
         #[test]
         fn installer_signature_borrows_only_the_sealed_installation_capability() {
@@ -326,6 +356,53 @@ pub mod registered_schema {
                 rendered.contains("no registered global/session schema installer is registered"),
                 "unexpected fail-closed message: {rendered}"
             );
+        }
+
+        #[tokio::test]
+        async fn registered_schema_transaction_revalidates_authority_during_atomic_batch() {
+            let directory = tempfile::tempdir().unwrap();
+            let authority = Arc::new(CountingSchemaAuthority {
+                batch_checks: AtomicUsize::new(0),
+            });
+            let connection = crate::db::engine::TestConnection::open_with_write_authority(
+                &directory.path().join("registered-schema.sqlite3"),
+                authority.clone(),
+            );
+            let installation =
+                RegisteredSchemaInstallationV1::from_authorized_connection((*connection).clone());
+            let transaction = installation
+                .begin_atomic_schema_transaction()
+                .await
+                .unwrap();
+
+            transaction
+                .execute_batch(
+                    "CREATE TABLE registered_schema_authority_probe (value INTEGER NOT NULL);
+                     WITH RECURSIVE values_to_install(value) AS (
+                         VALUES(1)
+                         UNION ALL
+                         SELECT value + 1 FROM values_to_install WHERE value < 10000
+                     )
+                     INSERT INTO registered_schema_authority_probe
+                     SELECT value FROM values_to_install;",
+                )
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
+
+            assert!(
+                authority.batch_checks.load(Ordering::Acquire) > 2,
+                "schema authority must be revalidated while one atomic batch makes progress"
+            );
+            let mut rows = connection
+                .query("SELECT COUNT(*) FROM registered_schema_authority_probe", ())
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                10000
+            );
+            assert!(rows.next().await.unwrap().is_none());
         }
     }
 }
