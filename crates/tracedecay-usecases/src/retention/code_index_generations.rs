@@ -102,12 +102,12 @@ pub const MAX_CODE_GENERATION_RETENTION_BATCH_V1: usize = 32;
 /// One maintenance pass removes at most this many derived text-artifact files.
 ///
 /// The bounded durable index can protect at most 32 completed artifacts and
-/// at most 32 matching in-progress staging files. The inventory reads that
-/// fixed liveness window plus one removal page, so a restart reaches later
-/// debris without ever materializing an unbounded directory listing.
+/// the active generation can own one resumable staging file. The inventory
+/// reads that fixed liveness window plus one removal page, so a restart reaches
+/// later debris without ever materializing an unbounded directory listing.
 pub const MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1: usize = 32;
 const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
-    (MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 * 2) + MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1;
+    MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 1 + MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1;
 
 #[derive(Deserialize)]
 struct SealedGenerationManifestMetadataV1 {
@@ -467,6 +467,11 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// inventory. Descriptor-referenced and still-in-progress staging files
     /// are deliberately absent.
     pub collectable_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    /// Unique bytes seen in the bounded text-artifact inventory: durable
+    /// descriptor targets, the one resumable active staging file, and this
+    /// pass's selected debris candidates. A descriptor shared by retained
+    /// generations is counted once by its canonical artifact path.
+    pub text_artifact_inventory_bytes: u64,
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
@@ -492,6 +497,11 @@ impl CodeGenerationRetentionPlanV1 {
     #[must_use]
     pub fn collectable_text_artifact_bytes(&self) -> u64 {
         total_text_artifact_bytes(&self.collectable_text_artifacts)
+    }
+
+    #[must_use]
+    pub fn text_artifact_inventory_bytes(&self) -> u64 {
+        self.text_artifact_inventory_bytes
     }
 
     #[must_use]
@@ -524,6 +534,7 @@ pub struct CodeTextArtifactRetentionReceiptV1 {
     pub active_generation_id: CodeGenerationId,
     pub active_generation_index_digest: String,
     pub deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    pub inventory_bytes_before_collection: u64,
     pub reclaimed_bytes: u64,
     pub completed_at_micros: i64,
 }
@@ -553,6 +564,7 @@ struct CodeTextArtifactRetentionReceiptMaterialV1<'a> {
     active_generation_id: &'a CodeGenerationId,
     active_generation_index_digest: &'a str,
     deleted_artifacts: &'a [CodeTextArtifactRetentionCandidateV1],
+    inventory_bytes_before_collection: u64,
     reclaimed_bytes: u64,
     completed_at_micros: i64,
 }
@@ -563,6 +575,11 @@ struct CodeTextArtifactRetentionTransactionV1 {
     schema: String,
     active_pointer: DurablePublicationPointerV1,
     receipt: CodeTextArtifactRetentionReceiptV1,
+}
+
+struct CodeTextArtifactRetentionInventoryV1 {
+    candidates: Vec<CodeTextArtifactRetentionCandidateV1>,
+    unique_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -851,7 +868,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
         .take(MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .cloned()
         .collect();
-    let collectable_text_artifacts =
+    let text_artifact_inventory =
         plan_collectable_text_artifacts_cancellable(store_root, &active_pointer, is_cancelled)?;
 
     Ok(CodeGenerationRetentionPlanV1 {
@@ -860,7 +877,8 @@ fn plan_code_generation_retention_with_verification_cancellable(
         rollback_floor,
         superseded_generations,
         collectable_generations,
-        collectable_text_artifacts,
+        collectable_text_artifacts: text_artifact_inventory.candidates,
+        text_artifact_inventory_bytes: text_artifact_inventory.unique_bytes,
         verification,
         active_pointer,
     })
@@ -875,19 +893,12 @@ fn plan_collectable_text_artifacts_cancellable(
     store_root: &Path,
     active_pointer: &DurablePublicationPointerV1,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<CodeTextArtifactRetentionCandidateV1>, CodeGenerationRetentionErrorV1> {
+) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     let mut referenced = BTreeMap::new();
-    let mut live_staging_sources = BTreeSet::new();
     for entry in &active_pointer.generation_index {
-        let digest = generation_file_digest(&entry.generation_file).ok_or_else(|| {
-            CodeGenerationRetentionErrorV1::UnsafeState(
-                "publication-pointer generation filename has no SHA-256 digest".to_owned(),
-            )
-        })?;
-        live_staging_sources.insert(digest.to_owned());
         if let Some(descriptor) = entry.text_artifact.as_ref() {
             validate_text_artifact_descriptor(descriptor)?;
             if referenced
@@ -900,13 +911,22 @@ fn plan_collectable_text_artifacts_cancellable(
             }
         }
     }
+    let active_staging_source = generation_file_digest(&active_pointer.generation_file)
+        .ok_or_else(|| {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "active publication-pointer generation filename has no SHA-256 digest".to_owned(),
+            )
+        })?;
 
     let root = code_text_artifacts_root(store_root);
     let root_metadata = match std::fs::symlink_metadata(&root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if referenced.is_empty() {
-                return Ok(Vec::new());
+                return Ok(CodeTextArtifactRetentionInventoryV1 {
+                    candidates: Vec::new(),
+                    unique_bytes: 0,
+                });
             }
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "durable publication pointer references text artifacts but their root is missing"
@@ -922,10 +942,12 @@ fn plan_collectable_text_artifacts_cancellable(
         )));
     }
 
-    // The index can name at most 32 artifacts, and it can keep at most 32
-    // source-digest staging files live. Verify all of that bounded authority
-    // directly before scanning debris, so an early candidate page never
-    // certifies deletion while a durable descriptor is corrupt or missing.
+    // The index can name at most 32 completed artifacts, and only the active
+    // generation has a resumable build authority. Verify the completed
+    // liveness set directly before scanning debris, so an early candidate page
+    // never certifies deletion while a durable descriptor is corrupt or
+    // missing.
+    let mut inventory = BTreeMap::new();
     for descriptor in referenced.values() {
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -935,6 +957,25 @@ fn plan_collectable_text_artifacts_cancellable(
             descriptor,
             is_cancelled,
         )?;
+        inventory.insert(
+            descriptor.artifact_file.clone(),
+            descriptor.artifact_size_bytes,
+        );
+    }
+    let active_staging_file = format!(".text-artifact-{active_staging_source}.staging");
+    let active_staging_path = root.join(&active_staging_file);
+    match std::fs::symlink_metadata(&active_staging_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            inventory.insert(active_staging_file, metadata.len());
+        }
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "active text-artifact staging path '{}' is not a regular file",
+                active_staging_path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(storage(error)),
     }
 
     let mut entries = std::fs::read_dir(&root).map_err(storage)?;
@@ -978,13 +1019,15 @@ fn plan_collectable_text_artifacts_cancellable(
                 })
             }
         } else if let Some(source_digest) = staging_text_artifact_source_digest(&file_name) {
-            (!live_staging_sources.contains(source_digest)).then(|| {
-                CodeTextArtifactRetentionCandidateV1 {
+            if source_digest == active_staging_source {
+                None
+            } else {
+                Some(CodeTextArtifactRetentionCandidateV1 {
                     artifact_file: file_name,
                     kind: CodeTextArtifactRetentionKindV1::Staging,
                     size_bytes: metadata.len(),
-                }
-            })
+                })
+            }
         } else if is_corrupt_text_artifact_file(&file_name) {
             Some(CodeTextArtifactRetentionCandidateV1 {
                 artifact_file: file_name,
@@ -998,13 +1041,19 @@ fn plan_collectable_text_artifacts_cancellable(
             )));
         };
         if let Some(candidate) = candidate {
+            inventory.insert(candidate.artifact_file.clone(), candidate.size_bytes);
             candidates.insert(candidate.artifact_file.clone(), candidate);
             if candidates.len() == MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
                 break;
             }
         }
     }
-    Ok(candidates.into_values().collect())
+    Ok(CodeTextArtifactRetentionInventoryV1 {
+        candidates: candidates.into_values().collect(),
+        unique_bytes: inventory
+            .values()
+            .fold(0_u64, |total, bytes| total.saturating_add(*bytes)),
+    })
 }
 
 fn completed_text_artifact_digest(file_name: &str) -> Option<&str> {
@@ -1521,6 +1570,8 @@ fn validate_text_artifact_transaction(
     if artifact_files.is_empty()
         || transaction.receipt.reclaimed_bytes
             != total_text_artifact_bytes(&transaction.receipt.deleted_artifacts)
+        || transaction.receipt.reclaimed_bytes
+            > transaction.receipt.inventory_bytes_before_collection
     {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "text-artifact transaction violates exact candidate or byte invariants".to_owned(),
@@ -2756,6 +2807,7 @@ fn build_text_artifact_receipt(
         active_generation_id: &plan.active_generation_id,
         active_generation_index_digest,
         deleted_artifacts: &deleted_artifacts,
+        inventory_bytes_before_collection: plan.text_artifact_inventory_bytes,
         reclaimed_bytes,
         completed_at_micros: completed_at.0,
     };
@@ -2772,6 +2824,7 @@ fn build_text_artifact_receipt(
         active_generation_id: plan.active_generation_id.clone(),
         active_generation_index_digest: active_generation_index_digest.to_owned(),
         deleted_artifacts,
+        inventory_bytes_before_collection: plan.text_artifact_inventory_bytes,
         reclaimed_bytes,
         completed_at_micros: completed_at.0,
     })
@@ -4486,6 +4539,16 @@ mod tests {
         let staging_name = format!(".text-artifact-{}.staging", "a".repeat(64));
         let staging_path = artifacts_root.join(&staging_name);
         std::fs::write(&staging_path, b"abandoned staging").expect("write stale staging");
+        let active_staging_name = format!(
+            ".text-artifact-{}.staging",
+            active
+                .state_digest
+                .strip_prefix("sha256:")
+                .expect("active sealed digest")
+        );
+        let active_staging_path = artifacts_root.join(&active_staging_name);
+        std::fs::write(&active_staging_path, b"resumable active staging")
+            .expect("write active staging");
         let corrupt_name = format!("text-artifact-{}.corrupt-incident", "b".repeat(64));
         let corrupt_path = artifacts_root.join(&corrupt_name);
         std::fs::write(&corrupt_path, b"corrupt backup").expect("write corrupt backup");
@@ -4515,6 +4578,19 @@ mod tests {
                         .len(),
                 )
         );
+        assert_eq!(
+            plan.text_artifact_inventory_bytes(),
+            std::fs::metadata(artifacts_root.join(&referenced.artifact_file),)
+                .expect("referenced metadata")
+                .len()
+                .saturating_add(
+                    std::fs::metadata(&active_staging_path)
+                        .expect("active staging metadata")
+                        .len(),
+                )
+                .saturating_add(plan.collectable_text_artifact_bytes()),
+            "the bounded inventory accounts descriptor bytes, resumable staging, and each candidate once"
+        );
 
         let report = execute_code_generation_retention(
             store.path(),
@@ -4535,6 +4611,19 @@ mod tests {
             total_text_artifact_bytes(&receipt.deleted_artifacts),
             "each receipt candidate contributes its exact bytes once"
         );
+        assert_eq!(
+            receipt.inventory_bytes_before_collection,
+            std::fs::metadata(artifacts_root.join(&referenced.artifact_file),)
+                .expect("referenced metadata after collection")
+                .len()
+                .saturating_add(
+                    std::fs::metadata(&active_staging_path)
+                        .expect("active staging metadata after collection")
+                        .len(),
+                )
+                .saturating_add(receipt.reclaimed_bytes),
+            "the durable receipt binds the pre-collection unique inventory bytes"
+        );
         assert!(
             artifacts_root.join(&referenced.artifact_file).is_file(),
             "durable descriptor target must survive retention"
@@ -4542,6 +4631,10 @@ mod tests {
         assert!(!orphan_path.exists());
         assert!(!staging_path.exists());
         assert!(!corrupt_path.exists());
+        assert!(
+            active_staging_path.is_file(),
+            "only the active generation's resumable staging evidence is preserved"
+        );
     }
 
     #[test]

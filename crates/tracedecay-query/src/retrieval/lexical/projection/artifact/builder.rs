@@ -21,7 +21,8 @@ use tracedecay_domain::{
 use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_padded_receipt, encode_field, metadata_digest, new_verified_receipt, padded_receipt,
+    decode_padded_receipt, decode_padded_receipt_with_control, encode_field, metadata_digest,
+    new_verified_receipt, padded_receipt,
 };
 use super::postings::{
     NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngram_scratch, insert_document_ngrams,
@@ -39,14 +40,14 @@ use super::super::{
 };
 
 const SECTION_QUERIES: [&str; 8] = [
-    "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal",
-    "SELECT 'document', document_id, digest FROM document_integrity UNION ALL SELECT 'import', canonical, digest FROM import_integrity ORDER BY 1, 2",
-    "SELECT canonical, evidence FROM import_evidence ORDER BY canonical",
-    "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id",
-    "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id",
-    "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id",
-    "SELECT kind, ngram, document_id FROM ngram_postings ORDER BY kind, ngram, document_id",
-    "SELECT 'field', field, '', total_length FROM field_stats UNION ALL SELECT 'term', field, term, document_frequency FROM term_stats UNION ALL SELECT 'vocabulary', '', term, 0 FROM vocabulary ORDER BY 1, 2, 3, 4",
+    "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor, printf('%020d', page_ordinal) AS finalization_key FROM source_pages",
+    "SELECT 'document', document_id, digest, printf('d%020d', document_id) AS finalization_key FROM document_integrity UNION ALL SELECT 'import', canonical, digest, printf('i%016X', length(canonical)) || hex(canonical) AS finalization_key FROM import_integrity",
+    "SELECT canonical, evidence, printf('%016X', length(canonical)) || hex(canonical) AS finalization_key FROM import_evidence",
+    "SELECT document_id, chunk_id, row, printf('%020d', document_id) AS finalization_key FROM rows",
+    "SELECT field, term, document_id, frequency, printf('%016X', length(CAST(field AS BLOB))) || hex(CAST(field AS BLOB)) || printf('%016X', length(CAST(term AS BLOB))) || hex(CAST(term AS BLOB)) || printf('%020d', document_id) AS finalization_key FROM term_postings",
+    "SELECT field, term, document_id, printf('%016X', length(CAST(field AS BLOB))) || hex(CAST(field AS BLOB)) || printf('%016X', length(term)) || hex(term) || printf('%020d', document_id) AS finalization_key FROM exact_postings",
+    "SELECT kind, ngram, document_id, printf('%020d%020d%020d', kind, ngram, document_id) AS finalization_key FROM ngram_postings",
+    "SELECT kind, field, term, value, CASE kind WHEN 'field' THEN 'f' WHEN 'term' THEN 't' WHEN 'vocabulary' THEN 'v' END || printf('%016X', length(CAST(field AS BLOB))) || hex(CAST(field AS BLOB)) || printf('%016X', length(CAST(term AS BLOB))) || hex(CAST(term AS BLOB)) AS finalization_key FROM (SELECT 'field' AS kind, field, '' AS term, total_length AS value FROM field_stats UNION ALL SELECT 'term', field, term, document_frequency FROM term_stats UNION ALL SELECT 'vocabulary', '', term, 0 FROM vocabulary)",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,11 +79,22 @@ pub enum CodeLexicalArtifactFinalizationStepV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedFinalizationStateV1 {
+    phase: PersistedFinalizationPhaseV1,
     section_ordinal: u64,
     section_row_count: u64,
+    section_last_key: Option<String>,
     section_accumulator: Vec<u8>,
     completed_sections: Vec<CodeLexicalArtifactSectionDigestV1>,
     completed_rows: u64,
+    content_epoch: i64,
+    source_state_digest: ManifestDigest,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PersistedFinalizationPhaseV1 {
+    Build,
+    Verify,
 }
 
 pub struct CodeLexicalArtifactBuilderV1 {
@@ -148,22 +160,16 @@ impl CodeLexicalArtifactBuilderV1 {
         })
     }
 
-    pub fn open_or_resume(
-        path: impl AsRef<Path>,
-        expected_metadata: CodeLexicalProjectionMetadataV1,
-    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
-        Self::open_or_resume_with_memory_budget(
-            path,
-            expected_metadata,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-    }
-
-    pub fn open_or_resume_with_memory_budget(
+    /// Reopen only the staged artifact authority while applying the caller's
+    /// scheduler epoch/deadline control to integrity, metadata, receipt, and
+    /// contiguous-cursor verification.
+    pub fn open_or_resume_with_memory_budget_and_control(
         path: impl AsRef<Path>,
         expected_metadata: CodeLexicalProjectionMetadataV1,
         memory_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
         expected_metadata
             .validate()
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
@@ -176,10 +182,12 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let connection = open_builder_connection(path)?;
-        require_integrity(&connection)?;
+        require_integrity(&connection, control)?;
         let expected_digest = metadata_digest(&expected_metadata)?;
-        verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest)?;
-        validate_contiguous_pages(&connection)?;
+        verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
+        read_receipt_with_control(&connection, control)?;
+        validate_contiguous_pages(&connection, control)?;
+        checkpoint(control)?;
         Ok(Self {
             path: path.to_path_buf(),
             connection,
@@ -297,18 +305,27 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         checkpoint(control)?;
-        verify_artifact_state_metadata(&self.connection, &self.metadata, &self.metadata_digest)?;
-        let staged = verify_staged_source_receipt(&self.connection, source)?;
+        verify_artifact_state_metadata(
+            &self.connection,
+            &self.metadata,
+            &self.metadata_digest,
+            control,
+        )?;
         if let Some(receipt) = read_receipt(&self.connection)? {
-            verify_sealed_receipt_header(&receipt, &self.metadata_digest, source, &staged)?;
+            verify_sealed_receipt_header(&receipt, &self.metadata_digest, source)?;
             return Ok(CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(
                 receipt,
             )));
         }
 
         if load_finalization_state(&self.connection)?.is_none() {
+            verify_staged_source_tail(&self.connection, source)?;
+            let content_epoch = content_epoch(&self.connection)?;
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
-            store_finalization_state(&transaction, &PersistedFinalizationStateV1::new()?)?;
+            store_finalization_state(
+                &transaction,
+                &PersistedFinalizationStateV1::new(content_epoch, source)?,
+            )?;
             transaction.commit().map_err(sqlite_error)?;
         }
 
@@ -319,6 +336,13 @@ impl CodeLexicalArtifactBuilderV1 {
             )
         })?;
         validate_finalization_state(&state)?;
+        ensure_content_epoch(&transaction, state.content_epoch)?;
+        if &state.source_state_digest != source.source_state_digest() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "bounded lexical artifact finalization received a different source receipt"
+                    .to_owned(),
+            ));
+        }
         let mut remaining_work = maximum_work;
         let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
         while remaining_work > 0 && state.section_ordinal < section_count {
@@ -345,13 +369,34 @@ impl CodeLexicalArtifactBuilderV1 {
             }
 
             let section = finish_persisted_section(section_name, &state)?;
-            state.completed_sections.push(section);
+            match state.phase {
+                PersistedFinalizationPhaseV1::Build => state.completed_sections.push(section),
+                PersistedFinalizationPhaseV1::Verify => {
+                    let expected =
+                        state
+                            .completed_sections
+                            .get(section_ordinal)
+                            .ok_or_else(|| {
+                                CodeLexicalArtifactErrorV1::Corrupt(
+                                    "lexical artifact verification has no matching build section"
+                                        .to_owned(),
+                                )
+                            })?;
+                    if &section != expected {
+                        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                            "lexical artifact changed between bounded finalization wakes"
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
             state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact finalization section ordinal overflowed".to_owned(),
                 )
             })?;
             state.section_row_count = 0;
+            state.section_last_key = None;
             if state.section_ordinal < section_count {
                 let next = SECTION_NAMES
                     [usize::try_from(state.section_ordinal).map_err(contract_number)?];
@@ -371,6 +416,22 @@ impl CodeLexicalArtifactBuilderV1 {
             });
         }
 
+        if state.phase == PersistedFinalizationPhaseV1::Build {
+            state.phase = PersistedFinalizationPhaseV1::Verify;
+            state.section_ordinal = 0;
+            state.section_row_count = 0;
+            state.section_last_key = None;
+            state.section_accumulator = initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
+            store_finalization_state(&transaction, &state)?;
+            checkpoint(control)?;
+            transaction.commit().map_err(sqlite_error)?;
+            return Ok(CodeLexicalArtifactFinalizationStepV1::Pending {
+                completed_sections: u64::try_from(state.completed_sections.len())
+                    .map_err(contract_number)?,
+                completed_rows: state.completed_rows,
+            });
+        }
+
         if state.completed_sections.len() != SECTION_NAMES.len() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact finalization completed with an invalid section receipt"
@@ -378,6 +439,7 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let sections = state.completed_sections;
+        verify_final_sections_against_source(&sections, source)?;
         let artifact_digest = artifact_digest(
             &self.metadata_digest,
             source.source_state_digest(),
@@ -800,6 +862,11 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                 state BLOB NOT NULL
             );
+            CREATE TABLE content_epoch (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                epoch INTEGER NOT NULL CHECK(epoch >= 0)
+            );
+            INSERT INTO content_epoch(singleton, epoch) VALUES (1, 0);
             CREATE TABLE source_pages (
                 page_ordinal INTEGER PRIMARY KEY,
                 page_digest TEXT NOT NULL,
@@ -863,19 +930,64 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id);
+            CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_source_pages_update AFTER UPDATE ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_source_pages_delete AFTER DELETE ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_document_integrity_insert AFTER INSERT ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_document_integrity_update AFTER UPDATE ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_document_integrity_delete AFTER DELETE ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_import_integrity_insert AFTER INSERT ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_import_integrity_update AFTER UPDATE ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_import_integrity_delete AFTER DELETE ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_import_evidence_insert AFTER INSERT ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_import_evidence_update AFTER UPDATE ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_import_evidence_delete AFTER DELETE ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_rows_insert AFTER INSERT ON rows BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_rows_update AFTER UPDATE ON rows BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_rows_delete AFTER DELETE ON rows BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_term_postings_insert AFTER INSERT ON term_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_term_postings_update AFTER UPDATE ON term_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_term_postings_delete AFTER DELETE ON term_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_term_stats_insert AFTER INSERT ON term_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_term_stats_update AFTER UPDATE ON term_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_term_stats_delete AFTER DELETE ON term_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_field_stats_insert AFTER INSERT ON field_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_field_stats_update AFTER UPDATE ON field_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_field_stats_delete AFTER DELETE ON field_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_exact_postings_insert AFTER INSERT ON exact_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_exact_postings_update AFTER UPDATE ON exact_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_exact_postings_delete AFTER DELETE ON exact_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_ngram_postings_insert AFTER INSERT ON ngram_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_ngram_postings_update AFTER UPDATE ON ngram_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_ngram_postings_delete AFTER DELETE ON ngram_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_vocabulary_insert AFTER INSERT ON vocabulary BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_vocabulary_update AFTER UPDATE ON vocabulary BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER content_epoch_vocabulary_delete AFTER DELETE ON vocabulary BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             ",
         )
         .map_err(sqlite_error)
 }
 
 impl PersistedFinalizationStateV1 {
-    fn new() -> Result<Self, CodeLexicalArtifactErrorV1> {
+    fn new(
+        content_epoch: i64,
+        source: &VerifiedSealedLexicalSourceReceiptV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        if content_epoch < 0 {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact mutation epoch is negative".to_owned(),
+            ));
+        }
         Ok(Self {
+            phase: PersistedFinalizationPhaseV1::Build,
             section_ordinal: 0,
             section_row_count: 0,
+            section_last_key: None,
             section_accumulator: initial_section_accumulator(SECTION_NAMES[0])?.to_vec(),
             completed_sections: Vec::new(),
             completed_rows: 0,
+            content_epoch,
+            source_state_digest: source.source_state_digest().clone(),
         })
     }
 }
@@ -884,7 +996,9 @@ fn verify_artifact_state_metadata(
     connection: &Connection,
     expected_metadata: &CodeLexicalProjectionMetadataV1,
     expected_digest: &ManifestDigest,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
     let (format_revision, metadata_bytes, stored_digest): (u32, Vec<u8>, String) = connection
         .query_row(
             "SELECT format_revision, metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
@@ -897,6 +1011,7 @@ fn verify_artifact_state_metadata(
             "format revision {format_revision} is not supported"
         )));
     }
+    checkpoint(control)?;
     let stored_metadata: CodeLexicalProjectionMetadataV1 = serde_json::from_slice(&metadata_bytes)
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
     let actual_digest = metadata_digest(&stored_metadata)?;
@@ -910,6 +1025,7 @@ fn verify_artifact_state_metadata(
             "staging metadata does not match the requested generation".to_owned(),
         ));
     }
+    checkpoint(control)?;
     Ok(())
 }
 
@@ -922,6 +1038,29 @@ fn finalization_started(connection: &Connection) -> Result<bool, CodeLexicalArti
         )
         .map(|exists| exists != 0)
         .map_err(sqlite_error)
+}
+
+fn content_epoch(connection: &Connection) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    connection
+        .query_row(
+            "SELECT epoch FROM content_epoch WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_corrupt)
+}
+
+fn ensure_content_epoch(
+    connection: &Connection,
+    expected: i64,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let actual = content_epoch(connection)?;
+    if actual != expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact content changed after bounded finalization began".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn load_finalization_state(
@@ -963,11 +1102,17 @@ fn validate_finalization_state(
     state: &PersistedFinalizationStateV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
+    let completed_section_count = match state.phase {
+        PersistedFinalizationPhaseV1::Build => {
+            usize::try_from(state.section_ordinal).map_err(contract_number)?
+        }
+        PersistedFinalizationPhaseV1::Verify => SECTION_NAMES.len(),
+    };
     if state.section_ordinal > section_count
-        || state.completed_sections.len()
-            != usize::try_from(state.section_ordinal).map_err(contract_number)?
+        || state.completed_sections.len() != completed_section_count
         || state.completed_sections.len() > SECTION_NAMES.len()
         || state.section_accumulator.len() != 32
+        || state.content_epoch < 0
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "persisted lexical artifact finalization state is malformed".to_owned(),
@@ -1020,16 +1165,34 @@ fn advance_section_rows(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let limit = i64::try_from(maximum_rows).map_err(contract_number)?;
-    let offset = i64::try_from(state.section_row_count).map_err(contract_number)?;
-    let query = format!("{query} LIMIT ?1 OFFSET ?2");
+    let query = format!(
+        "SELECT * FROM ({query}) AS section_rows \
+         WHERE (?1 IS NULL OR finalization_key > ?1) \
+         ORDER BY finalization_key LIMIT ?2"
+    );
     let mut statement = transaction.prepare(&query).map_err(sqlite_error)?;
     let column_count = statement.column_count();
+    let data_column_count = column_count.checked_sub(1).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact finalization query is missing its keyset key".to_owned(),
+        )
+    })?;
     let mut rows = statement
-        .query(params![limit, offset])
+        .query(params![state.section_last_key, limit])
         .map_err(sqlite_error)?;
     let mut advanced = 0usize;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
         checkpoint(control)?;
+        let key: String = row.get(data_column_count).map_err(sqlite_error)?;
+        if state
+            .section_last_key
+            .as_ref()
+            .is_some_and(|previous| key <= *previous)
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact finalization keyset did not advance".to_owned(),
+            ));
+        }
         if name == "derived_integrity" {
             verify_integrity_row(transaction, row)?;
         }
@@ -1038,8 +1201,9 @@ fn advance_section_rows(
             state.section_row_count,
             &mut state.section_accumulator,
             row,
-            column_count,
+            data_column_count,
         )?;
+        state.section_last_key = Some(key);
         state.section_row_count = state.section_row_count.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact finalization row count overflowed".to_owned(),
@@ -1144,15 +1308,19 @@ fn finish_persisted_section(
     name: &str,
     state: &PersistedFinalizationStateV1,
 ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
-    let accumulator: [u8; 32] = state
-        .section_accumulator
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact finalization accumulator has the wrong length".to_owned(),
-            )
-        })?;
+    finish_section(name, state.section_row_count, &state.section_accumulator)
+}
+
+fn finish_section(
+    name: &str,
+    row_count: u64,
+    accumulator: &[u8],
+) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
+    let accumulator: [u8; 32] = accumulator.as_ref().try_into().map_err(|_| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact finalization accumulator has the wrong length".to_owned(),
+        )
+    })?;
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.code-lexical-artifact-section.v2\0final");
     hasher.update(
@@ -1161,60 +1329,93 @@ fn finish_persisted_section(
             .to_le_bytes(),
     );
     hasher.update(name.as_bytes());
-    hasher.update(state.section_row_count.to_le_bytes());
+    hasher.update(row_count.to_le_bytes());
     hasher.update(accumulator);
     let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     Ok(CodeLexicalArtifactSectionDigestV1 {
         name: name.to_owned(),
-        row_count: state.section_row_count,
+        row_count,
         digest,
     })
 }
 
-fn verify_staged_source_receipt(
+/// Confirm the sealed source receipt from its durable terminal cursor without
+/// counting/replaying every staged page on each bounded finalization wake.
+/// The final section receipts validate the full source-page cardinality before
+/// a sealed artifact is published.
+fn verify_staged_source_tail(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
-) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-    let staged = progress(connection)?;
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let cursor = match source.page_count().checked_sub(1) {
+        Some(page_ordinal) => connection
+            .query_row(
+                "SELECT next_cursor FROM source_pages WHERE page_ordinal = ?1",
+                [i64::try_from(page_ordinal).map_err(contract_number)?],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .as_deref()
+            .map(decode_cursor)
+            .transpose()?,
+        None => None,
+    };
     source
-        .verify_completion(staged.next_cursor.as_ref())
+        .verify_completion(cursor.as_ref())
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    let document_receipts: i64 = connection
-        .query_row("SELECT COUNT(*) FROM document_integrity", [], |row| {
-            row.get(0)
-        })
-        .map_err(sqlite_error)?;
-    let import_receipts: i64 = connection
-        .query_row("SELECT COUNT(*) FROM import_integrity", [], |row| {
-            row.get(0)
-        })
-        .map_err(sqlite_error)?;
-    let imports: i64 = connection
-        .query_row("SELECT COUNT(*) FROM import_evidence", [], |row| row.get(0))
-        .map_err(sqlite_error)?;
-    if u64::try_from(document_receipts).map_err(contract_number)? != source.total_chunks()
-        || u64::try_from(import_receipts).map_err(contract_number)? != source.total_imports()
-        || u64::try_from(imports).map_err(contract_number)? != source.total_imports()
-    {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact derived receipt cardinality disagrees with sealed source".to_owned(),
-        ));
-    }
-    Ok(staged)
+    Ok(())
 }
 
 fn verify_sealed_receipt_header(
     receipt: &VerifiedCodeLexicalArtifactV1,
     expected_metadata_digest: &ManifestDigest,
     source: &VerifiedSealedLexicalSourceReceiptV1,
-    _staged: &CodeLexicalArtifactBuildProgressV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     verify_source_receipt(receipt, source)?;
     if receipt.metadata_digest() != expected_metadata_digest {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "finalized lexical artifact metadata digest changed".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn verify_final_sections_against_source(
+    sections: &[CodeLexicalArtifactSectionDigestV1],
+    source: &VerifiedSealedLexicalSourceReceiptV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let expected = [
+        ("source_pages", source.page_count()),
+        (
+            "derived_integrity",
+            source
+                .total_chunks()
+                .checked_add(source.total_imports())
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact final source cardinality overflowed".to_owned(),
+                    )
+                })?,
+        ),
+        ("import_evidence", source.total_imports()),
+        ("rows", source.total_chunks()),
+    ];
+    for (name, expected_rows) in expected {
+        let actual = sections
+            .iter()
+            .find(|section| section.name == name)
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact finalization omitted a required section".to_owned(),
+                )
+            })?;
+        if actual.row_count != expected_rows {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "lexical artifact {name} rows disagree with the sealed source receipt"
+            )));
+        }
     }
     Ok(())
 }
@@ -1623,13 +1824,17 @@ fn verify_replayed_page(
     Ok(())
 }
 
-fn validate_contiguous_pages(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
+fn validate_contiguous_pages(
+    connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut statement = connection
         .prepare("SELECT page_ordinal FROM source_pages ORDER BY page_ordinal")
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     let mut expected = 0i64;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
+        checkpoint(control)?;
         let ordinal: i64 = row.get(0).map_err(sqlite_error)?;
         if ordinal != expected {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1677,34 +1882,29 @@ fn digest_query(
     query: &str,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
-    let mut state = PersistedFinalizationStateV1 {
-        section_ordinal: 0,
-        section_row_count: 0,
-        section_accumulator: initial_section_accumulator(name)?.to_vec(),
-        completed_sections: Vec::new(),
-        completed_rows: 0,
-    };
-    let mut statement = connection.prepare(query).map_err(sqlite_error)?;
+    let mut row_count = 0u64;
+    let mut accumulator = initial_section_accumulator(name)?.to_vec();
+    let query = format!("SELECT * FROM ({query}) AS section_rows ORDER BY finalization_key");
+    let mut statement = connection.prepare(&query).map_err(sqlite_error)?;
     let column_count = statement.column_count();
+    let data_column_count = column_count.checked_sub(1).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact verification query is missing its keyset key".to_owned(),
+        )
+    })?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
-        if state.section_row_count.is_multiple_of(4_096) {
+        if row_count.is_multiple_of(4_096) {
             checkpoint(control)?;
         }
-        absorb_section_row(
-            name,
-            state.section_row_count,
-            &mut state.section_accumulator,
-            row,
-            column_count,
-        )?;
-        state.section_row_count = state.section_row_count.checked_add(1).ok_or_else(|| {
+        absorb_section_row(name, row_count, &mut accumulator, row, data_column_count)?;
+        row_count = row_count.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact section row count overflowed".to_owned(),
             )
         })?;
     }
-    finish_persisted_section(name, &state)
+    finish_section(name, row_count, &accumulator)
 }
 
 fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -1753,6 +1953,21 @@ fn read_receipt(
     decode_padded_receipt(&bytes)
 }
 
+fn read_receipt_with_control(
+    connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let bytes: Vec<u8> = connection
+        .query_row(
+            "SELECT receipt FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_corrupt)?;
+    decode_padded_receipt_with_control(&bytes, control)
+}
+
 fn verify_source_receipt(
     receipt: &VerifiedCodeLexicalArtifactV1,
     source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -1783,7 +1998,7 @@ fn verify_finalized_artifact(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
-    require_integrity(connection)?;
+    require_integrity(connection, control)?;
     verify_source_receipt(receipt, source)?;
     let progress = progress(connection)?;
     source
@@ -1837,10 +2052,15 @@ fn verify_finalized_artifact(
     Ok(())
 }
 
-fn require_integrity(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
+fn require_integrity(
+    connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
     let result: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .map_err(sqlite_corrupt)?;
+    checkpoint(control)?;
     if result != "ok" {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(result));
     }
