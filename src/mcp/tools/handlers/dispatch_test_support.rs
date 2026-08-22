@@ -12,6 +12,21 @@ struct FixtureCodeGraphProjection {
     store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
 }
 
+#[derive(Clone)]
+struct FailingFixtureCodeGraphProjection {
+    error: tracedecay_usecases::graph::CodeGraphReadError,
+}
+
+impl tracedecay_usecases::graph::CodeGraphProjectionReadPort for FailingFixtureCodeGraphProjection {
+    fn open<'a>(
+        &'a self,
+        _request: tracedecay_usecases::graph::CodeGraphReadRequest<'a>,
+    ) -> tracedecay_usecases::graph::CodeGraphReadFuture<'a> {
+        let error = self.error.clone();
+        Box::pin(async move { Err(error) })
+    }
+}
+
 impl tracedecay_usecases::graph::CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
     fn open<'a>(
         &'a self,
@@ -156,6 +171,17 @@ pub(super) fn verified_graph_options<'a>(
         store,
     }));
     options.code_graph_read_admission_port = Some(Arc::new(FixtureCodeGraphAdmission { scope }));
+    options
+}
+
+pub(super) fn verified_graph_error_options<'a>(
+    cg: &TraceDecay,
+    options: ToolCallRegistryOptions<'a>,
+    error: tracedecay_usecases::graph::CodeGraphReadError,
+) -> ToolCallRegistryOptions<'a> {
+    let mut options = verified_graph_options(cg, options);
+    options.code_graph_projection_read_port =
+        Some(Arc::new(FailingFixtureCodeGraphProjection { error }));
     options
 }
 

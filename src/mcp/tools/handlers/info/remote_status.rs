@@ -50,6 +50,7 @@ mod tests {
     use crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1;
     use crate::mcp::tools::ToolResult;
     use crate::mcp::tools::binding::{McpToolDispatchGroup, dispatch_group_for_tool};
+    use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
     use crate::mcp::tools::handlers::{
         ToolCallRegistryOptions, handle_tool_call_with_registry_options,
     };
@@ -148,6 +149,18 @@ mod tests {
     async fn dispatch_returns_provider_json_or_typed_unavailable() {
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        // The temp project and the temp profile must share one hermetic
+        // authority root; a fixture that splits them exercises a different
+        // (cross-authority) dispatch shape than the one under test.
+        let canonical_root = dir.path().canonicalize().unwrap();
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        assert!(
+            profile_root.starts_with(&canonical_root),
+            "hermetic profile authority {} must live under the fixture root {}",
+            profile_root.display(),
+            canonical_root.display()
+        );
         let project = dir.path().join("remote-status");
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();

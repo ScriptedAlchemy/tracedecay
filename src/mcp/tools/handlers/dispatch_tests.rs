@@ -842,6 +842,23 @@ fn run_git_in(root: &std::path::Path, args: &[&str]) {
     );
 }
 
+fn git_stdout_in(root: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output is UTF-8")
+        .trim()
+        .to_owned()
+}
+
 /// A deadline `offset_micros` from now, used to hand the git dispatcher a live
 /// budget the way the admission layer does.
 fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
@@ -963,6 +980,162 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
         !message.contains("dispatch deadline"),
         "a fast ref failure must not be reported as a deadline timeout: {message:?}",
     );
+
+    cg.close();
+}
+
+#[tokio::test]
+async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("git-pr-context-cold-graph");
+    fs::create_dir_all(project.join("src")).unwrap();
+    run_git_in(&project, &["init", "-b", "main"]);
+    fs::write(project.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "initial"]);
+    run_git_in(&project, &["switch", "-c", "feature"]);
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn before() {}\npub fn after() {}\n",
+    )
+    .unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "change source"]);
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-git-pr-context-cold-graph",
+    )
+    .await
+    .unwrap();
+    let base_oid = git_stdout_in(&project, &["rev-parse", "main^{commit}"]);
+    let head_oid = git_stdout_in(&project, &["rev-parse", "HEAD^{commit}"]);
+    let merge_base = git_stdout_in(&project, &["merge-base", "main", "HEAD"]);
+    for (error, expected_reason) in [
+        (
+            tracedecay_usecases::graph::CodeGraphReadError::Unavailable {
+                detail: "the exact generation is still warming".to_owned(),
+            },
+            "code-graph-unavailable",
+        ),
+        (
+            tracedecay_usecases::graph::CodeGraphReadError::Stale {
+                detail: "the exact generation advanced".to_owned(),
+            },
+            "code-graph-stale",
+        ),
+    ] {
+        let result = dispatch_git_tools(
+            "tracedecay_pr_context",
+            &cg,
+            json!({
+                "base_ref": "main",
+                "head_ref": "HEAD",
+                "format": "json",
+            }),
+            verified_graph_error_options(&cg, ToolCallRegistryOptions::default(), error),
+        )
+        .await
+        .expect("transient verified graph failure must preserve available Git evidence");
+        assert_ne!(result.semantic_error(), Some(true));
+        let payload = serde_json::from_str::<Value>(
+            result.value["content"][0]["text"]
+                .as_str()
+                .expect("PR context JSON text"),
+        )
+        .expect("parse PR context JSON");
+
+        assert_eq!(payload["base"], "main");
+        assert_eq!(payload["head"], "HEAD");
+        assert_eq!(payload["base_oid"], base_oid);
+        assert_eq!(payload["head_oid"], head_oid);
+        assert_eq!(payload["merge_base"], merge_base);
+        assert_eq!(payload["status"], "partial");
+        assert_eq!(payload["files_changed"], 1);
+        assert_eq!(payload["changes"][0]["path"], "src/lib.rs");
+        assert_eq!(payload["changes"][0]["status"], "modified");
+        assert_eq!(payload["analysis_coverage"]["complete"], false);
+        assert_eq!(
+            payload["verified_graph_evidence"]["reason_code"],
+            expected_reason
+        );
+        assert_eq!(payload["verified_graph_evidence"]["status"], "unavailable");
+    }
+
+    cg.close();
+}
+
+#[tokio::test]
+async fn pr_context_propagates_terminal_graph_failures_without_a_cursor() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("git-pr-context-terminal-graph");
+    fs::create_dir_all(project.join("src")).unwrap();
+    run_git_in(&project, &["init", "-b", "main"]);
+    fs::write(project.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "initial"]);
+    run_git_in(&project, &["switch", "-c", "feature"]);
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn before() {}\npub fn after() {}\n",
+    )
+    .unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "change source"]);
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-git-pr-context-terminal-graph",
+    )
+    .await
+    .unwrap();
+    let terminal_errors = [
+        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
+            tracedecay_usecases::graph::CodeGraphReadError::Cancelled,
+        ),
+        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
+            tracedecay_usecases::graph::CodeGraphReadError::Denied,
+        ),
+        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
+            tracedecay_usecases::graph::CodeGraphReadError::Corrupt {
+                detail: "corrupt projection".to_owned(),
+            },
+        ),
+        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
+            tracedecay_usecases::graph::CodeGraphReadError::ResetRequired {
+                detail: "generation reset required".to_owned(),
+            },
+        ),
+        tracedecay_usecases::graph::map_code_graph_read_runtime_error(
+            tracedecay_usecases::graph::CodeGraphReadError::InvalidRequest {
+                detail: "invalid graph request".to_owned(),
+            },
+        ),
+        TraceDecayError::Config {
+            message: "graph configuration is invalid".to_owned(),
+        },
+    ];
+
+    for error in terminal_errors {
+        let detail = error.to_string();
+        let result = git::handle_pr_context(
+            &cg,
+            async move { Err::<crate::tracedecay::queries::graph::VerifiedGraphQuery, _>(error) },
+            json!({"base_ref": "main", "head_ref": "HEAD", "format": "json"}),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "terminal graph failure must not become partial success: {detail}"
+        );
+    }
 
     cg.close();
 }
