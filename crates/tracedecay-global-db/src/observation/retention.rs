@@ -277,6 +277,23 @@ pub struct ObservationRetentionPhaseReport {
     pub oldest_eligible_at: Option<i64>,
 }
 
+/// Accumulated admission-work telemetry across every refusal marker: how much
+/// stored-row decode, identity-derivation, payload-digest, and runtime-command
+/// work refusal-answering admission passes have performed in total. Each pass
+/// lands its typed `AdmissionWorkV1` receipt on its marker row; this rollup is
+/// the operator-facing sum, reported on the retention report the daemon
+/// maintenance tick already reads, so collision re-admission churn is visible
+/// in-product instead of only through `perf(1)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationAdmissionWorkRollupV1 {
+    /// Retained terminal refusal markers carrying work telemetry.
+    pub refusal_markers: u64,
+    pub stored_rows_decoded: u64,
+    pub identity_derivations: u64,
+    pub payload_digests: u64,
+    pub runtime_commands: u64,
+}
+
 /// Aggregate report for a retention run, including measurable reclaim (row and
 /// page/freelist counts before and after).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +326,8 @@ pub struct ObservationRetentionReport {
     /// Database `PRAGMA page_count` before/after.
     pub page_count_before: u64,
     pub page_count_after: u64,
+    /// Admission-work telemetry accumulated on the retained refusal markers.
+    pub admission_work: ObservationAdmissionWorkRollupV1,
     pub errors: Vec<String>,
 }
 
@@ -335,6 +354,57 @@ async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> u64 {
     match rows.next().await {
         Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
         _ => 0,
+    }
+}
+
+/// Sums the per-pass admission-work receipts persisted on the refusal
+/// markers. A read failure is not silent: it lands in the report's error list
+/// and the rollup stays at its zero default.
+async fn read_admission_work_rollup(
+    conn: &(impl QueryExecutor + ?Sized),
+    errors: &mut Vec<String>,
+) -> ObservationAdmissionWorkRollupV1 {
+    const SQL: &str = "SELECT COUNT(*),
+                COALESCE(SUM(stored_rows_decoded), 0),
+                COALESCE(SUM(identity_derivations), 0),
+                COALESCE(SUM(payload_digests), 0),
+                COALESCE(SUM(runtime_commands), 0)
+         FROM observation_admission_refusals";
+    let decoded: std::result::Result<ObservationAdmissionWorkRollupV1, String> = async {
+        let mut rows = conn
+            .query(SQL, ())
+            .await
+            .map_err(|error| format!("admission work rollup query failed: {error}"))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("admission work rollup read failed: {error}"))?
+        else {
+            return Err("admission work rollup returned no aggregate row".to_string());
+        };
+        let column = |index: i32, field: &str| {
+            row.get::<i64>(index)
+                .map_err(|error| format!("admission work rollup {field} failed: {error}"))
+                .and_then(|value| {
+                    u64::try_from(value)
+                        .map_err(|_| format!("admission work rollup {field} was negative"))
+                })
+        };
+        Ok(ObservationAdmissionWorkRollupV1 {
+            refusal_markers: column(0, "marker count")?,
+            stored_rows_decoded: column(1, "stored-row decode sum")?,
+            identity_derivations: column(2, "identity derivation sum")?,
+            payload_digests: column(3, "payload digest sum")?,
+            runtime_commands: column(4, "runtime command sum")?,
+        })
+    }
+    .await;
+    match decoded {
+        Ok(rollup) => rollup,
+        Err(error) => {
+            errors.push(error);
+            ObservationAdmissionWorkRollupV1::default()
+        }
     }
 }
 
@@ -418,8 +488,10 @@ pub async fn run_observation_retention(
         freelist_after: freelist_before,
         page_count_before,
         page_count_after: page_count_before,
+        admission_work: ObservationAdmissionWorkRollupV1::default(),
         errors: Vec::new(),
     };
+    report.admission_work = read_admission_work_rollup(&reader, &mut report.errors).await;
 
     if !config.enabled || !config.any_window() {
         report.anchors_released.window_days = config.anchor_release_after_days;

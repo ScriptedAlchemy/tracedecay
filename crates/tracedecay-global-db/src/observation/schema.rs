@@ -39,6 +39,20 @@ pub(super) const SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS: &[&str] = &[
     "receipt_id",
 ];
 
+/// Canonical `observation_admission_refusals` column set: the immutable
+/// refusal signature plus the production admission-work telemetry counters
+/// every admission pass accumulates onto its marker row.
+const ADMISSION_REFUSALS_CANONICAL_COLUMNS: &[&str] = &[
+    "observation_id",
+    "refused_payload_digest",
+    "retained_payload_digest",
+    "refused_at",
+    "stored_rows_decoded",
+    "identity_derivations",
+    "payload_digests",
+    "runtime_commands",
+];
+
 pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "ensure observation authority schema";
 
 async fn observation_table_exists(
@@ -136,6 +150,19 @@ async fn require_admitted_observation_shape(
                 OBSERVATION_AUTHORITY,
                 "source_cursor_advances carries a pre-release branch-local shape \
                  that no published binary ever wrote; there is no sanctioned \
+                 migration, reset the observation authority to recreate it at the \
+                 canonical schema",
+            ),
+        );
+    }
+    let refusals = table_columns(conn, "observation_admission_refusals").await?;
+    if !refusals.is_empty() && refusals != canonical_column_set(ADMISSION_REFUSALS_CANONICAL_COLUMNS)
+    {
+        return Err(
+            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                OBSERVATION_AUTHORITY,
+                "observation_admission_refusals carries a pre-release branch-local \
+                 shape that no published binary ever wrote; there is no sanctioned \
                  migration, reset the observation authority to recreate it at the \
                  canonical schema",
             ),
@@ -243,11 +270,20 @@ pub(super) const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             refused_payload_digest TEXT NOT NULL,
             retained_payload_digest TEXT NOT NULL,
             refused_at INTEGER NOT NULL,
+            stored_rows_decoded INTEGER NOT NULL DEFAULT 0 CHECK(stored_rows_decoded >= 0),
+            identity_derivations INTEGER NOT NULL DEFAULT 0 CHECK(identity_derivations >= 0),
+            payload_digests INTEGER NOT NULL DEFAULT 0 CHECK(payload_digests >= 0),
+            runtime_commands INTEGER NOT NULL DEFAULT 0 CHECK(runtime_commands >= 0),
             PRIMARY KEY(observation_id, refused_payload_digest),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
         );
         CREATE TRIGGER IF NOT EXISTS observation_admission_refusals_immutable_update
-        BEFORE UPDATE ON observation_admission_refusals BEGIN
+        BEFORE UPDATE ON observation_admission_refusals
+        WHEN NEW.observation_id IS NOT OLD.observation_id
+          OR NEW.refused_payload_digest IS NOT OLD.refused_payload_digest
+          OR NEW.retained_payload_digest IS NOT OLD.retained_payload_digest
+          OR NEW.refused_at IS NOT OLD.refused_at
+        BEGIN
             SELECT RAISE(ABORT, 'observation admission refusals are immutable');
         END;
         CREATE TRIGGER IF NOT EXISTS observation_admission_refusals_immutable_delete

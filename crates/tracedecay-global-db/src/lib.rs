@@ -51,7 +51,7 @@ pub use observability_rollup::{
     ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
     ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
 };
-pub use observation_adapter::GlobalDbObservationStore;
+pub use observation_adapter::{AdmissionWorkV1, GlobalDbObservationStore};
 pub use observation_projection::{
     converge_projection_predecessor, project_observation, rebuild_projection,
 };

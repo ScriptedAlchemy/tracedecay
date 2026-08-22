@@ -34,15 +34,63 @@ use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
 };
 
 /// Observation-store adapter over the already-registered authoritative
-/// runtime. The struct is concrete: the collision tests prove the
-/// terminal-refusal fast path repeats no record work behaviorally — they
-/// corrupt the stored row after the marker exists, so any stored-row decode,
-/// identity re-derivation, or payload re-hash fails loudly — not through any
-/// adapter seam or counter instrumentation.
+/// runtime. The struct is concrete — no seam, generic, or test-only port.
+/// The no-rework fast-path contract is proven two ways: production
+/// [`AdmissionWorkV1`] telemetry durably records exactly how much record work
+/// every refusal-answering admission pass performed, and the collision tests
+/// additionally corrupt the stored row after the marker exists so any
+/// regression that re-decodes, re-derives, or re-hashes stored data fails
+/// loudly.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,
     runtime: DatabaseRuntimeClientV1,
+}
+
+/// Per-pass admission-work receipt: how much record work one
+/// `persist_observation` pass actually performed. The receipt is the ONE
+/// counting authority — production call sites in this adapter increment
+/// through it wherever they invoke a runtime command dispatch, decode a
+/// stored observation row, or (via that decode) re-derive an identity or
+/// re-verify a payload digest.
+///
+/// Every refusal-answering pass durably lands its receipt on the refusal
+/// marker row (`observation_admission_refusals` work columns, accumulated in
+/// the same transaction the pass already commits when one exists). That is
+/// what makes the fast-path contract falsifiable from production data: a
+/// re-admitted terminal collision must record exactly
+/// `{stored_rows_decoded: 0, identity_derivations: 0, payload_digests: 0,
+/// runtime_commands: 1}` — the single frontier cursor read — and the
+/// operator-facing retention rollup surfaces the accumulated totals so
+/// collision re-admission churn is visible in-product instead of only in
+/// `perf(1)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdmissionWorkV1 {
+    /// Stored observation rows fetched and decoded by this pass.
+    pub stored_rows_decoded: u32,
+    /// Canonical observation-identity derivations this pass invoked (a
+    /// stored-row decode re-derives and verifies the row's identity).
+    pub identity_derivations: u32,
+    /// Payload-content digests this pass invoked (a stored-row decode
+    /// re-verifies the row's payload digest against its content).
+    pub payload_digests: u32,
+    /// Typed runtime commands this pass dispatched (reads and submits).
+    pub runtime_commands: u32,
+}
+
+impl AdmissionWorkV1 {
+    fn record_runtime_command(&mut self) {
+        self.runtime_commands = self.runtime_commands.saturating_add(1);
+    }
+
+    /// One stored observation row was fetched and decoded; the decode
+    /// re-derives the identity and re-verifies the payload digest, so all
+    /// three work kinds advance together.
+    fn record_stored_row_decode(&mut self) {
+        self.stored_rows_decoded = self.stored_rows_decoded.saturating_add(1);
+        self.identity_derivations = self.identity_derivations.saturating_add(1);
+        self.payload_digests = self.payload_digests.saturating_add(1);
+    }
 }
 
 impl GlobalDbObservationStore {
@@ -69,18 +117,26 @@ impl GlobalDbObservationStore {
     /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
     /// that the runtime write path also executes. No record content is
     /// decoded, derived, or hashed.
+    ///
+    /// The pass's [`AdmissionWorkV1`] receipt accumulates onto the marker
+    /// row's work columns inside the same transaction. Returns whether the
+    /// receipt landed durably: the not-at-frontier and lost-compare-and-set
+    /// shapes touch no ledger here, so the caller accumulates the pass work
+    /// onto the existing marker row instead.
     async fn record_refusal_with_coverage(
         &self,
         write: &AnchoredObservationWrite,
         retained_digest: &PayloadDigestV1,
-    ) -> ObservationStoreResult<()> {
+        work: &mut AdmissionWorkV1,
+    ) -> ObservationStoreResult<bool> {
         const OPERATION: &str = "record refused admission terminal and coverage";
         let candidate = write.observation();
         let identity = candidate.identity();
         let actual_cursor =
             read_runtime_source_cursor(&self.runtime, identity.source(), identity.scope())?;
+        work.record_runtime_command();
         let Some(mut advance) = refused_scan_frontier(write, actual_cursor.as_ref())? else {
-            return Ok(());
+            return Ok(false);
         };
         match (
             write.next_cursor().file_identity(),
@@ -143,19 +199,32 @@ impl GlobalDbObservationStore {
                 .rollback()
                 .await
                 .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Ok(());
+            return Ok(false);
         }
+        // The marker and this pass's admission-work receipt land in the one
+        // transaction: a first refusal seeds the work columns, a re-answered
+        // refusal accumulates onto them. Only the telemetry columns are
+        // mutable — the refusal signature stays trigger-immutable.
         transaction
             .execute(
                 "INSERT INTO observation_admission_refusals (
-                    observation_id, refused_payload_digest, retained_payload_digest, refused_at
-                 ) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT DO NOTHING",
+                    observation_id, refused_payload_digest, retained_payload_digest, refused_at,
+                    stored_rows_decoded, identity_derivations, payload_digests, runtime_commands
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(observation_id, refused_payload_digest) DO UPDATE SET
+                    stored_rows_decoded = stored_rows_decoded + excluded.stored_rows_decoded,
+                    identity_derivations = identity_derivations + excluded.identity_derivations,
+                    payload_digests = payload_digests + excluded.payload_digests,
+                    runtime_commands = runtime_commands + excluded.runtime_commands",
                 tracedecay_runtime_core::db::engine::params![
                     candidate.observation_id().as_str(),
                     candidate.payload_reference().digest().as_str(),
                     retained_digest.as_str(),
-                    now_micros().0
+                    now_micros().0,
+                    i64::from(work.stored_rows_decoded),
+                    i64::from(work.identity_derivations),
+                    i64::from(work.payload_digests),
+                    i64::from(work.runtime_commands)
                 ],
             )
             .await
@@ -227,6 +296,50 @@ impl GlobalDbObservationStore {
             .commit()
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
+        Ok(true)
+    }
+
+    /// Accumulates one pass's [`AdmissionWorkV1`] receipt onto an existing
+    /// refusal marker row, for the refusal-answering shapes that commit no
+    /// coverage transaction of their own (covered replays and stale expected
+    /// cursors). Touches only the mutable telemetry columns; a pass whose
+    /// refusal recorded no marker (the fail-closed full-path replay shapes)
+    /// matches no row and leaves every ledger untouched.
+    async fn accumulate_admission_work(
+        &self,
+        observation_id: &CanonicalObservationIdV1,
+        refused_digest: &PayloadDigestV1,
+        work: &AdmissionWorkV1,
+    ) -> ObservationStoreResult<()> {
+        const OPERATION: &str = "accumulate admission work telemetry";
+        let transaction = self
+            .database
+            .begin_write_transaction(OPERATION)
+            .await
+            .map_err(|error| runtime_storage_error(OPERATION, error))?;
+        transaction
+            .execute(
+                "UPDATE observation_admission_refusals SET
+                    stored_rows_decoded = stored_rows_decoded + ?3,
+                    identity_derivations = identity_derivations + ?4,
+                    payload_digests = payload_digests + ?5,
+                    runtime_commands = runtime_commands + ?6
+                 WHERE observation_id = ?1 AND refused_payload_digest = ?2",
+                tracedecay_runtime_core::db::engine::params![
+                    observation_id.as_str(),
+                    refused_digest.as_str(),
+                    i64::from(work.stored_rows_decoded),
+                    i64::from(work.identity_derivations),
+                    i64::from(work.payload_digests),
+                    i64::from(work.runtime_commands)
+                ],
+            )
+            .await
+            .map_err(|error| runtime_storage_error(OPERATION, error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| runtime_storage_error(OPERATION, error))?;
         Ok(())
     }
 
@@ -246,6 +359,11 @@ impl ObservationStore for GlobalDbObservationStore {
         let observation_id = write.observation().observation_id().clone();
         let candidate = write.observation().clone();
         let candidate_cursor = write.next_cursor().clone();
+        // The pass's admission-work receipt: every production call site below
+        // that dispatches a runtime command or decodes a stored row counts
+        // through it, and refusal-answering passes land it durably on the
+        // refusal marker.
+        let mut admission_work = AdmissionWorkV1::default();
         // A previously refused identity collision is deterministic and
         // terminal. The refusal authority is its own retained table keyed by
         // the exact refused candidate signature `(observation_id,
@@ -270,8 +388,17 @@ impl ObservationStore for GlobalDbObservationStore {
             // record at end-of-file would be re-read, re-decoded, and
             // re-hashed by every later rescan forever. Converging is one
             // atomic authority transaction touching no record content.
-            self.record_refusal_with_coverage(&write, &retained_digest)
+            let recorded = self
+                .record_refusal_with_coverage(&write, &retained_digest, &mut admission_work)
                 .await?;
+            if !recorded {
+                self.accumulate_admission_work(
+                    &observation_id,
+                    candidate.payload_reference().digest(),
+                    &admission_work,
+                )
+                .await?;
+            }
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
                 existing_digest: Box::new(retained_digest),
@@ -280,6 +407,10 @@ impl ObservationStore for GlobalDbObservationStore {
             });
         }
         let existing = read_runtime_stored_observation(runtime, &observation_id)?;
+        admission_work.record_runtime_command();
+        if existing.is_some() {
+            admission_work.record_stored_row_decode();
+        }
         let collision = existing
             .as_ref()
             .map(|existing| classify_observation_collision(existing.observation(), &candidate));
@@ -320,11 +451,21 @@ impl ObservationStore for GlobalDbObservationStore {
             // authoritative state — rows, cursor, ledger — left untouched;
             // an already-covered candidate is a replayed verification probe
             // and is likewise left untouched.
-            self.record_refusal_with_coverage(
-                &write,
-                existing.observation().payload_reference().digest(),
-            )
-            .await?;
+            let recorded = self
+                .record_refusal_with_coverage(
+                    &write,
+                    existing.observation().payload_reference().digest(),
+                    &mut admission_work,
+                )
+                .await?;
+            if !recorded {
+                self.accumulate_admission_work(
+                    &observation_id,
+                    candidate.payload_reference().digest(),
+                    &admission_work,
+                )
+                .await?;
+            }
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
                 existing_digest: Box::new(

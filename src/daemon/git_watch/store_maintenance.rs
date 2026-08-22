@@ -1663,6 +1663,38 @@ pub(super) async fn run_session_retention(
                         ],
                     );
                 }
+                // Per-pass admission-work receipts accumulated on the refusal
+                // markers: the in-product signal for collision re-admission
+                // churn that previously required perf(1) to diagnose.
+                let admission_work = &report.admission_work;
+                if admission_work.refusal_markers > 0 {
+                    log_daemon_event(
+                        "observation_admission_work",
+                        &[
+                            ("store", "mounted_sessions".to_string()),
+                            (
+                                "refusal_markers",
+                                admission_work.refusal_markers.to_string(),
+                            ),
+                            (
+                                "stored_rows_decoded",
+                                admission_work.stored_rows_decoded.to_string(),
+                            ),
+                            (
+                                "identity_derivations",
+                                admission_work.identity_derivations.to_string(),
+                            ),
+                            (
+                                "payload_digests",
+                                admission_work.payload_digests.to_string(),
+                            ),
+                            (
+                                "runtime_commands",
+                                admission_work.runtime_commands.to_string(),
+                            ),
+                        ],
+                    );
+                }
             }
             Err(_) => {
                 succeeded = false;

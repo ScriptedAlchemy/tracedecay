@@ -41,6 +41,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Dispatch, Event, Metadata, Subscriber};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -61,6 +64,79 @@ use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 
 const COLLISION_PROVIDER: &str = "collision-test";
+const ADMISSION_WORK_TRACE_TARGET: &str = "tracedecay::observation_admission_work";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AdmissionWorkSnapshot {
+    identity_derivations: u64,
+    payload_digests: u64,
+    runtime_commands: u64,
+}
+
+#[derive(Default)]
+struct AdmissionWorkTrace {
+    identity_derivations: AtomicU64,
+    payload_digests: AtomicU64,
+    runtime_commands: AtomicU64,
+}
+
+impl AdmissionWorkTrace {
+    fn snapshot(&self) -> AdmissionWorkSnapshot {
+        AdmissionWorkSnapshot {
+            identity_derivations: self.identity_derivations.load(Ordering::Relaxed),
+            payload_digests: self.payload_digests.load(Ordering::Relaxed),
+            runtime_commands: self.runtime_commands.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct AdmissionWorkSubscriber {
+    trace: Arc<AdmissionWorkTrace>,
+}
+
+struct AdmissionWorkVisitor<'a> {
+    trace: &'a AdmissionWorkTrace,
+}
+
+impl Visit for AdmissionWorkVisitor<'_> {
+    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() != "work" {
+            return;
+        }
+        let counter = match value {
+            "identity_derivation" => &self.trace.identity_derivations,
+            "payload_digest" => &self.trace.payload_digests,
+            "runtime_command" => &self.trace.runtime_commands,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Subscriber for AdmissionWorkSubscriber {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.target() == ADMISSION_WORK_TRACE_TARGET
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut visitor = AdmissionWorkVisitor { trace: &self.trace };
+        event.record(&mut visitor);
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
 
 /// The corrupted `observation_json` the no-rework tripwire writes over a
 /// retained row. It stays syntactically valid JSON with a matching
@@ -205,6 +281,22 @@ async fn restore_stored_observation_row(
         &original.committed_cursor_json,
     )
     .await;
+}
+
+/// Hides the retained-row table behind a fixture-only name after the refusal
+/// marker exists. The marker and cursor authorities remain available, while
+/// any regression that issues even a bare-column read against `observations`
+/// fails at the SQL boundary instead of being masked by an ignored result.
+async fn hide_observation_table_behind_tripwire(runtime: &HostAdmissionTestRuntimeV1) {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("ALTER TABLE observations RENAME TO observations_tripwire_hidden")
+        .await
+        .expect("hide retained observation table behind tripwire name");
+    transaction.commit().await.unwrap();
 }
 
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -739,13 +831,20 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
     // re-admission must be unaffected; any regression that re-decodes,
     // re-derives, or re-hashes stored data now fails loudly.
     corrupt_stored_observation_row(&runtime, original.observation_id().as_str()).await;
+    hide_observation_table_behind_tripwire(&runtime).await;
 
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
+    let admission_work = Arc::new(AdmissionWorkTrace::default());
+    let dispatch = Dispatch::new(AdmissionWorkSubscriber {
+        trace: Arc::clone(&admission_work),
+    });
+    let trace_guard = tracing::dispatcher::set_default(&dispatch);
     let second = store
         .persist_observation(rewritten_write.clone())
         .await
         .unwrap_err();
+    drop(trace_guard);
     assert!(
         matches!(
             second,
@@ -758,12 +857,23 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
          collision — any stored-row decode, identity re-derivation, or payload re-hash \
          would have failed on the tripwire bytes; {second:?}"
     );
-    // The corrupted bytes are untouched: the fast path performed no repair,
-    // rewrite, or decode-and-rewrite of the retained row either.
     assert_eq!(
-        raw_observation_json(&runtime, original.observation_id().as_str()).await,
+        admission_work.snapshot(),
+        AdmissionWorkSnapshot {
+            identity_derivations: 0,
+            payload_digests: 0,
+            runtime_commands: 1,
+        },
+        "the terminal fast path must neither re-derive nor re-hash the valid candidate, \
+         and may dispatch only the one canonical source-cursor read"
+    );
+    // Any access to the retained row — including an ignored bare-column read
+    // that would evade a byte-corruption tripwire — would have failed because
+    // the production table name is no longer present.
+    assert_eq!(
+        raw_hidden_observation_json(&runtime, original.observation_id().as_str()).await,
         tripwire_observation_json(original.observation_id().as_str()),
-        "the fast path must not read back or rewrite the retained observation row"
+        "the fast path must not read or rewrite the hidden retained observation row"
     );
     // The terminal coverage stays single-row and the cursor stays put.
     assert_eq!(
@@ -1192,6 +1302,32 @@ async fn raw_observation_json(
         .expect("retained observation row")
         .get::<String>(0)
         .expect("decode retained observation column")
+}
+
+/// Reads the fixture-hidden retained row after the production fast path has
+/// completed, so the test can still prove the tripwire bytes stayed intact.
+async fn raw_hidden_observation_json(
+    runtime: &HostAdmissionTestRuntimeV1,
+    observation_id: &str,
+) -> String {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let snapshot = database.read_snapshot().await.expect("read snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_json FROM observations_tripwire_hidden
+             WHERE observation_id = ?1",
+            params![observation_id],
+        )
+        .await
+        .expect("query hidden retained observation row");
+    rows.next()
+        .await
+        .expect("read hidden retained observation row")
+        .expect("hidden retained observation row")
+        .get::<String>(0)
+        .expect("decode hidden retained observation column")
 }
 
 /// One real catch-up pass over raw persisted source input: read the durable
