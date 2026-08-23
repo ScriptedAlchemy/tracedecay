@@ -33,14 +33,16 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
         registry_database: &RegisteredGlobalDb,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_authority(
+        let layout = Self::resolve_store_layout_for_authority(
             project_root,
             open_options,
             Some(registry_database),
             false,
             &MovedStoreAdoption::Never,
         )
-        .await
+        .await?;
+        Self::reject_split_identity_cutover(project_root, open_options, &layout)?;
+        Ok(layout)
     }
 
     /// Resolves the store layout for a project that has never been enrolled,
@@ -398,7 +400,7 @@ impl TraceDecay {
         );
         Err(TraceDecayError::Config {
             message: format!(
-                "identity cutover conflict for '{}': selected [project_id={selected_id} path='{}']; legacy [project_id={legacy_id} path='{}']; run the offline dry-run `{command}` before changing the marker; both shards were preserved and no files changed",
+                "identity cutover conflict for '{}': selected [project_id={selected_id} path='{}']; legacy [project_id={legacy_id} path='{}']; choose one shard and retire the other; run the offline dry-run `{command}` before changing the marker; both shards were preserved and no files changed",
                 project_root.display(),
                 selected.data_root.display(),
                 legacy.data_root.display(),
