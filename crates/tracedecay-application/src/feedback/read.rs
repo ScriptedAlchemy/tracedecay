@@ -441,7 +441,7 @@ where
         .await
     }
 
-    async fn complete_read<Req, Res, PortFn, PortFut, ValidFn>(
+    async fn complete_read<Req, Res, PortFn, ValidFn>(
         &self,
         context: &RequestContext,
         request: Req,
@@ -451,8 +451,11 @@ where
         valid: ValidFn,
     ) -> Result<ApplicationResult<Res>, ApplicationContractError>
     where
-        PortFn: FnOnce(&P, &FeedbackReadPortContext<'_>, &Req) -> PortFut,
-        PortFut: Future<Output = RetrievalPortOutcome<Res>>,
+        PortFn: for<'p> FnOnce(
+            &'p P,
+            &'p FeedbackReadPortContext<'p>,
+            &'p Req,
+        ) -> FeedbackReadPortFuture<'p, Res>,
         ValidFn: FnOnce(&RequestContext, &Req, &Res, &RetrievalEvidence<Res>) -> bool,
     {
         let admission = match self.authorization.admit(context, operation, observed_at) {
