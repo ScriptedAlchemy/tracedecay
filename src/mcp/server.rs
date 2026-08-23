@@ -204,16 +204,53 @@ pub(crate) async fn resolve_initialize_roots_project_path(
 }
 
 pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
-    params
-        .and_then(|p| p.get("roots"))
-        .and_then(Value::as_array)
+    let Some(params) = params else {
+        return Vec::new();
+    };
+    let listed_uris = ["roots", "workspaceFolders"]
         .into_iter()
-        .flatten()
-        .filter_map(|root| {
-            let uri = root.get("uri").and_then(Value::as_str)?;
-            crate::serve::local_path_from_mcp_root_uri(uri)
+        .flat_map(|key| {
+            params
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
         })
-        .collect()
+        .filter_map(|entry| entry.get("uri").and_then(Value::as_str));
+    let root_uri = params.get("rootUri").and_then(Value::as_str).into_iter();
+    let mut paths = Vec::new();
+    for uri in listed_uris.chain(root_uri) {
+        if let Some(path) = crate::serve::local_path_from_mcp_root_uri(uri)
+            && !paths.contains(&path)
+        {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+#[cfg(test)]
+mod initialize_root_path_tests {
+    use super::initialize_root_paths;
+
+    #[test]
+    fn initialize_roots_include_workspace_folders_and_root_uri_without_duplicates() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let first_uri = url::Url::from_file_path(&first).expect("first file URI");
+        let second_uri = url::Url::from_file_path(&second).expect("second file URI");
+        let params = serde_json::json!({
+            "roots": [{"uri": first_uri.as_str()}],
+            "workspaceFolders": [
+                {"uri": first_uri.as_str(), "name": "first"},
+                {"uri": second_uri.as_str(), "name": "second"}
+            ],
+            "rootUri": second_uri.as_str()
+        });
+
+        assert_eq!(initialize_root_paths(Some(&params)), vec![first, second]);
+    }
 }
 
 fn match_initialize_root_to_registered_project(

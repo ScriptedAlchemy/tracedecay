@@ -116,6 +116,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                         &lifecycle,
                         store_administration,
                         gates,
+                        Default::default(),
                         Some(attempts),
                     ))
                     .await
@@ -274,6 +275,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
                     &lifecycle,
                     administration,
                     gates,
+                    Default::default(),
                     Some(attempts),
                 ))
                 .await
@@ -1744,6 +1746,25 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn cached_initialize_route_rebinds_later_projectless_handshake() {
+    let routes = Default::default();
+    let mut initialized = test_handshake_defaults();
+    initialized.client_instance_id = "mcp-1234567890".to_string();
+    let route = super::InitializeRouteMetadata {
+        project_path: PathBuf::from("/registered/project"),
+        allow_init: true,
+    };
+    super::apply_cached_initialize_route(&mut initialized, Some(&route), &routes).await;
+
+    let mut later = test_handshake_defaults();
+    later.client_instance_id = initialized.client_instance_id;
+    super::apply_cached_initialize_route(&mut later, None, &routes).await;
+
+    assert_eq!(later.project_path, Some(route.project_path));
+    assert!(later.allow_init);
+}
+
+#[tokio::test]
 async fn initialize_root_routing_replaces_cached_project_and_scope() {
     let profile = TempDir::new().expect("profile temp dir");
     let project_a = TempDir::new().expect("project a temp dir");
@@ -2610,6 +2631,7 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
             &DaemonLifecycle::default(),
             server_administration,
             gates,
+            Default::default(),
             Some(server_attempts),
         ))
         .await

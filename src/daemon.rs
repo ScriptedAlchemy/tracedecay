@@ -41,6 +41,7 @@ pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
 const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
+const MAX_INITIALIZE_ROUTE_CLIENTS: usize = 1_024;
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -1039,6 +1040,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let lifecycle = DaemonLifecycle::default();
     let store_administration = StoreAdministration::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
+    let initialize_routes = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
     loop {
         let stream = tokio::select! {
@@ -1055,6 +1057,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         let client_lifecycle = lifecycle.clone();
         let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
+        let initialize_routes = Arc::clone(&initialize_routes);
         clients.spawn(async move {
             serve_windows_broker_client(
                 stream,
@@ -1062,6 +1065,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 &client_lifecycle,
                 store_administration,
                 project_open_gates,
+                initialize_routes,
                 #[cfg(test)]
                 None,
             )
@@ -1872,6 +1876,7 @@ struct DaemonEngine {
     catalog_refresh_notified_clients: Arc<tokio::sync::Mutex<HashSet<CatalogRefreshClientKey>>>,
     /// Prevents capacity exhaustion from flooding the daemon log.
     catalog_refresh_saturation_logged: Arc<AtomicBool>,
+    initialize_routes: InitializeRouteCache,
     /// Git-metadata watcher (design D3/D5). Default-constructed inert; the real
     /// config-driven watcher is installed by `run_foreground_unix` via
     /// [`DaemonEngine::with_git_watcher`] before the accept loop starts.
@@ -2085,14 +2090,15 @@ fn portable_database_owner_reconciler(
     })
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CatalogRefreshClientKey {
     client_identity: DaemonClientIdentity,
     client_instance_id: String,
 }
 
-#[cfg(unix)]
+type InitializeRouteCache =
+    Arc<tokio::sync::Mutex<HashMap<CatalogRefreshClientKey, InitializeRouteMetadata>>>;
+
 impl CatalogRefreshClientKey {
     fn from_handshake(handshake: &DaemonHandshake) -> Self {
         Self {
@@ -2102,7 +2108,6 @@ impl CatalogRefreshClientKey {
     }
 }
 
-#[cfg(unix)]
 fn valid_client_instance_id(client_instance_id: &str) -> bool {
     let bytes = client_instance_id.as_bytes();
     (bytes.len() == 32
@@ -2664,6 +2669,32 @@ async fn apply_daemon_initialize_route(
     Ok(Some(route))
 }
 
+async fn apply_cached_initialize_route(
+    handshake: &mut DaemonHandshake,
+    initialize_route: Option<&InitializeRouteMetadata>,
+    routes: &InitializeRouteCache,
+) {
+    if !valid_client_instance_id(&handshake.client_instance_id) {
+        return;
+    }
+    let key = CatalogRefreshClientKey::from_handshake(handshake);
+    let mut routes = routes.lock().await;
+    if let Some(route) = initialize_route {
+        if routes.len() < MAX_INITIALIZE_ROUTE_CLIENTS || routes.contains_key(&key) {
+            routes.insert(key, route.clone());
+        }
+        return;
+    }
+    if handshake.project_path.is_some() {
+        return;
+    }
+    let Some(route) = routes.get(&key) else {
+        return;
+    };
+    handshake.project_path = Some(route.project_path.clone());
+    handshake.allow_init = route.allow_init;
+}
+
 fn attach_initialize_route_metadata(
     response: &mut JsonRpcResponse,
     route: &InitializeRouteMetadata,
@@ -2902,6 +2933,12 @@ async fn serve_broker_socket_client(
         &engine.store_administration,
     )
     .await?;
+    apply_cached_initialize_route(
+        &mut handshake,
+        initialize_route.as_ref(),
+        &engine.initialize_routes,
+    )
+    .await;
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => engine.execute_branch_admin(&handshake, action).await,
@@ -3059,6 +3096,7 @@ async fn serve_windows_broker_client(
     lifecycle: &DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    initialize_routes: InitializeRouteCache,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let mut transport = BrokerStreamTransport::new(stream);
@@ -3087,6 +3125,12 @@ async fn serve_windows_broker_client(
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
             .await?;
+    apply_cached_initialize_route(
+        &mut handshake,
+        initialize_route.as_ref(),
+        &initialize_routes,
+    )
+    .await;
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => {
