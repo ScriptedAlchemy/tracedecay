@@ -524,15 +524,17 @@ pub async fn query_status(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
 ) -> Response {
-    let Some(stored) = find_run(&state, &run_id) else {
-        return not_found(&run_id);
-    };
-    let mut run = stored.run.read().await.clone();
-    run.elapsed_micros = run
-        .completed_at_micros
-        .unwrap_or_else(now_micros)
-        .saturating_sub(run.submitted_at_micros);
-    Json(envelope_for_run(&state, run)).into_response()
+    hotpath::measure_block!("dashboard.query.status", {
+        let Some(stored) = find_run(&state, &run_id) else {
+            return not_found(&run_id);
+        };
+        let mut run = stored.run.read().await.clone();
+        run.elapsed_micros = run
+            .completed_at_micros
+            .unwrap_or_else(now_micros)
+            .saturating_sub(run.submitted_at_micros);
+        Json(envelope_for_run(&state, run)).into_response()
+    })
 }
 
 pub async fn cancel_query(
@@ -1012,50 +1014,52 @@ pub async fn session_size(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     Path(session_id): Path<String>,
 ) -> Response {
-    let Some(Extension(control)) = control else {
-        return explorer_session_not_ready::<ExplorerSessionSizeV1>(
-            &state,
-            DashboardLcmReadStateV1::Unavailable,
-            "dashboard_request_admission_unavailable".to_owned(),
-        );
-    };
-    let outcome = read_session_page(&state, control, &session_id, 500, None).await;
-    match outcome {
-        DashboardLcmReadOutcomeV1::Ready(page) => {
-            let payload = ExplorerSessionSizeV1 {
-                session_id,
-                storage_scope: "project".to_owned(),
-                counts: explorer_session_counts(&page.stats),
-            };
-            Json(DashboardEnvelopeV1::ready(
-                scope_from_state(&state),
-                DashboardCoverageV1::unknown(),
-                Some(payload),
-            ))
-            .into_response()
+    hotpath::measure_block!("dashboard.query.session_size", {
+        let Some(Extension(control)) = control else {
+            return explorer_session_not_ready::<ExplorerSessionSizeV1>(
+                &state,
+                DashboardLcmReadStateV1::Unavailable,
+                "dashboard_request_admission_unavailable".to_owned(),
+            );
+        };
+        let outcome = read_session_page(&state, control, &session_id, 500, None).await;
+        match outcome {
+            DashboardLcmReadOutcomeV1::Ready(page) => {
+                let payload = ExplorerSessionSizeV1 {
+                    session_id,
+                    storage_scope: "project".to_owned(),
+                    counts: explorer_session_counts(&page.stats),
+                };
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::unknown(),
+                    Some(payload),
+                ))
+                .into_response()
+            }
+            DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
+                let examined = u64::try_from(page.messages.len()).unwrap_or(u64::MAX);
+                let payload = ExplorerSessionSizeV1 {
+                    session_id,
+                    storage_scope: "project".to_owned(),
+                    counts: explorer_session_counts(&page.stats),
+                };
+                Json(DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    examined.saturating_add(omitted),
+                    examined,
+                    "canonical hydrated records",
+                    vec!["lcm_temporal_read_incomplete".to_owned()],
+                    Some(payload),
+                ))
+                .into_response()
+            }
+            DashboardLcmReadOutcomeV1::NotReady {
+                state: read_state,
+                reason,
+            } => explorer_session_not_ready::<ExplorerSessionSizeV1>(&state, read_state, reason),
         }
-        DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
-            let examined = u64::try_from(page.messages.len()).unwrap_or(u64::MAX);
-            let payload = ExplorerSessionSizeV1 {
-                session_id,
-                storage_scope: "project".to_owned(),
-                counts: explorer_session_counts(&page.stats),
-            };
-            Json(DashboardEnvelopeV1::partial(
-                scope_from_state(&state),
-                examined.saturating_add(omitted),
-                examined,
-                "canonical hydrated records",
-                vec!["lcm_temporal_read_incomplete".to_owned()],
-                Some(payload),
-            ))
-            .into_response()
-        }
-        DashboardLcmReadOutcomeV1::NotReady {
-            state: read_state,
-            reason,
-        } => explorer_session_not_ready::<ExplorerSessionSizeV1>(&state, read_state, reason),
-    }
+    })
 }
 
 pub async fn read_context(
@@ -1064,112 +1068,114 @@ pub async fn read_context(
     Path(session_id): Path<String>,
     Query(params): Query<ReadContextParams>,
 ) -> Response {
-    let limit = params.limit.unwrap_or(100).clamp(1, 500);
-    let Some(Extension(control)) = control else {
-        return explorer_session_not_ready::<ExplorerReadContextV1>(
-            &state,
-            DashboardLcmReadStateV1::Unavailable,
-            "dashboard_request_admission_unavailable".to_owned(),
-        );
-    };
-    let offset = params.offset.unwrap_or(0).max(0);
-    let order = if params.order.as_deref() == Some("desc") {
-        "desc"
-    } else {
-        "asc"
-    };
-    if offset != 0 || order == "desc" {
-        return Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            None::<ExplorerReadContextV1>,
-            "lcm_cursor_required",
-        ))
-        .into_response();
-    }
-    // The kernel serves one ranked stream in which summary nodes ride beside
-    // messages, so a windowed read fills its MESSAGE quota by consuming
-    // continuation pages: summaries accumulate alongside without starving the
-    // caller's limit, and the fill stays bounded so a read never becomes
-    // unbounded background work.
-    const READ_CONTEXT_FILL_PAGES: usize = 8;
-    let mut messages: Vec<DashboardLcmCanonicalMessageV1> = Vec::new();
-    let mut summary_nodes = Vec::new();
-    let mut stats = None;
-    let mut window_partial = false;
-    let mut omitted_total = 0_u64;
-    let mut cursor: Option<String> = None;
-    for _ in 0..READ_CONTEXT_FILL_PAGES {
-        let outcome =
-            read_session_page(&state, control.clone(), &session_id, limit, cursor.take()).await;
-        let (mut page, page_partial, page_omitted) = match outcome {
-            DashboardLcmReadOutcomeV1::Ready(page) => (page, false, 0),
-            DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, true, omitted),
-            DashboardLcmReadOutcomeV1::NotReady {
-                state: read_state,
-                reason,
-            } => {
-                return explorer_session_not_ready::<ExplorerReadContextV1>(
-                    &state, read_state, reason,
-                );
-            }
+    hotpath::measure_block!("dashboard.query.read_context", {
+        let limit = params.limit.unwrap_or(100).clamp(1, 500);
+        let Some(Extension(control)) = control else {
+            return explorer_session_not_ready::<ExplorerReadContextV1>(
+                &state,
+                DashboardLcmReadStateV1::Unavailable,
+                "dashboard_request_admission_unavailable".to_owned(),
+            );
         };
-        window_partial |= page_partial;
-        omitted_total = omitted_total.saturating_add(page_omitted);
-        summary_nodes.append(&mut page.summary_nodes);
-        let deficit = usize::try_from(limit).unwrap_or(usize::MAX) - messages.len();
-        let overflow = page.messages.len() > deficit;
-        messages.extend(page.messages.drain(..).take(deficit));
-        stats = Some(page.stats);
-        cursor = page.next_cursor;
-        if overflow || messages.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
-            break;
+        let offset = params.offset.unwrap_or(0).max(0);
+        let order = if params.order.as_deref() == Some("desc") {
+            "desc"
+        } else {
+            "asc"
+        };
+        if offset != 0 || order == "desc" {
+            return Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                None::<ExplorerReadContextV1>,
+                "lcm_cursor_required",
+            ))
+            .into_response();
         }
-        if cursor.is_none() {
-            break;
+        // The kernel serves one ranked stream in which summary nodes ride beside
+        // messages, so a windowed read fills its MESSAGE quota by consuming
+        // continuation pages: summaries accumulate alongside without starving the
+        // caller's limit, and the fill stays bounded so a read never becomes
+        // unbounded background work.
+        const READ_CONTEXT_FILL_PAGES: usize = 8;
+        let mut messages: Vec<DashboardLcmCanonicalMessageV1> = Vec::new();
+        let mut summary_nodes = Vec::new();
+        let mut stats = None;
+        let mut window_partial = false;
+        let mut omitted_total = 0_u64;
+        let mut cursor: Option<String> = None;
+        for _ in 0..READ_CONTEXT_FILL_PAGES {
+            let outcome =
+                read_session_page(&state, control.clone(), &session_id, limit, cursor.take()).await;
+            let (mut page, page_partial, page_omitted) = match outcome {
+                DashboardLcmReadOutcomeV1::Ready(page) => (page, false, 0),
+                DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, true, omitted),
+                DashboardLcmReadOutcomeV1::NotReady {
+                    state: read_state,
+                    reason,
+                } => {
+                    return explorer_session_not_ready::<ExplorerReadContextV1>(
+                        &state, read_state, reason,
+                    );
+                }
+            };
+            window_partial |= page_partial;
+            omitted_total = omitted_total.saturating_add(page_omitted);
+            summary_nodes.append(&mut page.summary_nodes);
+            let deficit = usize::try_from(limit).unwrap_or(usize::MAX) - messages.len();
+            let overflow = page.messages.len() > deficit;
+            messages.extend(page.messages.drain(..).take(deficit));
+            stats = Some(page.stats);
+            cursor = page.next_cursor;
+            if overflow || messages.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                break;
+            }
+            if cursor.is_none() {
+                break;
+            }
         }
-    }
-    let stats = stats.unwrap_or_default();
-    let counts = explorer_session_counts(&stats);
-    let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
-    let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
-    let has_more_messages = stats.message_count > returned_messages;
-    let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
-    let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
-    let has_more = has_more_messages || has_more_summary_nodes;
-    let payload = ExplorerReadContextV1 {
-        session_id,
-        storage_scope: "project".to_owned(),
-        limit,
-        offset,
-        order: order.to_owned(),
-        counts,
-        messages: messages.into_iter().map(explorer_lcm_message).collect(),
-        summary_nodes: summary_nodes
-            .into_iter()
-            .map(explorer_lcm_summary)
-            .collect(),
-        has_more,
-        has_more_messages,
-        has_more_summary_nodes,
-    };
-    if window_partial || has_more {
-        Json(DashboardEnvelopeV1::partial(
-            scope_from_state(&state),
-            examined.saturating_add(omitted_total),
-            examined,
-            "canonical hydrated records",
-            vec!["lcm_temporal_read_incomplete".to_owned()],
-            Some(payload),
-        ))
-        .into_response()
-    } else {
-        Json(DashboardEnvelopeV1::ready(
-            scope_from_state(&state),
-            DashboardCoverageV1::unknown(),
-            Some(payload),
-        ))
-        .into_response()
-    }
+        let stats = stats.unwrap_or_default();
+        let counts = explorer_session_counts(&stats);
+        let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
+        let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
+        let has_more_messages = stats.message_count > returned_messages;
+        let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
+        let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
+        let has_more = has_more_messages || has_more_summary_nodes;
+        let payload = ExplorerReadContextV1 {
+            session_id,
+            storage_scope: "project".to_owned(),
+            limit,
+            offset,
+            order: order.to_owned(),
+            counts,
+            messages: messages.into_iter().map(explorer_lcm_message).collect(),
+            summary_nodes: summary_nodes
+                .into_iter()
+                .map(explorer_lcm_summary)
+                .collect(),
+            has_more,
+            has_more_messages,
+            has_more_summary_nodes,
+        };
+        if window_partial || has_more {
+            Json(DashboardEnvelopeV1::partial(
+                scope_from_state(&state),
+                examined.saturating_add(omitted_total),
+                examined,
+                "canonical hydrated records",
+                vec!["lcm_temporal_read_incomplete".to_owned()],
+                Some(payload),
+            ))
+            .into_response()
+        } else {
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::unknown(),
+                Some(payload),
+            ))
+            .into_response()
+        }
+    })
 }
 
 async fn read_session_page(

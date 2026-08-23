@@ -217,61 +217,64 @@ pub async fn temporal(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<LoomTemporalParamsV1>,
 ) -> Response {
-    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let Some(database) = state.lcm_db.as_deref() else {
-        let payload = unavailable_payload("the resolved project session authority is unavailable");
-        return Json(DashboardEnvelopeV1::new(
-            scope_from_state(&state),
-            DashboardDomainStateV1::Unknown,
-            DashboardCoverageV1::unknown(),
-            DashboardFreshnessV1::unknown(),
-            payload,
-        ))
-        .into_response();
-    };
+    hotpath::measure_block!("dashboard.loom.temporal", {
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let offset = params.offset.unwrap_or(0).max(0);
+        let Some(database) = state.lcm_db.as_deref() else {
+            let payload =
+                unavailable_payload("the resolved project session authority is unavailable");
+            return Json(DashboardEnvelopeV1::new(
+                scope_from_state(&state),
+                DashboardDomainStateV1::Unknown,
+                DashboardCoverageV1::unknown(),
+                DashboardFreshnessV1::unknown(),
+                payload,
+            ))
+            .into_response();
+        };
 
-    let snapshot = match database.read_snapshot().await {
-        Ok(snapshot) => snapshot,
-        Err(error) => return query_error(format!("open Loom session snapshot: {error}")),
-    };
-    let git_correlation = match state.git_correlation_read_authority.as_ref() {
-        None => GitCorrelationSourceReadV1::Absent,
-        Some(authority) => match authority.read().await {
-            Ok(read) => GitCorrelationSourceReadV1::Read(read),
-            Err(error) => GitCorrelationSourceReadV1::Failed(error.detail),
-        },
-    };
-    let read = match read_temporal(&snapshot, limit, offset, git_correlation).await {
-        Ok(read) => read,
-        Err(error) => return query_error(error),
-    };
-    let total = read.payload.total;
-    let examined = read.examined_sessions;
-    let coverage = if offset == 0 && examined == total {
-        DashboardCoverageV1::complete(total, "sessions")
-    } else {
-        DashboardCoverageV1::partial(
-            total,
-            examined,
-            "sessions",
-            vec!["the requested session page does not cover the full store".to_string()],
-        )
-    };
-    let mut envelope = DashboardEnvelopeV1::new(
-        scope_from_state(&state),
-        DashboardDomainStateV1::Partial,
-        coverage,
-        DashboardFreshnessV1::fresh_now(),
-        read.payload,
-    );
-    if let Some(activated_at) = read.latest_activated_at {
-        envelope = envelope.with_source_watermark(DashboardWatermarkV1 {
-            source: "session_temporal_generations".to_string(),
-            watermark: format!("active-through-micros-{activated_at}"),
-        });
-    }
-    Json(envelope).into_response()
+        let snapshot = match database.read_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return query_error(format!("open Loom session snapshot: {error}")),
+        };
+        let git_correlation = match state.git_correlation_read_authority.as_ref() {
+            None => GitCorrelationSourceReadV1::Absent,
+            Some(authority) => match authority.read().await {
+                Ok(read) => GitCorrelationSourceReadV1::Read(read),
+                Err(error) => GitCorrelationSourceReadV1::Failed(error.detail),
+            },
+        };
+        let read = match read_temporal(&snapshot, limit, offset, git_correlation).await {
+            Ok(read) => read,
+            Err(error) => return query_error(error),
+        };
+        let total = read.payload.total;
+        let examined = read.examined_sessions;
+        let coverage = if offset == 0 && examined == total {
+            DashboardCoverageV1::complete(total, "sessions")
+        } else {
+            DashboardCoverageV1::partial(
+                total,
+                examined,
+                "sessions",
+                vec!["the requested session page does not cover the full store".to_string()],
+            )
+        };
+        let mut envelope = DashboardEnvelopeV1::new(
+            scope_from_state(&state),
+            DashboardDomainStateV1::Partial,
+            coverage,
+            DashboardFreshnessV1::fresh_now(),
+            read.payload,
+        );
+        if let Some(activated_at) = read.latest_activated_at {
+            envelope = envelope.with_source_watermark(DashboardWatermarkV1 {
+                source: "session_temporal_generations".to_string(),
+                watermark: format!("active-through-micros-{activated_at}"),
+            });
+        }
+        Json(envelope).into_response()
+    })
 }
 
 /// One resolved git-correlation read for this request: the composed

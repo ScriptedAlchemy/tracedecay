@@ -344,91 +344,93 @@ struct HintCounts {
 pub async fn overview(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>> {
-    // These reads are independent of one another; run them concurrently. The
-    // hint/usage/diagnostics summaries then share the one durable-event fetch.
-    let (durable_events, observatory, agents, underused) = tokio::join!(
-        durable_analytics_rows_for_state(&state),
-        observatory_model(&state),
-        agent_usage_summary(state.lcm_db.as_deref()),
-        underused_tool_families(state.lcm_db.as_deref()),
-    );
-    let observatory = Some(observatory);
-    let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-    let (hints, usage, diagnostics) = tokio::join!(
-        hint_summary(
-            state.savings_db.as_deref().or(state.lcm_db.as_deref()),
-            durable_events.as_deref(),
-            Some(&project_id),
-        ),
-        typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
-        typed_diagnostics_summary(&state, durable_events.as_deref()),
-    );
-    let usage = match usage {
-        Ok(usage) => usage,
-        Err(error) => {
-            return Json(DashboardEnvelopeV1::error(
-                scope_from_state(&state),
-                None,
-                error,
-            ));
-        }
-    };
-    let agents = match agents {
-        Ok(agents) => agents,
-        Err(error) => {
-            return Json(DashboardEnvelopeV1::error(
-                scope_from_state(&state),
-                None,
-                error,
-            ));
-        }
-    };
-    let diagnostics = match diagnostics {
-        Ok(diagnostics) => diagnostics,
-        Err(error) => {
-            return Json(DashboardEnvelopeV1::error(
-                scope_from_state(&state),
-                None,
-                error,
-            ));
-        }
-    };
-    let underused = match underused {
-        Ok(Some(families)) => families,
-        Ok(None) => Vec::new(),
-        Err(error) => {
-            return Json(DashboardEnvelopeV1::unavailable(
-                scope_from_state(&state),
-                None,
-                error,
-            ));
-        }
-    };
+    hotpath::measure_block!("dashboard.analytics.overview", {
+        // These reads are independent of one another; run them concurrently. The
+        // hint/usage/diagnostics summaries then share the one durable-event fetch.
+        let (durable_events, observatory, agents, underused) = tokio::join!(
+            durable_analytics_rows_for_state(&state),
+            observatory_model(&state),
+            agent_usage_summary(state.lcm_db.as_deref()),
+            underused_tool_families(state.lcm_db.as_deref()),
+        );
+        let observatory = Some(observatory);
+        let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+        let (hints, usage, diagnostics) = tokio::join!(
+            hint_summary(
+                state.savings_db.as_deref().or(state.lcm_db.as_deref()),
+                durable_events.as_deref(),
+                Some(&project_id),
+            ),
+            typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
+            typed_diagnostics_summary(&state, durable_events.as_deref()),
+        );
+        let usage = match usage {
+            Ok(usage) => usage,
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    error,
+                ));
+            }
+        };
+        let agents = match agents {
+            Ok(agents) => agents,
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    error,
+                ));
+            }
+        };
+        let diagnostics = match diagnostics {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    error,
+                ));
+            }
+        };
+        let underused = match underused {
+            Ok(Some(families)) => families,
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::unavailable(
+                    scope_from_state(&state),
+                    None,
+                    error,
+                ));
+            }
+        };
 
-    let payload = AnalyticsOverviewPayloadV1 {
-        available: state.lcm_db.is_some() || durable_events.is_some(),
-        db: state.lcm_db_path.clone(),
-        scope: state.lcm_scope.clone(),
-        hints,
-        usage,
-        agents,
-        diagnostics,
-        underused_tool_families: underused,
-        observatory,
-    };
-    if payload.available {
-        Json(DashboardEnvelopeV1::ready(
-            scope_from_state(&state),
-            DashboardCoverageV1::unknown(),
-            Some(payload),
-        ))
-    } else {
-        Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(payload),
-            "analytics_sources_unavailable",
-        ))
-    }
+        let payload = AnalyticsOverviewPayloadV1 {
+            available: state.lcm_db.is_some() || durable_events.is_some(),
+            db: state.lcm_db_path.clone(),
+            scope: state.lcm_scope.clone(),
+            hints,
+            usage,
+            agents,
+            diagnostics,
+            underused_tool_families: underused,
+            observatory,
+        };
+        if payload.available {
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::unknown(),
+                Some(payload),
+            ))
+        } else {
+            Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                Some(payload),
+                "analytics_sources_unavailable",
+            ))
+        }
+    })
 }
 
 /// Canonical Observatory read model. CLI/MCP call the same application
@@ -436,30 +438,32 @@ pub async fn overview(
 pub async fn observatory(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<ObservatoryReadModelV1>> {
-    let model = observatory_model(&state).await;
-    let known = model
-        .metrics
-        .iter()
-        .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
-        .count() as u64;
-    let eligible = model.metrics.len() as u64;
-    let envelope = if model.current && known == eligible {
-        DashboardEnvelopeV1::ready(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(eligible, "metrics"),
-            model,
-        )
-    } else {
-        DashboardEnvelopeV1::partial(
-            scope_from_state(&state),
-            eligible,
-            known,
-            "metrics",
-            vec!["incomplete_metric_coverage".to_owned()],
-            model,
-        )
-    };
-    Json(envelope)
+    hotpath::measure_block!("dashboard.analytics.observatory", {
+        let model = observatory_model(&state).await;
+        let known = model
+            .metrics
+            .iter()
+            .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
+            .count() as u64;
+        let eligible = model.metrics.len() as u64;
+        let envelope = if model.current && known == eligible {
+            DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(eligible, "metrics"),
+                model,
+            )
+        } else {
+            DashboardEnvelopeV1::partial(
+                scope_from_state(&state),
+                eligible,
+                known,
+                "metrics",
+                vec!["incomplete_metric_coverage".to_owned()],
+                model,
+            )
+        };
+        Json(envelope)
+    })
 }
 
 // `observatory_http` / `observatory_export` are deleted with their last caller.
@@ -561,26 +565,28 @@ fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Optio
 pub async fn agents(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>> {
-    match agent_usage_summary(state.lcm_db.as_deref()).await {
-        Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(payload),
-            "analytics_agents_source_unavailable",
-        )),
-        Ok(payload) => {
-            let count = payload.by_agent.len() as u64;
-            Json(DashboardEnvelopeV1::ready(
+    hotpath::measure_block!("dashboard.analytics.agents", {
+        match agent_usage_summary(state.lcm_db.as_deref()).await {
+            Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                 scope_from_state(&state),
-                DashboardCoverageV1::complete(count, "managed_agents"),
                 Some(payload),
-            ))
+                "analytics_agents_source_unavailable",
+            )),
+            Ok(payload) => {
+                let count = payload.by_agent.len() as u64;
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(count, "managed_agents"),
+                    Some(payload),
+                ))
+            }
+            Err(error) => Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            )),
         }
-        Err(error) => Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            error,
-        )),
-    }
+    })
 }
 
 /// Ceiling on sessions read for one subagent-tree answer. A dashboard tree is
@@ -840,213 +846,223 @@ async fn subagent_tree_reading(
 pub async fn subagent_tree(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
-    let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-    match subagent_tree_reading(state.lcm_db.as_deref(), &project_key).await {
-        Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(payload),
-            "analytics_subagent_tree_source_unavailable",
-        )),
-        Ok(payload) => {
-            let count = payload.nodes.len() as u64;
-            // A ceiling read has no denominator: the store holds an unknown
-            // number of further sessions, so `partial` — which asserts a known
-            // eligible total — would be the wrong claim. Coverage is unknown
-            // with the count actually examined and the reason stated.
-            let coverage = if payload.truncated {
-                let mut coverage = DashboardCoverageV1::unknown();
-                coverage.examined = Some(count);
-                coverage.unit = Some("subagent_sessions".to_owned());
-                coverage
-                    .omission_reasons
-                    .push("analytics_subagent_tree_scan_ceiling_reached".to_owned());
-                coverage
-            } else {
-                DashboardCoverageV1::complete(count, "subagent_sessions")
-            };
-            Json(DashboardEnvelopeV1::ready(
+    hotpath::measure_block!("dashboard.analytics.subagent_tree", {
+        let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+        match subagent_tree_reading(state.lcm_db.as_deref(), &project_key).await {
+            Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                 scope_from_state(&state),
-                coverage,
                 Some(payload),
-            ))
+                "analytics_subagent_tree_source_unavailable",
+            )),
+            Ok(payload) => {
+                let count = payload.nodes.len() as u64;
+                // A ceiling read has no denominator: the store holds an unknown
+                // number of further sessions, so `partial` — which asserts a known
+                // eligible total — would be the wrong claim. Coverage is unknown
+                // with the count actually examined and the reason stated.
+                let coverage = if payload.truncated {
+                    let mut coverage = DashboardCoverageV1::unknown();
+                    coverage.examined = Some(count);
+                    coverage.unit = Some("subagent_sessions".to_owned());
+                    coverage
+                        .omission_reasons
+                        .push("analytics_subagent_tree_scan_ceiling_reached".to_owned());
+                    coverage
+                } else {
+                    DashboardCoverageV1::complete(count, "subagent_sessions")
+                };
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    coverage,
+                    Some(payload),
+                ))
+            }
+            Err(error) => Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            )),
         }
-        Err(error) => Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            error,
-        )),
-    }
+    })
 }
 
 /// `GET /api/plugins/analytics/hints`
 pub async fn hints(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>> {
-    let durable_events = durable_analytics_rows_for_state(&state).await;
-    let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-    let payload = hint_summary(
-        state.savings_db.as_deref().or(state.lcm_db.as_deref()),
-        durable_events.as_deref(),
-        Some(&project_id),
-    )
-    .await;
-    if !payload.available {
-        return Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(payload),
-            "analytics_hint_source_unavailable",
-        ));
-    }
-    let count = payload.by_category.len() as u64;
-    let envelope = if durable_events
-        .as_ref()
-        .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT)
-    {
-        DashboardEnvelopeV1::partial(
-            scope_from_state(&state),
-            count.saturating_add(1),
-            count,
-            "hint_categories",
-            vec!["analytics_event_limit".to_owned()],
-            Some(payload),
+    hotpath::measure_block!("dashboard.analytics.hints", {
+        let durable_events = durable_analytics_rows_for_state(&state).await;
+        let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+        let payload = hint_summary(
+            state.savings_db.as_deref().or(state.lcm_db.as_deref()),
+            durable_events.as_deref(),
+            Some(&project_id),
         )
-    } else {
-        DashboardEnvelopeV1::ready(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(count, "hint_categories"),
-            Some(payload),
-        )
-    };
-    Json(envelope)
+        .await;
+        if !payload.available {
+            return Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                Some(payload),
+                "analytics_hint_source_unavailable",
+            ));
+        }
+        let count = payload.by_category.len() as u64;
+        let envelope = if durable_events
+            .as_ref()
+            .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT)
+        {
+            DashboardEnvelopeV1::partial(
+                scope_from_state(&state),
+                count.saturating_add(1),
+                count,
+                "hint_categories",
+                vec!["analytics_event_limit".to_owned()],
+                Some(payload),
+            )
+        } else {
+            DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(count, "hint_categories"),
+                Some(payload),
+            )
+        };
+        Json(envelope)
+    })
 }
 
 /// `GET /api/plugins/analytics/usage`
 pub async fn usage(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>> {
-    let durable_events = durable_analytics_rows_for_state(&state).await;
-    match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
-        Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(payload),
-            "analytics_usage_source_unavailable",
-        )),
-        Ok(payload)
-            if durable_events
-                .as_ref()
-                .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT) =>
-        {
-            let examined = payload.event_count.unwrap_or(payload.message_count).max(0) as u64;
-            Json(DashboardEnvelopeV1::partial(
+    hotpath::measure_block!("dashboard.analytics.usage", {
+        let durable_events = durable_analytics_rows_for_state(&state).await;
+        match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+            Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                 scope_from_state(&state),
-                examined.saturating_add(1),
-                examined,
-                "analytics_events",
-                vec!["analytics_event_limit".to_owned()],
                 Some(payload),
-            ))
-        }
-        Ok(payload) => {
-            let count = payload.event_count.unwrap_or(payload.message_count).max(0) as u64;
-            Json(DashboardEnvelopeV1::ready(
+                "analytics_usage_source_unavailable",
+            )),
+            Ok(payload)
+                if durable_events
+                    .as_ref()
+                    .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT) =>
+            {
+                let examined = payload.event_count.unwrap_or(payload.message_count).max(0) as u64;
+                Json(DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    examined.saturating_add(1),
+                    examined,
+                    "analytics_events",
+                    vec!["analytics_event_limit".to_owned()],
+                    Some(payload),
+                ))
+            }
+            Ok(payload) => {
+                let count = payload.event_count.unwrap_or(payload.message_count).max(0) as u64;
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(count, "analytics_events"),
+                    Some(payload),
+                ))
+            }
+            Err(error) => Json(DashboardEnvelopeV1::error(
                 scope_from_state(&state),
-                DashboardCoverageV1::complete(count, "analytics_events"),
-                Some(payload),
-            ))
+                None,
+                error,
+            )),
         }
-        Err(error) => Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            error,
-        )),
-    }
+    })
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
 pub async fn diagnostics(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>> {
-    let durable_events = durable_analytics_rows_for_state(&state).await;
-    let payload = match typed_diagnostics_summary(&state, durable_events.as_deref()).await {
-        Ok(payload) => payload,
-        Err(error) => {
-            return Json(DashboardEnvelopeV1::error(
+    hotpath::measure_block!("dashboard.analytics.diagnostics", {
+        let durable_events = durable_analytics_rows_for_state(&state).await;
+        let payload = match typed_diagnostics_summary(&state, durable_events.as_deref()).await {
+            Ok(payload) => payload,
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    error,
+                ));
+            }
+        };
+        if !payload.available {
+            return Json(DashboardEnvelopeV1::unavailable(
                 scope_from_state(&state),
-                None,
-                error,
+                Some(payload),
+                "analytics_diagnostics_sources_unavailable",
             ));
         }
-    };
-    if !payload.available {
-        return Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(payload),
-            "analytics_diagnostics_sources_unavailable",
-        ));
-    }
-    let truncated_events = durable_events
-        .as_ref()
-        .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT);
-    if truncated_events || payload.hook_window.truncated {
-        let mut reasons = Vec::new();
-        if truncated_events {
-            reasons.push("analytics_event_limit".to_owned());
+        let truncated_events = durable_events
+            .as_ref()
+            .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT);
+        if truncated_events || payload.hook_window.truncated {
+            let mut reasons = Vec::new();
+            if truncated_events {
+                reasons.push("analytics_event_limit".to_owned());
+            }
+            if payload.hook_window.truncated {
+                reasons.push("hook_analytics_window".to_owned());
+            }
+            return Json(DashboardEnvelopeV1::partial(
+                scope_from_state(&state),
+                2,
+                2_u64.saturating_sub(reasons.len() as u64),
+                "analytics_sources",
+                reasons,
+                Some(payload),
+            ));
         }
-        if payload.hook_window.truncated {
-            reasons.push("hook_analytics_window".to_owned());
-        }
-        return Json(DashboardEnvelopeV1::partial(
+        Json(DashboardEnvelopeV1::ready(
             scope_from_state(&state),
-            2,
-            2_u64.saturating_sub(reasons.len() as u64),
-            "analytics_sources",
-            reasons,
+            DashboardCoverageV1::complete(2, "analytics_sources"),
             Some(payload),
-        ));
-    }
-    Json(DashboardEnvelopeV1::ready(
-        scope_from_state(&state),
-        DashboardCoverageV1::complete(2, "analytics_sources"),
-        Some(payload),
-    ))
+        ))
+    })
 }
 
 /// `GET /api/plugins/analytics/underused`
 pub async fn underused(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>> {
-    match underused_tool_families(state.lcm_db.as_deref()).await {
-        Ok(Some(families)) => {
-            let payload = AnalyticsUnderusedPayloadV1 {
-                available: true,
-                db: state.lcm_db_path.clone(),
-                families,
-            };
-            Json(DashboardEnvelopeV1::ready(
+    hotpath::measure_block!("dashboard.analytics.underused", {
+        match underused_tool_families(state.lcm_db.as_deref()).await {
+            Ok(Some(families)) => {
+                let payload = AnalyticsUnderusedPayloadV1 {
+                    available: true,
+                    db: state.lcm_db_path.clone(),
+                    families,
+                };
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(payload.families.len() as u64, "tool_families"),
+                    Some(payload),
+                ))
+            }
+            Ok(None) => Json(DashboardEnvelopeV1::unavailable(
                 scope_from_state(&state),
-                DashboardCoverageV1::complete(payload.families.len() as u64, "tool_families"),
-                Some(payload),
-            ))
+                Some(AnalyticsUnderusedPayloadV1 {
+                    available: false,
+                    db: state.lcm_db_path.clone(),
+                    families: Vec::new(),
+                }),
+                "analytics_underused_source_unavailable",
+            )),
+            Err(error) => Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                Some(AnalyticsUnderusedPayloadV1 {
+                    available: false,
+                    db: state.lcm_db_path.clone(),
+                    families: Vec::new(),
+                }),
+                error,
+            )),
         }
-        Ok(None) => Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(AnalyticsUnderusedPayloadV1 {
-                available: false,
-                db: state.lcm_db_path.clone(),
-                families: Vec::new(),
-            }),
-            "analytics_underused_source_unavailable",
-        )),
-        Err(error) => Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&state),
-            Some(AnalyticsUnderusedPayloadV1 {
-                available: false,
-                db: state.lcm_db_path.clone(),
-                families: Vec::new(),
-            }),
-            error,
-        )),
-    }
+    })
 }
 
 fn empty_hint_categories() -> Vec<AnalyticsHintCategoryV1> {
