@@ -3,6 +3,11 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -76,8 +81,57 @@ const UNCHANGED_PREFIX_MEMO_CAP: usize = 4096;
 struct UnchangedPrefixMemoKey {
     file_identity: u64,
     size: u64,
-    mtime: u64,
+    change: JsonlFileChangeToken,
     fingerprint: u64,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct JsonlFileChangeToken {
+    mtime_seconds: i64,
+    mtime_nanos: i64,
+    ctime_seconds: i64,
+    ctime_nanos: i64,
+}
+
+#[cfg(unix)]
+fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
+    JsonlFileChangeToken {
+        mtime_seconds: metadata.mtime(),
+        mtime_nanos: metadata.mtime_nsec(),
+        ctime_seconds: metadata.ctime(),
+        ctime_nanos: metadata.ctime_nsec(),
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct JsonlFileChangeToken {
+    last_write_time: u64,
+}
+
+#[cfg(windows)]
+fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
+    JsonlFileChangeToken {
+        last_write_time: metadata.last_write_time(),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct JsonlFileChangeToken {
+    modified_nanos: Option<u128>,
+}
+
+#[cfg(not(any(unix, windows)))]
+fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
+    JsonlFileChangeToken {
+        modified_nanos: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos()),
+    }
 }
 
 fn unchanged_prefix_memo() -> &'static Mutex<HashMap<UnchangedPrefixMemoKey, ()>> {
@@ -724,11 +778,13 @@ impl PreparedJsonlScan {
             let memo_key = UnchangedPrefixMemoKey {
                 file_identity,
                 size: file_size,
-                mtime,
+                change: jsonl_file_change_token(&metadata),
                 fingerprint: resume_state.fingerprint,
             };
-            // A later unchanged poll with the same identity/size/mtime can skip
-            // the prefix walk: a same-inode rewrite updates mtime and misses.
+            // A later unchanged poll with the same identity, size, and
+            // high-resolution change token can skip the prefix walk. Unix
+            // ctime additionally detects attempts to restore mtime after an
+            // in-place rewrite.
             let resume_matches = identity_matches
                 && ((file_size == previous.position && unchanged_prefix_memo_hit(memo_key))
                     || match jsonl_prefix_digest(&mut file, previous.position) {
@@ -1402,6 +1458,56 @@ mod tests {
             third.io.prefix_validation_bytes, 0,
             "a later unchanged poll with the same identity/size/mtime skips the prefix walk"
         );
+    }
+
+    #[test]
+    fn memoized_unchanged_prefix_revalidates_an_in_place_tail_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memo-rewrite.jsonl");
+        let original = b"{\"v\":0}\n".repeat(3_000);
+        std::fs::write(&path, &original).unwrap();
+        let first = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+
+        let unchanged = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            first.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(checkpoint),
+        )
+        .unwrap();
+        assert_eq!(unchanged.start_offset, first.new_cursor.position);
+
+        let mut rewritten = original;
+        let tail = rewritten.len() - b"{\"v\":0}\n".len();
+        rewritten[tail..].copy_from_slice(b"{\"v\":1}\n");
+        std::fs::write(&path, rewritten).unwrap();
+
+        let rescanned = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            unchanged.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(checkpoint),
+        )
+        .unwrap();
+        assert_eq!(
+            rescanned.start_offset, 0,
+            "a memoized prefix must be invalidated by a same-size in-place rewrite"
+        );
+        assert_ne!(rescanned.new_cursor.file_id, checkpoint.generation);
     }
 
     #[test]
