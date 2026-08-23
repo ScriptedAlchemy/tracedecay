@@ -921,6 +921,42 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
     assert!(!wake.wake());
 }
 
+#[tokio::test]
+async fn evicted_project_owner_releases_temporal_scheduler() {
+    let temp = TempDir::new().unwrap();
+    let authority =
+        registered_test_database(&temp, "evict-owner", HostAdmissionScope::Project).await;
+    let owner = super::super::StoreOwnerKey {
+        profile_root: temp.path().to_path_buf(),
+        global_db_path: temp.path().join("global.db"),
+        project_id: Some("project.evict-owner".to_string()),
+        store_root: temp.path().join("store"),
+        graph_db_path: temp.path().join("store/graph.db"),
+    };
+    let administration = crate::daemon::branch_admin::StoreAdministration::default();
+    let registry = administration.session_temporal_refresh_schedulers();
+    authority.ensure_project(registry, owner.clone()).await;
+    assert_eq!(registry.project_worker_count().await, 1);
+
+    crate::daemon::project_server_lifecycle::retire_evicted_project_owner(
+        &administration,
+        owner.clone(),
+        Vec::new(),
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        registry.project_worker_count().await,
+        0,
+        "project-server owner eviction must release the temporal scheduler"
+    );
+    assert!(
+        registry.project_state(&owner).await.is_none(),
+        "retired owner must not retain a temporal scheduler entry"
+    );
+}
+
 struct PanicOnceProjector {
     panicked: AtomicBool,
 }
