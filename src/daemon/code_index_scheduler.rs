@@ -13,7 +13,7 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use same_file::Handle;
@@ -435,6 +435,14 @@ impl Drop for HeldActiveDecodeV1 {
     }
 }
 
+/// Last validated publication pointer, reused when the on-disk file is unchanged.
+struct PublicationPointerMemoV1 {
+    mtime: Option<SystemTime>,
+    size: u64,
+    digest: String,
+    pointer: DurablePublicationPointerV1,
+}
+
 #[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
@@ -444,6 +452,7 @@ struct DaemonCodeIndexPublicationStoreV1 {
     project_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
+    pointer_memo: Arc<Mutex<Option<PublicationPointerMemoV1>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,6 +477,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             project_root: project_root.to_path_buf(),
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
+            pointer_memo: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -530,7 +540,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Option<DurablePublicationPointerV1>, CodeIndexPublicationStoreErrorV1> {
         let metadata = match std::fs::metadata(&self.active_path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                *self
+                    .pointer_memo
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                return Ok(None);
+            }
             Err(error) => return Err(Self::unavailable(error)),
         };
         if metadata.len() > MAX_DURABLE_PUBLICATION_POINTER_BYTES {
@@ -538,7 +554,36 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its byte bound",
             ));
         }
+        let mtime = metadata.modified().ok();
+        let size = metadata.len();
+        {
+            let memo = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(memo) = memo.as_ref()
+                && memo.size == size
+                && memo.mtime.is_some()
+                && memo.mtime == mtime
+            {
+                return Ok(Some(memo.pointer.clone()));
+            }
+        }
         let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
+        let digest = Self::state_digest(&bytes);
+        {
+            let mut memo = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(memo) = memo.as_mut()
+                && memo.digest == digest
+            {
+                memo.mtime = mtime;
+                memo.size = size;
+                return Ok(Some(memo.pointer.clone()));
+            }
+        }
         let pointer: DurablePublicationPointerV1 =
             serde_json::from_slice(&bytes).map_err(|error| {
                 Self::corruption(format!(
@@ -652,7 +697,38 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its retention bounds",
             ));
         }
+        *self
+            .pointer_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
+            mtime,
+            size,
+            digest,
+            pointer: pointer.clone(),
+        });
         Ok(Some(pointer))
+    }
+
+    fn remember_publication_pointer(&self, pointer: &DurablePublicationPointerV1, bytes: &[u8]) {
+        let metadata = match std::fs::metadata(&self.active_path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                *self
+                    .pointer_memo
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                return;
+            }
+        };
+        *self
+            .pointer_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
+            mtime: metadata.modified().ok(),
+            size: metadata.len(),
+            digest: Self::state_digest(bytes),
+            pointer: pointer.clone(),
+        });
     }
 
     /// Serve one sealed generation by identity, decoding it at most once.
@@ -668,19 +744,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(None);
         };
+        // The pointer already names the active generation. Serve it from the
+        // pinned slot instead of decoding the active file a second time just to
+        // compare identities, and skip that decode entirely for historical pins.
+        if pointer.generation_id == generation_id.as_str() {
+            return self.load_active_shared();
+        }
         let Some(entry) = pointer
             .generation_index
             .iter()
             .find(|entry| entry.generation_id == generation_id.as_str())
-            .cloned()
         else {
             return Ok(None);
         };
-        if let Some(active) = self.load_active_shared()?
-            && active.manifest().generation_id == *generation_id
-        {
-            return Ok(Some(active));
-        }
         let subject = DecodeSubjectV1::Generation(generation_id.clone());
         let lease = loop {
             let mut state = self.cache.lock_state()?;
@@ -1155,6 +1231,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .parent()
                 .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
         )?;
+        self.remember_publication_pointer(&pointer, &bytes);
         let mut state = self.cache.lock_state()?;
         if state
             .active
@@ -2903,14 +2980,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             let latest_snapshot = active_generation
                 .as_ref()
-                .map(|generation| generation.snapshot().clone());
-            let unchanged_source = latest_snapshot.as_ref().is_some_and(|latest| {
+                .map(|generation| generation.snapshot());
+            let unchanged_source = latest_snapshot.is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision
             });
-            let active_content_identity = latest_snapshot
-                .as_ref()
-                .map(|snapshot| &snapshot.content_identity);
+            let active_content_identity = latest_snapshot.map(|snapshot| &snapshot.content_identity);
             if self
                 .latest_content_identity
                 .as_ref()
@@ -2971,7 +3046,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(error) => return Err(error.into()),
             };
             self.latest_content_identity = Some(snapshot_content_identity);
-            self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
+            self.mark_reconciled(sampled_metadata, sampled_signature);
 
             let changes = &generation.projection().request().changes;
             let lane_digest = canonical_sha256(&(
@@ -3458,6 +3533,23 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
+        self.capture_admitted_candidate(registry, logical_path, control, explicitly_admitted)
+    }
+
+    fn ignored_admission_paths(&self) -> BTreeSet<&str> {
+        self.ignored_source_admissions
+            .iter()
+            .map(|admission| admission.logical_path.as_str())
+            .collect()
+    }
+
+    fn capture_admitted_candidate(
+        &self,
+        registry: &StaticLanguageRegistry,
+        logical_path: &str,
+        control: Option<&dyn CodeIndexExecutionControlV1>,
+        explicitly_admitted: bool,
+    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
         if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
             return Ok(None);
         }
@@ -3564,11 +3656,23 @@ impl CodeIndexWorktreeSchedulerV1 {
         // that same order and the lowest-index failure is the reported one,
         // so the captured snapshot is byte-identical to the sequential sweep.
         let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
+        let admitted_paths = self.ignored_admission_paths();
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates
                 .par_iter()
-                .map(|logical_path| self.capture_candidate(&registry, logical_path, control))
+                .map(|logical_path| {
+                    if self.shutting_down.load(Ordering::Acquire) {
+                        return Err(cancelled_code_index_reconcile());
+                    }
+                    ignored_dependencies::checkpoint_if_present(control)?;
+                    self.capture_admitted_candidate(
+                        &registry,
+                        logical_path,
+                        control,
+                        admitted_paths.contains(logical_path.as_str()),
+                    )
+                })
                 .collect::<Vec<_>>()
         });
 

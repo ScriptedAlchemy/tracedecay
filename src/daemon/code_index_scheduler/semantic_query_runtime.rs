@@ -681,7 +681,7 @@ fn paginate_semantic_composition(
     let semantic_end = semantic_start
         .saturating_add(semantic_page_size)
         .min(composition.ranked_candidates.len());
-    let page = composition.ranked_candidates[semantic_start..semantic_end].to_vec();
+    let page_len = semantic_end.saturating_sub(semantic_start);
 
     let query_start = authorized_query
         .request_cursor
@@ -691,7 +691,7 @@ fn paginate_semantic_composition(
         return Err(SemanticQueryServiceError::InvalidCursor);
     }
     let query_end = query_start
-        .saturating_add(page.len())
+        .saturating_add(page_len)
         .min(authorized_query.composition.ranked_candidates.len());
     let has_more = semantic_end < composition.ranked_candidates.len();
     let cursor = if has_more {
@@ -732,7 +732,13 @@ fn paginate_semantic_composition(
     } else {
         None
     };
-    composition.ranked_candidates = page;
+    let mut ranked = std::mem::take(&mut composition.ranked_candidates);
+    composition.ranked_candidates = if semantic_start == 0 {
+        ranked.truncate(semantic_end);
+        ranked
+    } else {
+        ranked.drain(semantic_start..semantic_end).collect()
+    };
     Ok(cursor)
 }
 

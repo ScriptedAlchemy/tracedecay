@@ -626,6 +626,37 @@ fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_application::CodeQ
     crate::path_scope::path_matches_scope(path, scope.path_prefix.as_deref())
 }
 
+fn relation_edge_kind_name(kind: RelationEdgeKindV1) -> &'static str {
+    match kind {
+        RelationEdgeKindV1::Calls => "calls",
+        RelationEdgeKindV1::Uses => "uses",
+        RelationEdgeKindV1::TypeOf => "typeof",
+        RelationEdgeKindV1::Contains => "contains",
+        RelationEdgeKindV1::Implements => "implements",
+        RelationEdgeKindV1::Extends => "extends",
+        RelationEdgeKindV1::Annotates => "annotates",
+        RelationEdgeKindV1::Returns => "returns",
+        RelationEdgeKindV1::Receives => "receives",
+    }
+}
+
+fn ascii_contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle_lower.len())
+        .any(|window| window.eq_ignore_ascii_case(needle_lower.as_bytes()))
+}
+
+fn ascii_starts_with_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    haystack
+        .as_bytes()
+        .get(..needle_lower.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle_lower.as_bytes()))
+}
+
 /// One-time point-lookup indices over a sealed generation's in-memory record
 /// vectors.
 ///
@@ -1014,7 +1045,7 @@ fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord
         symbol: application_symbol_record(record.symbol),
         edge_kind: record.edge_kind.map_or_else(
             || "unknown".to_owned(),
-            |edge| format!("{edge:?}").to_ascii_lowercase(),
+            |edge| relation_edge_kind_name(edge).to_owned(),
         ),
         dispatch_via_trait: false,
         dispatch_from: None,
@@ -1041,6 +1072,36 @@ fn symbol_record_by_id(
     let position = latest.record_index().chunk_position_for_symbol(symbol)?;
     let chunk = &latest.generation.chunks().chunks()[position];
     symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)
+}
+
+fn symbol_scope_path<'a>(
+    latest: &'a LatestCompleteCodeIndexV1,
+    symbol: &SymbolOccurrenceId,
+) -> Option<&'a str> {
+    let index = latest.record_index();
+    let chunk_position = index.chunk_position_for_symbol(symbol)?;
+    let file = &latest.generation.chunks().chunks()[chunk_position]
+        .anchor
+        .file_occurrence_id;
+    let file_position = index.file_position(file)?;
+    Some(
+        latest.generation.snapshot().files[file_position]
+            .logical_path
+            .as_str(),
+    )
+}
+
+fn symbol_signature_line<'a>(
+    latest: &'a LatestCompleteCodeIndexV1,
+    symbol: &SymbolOccurrenceId,
+) -> Option<&'a str> {
+    let chunk_position = latest.record_index().chunk_position_for_symbol(symbol)?;
+    latest.generation.chunks().chunks()[chunk_position]
+        .sanitized_text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
 }
 
 struct PreparedCallableQueryV1 {
@@ -1306,15 +1367,18 @@ fn relation_records(
             if !visited.insert(next.clone()) {
                 continue;
             }
+            let Some(path) = symbol_scope_path(latest, next) else {
+                continue;
+            };
+            if !path_is_in_code_query_scope(path, scope) {
+                continue;
+            }
             let Some(symbol) = symbol_record_by_id(latest, next) else {
                 continue;
             };
-            if !path_is_in_code_query_scope(&symbol.file, scope) {
-                continue;
-            }
             records.push(SymbolRelationRecord {
                 symbol,
-                edge_kind: format!("{:?}", edge.kind).to_ascii_lowercase(),
+                edge_kind: relation_edge_kind_name(edge.kind).to_owned(),
                 dispatch_via_trait: edge.kind == RelationEdgeKindV1::Implements,
                 dispatch_from: (edge.kind == RelationEdgeKindV1::Implements)
                     .then(|| current.as_str().to_owned()),
@@ -1842,26 +1906,33 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .symbols
                 .iter()
                 .filter_map(|symbol| {
-                    let name = symbol.simple_name.to_ascii_lowercase();
-                    let qualified = symbol.qualified_name.to_ascii_lowercase();
-                    if !name.contains(&query) && !qualified.contains(&query) {
+                    if !ascii_contains_ignore_case(&symbol.simple_name, &query)
+                        && !ascii_contains_ignore_case(&symbol.qualified_name, &query)
+                    {
                         return None;
                     }
-                    let mut record = symbol_record_by_id(&prepared.latest, &symbol.occurrence)?;
-                    if !path_is_in_code_query_scope(&record.file, &request.scope) {
+                    let path = symbol_scope_path(&prepared.latest, &symbol.occurrence)?;
+                    if !path_is_in_code_query_scope(path, &request.scope) {
                         return None;
                     }
-                    let name = record.name.to_ascii_lowercase();
-                    let qualified = record.qualified_name.to_ascii_lowercase();
-                    let tier = if name == query || qualified == query {
+                    let name = last_qualified_segment(&symbol.qualified_name);
+                    let qualified = symbol.qualified_name.as_str();
+                    let tier = if name.eq_ignore_ascii_case(&query)
+                        || qualified.eq_ignore_ascii_case(&query)
+                    {
                         0_u8
-                    } else if name.starts_with(&query) || qualified.starts_with(&query) {
+                    } else if ascii_starts_with_ignore_case(name, &query)
+                        || ascii_starts_with_ignore_case(qualified, &query)
+                    {
                         1
-                    } else if name.contains(&query) || qualified.contains(&query) {
+                    } else if ascii_contains_ignore_case(name, &query)
+                        || ascii_contains_ignore_case(qualified, &query)
+                    {
                         2
                     } else {
                         return None;
                     };
+                    let mut record = symbol_record_by_id(&prepared.latest, &symbol.occurrence)?;
                     record.score = Some(match tier {
                         0 => 1.0,
                         1 => 0.75,
@@ -1918,8 +1989,13 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .qualified_name_positions(symbols, &request.qualified_name)
                 .iter()
                 .map(|position| &symbols[*position])
-                .filter_map(|symbol| symbol_record_by_id(&prepared.latest, &symbol.occurrence))
-                .filter(|record| path_is_in_code_query_scope(&record.file, &request.scope))
+                .filter_map(|symbol| {
+                    let path = symbol_scope_path(&prepared.latest, &symbol.occurrence)?;
+                    if !path_is_in_code_query_scope(path, &request.scope) {
+                        return None;
+                    }
+                    symbol_record_by_id(&prepared.latest, &symbol.occurrence)
+                })
                 .collect::<Vec<_>>();
             items.sort_by(|left, right| left.node_id.cmp(&right.node_id));
             finish_generation_page(
@@ -1961,20 +2037,26 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .symbols()
                 .symbols
                 .iter()
-                .filter_map(|symbol| symbol_record_by_id(&prepared.latest, &symbol.occurrence))
-                .filter(|record| path_is_in_code_query_scope(&record.file, &request.scope))
-                .filter(|record| {
-                    let Some(signature) = record.signature.as_deref() else {
-                        return false;
-                    };
-                    request
+                .filter_map(|symbol| {
+                    let path = symbol_scope_path(&prepared.latest, &symbol.occurrence)?;
+                    if !path_is_in_code_query_scope(path, &request.scope) {
+                        return None;
+                    }
+                    let signature = symbol_signature_line(&prepared.latest, &symbol.occurrence)?;
+                    if request
                         .returns
                         .as_ref()
-                        .is_none_or(|returns| signature.contains(returns))
-                        && request.params.iter().all(|param| signature.contains(param))
-                        && request
-                            .is_async
-                            .is_none_or(|is_async| record.is_async == is_async)
+                        .is_some_and(|returns| !signature.contains(returns))
+                        || request.params.iter().any(|param| !signature.contains(param))
+                    {
+                        return None;
+                    }
+                    if request.is_async.is_some_and(|is_async| {
+                        signature.split_whitespace().any(|part| part == "async") != is_async
+                    }) {
+                        return None;
+                    }
+                    symbol_record_by_id(&prepared.latest, &symbol.occurrence)
                 })
                 .collect::<Vec<_>>();
             items.sort_by(|left, right| {
@@ -2224,16 +2306,23 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .symbols()
                 .symbols
                 .iter()
-                .filter_map(|symbol| symbol_record_by_id(&prepared.latest, &symbol.occurrence))
-                .filter(|record| {
-                    (record.file == request.path || record.file.starts_with(&prefix))
-                        && path_is_in_code_query_scope(&record.file, &request.scope)
-                        && record.signature.as_deref().is_some_and(|signature| {
-                            let signature = signature.trim_start();
-                            signature.starts_with("pub ")
-                                || signature.starts_with("export ")
-                                || signature.starts_with("public ")
-                        })
+                .filter_map(|symbol| {
+                    let path = symbol_scope_path(&prepared.latest, &symbol.occurrence)?;
+                    if path != request.path && !path.starts_with(&prefix) {
+                        return None;
+                    }
+                    if !path_is_in_code_query_scope(path, &request.scope) {
+                        return None;
+                    }
+                    let signature = symbol_signature_line(&prepared.latest, &symbol.occurrence)
+                        .map(str::trim_start)?;
+                    if !signature.starts_with("pub ")
+                        && !signature.starts_with("export ")
+                        && !signature.starts_with("public ")
+                    {
+                        return None;
+                    }
+                    symbol_record_by_id(&prepared.latest, &symbol.occurrence)
                 })
                 .collect::<Vec<_>>();
             items.sort_by(|left, right| {
@@ -2425,12 +2514,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .count() as u64,
                 symbol_count: prepared
                     .latest
-                    .generation
-                    .symbols()
-                    .symbols
+                    .record_index()
+                    .kind_facet_rows()
                     .iter()
-                    .filter_map(|symbol| symbol_record_by_id(&prepared.latest, &symbol.occurrence))
-                    .filter(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope))
+                    .filter(|(_, file_position)| {
+                        path_is_in_code_query_scope(
+                            &prepared.latest.generation.snapshot().files[*file_position]
+                                .logical_path,
+                            &request.scope,
+                        )
+                    })
                     .count() as u64,
             }];
             let page = match CodeQueryPage::new(generation.clone(), items, None, None, None) {
