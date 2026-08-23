@@ -1269,7 +1269,10 @@ impl NativeGitIntelligence {
         }
         // check-attr emits NUL-delimited (path, attribute, value) triples; this
         // groups the raw slices by path before any of them are decoded.
-        let mut triples_by_path: BTreeMap<String, Vec<(&[u8], &[u8], &[u8])>> = BTreeMap::new();
+        // The alias is what keeps this annotation under `clippy::type_complexity`;
+        // it cannot be inlined, and `or_default` below needs it to infer `Vec`.
+        type AttributeTriples<'a> = BTreeMap<String, Vec<(&'a [u8], &'a [u8], &'a [u8])>>;
+        let mut triples_by_path: AttributeTriples<'_> = BTreeMap::new();
         for triple in records.chunks_exact(3) {
             triples_by_path
                 .entry(String::from_utf8_lossy(triple[0]).into_owned())
