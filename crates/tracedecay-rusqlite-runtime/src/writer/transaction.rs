@@ -50,6 +50,7 @@ struct Processed {
 }
 
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn process_batch(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
