@@ -67,15 +67,17 @@ pub async fn search(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
-    let limit = coerce_limit(params.limit, 50, 200);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    graph_response(
-        &state,
-        graph_service::search_payload(&state, &control, params.q.trim(), limit, offset).await,
-    )
+    hotpath::measure_block!("dashboard.graph.search", {
+        let limit = coerce_limit(params.limit, 50, 200);
+        let offset = params.offset.unwrap_or(0).max(0);
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        graph_response(
+            &state,
+            graph_service::search_payload(&state, &control, params.q.trim(), limit, offset).await,
+        )
+    })
 }
 
 /// `GET /api/plugins/graph/node/{node_id}`

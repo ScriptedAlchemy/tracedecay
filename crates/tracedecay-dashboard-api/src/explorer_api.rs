@@ -474,48 +474,50 @@ pub async fn create_query(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
-    if let Err(message) = validate_query(&mut request) {
-        return bad_request(message);
-    }
-    let Some(owner) = run_owner(&state) else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"detail": "exact registered project scope is unavailable"})),
-        )
-            .into_response();
-    };
-    let Some(Extension(control)) = control else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
-        )
-            .into_response();
-    };
-    let Some(run_id) = new_run_id() else {
-        return internal_error("could not allocate explorer query run identity");
-    };
-    let run = Arc::new(RwLock::new(initial_run(run_id.clone(), request.clone())));
-    let cancellation = CancellationToken::new();
-    if let Err(message) = remember_run(
-        StoredExplorerRun {
-            owner,
-            cancellation: cancellation.clone(),
-            run: Arc::clone(&run),
-        },
-        run_id,
-    ) {
-        return internal_error(message);
-    }
-    let initial = run.read().await.clone();
-    let response = envelope_for_run(&state, initial);
-    tokio::spawn(execute_query(
-        state,
-        request,
-        Arc::clone(&run),
-        cancellation,
-        control,
-    ));
-    (StatusCode::ACCEPTED, Json(response)).into_response()
+    hotpath::measure_block!("dashboard.query.create", {
+        if let Err(message) = validate_query(&mut request) {
+            return bad_request(message);
+        }
+        let Some(owner) = run_owner(&state) else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"detail": "exact registered project scope is unavailable"})),
+            )
+                .into_response();
+        };
+        let Some(Extension(control)) = control else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
+            )
+                .into_response();
+        };
+        let Some(run_id) = new_run_id() else {
+            return internal_error("could not allocate explorer query run identity");
+        };
+        let run = Arc::new(RwLock::new(initial_run(run_id.clone(), request.clone())));
+        let cancellation = CancellationToken::new();
+        if let Err(message) = remember_run(
+            StoredExplorerRun {
+                owner,
+                cancellation: cancellation.clone(),
+                run: Arc::clone(&run),
+            },
+            run_id,
+        ) {
+            return internal_error(message);
+        }
+        let initial = run.read().await.clone();
+        let response = envelope_for_run(&state, initial);
+        tokio::spawn(execute_query(
+            state,
+            request,
+            Arc::clone(&run),
+            cancellation,
+            control,
+        ));
+        (StatusCode::ACCEPTED, Json(response)).into_response()
+    })
 }
 
 pub async fn query_status(
