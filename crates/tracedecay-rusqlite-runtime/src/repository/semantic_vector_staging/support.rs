@@ -626,7 +626,9 @@ pub(super) fn begin_read_snapshot(
     context: &GraphPublicationOperationContextV1<'_>,
     wait: Duration,
 ) -> SemanticVectorStagingStoreResult<ExactSqlReadSnapshot> {
-    match handle.begin_read_snapshot(wait) {
+    match hotpath::measure_block!("rusqlite.begin_read_snapshot", {
+        handle.begin_read_snapshot(wait)
+    }) {
         Ok(snapshot) => Ok(snapshot),
         Err(error) => {
             ensure_live(context)?;

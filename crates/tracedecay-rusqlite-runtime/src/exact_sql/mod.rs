@@ -401,7 +401,9 @@ impl ExactSqlHandle {
         &self,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
-        self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
+        hotpath::measure_block!("rusqlite.begin_read_snapshot", {
+            self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
+        })
     }
 
     /// Read snapshot under an explicit priority. A pinned snapshot holds its
@@ -429,7 +431,9 @@ impl ExactSqlHandle {
     }
 
     pub fn begin_deferred(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        self.begin_transaction(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
+        hotpath::measure_block!("rusqlite.begin_deferred", {
+            self.begin_transaction(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
+        })
     }
 
     /// Begins the only transaction mode whose lease renews on progress.
@@ -451,10 +455,12 @@ impl ExactSqlHandle {
                 "long-lease transaction requires attached write authority".to_owned(),
             ));
         }
-        self.begin_transaction(
-            TransactionBehavior::Immediate,
-            TransactionPolicy::AuthorizedLongLease,
-        )
+        hotpath::measure_block!("rusqlite.begin_authorized_long_lease_immediate", {
+            self.begin_transaction(
+                TransactionBehavior::Immediate,
+                TransactionPolicy::AuthorizedLongLease,
+            )
+        })
     }
 
     fn begin_transaction(
