@@ -20,7 +20,12 @@
  * `getComputedStyle` call inside the draw loop.
  */
 import { kindColor } from '../graph/kindColor.ts';
-import type { TraceFrame, TraceModel, TracePalette } from './types.ts';
+import type {
+  TraceChannelDirection,
+  TraceFrame,
+  TraceModel,
+  TracePalette,
+} from './types.ts';
 
 /* ---- measurement → mark ------------------------------------------------- */
 
@@ -99,6 +104,7 @@ export function ringLabel(ring: number): string {
 /* ---- geometry ----------------------------------------------------------- */
 
 type Point = readonly [number, number];
+type ScratchPoint = [number, number];
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -188,12 +194,28 @@ function traceCurve(
  */
 /** Per-draw scratch. Draw is synchronous on the main thread, so one ribbon at
  * a time reuses these instead of allocating three arrays per channel. */
-const ribbonNormals: Point[] = [];
-const ribbonUpper: Point[] = [];
-const ribbonLower: Point[] = [];
+const ribbonNormals: ScratchPoint[] = [];
+const ribbonUpper: ScratchPoint[] = [];
+const ribbonLower: ScratchPoint[] = [];
+const channelPathIn: ScratchPoint[] = [
+  [0, 0],
+  [0, 0],
+  [0, 0],
+];
+const channelPathRun: ScratchPoint[] = [
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+];
 
-function growScratch(buffer: Point[], n: number): void {
+function growScratch(buffer: ScratchPoint[], n: number): void {
   while (buffer.length < n) buffer.push([0, 0]);
+}
+
+function setPoint(point: ScratchPoint, x: number, y: number): void {
+  point[0] = x;
+  point[1] = y;
 }
 
 function ribbon(
@@ -213,7 +235,7 @@ function ribbon(
     const dx = b[0] - a[0];
     const dy = b[1] - a[1];
     const len = Math.hypot(dx, dy) || 1;
-    ribbonNormals[i] = [-dy / len, dx / len];
+    setPoint(ribbonNormals[i]!, -dy / len, dx / len);
   }
   const mouthWidth = Math.max(widthStart, widthEnd);
   const headWidth = Math.min(widthStart, widthEnd);
@@ -230,8 +252,8 @@ function ribbon(
     const nx = ribbonNormals[i]![0];
     const ny = ribbonNormals[i]![1];
     const offset = half(i);
-    ribbonUpper[i] = [pt[0] + nx * offset, pt[1] + ny * offset];
-    ribbonLower[n - 1 - i] = [pt[0] - nx * offset, pt[1] - ny * offset];
+    setPoint(ribbonUpper[i]!, pt[0] + nx * offset, pt[1] + ny * offset);
+    setPoint(ribbonLower[n - 1 - i]!, pt[0] - nx * offset, pt[1] - ny * offset);
   }
   ctx.beginPath();
   traceCurve(ctx, ribbonUpper, true, n);
@@ -334,6 +356,9 @@ export function createRenderer(
     upper?: boolean;
   }
 
+  const NO_LABEL_OPTIONS: LabelOptions = {};
+  const labelWidths: number[] = [];
+
   /**
    * Type is specified in CSS pixels and divided back out of the world
    * transform, so a label is the same physical size whether the field is
@@ -349,7 +374,7 @@ export function createRenderer(
     return Math.min(2.2, 1 / Math.max(0.05, view.scale));
   }
 
-  function label(text: string, x: number, y: number, options: LabelOptions = {}): void {
+  function label(text: string, x: number, y: number, options: LabelOptions = NO_LABEL_OPTIONS): void {
     const pal = palette!;
     const { size = 9, color, align = 'left', tracking = 0, halo = true, upper = false } = options;
     const body = upper ? text.toUpperCase() : text;
@@ -364,9 +389,15 @@ export function createRenderer(
       const glyphs = [...body];
       // One measurement per glyph, reused for both the alignment total and the
       // cursor advance — this runs per label per frame, and `measureText` is
-      // the expensive call in it.
-      const widths = glyphs.map((glyph) => ctx.measureText(glyph).width);
-      const total = widths.reduce((sum, width) => sum + width + track, -track);
+      // the expensive call in it. Widths live in renderer scratch so the map
+      // and reduce do not allocate a fresh array every tracked label.
+      while (labelWidths.length < glyphs.length) labelWidths.push(0);
+      let total = -track;
+      for (let i = 0; i < glyphs.length; i += 1) {
+        const width = ctx.measureText(glyphs[i]!).width;
+        labelWidths[i] = width;
+        total += width + track;
+      }
       let cursor = align === 'right' ? x - total : align === 'center' ? x - total / 2 : x;
       for (let i = 0; i < glyphs.length; i += 1) {
         const glyph = glyphs[i]!;
@@ -377,7 +408,7 @@ export function createRenderer(
         }
         ctx.fillStyle = color ?? pal.textMuted;
         ctx.fillText(glyph, cursor, y);
-        cursor += widths[i]! + track;
+        cursor += labelWidths[i]! + track;
       }
       return;
     }
@@ -495,26 +526,33 @@ export function createRenderer(
     ay: number,
     bx: number,
     by: number,
-    dir: string,
+    dir: TraceChannelDirection,
     focusX: number,
-  ): Point[] {
-    if (dir === 'in') {
-      // A call that entered a type and moves between its methods before
-      // leaving. Drawn, not implied — it is the sheet's whole argument.
-      return [
-        [ax, ay],
-        [(ax + bx) / 2, Math.min(ay, by) - 46],
-        [bx, by],
-      ];
+  ): readonly Point[] {
+    switch (dir) {
+      case 'in':
+        // A call that entered a type and moves between its methods before
+        // leaving. Drawn, not implied — it is the sheet's whole argument.
+        setPoint(channelPathIn[0]!, ax, ay);
+        setPoint(channelPathIn[1]!, (ax + bx) / 2, Math.min(ay, by) - 46);
+        setPoint(channelPathIn[2]!, bx, by);
+        return channelPathIn;
+      case 'up':
+      case 'down':
+      case 'lost': {
+        const mid = (ay + by) / 2;
+        const pull = dir === 'up' ? 0.42 : 0.34;
+        setPoint(channelPathRun[0]!, ax, ay);
+        setPoint(channelPathRun[1]!, ax + (focusX - ax) * pull * 0.5, mid - (by - ay) * 0.18);
+        setPoint(channelPathRun[2]!, bx + (focusX - bx) * pull * 0.12, mid + (by - ay) * 0.2);
+        setPoint(channelPathRun[3]!, bx, by);
+        return channelPathRun;
+      }
+      default: {
+        const unhandled: never = dir;
+        return unhandled;
+      }
     }
-    const mid = (ay + by) / 2;
-    const pull = dir === 'up' ? 0.42 : 0.34;
-    return [
-      [ax, ay],
-      [ax + (focusX - ax) * pull * 0.5, mid - (by - ay) * 0.18],
-      [bx + (focusX - bx) * pull * 0.12, mid + (by - ay) * 0.2],
-      [bx, by],
-    ];
   }
 
   function drawChannels(

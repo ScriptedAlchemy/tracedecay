@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsOption, ECharts } from 'echarts';
 import { useReducedMotion } from '../trace/reducedMotion.ts';
 import { isRegisteredSeries } from './echarts.ts';
@@ -94,7 +94,7 @@ function themedOption(
  * the chart on every parent update. Applying the option is now its own effect,
  * and a theme flip bumps a revision counter rather than being read through a
  * closure that would otherwise be pinned to the mount-time option. */
-export function Chart({
+export const Chart = memo(function Chart({
   option,
   height = 220,
   ariaLabel,
@@ -171,4 +171,4 @@ export function Chart({
   }
 
   return <div ref={containerRef} style={{ height }} role="img" aria-label={ariaLabel} />;
-}
+});

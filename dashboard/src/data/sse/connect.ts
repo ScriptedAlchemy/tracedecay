@@ -81,16 +81,14 @@ export function connectEvents(url = '/api/events'): SseConnection {
    * visualization twice for one real occurrence. */
   const recordActivity = (event: DecodedSseEvent) => {
     const payload = event.payload;
-    activity = [
-      ...activity,
-      {
-        projectId: event.projectId,
-        family:
-          isRecord(payload) && typeof payload.family === 'string' ? payload.family : event.stream.stream_id,
-        streamId: event.stream.stream_id,
-        at: Date.now(),
-      },
-    ].slice(-MAX_ACTIVITY_PULSES);
+    activity.push({
+      projectId: event.projectId,
+      family:
+        isRecord(payload) && typeof payload.family === 'string' ? payload.family : event.stream.stream_id,
+      streamId: event.stream.stream_id,
+      at: Date.now(),
+    });
+    if (activity.length > MAX_ACTIVITY_PULSES) activity.shift();
     activityRevision += 1;
   };
 
@@ -182,13 +180,10 @@ function decodeDashboardEvent(value: unknown, frameBytes: number): DecodedSseEve
   const generation = streamGeneration(value.run_id);
   const watermark = value.source_watermark;
   let watermarkValue = '';
-  if (
-    watermark !== null
-    && (typeof watermark.source !== 'string' || typeof watermark.watermark !== 'string')
-  ) {
-    return null;
-  }
-  if (watermark !== null && typeof watermark.watermark === 'string') {
+  if (watermark !== null) {
+    if (typeof watermark.source !== 'string' || typeof watermark.watermark !== 'string') {
+      return null;
+    }
     watermarkValue = watermark.watermark;
   }
   const rawProjectId = value.scope.project_id;
