@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 #[cfg(feature = "test-transport")]
+use std::fs;
+#[cfg(feature = "test-transport")]
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
