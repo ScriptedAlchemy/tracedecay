@@ -7,8 +7,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ParseOffset, ProjectionStoreError, StoreShardScopeV1, build_scope_resolution_authorization_v1,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationStoreError, ParseOffset, ProjectionStoreError, StoreShardScopeV1,
+    build_scope_resolution_authorization_v1,
 };
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
@@ -631,6 +632,62 @@ impl<'a> HostAdmissionFacade<'a> {
             .await
             .map_err(|error| classify_error(&error))?;
         project_captured_outcomes(database, outcomes).await
+    }
+
+    /// Persist one sanitized write through the store the façade already holds.
+    pub async fn persist_observation(
+        &self,
+        provider: &str,
+        scope: &ObservationScopeV1,
+        write: AnchoredObservationWrite,
+    ) -> Result<ObservationPersistOutcome, HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        if write.observation().source().provider().as_str() != provider
+            || write.observation().scope() != scope
+        {
+            return Err(admission_outcome(
+                HostAdmissionStatus::Degraded,
+                false,
+                Some("invalid_observation_contract"),
+            ));
+        }
+        let store = self.store(provider, scope)?;
+        store
+            .persist_observation(write)
+            .await
+            .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
+    }
+
+    /// Persist a bounded window through one store-owned writer transaction.
+    ///
+    /// An empty window returns empty without opening the store or minting a
+    /// skipped-authority success. Mixed provider or scope writes fail closed.
+    pub async fn persist_observations(
+        &self,
+        provider: &str,
+        scope: &ObservationScopeV1,
+        writes: Vec<AnchoredObservationWrite>,
+    ) -> Result<Vec<ObservationPersistOutcome>, HostAdmissionOutcome> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.authorities.validate_scope(scope)?;
+        for write in &writes {
+            if write.observation().source().provider().as_str() != provider
+                || write.observation().scope() != scope
+            {
+                return Err(admission_outcome(
+                    HostAdmissionStatus::Degraded,
+                    false,
+                    Some("invalid_observation_contract"),
+                ));
+            }
+        }
+        let store = self.store(provider, scope)?;
+        store
+            .persist_observations(writes)
+            .await
+            .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
 
     pub async fn capture(&self, request: CaptureObservationRequest) -> HostAdmissionOutcome {
