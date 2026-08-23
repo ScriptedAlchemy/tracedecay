@@ -1,14 +1,14 @@
 //! Pinned semantic runtime configuration.
 //!
-//! Moved down from root `src/config.rs`. The configuration registry that
-//! validates and defaults the `semantic.runtime.v1` setting lives beside the
-//! configuration control store in this crate, and this shape is what it
-//! encodes; the values themselves are owned by `tracedecay-semantic`, which is
-//! below both.
+//! The configuration registry that validates and defaults the
+//! `semantic.runtime.v1` setting lives beside the configuration control store
+//! in this crate, and this shape is what it encodes; the values themselves
+//! are owned by `tracedecay-semantic`, which is below both.
 
 use std::path::{Component, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::canonical_text::default_true;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
@@ -138,10 +138,6 @@ pub struct SemanticConfig {
 
 fn default_selected_fastembed_model() -> Option<String> {
     Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned())
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for SemanticConfig {
