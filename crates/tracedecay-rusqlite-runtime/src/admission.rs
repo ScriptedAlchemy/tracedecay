@@ -6,6 +6,8 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 
+use crate::profiled_lock::ProfiledMutex;
+
 use tracedecay_store::{OperationPriorityV1, SaturationScopeV1, StoreOperationMetadataV1};
 
 #[cfg(test)]
@@ -104,19 +106,25 @@ impl State {
 
 /// The sole admission authority. A successful reservation remains charged
 /// from `submit` until the accepted request sends its terminal reply.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Admission {
-    state: Arc<Mutex<State>>,
+    state: Arc<ProfiledMutex<State>>,
 }
 
 impl Admission {
     pub(crate) fn new(limits: Limits) -> Self {
         Self {
-            state: Arc::new(Mutex::new(State {
-                limits,
-                general: Usage::default(),
-                health: Usage::default(),
-            })),
+            // Every store operation reserves here, so this is the lock a
+            // writer fat tail would show up on first. Instrumented at the
+            // construction site so the report keys on this line.
+            state: Arc::new(hotpath::mutex!(
+                Mutex::new(State {
+                    limits,
+                    general: Usage::default(),
+                    health: Usage::default(),
+                }),
+                label = "rusqlite.admission"
+            )),
         }
     }
 
@@ -170,11 +178,20 @@ impl Admission {
 }
 
 #[must_use = "the permit must be retained through the request's terminal reply"]
-#[derive(Debug)]
 pub(crate) struct Permit {
-    state: Arc<Mutex<State>>,
+    state: Arc<ProfiledMutex<State>>,
     lane: Lane,
     bytes: u64,
+}
+
+impl std::fmt::Debug for Permit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Permit")
+            .field("lane", &self.lane)
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for Permit {
