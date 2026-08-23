@@ -2,18 +2,18 @@
 //!
 //! Claude and Codex share the common hook JSON shape.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::codex::codex_additional_context_json;
 use super::post_tool_use::is_post_tool_use_failure_event;
 use super::steering::{cursor_index_signals_for_root, index_status_line};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_project_root, event_project_root_with_identity, event_session_id,
-    process_cwd_project_root, prompt_like_text, read_hook_event, record_hook_analytics,
-    record_hook_invoked_parsed, research_block_reason,
+    additional_context_json, compact_daemon_args, event_project_root,
+    event_project_root_with_identity, event_session_id, process_cwd_project_root, prompt_like_text,
+    read_hook_event, record_hook_analytics, record_hook_invoked_parsed, research_block_reason,
+    reset_counter_for_project,
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
@@ -169,7 +169,7 @@ async fn claude_session_start_response(event: &str) -> (Option<PathBuf>, String)
     .flatten()
     .map_or_else(
         || serde_json::json!({}).to_string(),
-        |guidance| codex_additional_context_json("SessionStart", &guidance),
+        |guidance| additional_context_json("SessionStart", &guidance),
     );
     (root, output)
 }
@@ -201,8 +201,8 @@ pub async fn hook_claude_subagent_start() -> i32 {
         &event,
         &parsed,
     );
-    let output = if let Some(context) = claude_subagent_start_context(&parsed).await {
-        codex_additional_context_json("SubagentStart", &context)
+    let output = if let Some(context) = claude_subagent_start_context(root.as_deref()).await {
+        additional_context_json("SubagentStart", &context)
     } else {
         serde_json::json!({}).to_string()
     };
@@ -237,12 +237,13 @@ pub async fn hook_claude_post_compact() -> i32 {
         &event,
         &parsed,
     );
-    let args = serde_json::json!({
-        "action": "claude_compact",
-        "provider": "claude",
-        "user_scope": root.is_none(),
-        "event_json": event,
-    });
+    let args = compact_daemon_args(
+        "claude_compact",
+        "claude",
+        root.is_none(),
+        &event,
+        None,
+    );
     if let Err(error) =
         super::daemon_hook_action(root.as_deref(), args, Some(&hook_telemetry)).await
     {
@@ -266,9 +267,9 @@ pub async fn hook_claude_post_compact() -> i32 {
 /// `None` when root detection fails (no project to steer toward). The status
 /// line is resolved the same registry-aware way as `SessionStart` so a
 /// global-store-only project still steers correctly.
-async fn claude_subagent_start_context(parsed: &Value) -> Option<String> {
-    let root = event_project_root_with_identity(parsed).await?;
-    let (staleness, _) = cursor_index_signals_for_root(&root).await;
+async fn claude_subagent_start_context(root: Option<&Path>) -> Option<String> {
+    let root = root?;
+    let (staleness, _) = cursor_index_signals_for_root(root).await;
     let mut context = index_status_line(true, staleness.as_deref());
     context.push_str(CLAUDE_SUBAGENT_START_CONTEXT);
     Some(context)
@@ -319,7 +320,7 @@ async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten()
-    .map(|guidance| codex_additional_context_json(hook_event_name, &guidance));
+    .map(|guidance| additional_context_json(hook_event_name, &guidance));
     (root, response)
 }
 
@@ -356,15 +357,8 @@ pub async fn hook_prompt_submit() -> i32 {
     {
         super::schedule_user_session_review("claude", session_id.as_deref()).await;
     }
-    if let Some(root) = root.as_deref()
-        && let Err(error) = super::daemon_hook_action(
-            Some(root),
-            serde_json::json!({ "action": "reset_counter" }),
-            Some(&hook_telemetry),
-        )
-        .await
-    {
-        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
+    if let Some(root) = root.as_deref() {
+        reset_counter_for_project(root, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
         root.as_deref(),
@@ -426,7 +420,7 @@ async fn claude_stop_response_for_event(event: &str) -> (Option<PathBuf>, String
     .flatten()
     .map_or_else(
         || serde_json::json!({}).to_string(),
-        |guidance| codex_additional_context_json("Stop", &guidance),
+        |guidance| additional_context_json("Stop", &guidance),
     );
     (root, output)
 }
@@ -551,7 +545,7 @@ mod tests {
         );
 
         let json: Value =
-            serde_json::from_str(&codex_additional_context_json("PostToolUse", &context)).unwrap();
+            serde_json::from_str(&additional_context_json("PostToolUse", &context)).unwrap();
         assert_eq!(
             json["hookSpecificOutput"]["hookEventName"].as_str(),
             Some("PostToolUse")

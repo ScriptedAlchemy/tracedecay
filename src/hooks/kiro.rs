@@ -13,9 +13,8 @@ use super::claude::is_code_research_prompt;
 use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_cwd_from_parsed, event_project_root, event_project_root_from_json,
-    event_project_root_or_process_cwd, event_session_id, read_hook_event, record_hook_invoked,
-    record_hook_invoked_parsed, rel_under_root, research_block_reason,
+    event_cwd_from_parsed, event_project_root, event_project_root_or_process_cwd, event_session_id,
+    read_hook_event, record_hook_invoked_parsed, rel_under_root, research_block_reason,
 };
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
@@ -28,9 +27,10 @@ const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_mi
 /// Blocks with exit code 2 and stderr, per Kiro's hook contract.
 pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_from_json(&event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root(&parsed);
     let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "preToolUse", &event);
+        record_hook_invoked_parsed(root.as_deref(), HintAgent::Kiro, "preToolUse", &event, &parsed);
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
         eprintln!("{reason}");
         2
@@ -136,9 +136,15 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// user/project memory relevant to the submitted prompt.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = kiro_project_root(&event);
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_or_process_cwd(&parsed);
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Kiro,
+        "userPromptSubmit",
+        &event,
+        &parsed,
+    );
     let dispatch_guidance = if let Some(root) = root.as_deref() {
         super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::Kiro,
@@ -283,16 +289,6 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
             _ => {}
         }
     }
-}
-
-/// Kiro write events may omit `cwd`, so the hook falls back to its own working
-/// directory before resolving. Shares the host-neutral resolver with every other
-/// `cwd`-carrying host.
-fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
-    // An unreadable payload names no directory, so it takes the same
-    // process-cwd fallback a payload without `cwd` does.
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    event_project_root_or_process_cwd(&parsed)
 }
 
 #[cfg(test)]

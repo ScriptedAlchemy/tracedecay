@@ -16,7 +16,7 @@ use super::post_tool_use::{
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
     deduped_project_hint_with_id, event_session_id, format_tool_hint,
-    hook_route_metadata_from_event, mint_hint_id, nearest_project_like_root, read_hook_event,
+    hook_route_metadata_from_parsed, mint_hint_id, nearest_project_like_root, read_hook_event,
     record_hint_analytics, record_hook_invoked, record_hook_invoked_parsed, rel_under_root,
     text_field,
 };
@@ -51,9 +51,15 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 /// Cursor `subagentStart` hook handler.
 pub async fn hook_cursor_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let _hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "subagentStart",
+        &event,
+        &parsed,
+    );
     if let Some(decision) = evaluate_cursor_subagent_start(&event)
         && !super::write_hook_output(
             root.as_deref(),
@@ -82,9 +88,15 @@ pub async fn hook_cursor_subagent_start() -> i32 {
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
 pub async fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let _hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "postToolUse",
+        &event,
+        &parsed,
+    );
     if let Some(decision) = cursor_post_tool_use_decision(&event)
         && !super::write_hook_output(
             root.as_deref(),
@@ -200,9 +212,15 @@ pub async fn hook_cursor_stop() -> i32 {
 /// The hook is fail-open and emits Cursor's empty object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "preCompact",
+        &event,
+        &parsed,
+    );
     let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
         &event,
         Some(&hook_telemetry),
@@ -316,9 +334,15 @@ pub async fn hook_cursor_session_start() -> i32 {
 /// Returns the identity-resolved root alongside the response so the handler
 /// does not repeat the registry-probing resolution for output delivery.
 async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String) {
-    let root = cursor_project_root_from_event_with_identity(event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", event);
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "sessionStart",
+        event,
+        &parsed,
+    );
     let guidance = super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::CursorDesktop,
         event,
@@ -347,7 +371,7 @@ pub async fn hook_cursor_after_shell() -> i32 {
         &event,
         &parsed,
     );
-    notify_cursor_after_shell_event(&event, &parsed, root.as_deref(), &hook_telemetry).await;
+    notify_cursor_after_shell_event(&parsed, root.as_deref(), &hook_telemetry).await;
     0
 }
 
@@ -356,10 +380,16 @@ pub async fn hook_cursor_after_shell() -> i32 {
 /// Notifies the daemon to run one-shot workspace catch-up. Fail-open.
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
-    notify_cursor_workspace_open(&event, root.as_deref(), &hook_telemetry).await;
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "workspaceOpen",
+        &event,
+        &parsed,
+    );
+    notify_cursor_workspace_open(&parsed, root.as_deref(), &hook_telemetry).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
@@ -502,11 +532,6 @@ pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<Pa
         (Some(cwd_root), None) => Some(cwd_root),
         (_, other) => other,
     }
-}
-
-async fn cursor_project_root_from_event_with_identity(event_json: &str) -> Option<PathBuf> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    cursor_project_root_from_parsed_event_with_identity(&parsed).await
 }
 
 async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
@@ -660,7 +685,6 @@ async fn notify_cursor_after_file_edit(
 
 /// Best-effort daemon notification for Cursor `afterShellExecution`.
 async fn notify_cursor_after_shell_event(
-    event_json: &str,
     parsed: &Value,
     root: Option<&Path>,
     telemetry: &super::analytics::HookTimingSpan,
@@ -675,7 +699,7 @@ async fn notify_cursor_after_shell_event(
     super::notify_hook_event_with_telemetry(
         root,
         DaemonHookEvent::cursor_after_shell_execution(cwd)
-            .with_route(hook_route_metadata_from_event(event_json, root)),
+            .with_route(hook_route_metadata_from_parsed(parsed, root)),
         telemetry,
     )
     .await;
@@ -683,7 +707,7 @@ async fn notify_cursor_after_shell_event(
 
 /// Best-effort daemon notification for Cursor `workspaceOpen`.
 async fn notify_cursor_workspace_open(
-    event_json: &str,
+    parsed: &Value,
     root: Option<&Path>,
     telemetry: &super::analytics::HookTimingSpan,
 ) {
@@ -696,7 +720,7 @@ async fn notify_cursor_workspace_open(
     super::notify_hook_event_with_telemetry(
         root,
         DaemonHookEvent::cursor_workspace_open(root.to_path_buf())
-            .with_route(hook_route_metadata_from_event(event_json, root)),
+            .with_route(hook_route_metadata_from_parsed(parsed, root)),
         telemetry,
     )
     .await;

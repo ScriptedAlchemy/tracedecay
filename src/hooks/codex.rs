@@ -16,11 +16,11 @@ use super::steering::{
 };
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
-    append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed, event_project_root,
-    event_project_root_from_json, event_project_root_with_identity,
-    event_project_root_with_identity_from_json, event_session_id, format_tool_hint,
-    is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
-    record_hint_analytics, record_hook_analytics, record_hook_invoked, record_hook_invoked_parsed,
+    additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
+    event_cwd_from_parsed, event_project_root, event_project_root_from_json,
+    event_project_root_with_identity, event_session_id, format_tool_hint, is_project_like_workspace,
+    mint_hint_id, prompt_like_text, read_hook_event, record_hint_analytics, record_hook_analytics,
+    record_hook_invoked_parsed,
     record_workspace_status_analytics, rel_under_root, text_field,
 };
 
@@ -64,7 +64,7 @@ pub async fn hook_codex_session_start() -> i32 {
     .flatten();
     let output = guidance.map_or_else(
         || serde_json::json!({}).to_string(),
-        |guidance| codex_additional_context_json("SessionStart", &guidance),
+        |guidance| additional_context_json("SessionStart", &guidance),
     );
     if !super::write_hook_output(
         root.as_deref(),
@@ -90,20 +90,19 @@ fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
 /// Resets the local counter and injects steering context for the new turn.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_with_identity_from_json(&event).await;
-    let hook_telemetry = record_hook_invoked(
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Codex,
         "UserPromptSubmit",
         &event,
+        &parsed,
     );
     if let Some(root) = root.as_deref() {
         super::reset_counter_for_project(root, Some(&hook_telemetry)).await;
     }
-    let session_id = serde_json::from_str::<Value>(&event)
-        .ok()
-        .as_ref()
-        .and_then(event_session_id);
+    let session_id = event_session_id(&parsed);
     if root.is_none() {
         // Keep recall current, but wait for the native Stop receipt before
         // reflection so one completed turn schedules one review rather than a
@@ -111,12 +110,12 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         let _ = ingest_user_codex_session(session_id, Some(&hook_telemetry)).await;
     }
     let context =
-        Box::pin(codex_user_prompt_submit_context_with_root(&event, root.as_deref())).await;
+        Box::pin(codex_user_prompt_submit_context_with_root(&parsed, root.as_deref())).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
-        &codex_additional_context_json("UserPromptSubmit", &context),
+        &additional_context_json("UserPromptSubmit", &context),
         Some(&hook_telemetry),
     )
     .await
@@ -127,17 +126,18 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 }
 
 pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
-    let root = event_project_root_with_identity_from_json(event).await;
-    codex_user_prompt_submit_context_with_root(event, root.as_deref()).await
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(&parsed).await;
+    codex_user_prompt_submit_context_with_root(&parsed, root.as_deref()).await
 }
 
 /// [`codex_user_prompt_submit_context_for_event`] for handlers that already
 /// resolved the identity-aware project root, so the registry probe runs once
 /// per event.
-async fn codex_user_prompt_submit_context_with_root(event: &str, root: Option<&Path>) -> String {
-    let (mut context, status) = codex_session_context_with_root(event, root).await;
+async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option<&Path>) -> String {
+    let (mut context, status) = codex_session_context_with_root(parsed, root).await;
     if !matches!(status, HookWorkspaceStatus::Generic)
-        && let Some(hint) = codex_prompt_hint(event)
+        && let Some(hint) = codex_prompt_hint(parsed)
     {
         append_tool_hint(&mut context, &hint);
     }
@@ -149,17 +149,16 @@ async fn codex_user_prompt_submit_context_with_root(event: &str, root: Option<&P
 async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
-    codex_session_context_with_root(event_json, root.as_deref()).await
+    codex_session_context_with_root(&parsed, root.as_deref()).await
 }
 
 /// Builds Codex session/prompt context from an already-resolved root.
 async fn codex_session_context_with_root(
-    event_json: &str,
+    parsed: &Value,
     root: Option<&Path>,
 ) -> (String, HookWorkspaceStatus) {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let cwd = event_cwd_from_parsed(&parsed);
-    let session_id = event_session_id(&parsed);
+    let cwd = event_cwd_from_parsed(parsed);
+    let session_id = event_session_id(parsed);
     let status = codex_workspace_status(root, cwd.as_deref());
     record_workspace_status_analytics(root, status, session_id.as_deref());
     let staleness = match (status, root) {
@@ -178,9 +177,15 @@ async fn codex_session_context_with_root(
 /// Codex `SubagentStart` hook handler.
 pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_with_identity_from_json(&event).await;
-    let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(&parsed).await;
+    let _hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Codex,
+        "SubagentStart",
+        &event,
+        &parsed,
+    );
     let count = record_codex_subagent_start(&event).await;
     let output = evaluate_codex_subagent_start(&event);
     eprintln!(
@@ -233,7 +238,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
-            &codex_additional_context_json("PostToolUse", &guidance),
+            &additional_context_json("PostToolUse", &guidance),
             Some(&hook_telemetry),
         )
         .await
@@ -251,9 +256,15 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 /// itself only forwards the boundary and fails open.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_with_identity_from_json(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Codex,
+        "PostCompact",
+        &event,
+        &parsed,
+    );
     if std::env::var_os(tracedecay_sessions::runtime::codex_app_server::CODEX_SUMMARY_CHILD_ENV)
         .is_none()
     {
@@ -305,7 +316,7 @@ pub async fn hook_codex_stop() -> i32 {
         // registered projects.
         retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
         let output = if let Some(guidance) = guidance {
-            codex_additional_context_json("Stop", &guidance)
+            additional_context_json("Stop", &guidance)
         } else {
             serde_json::json!({}).to_string()
         };
@@ -371,16 +382,7 @@ async fn retain_codex_stop_in_daemon(
     super::await_within_stop_budget(retain, CODEX_STOP_RETENTION_BUDGET, telemetry, || false).await
 }
 
-/// Builds a Codex hook stdout payload with `additionalContext`.
-pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": event_name,
-            "additionalContext": additional_context,
-        }
-    })
-    .to_string()
-}
+pub use super::additional_context_json as codex_additional_context_json;
 
 /// Pure decision logic for Codex `SubagentStart` events.
 pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
@@ -412,7 +414,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
             context: CODEX_SUBAGENT_START_CONTEXT.to_string(),
             nonblocking: true,
         };
-        let root = codex_project_root_from_event(event_json);
+        let root = event_project_root(&parsed);
         let hint_id = mint_hint_id();
         record_hint_analytics(
             root.as_deref(),
@@ -422,9 +424,9 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
             &hint_id,
             &hint,
         );
-        let _ = deduped_codex_hint(event_json, &parsed, &hint_id, hint.clone())?;
+        let _ = deduped_codex_hint(&parsed, &hint_id, hint.clone())?;
         let context = codex_subagent_start_context(Some(hint), needs_context);
-        return Some(codex_additional_context_json("SubagentStart", &context));
+        return Some(additional_context_json("SubagentStart", &context));
     }
     None
 }
@@ -631,22 +633,18 @@ async fn codex_post_compact(
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) {
-    let Some(root) = event_project_root_with_identity_from_json(event_json).await else {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let Some(root) = event_project_root_with_identity(&parsed).await else {
         return;
     };
-    let session_id = serde_json::from_str::<Value>(event_json)
-        .ok()
-        .as_ref()
-        .and_then(event_session_id);
-    let mut args = serde_json::json!({
-        "action": "codex_compact",
-        "provider": "codex",
-        "user_scope": false,
-        "event_json": event_json,
-    });
-    if let Some(session_id) = session_id {
-        args["session_id"] = serde_json::json!(session_id);
-    }
+    let session_id = event_session_id(&parsed);
+    let args = compact_daemon_args(
+        "codex_compact",
+        "codex",
+        false,
+        event_json,
+        session_id.as_deref(),
+    );
     if let Err(error) = super::daemon_hook_action(Some(&root), args, telemetry).await {
         eprintln!("[tracedecay] Codex PostCompact daemon call failed: {error}");
     }
@@ -659,15 +657,9 @@ async fn ingest_user_codex_session(
     super::ingest_user_session("Codex", session_id, telemetry).await
 }
 
-fn deduped_codex_hint(
-    event_json: &str,
-    parsed: &Value,
-    hint_id: &str,
-    hint: ToolHint,
-) -> Option<ToolHint> {
-    let root = codex_project_root_from_event(event_json);
+fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
     deduped_project_hint_with_id(
-        root.as_deref(),
+        event_project_root(parsed).as_deref(),
         HintAgent::Codex,
         event_session_id(parsed),
         hint_id,
@@ -675,14 +667,13 @@ fn deduped_codex_hint(
     )
 }
 
-fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
     let hint = decide_hint(&ToolHintInput {
         agent: HintAgent::Codex,
-        session_id: event_session_id(&parsed),
+        session_id: event_session_id(parsed),
         tool_name: None,
         command: None,
-        prompt: prompt_like_text(&parsed),
+        prompt: prompt_like_text(parsed),
         subagent_type: None,
         file_path: None,
         captured_output: None,
@@ -690,17 +681,17 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         edit_text: None,
         hints_enabled: true,
     })?;
-    let root = codex_project_root_from_event(event_json);
+    let root = event_project_root(parsed);
     let hint_id = mint_hint_id();
     record_hint_analytics(
         root.as_deref(),
         "hint_candidate",
         HintAgent::Codex,
-        event_session_id(&parsed).as_deref(),
+        event_session_id(parsed).as_deref(),
         &hint_id,
         &hint,
     );
-    deduped_codex_hint(event_json, &parsed, &hint_id, hint)
+    deduped_codex_hint(parsed, &hint_id, hint)
 }
 
 #[cfg(test)]
@@ -797,8 +788,7 @@ mod tests {
             "session_id": "codex-session-1",
             "cwd": project_root,
             "prompt": "Please explain the impact of changing parse_user"
-        })
-        .to_string();
+        });
 
         let first = codex_prompt_hint(&event).unwrap();
         assert_eq!(first.category, HintCategory::Impact);

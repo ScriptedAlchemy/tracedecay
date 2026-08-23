@@ -79,6 +79,7 @@ pub struct HookSpoolV1 {
     meta: HookSpoolMetaV1,
     pending: Vec<HookSpoolRecordV1>,
     pending_by_session: BTreeMap<[u8; 32], (u32, u64)>,
+    pending_by_event: BTreeMap<[u8; 16], usize>,
     physical_len: u64,
     round_robin_after: Option<[u8; 32]>,
     replay_claims: BTreeMap<[u8; 32], [u8; 16]>,
@@ -180,12 +181,10 @@ impl HookSpoolV1 {
             })
             .collect::<Vec<_>>();
         let pending_by_session = usage_by_session(&pending, config.limits)?;
+        let pending_by_event = pending_event_index(&pending);
         let report = HookSpoolOpenReportV1 {
             pending_records: u32::try_from(pending.len()).map_err(|_| HookSpoolError::SpoolFull)?,
-            pending_bytes: pending
-                .iter()
-                .map(|record| u64::from(record.framed_len))
-                .sum(),
+            pending_bytes: pending_by_session.values().map(|(_, bytes)| *bytes).sum(),
             committed_through: meta.committed_through,
             next_sequence: meta.next_sequence,
             truncated_partial_tail_bytes,
@@ -203,6 +202,7 @@ impl HookSpoolV1 {
             meta,
             pending,
             pending_by_session,
+            pending_by_event,
             physical_len: scan.physical_len,
             round_robin_after,
             replay_claims: BTreeMap::new(),
@@ -226,9 +226,9 @@ impl HookSpoolV1 {
     /// Callers use this only to preserve a prior transport attempt's envelope
     /// on retry; it does not grant replay or acknowledgement authority.
     pub fn pending_envelope(&self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
-        self.pending
-            .iter()
-            .find(|record| record.envelope.event_id == event_id)
+        self.pending_by_event
+            .get(&event_id)
+            .and_then(|&index| self.pending.get(index))
             .map(|record| record.envelope.clone())
     }
 
@@ -257,11 +257,8 @@ impl HookSpoolV1 {
         if encoded.is_empty() || encoded.len() > MAX_HOOK_PAYLOAD_BYTES {
             return Err(HookSpoolError::RecordTooLarge);
         }
-        if let Some(existing) = self
-            .pending
-            .iter()
-            .find(|record| record.envelope.event_id == envelope.event_id)
-        {
+        if let Some(&index) = self.pending_by_event.get(&envelope.event_id) {
+            let existing = &self.pending[index];
             return if existing.envelope == envelope {
                 Ok(existing.clone())
             } else {
@@ -418,6 +415,7 @@ impl HookSpoolV1 {
         write_meta(&self.root, &next_meta)?;
         self.meta = next_meta;
         self.pending.remove(index);
+        self.forget_pending_event(removed.envelope.event_id, index);
         self.release_usage(&removed);
         // Compaction rewrites every remaining frame, so draining N records
         // must not rewrite the file once per acknowledgement (O(N^2) bytes).
@@ -500,6 +498,8 @@ impl HookSpoolV1 {
             .or_default();
         entry.0 = entry.0.checked_add(1).ok_or(HookSpoolError::SpoolFull)?;
         entry.1 = entry.1.saturating_add(u64::from(record.framed_len));
+        self.pending_by_event
+            .insert(record.envelope.event_id, self.pending.len());
         self.pending.push(record.clone());
         Ok(())
     }
@@ -518,10 +518,16 @@ impl HookSpoolV1 {
     }
 
     fn pending_bytes(&self) -> u64 {
-        self.pending
-            .iter()
-            .map(|record| u64::from(record.framed_len))
-            .sum()
+        self.pending_by_session.values().map(|(_, bytes)| *bytes).sum()
+    }
+
+    fn forget_pending_event(&mut self, event_id: [u8; 16], removed_index: usize) {
+        self.pending_by_event.remove(&event_id);
+        for index in self.pending_by_event.values_mut() {
+            if *index > removed_index {
+                *index -= 1;
+            }
+        }
     }
 
     fn compact_pending(&mut self) -> Result<(), HookSpoolError> {
@@ -551,6 +557,7 @@ impl HookSpoolV1 {
         )
         .map_err(|_| HookSpoolError::Io)?;
         self.pending = rebuilt;
+        self.pending_by_event = pending_event_index(&self.pending);
         self.physical_len = offset;
         Ok(())
     }
@@ -638,6 +645,14 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
         Err(_) => return Err(HookSpoolError::Io),
     }
     shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
+}
+
+fn pending_event_index(pending: &[HookSpoolRecordV1]) -> BTreeMap<[u8; 16], usize> {
+    pending
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.envelope.event_id, index))
+        .collect()
 }
 
 fn validate_regular_or_missing(path: &Path) -> Result<bool, HookSpoolError> {

@@ -706,25 +706,28 @@ async fn dispatch_decoded(
                 _ => None,
             };
             let receipts = DaemonDeliveryReceiptPort::new(project_root);
-            let _ = deliver_hook_feedback(
-                &envelope,
-                &result.receipt,
-                rollback,
-                scout_receipt,
-                deadline,
-                &receipts,
-            )
-            .await;
-            let delivered = deliver_hook_feedback(
-                &envelope,
-                &result.receipt,
-                rollback,
-                feedback_notice,
-                deadline,
-                delivery,
-            )
-            .await
-            .unwrap_or(HookFeedbackDeliveryV1 {
+            // Scout receipt and advisory notice use independent ports; overlapping
+            // them keeps both inside the leftover sync budget without combining
+            // the two delivery contracts.
+            let (_scout_delivery, notice_delivery) = tokio::join!(
+                deliver_hook_feedback(
+                    &envelope,
+                    &result.receipt,
+                    rollback,
+                    scout_receipt,
+                    deadline,
+                    &receipts,
+                ),
+                deliver_hook_feedback(
+                    &envelope,
+                    &result.receipt,
+                    rollback,
+                    feedback_notice,
+                    deadline,
+                    delivery,
+                ),
+            );
+            let delivered = notice_delivery.unwrap_or(HookFeedbackDeliveryV1 {
                 feedback: None,
                 outcome: None,
             });

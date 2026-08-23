@@ -36,13 +36,14 @@ pub(crate) use dispatch::project_id_for_layout as hook_project_id_for_layout;
 pub(crate) use dispatch::protected_session_id_for_native as protected_native_session_id;
 pub(crate) use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
+pub use additional_context_json as codex_additional_context_json;
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
     hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
     hook_stop,
 };
 pub use codex::{
-    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
+    codex_apply_patch_rel_paths, codex_project_root_from_event,
     codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
     codex_workspace_status_from_event, evaluate_codex_subagent_start, hook_codex_post_compact,
     hook_codex_post_tool_use, hook_codex_session_start, hook_codex_stop, hook_codex_subagent_start,
@@ -590,6 +591,37 @@ pub(crate) async fn reset_counter_for_project(
     }
 }
 
+/// Claude and Codex share this `hookSpecificOutput.additionalContext` stdout
+/// shape. Cursor uses a flatter `{ additional_context }` object.
+pub fn additional_context_json(event_name: &str, additional_context: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": additional_context,
+        }
+    })
+    .to_string()
+}
+
+pub(crate) fn compact_daemon_args(
+    action: &str,
+    provider: &str,
+    user_scope: bool,
+    event_json: &str,
+    session_id: Option<&str>,
+) -> Value {
+    let mut args = serde_json::json!({
+        "action": action,
+        "provider": provider,
+        "user_scope": user_scope,
+        "event_json": event_json,
+    });
+    if let Some(session_id) = session_id {
+        args["session_id"] = serde_json::json!(session_id);
+    }
+    args
+}
+
 pub(crate) async fn notify_hook_event_with_telemetry(
     project_root: &Path,
     event: DaemonHookEvent,
@@ -867,7 +899,7 @@ fn hook_route_metadata_from_event(
     Some(hook_route_metadata_from_parsed(&parsed, project_root))
 }
 
-fn hook_route_metadata_from_parsed(parsed: &Value, project_root: &Path) -> HookRouteMetadata {
+pub(crate) fn hook_route_metadata_from_parsed(parsed: &Value, project_root: &Path) -> HookRouteMetadata {
     let cwd = event_cwd_from_parsed(parsed);
     let route_root = cwd.as_deref().unwrap_or(project_root);
     let worktree = crate::worktree::git_worktree_root(route_root)
@@ -1082,12 +1114,6 @@ fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
 async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
     crate::config::discover_project_root_with_identity(&cwd).await
-}
-
-/// [`event_project_root_with_identity`] for callers that hold only the raw JSON.
-async fn event_project_root_with_identity_from_json(event_json: &str) -> Option<PathBuf> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    event_project_root_with_identity(&parsed).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {

@@ -38,17 +38,7 @@ impl HookDeliverySourceReceiptV1 {
         // timestamps remain in the retained payload for truthful evidence,
         // but are deliberately absent from the durable file key so an exact
         // retry replays the first receipt instead of creating a second one.
-        let digest = canonical_sha256(&(
-            "tracedecay.hook-delivery-source-receipt.v1",
-            StableReceiptIdentity::from_settlement(&settlement),
-        ))
-        .map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
-        let hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(HookDeliverySpoolError::InvalidReceipt)?;
-        let mut receipt_id = [0_u8; 16];
-        decode_hex_prefix(hex, &mut receipt_id)?;
+        let receipt_id = receipt_id_for_settlement(&settlement)?;
         Ok(Self {
             receipt_id,
             settlement,
@@ -60,8 +50,8 @@ impl HookDeliverySourceReceiptV1 {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
         validate_settlement(&self.settlement)?;
-        let expected = Self::new(self.settlement.clone())?;
-        if expected.receipt_id != self.receipt_id {
+        let expected = receipt_id_for_settlement(&self.settlement)?;
+        if expected != self.receipt_id {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
         Ok(())
@@ -280,6 +270,23 @@ impl HookDeliveryReceiptSpoolV1 {
 
 pub fn hook_delivery_receipt_spool_root(data_root: &Path, host: crate::HookHostV1) -> PathBuf {
     data_root.join("hook-delivery-spool").join(host.hook_key())
+}
+
+fn receipt_id_for_settlement(
+    settlement: &DeliverySettlementV1,
+) -> Result<[u8; 16], HookDeliverySpoolError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.hook-delivery-source-receipt.v1",
+        StableReceiptIdentity::from_settlement(settlement),
+    ))
+    .map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(HookDeliverySpoolError::InvalidReceipt)?;
+    let mut receipt_id = [0_u8; 16];
+    decode_hex_prefix(hex, &mut receipt_id)?;
+    Ok(receipt_id)
 }
 
 fn validate_settlement(settlement: &DeliverySettlementV1) -> Result<(), HookDeliverySpoolError> {
