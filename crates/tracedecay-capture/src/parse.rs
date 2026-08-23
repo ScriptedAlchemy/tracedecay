@@ -140,6 +140,9 @@ pub fn parse_observation_record_v1(
 /// Decodes one bounded native JSON record, consumes that decoded value in a
 /// provider normalizer, and issues a parser token containing only the canonical
 /// envelope. The native record is never decoded a second time.
+///
+/// Measured at source-record composition, not per JSON token or structure value.
+#[hotpath::measure]
 pub fn parse_normalized_observation_record_v1(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
@@ -181,11 +184,12 @@ pub fn parse_normalized_observation_record_v1(
         encoded_len: record.len(),
         observed_depth: structure.depth,
         observed_values: structure.values,
-        raw_digest: Sha256::digest(record).into(),
+        raw_digest: record_digest(record),
         canonical_provider: Some(canonical_provider),
     })
 }
 
+#[hotpath::measure]
 fn parse_observation_record(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
@@ -206,9 +210,14 @@ fn parse_observation_record(
         encoded_len: record.len(),
         observed_depth: structure.depth,
         observed_values: structure.values,
-        raw_digest: Sha256::digest(record).into(),
+        raw_digest: record_digest(record),
         canonical_provider: None,
     })
+}
+
+fn record_digest(record: &[u8]) -> [u8; 32] {
+    hotpath::gauge!("capture.parse.record_bytes").set(record.len());
+    hotpath::measure_block!("capture.parse.record_digest", Sha256::digest(record).into())
 }
 
 fn validate_record_frame(
