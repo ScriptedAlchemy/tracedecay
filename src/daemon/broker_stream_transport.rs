@@ -467,6 +467,7 @@ mod peer_close_tests {
     struct DeliverySettlementFixture {
         _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
         _project: tempfile::TempDir,
+        _runtime: crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime,
         recorder: Arc<BoundedDeliverySettlementRecorderV1>,
         authority: Arc<DeliverySettlementAuthorityV1>,
         producer: Arc<BoundedObservabilityProducerV1>,
@@ -508,6 +509,7 @@ mod peer_close_tests {
         DeliverySettlementFixture {
             _pin: pin,
             _project: project,
+            _runtime: runtime,
             recorder,
             authority,
             producer,

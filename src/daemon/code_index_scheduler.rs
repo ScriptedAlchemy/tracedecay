@@ -1840,7 +1840,17 @@ impl LatestCompleteCodeIndexV1 {
     /// closed on — the exact same checks.
     #[cfg(test)]
     pub(in crate::daemon) fn warm_serving_caches(&self) {
-        let _ = self.activate_text_serving();
+        loop {
+            match self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1) {
+                Ok(true) => {
+                    let _ = self.record_index();
+                    let _ = self.generation.test_attribution_authority();
+                    break;
+                }
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
         let generation_id = self.generation.manifest().generation_id.clone();
         let Ok(freshness) = self.source_freshness() else {
             return;
