@@ -6401,6 +6401,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tracedecay-application",
+ "tracedecay-capture",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-private-fs",

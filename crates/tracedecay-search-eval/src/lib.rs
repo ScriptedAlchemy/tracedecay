@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod candidate_output;
+mod controlled_workloads;
 mod native_qualification;
 mod packaged_assets;
 mod report;
@@ -40,6 +41,11 @@ pub use candidate_output::{
     generate_candidate_outputs_with_native, load_candidate_workload,
     load_direct_evaluated_profile_material, no_admitted_corpus_scope,
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
+};
+pub use controlled_workloads::{
+    ControlledOperationDeltaV1, ControlledOperationV1, ControlledWorkloadComparisonV1,
+    ControlledWorkloadErrorV1, ControlledWorkloadReportV1, compare_controlled_workloads,
+    run_cursor_parse_batch_workload, run_framed_log_durability_workload,
 };
 pub use native_qualification::{
     NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
