@@ -1,4 +1,4 @@
-//! Opt-in hotpath gauges for usecases retention, scheduling, and queries.
+//! Opt-in hotpath gauges for usecases retention, scheduling, queries, and admission.
 //!
 //! Keys are static capability names. Never pass model inputs, paths, or
 //! generation identifiers as labels. Every macro expands to a no-op unless
@@ -117,4 +117,14 @@ pub(crate) fn diagnostics_query(records: usize, total: usize) {
 #[inline]
 pub(crate) fn feedback_query(findings: usize) {
     hotpath::gauge!("usecases.feedback.findings").set(findings as f64);
+}
+
+#[inline]
+pub(crate) fn admission_capture_frames(frames: usize) {
+    hotpath::gauge!("usecases.admission.capture_frames").set(frames as f64);
+}
+
+#[inline]
+pub(crate) fn admission_persist_frames(frames: usize) {
+    hotpath::gauge!("usecases.admission.persist_frames").set(frames as f64);
 }

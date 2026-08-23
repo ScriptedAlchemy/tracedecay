@@ -598,6 +598,7 @@ impl<'a> HostAdmissionFacade<'a> {
     /// This overrides the trait default, which still walks
     /// [`Self::capture_observation`] one frame at a time. An empty window
     /// returns empty without minting a skipped-authority success.
+    #[hotpath::measure]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -605,6 +606,7 @@ impl<'a> HostAdmissionFacade<'a> {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
+        crate::hotpath_observe::admission_capture_frames(requests.len());
         let provider = first.provider().to_owned();
         let scope = first.scope().clone();
         self.authorities.validate_scope(&scope)?;
@@ -662,6 +664,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ///
     /// An empty window returns empty without opening the store or minting a
     /// skipped-authority success. Mixed provider or scope writes fail closed.
+    #[hotpath::measure]
     pub async fn persist_observations(
         &self,
         provider: &str,
@@ -671,6 +674,7 @@ impl<'a> HostAdmissionFacade<'a> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
+        crate::hotpath_observe::admission_persist_frames(writes.len());
         self.authorities.validate_scope(scope)?;
         for write in &writes {
             if write.observation().source().provider().as_str() != provider

@@ -136,6 +136,7 @@ impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
 }
 
 impl<A: FactStore> MemoryApplication<A> {
+    #[hotpath::measure]
     pub async fn commit_fact(
         &self,
         batch: FactWriteBatch,
