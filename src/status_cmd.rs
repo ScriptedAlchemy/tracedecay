@@ -331,10 +331,9 @@ async fn handle_status_command_within(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_status_tool_args, should_fetch_online_status_embellishments,
-        should_print_status_logo,
+        compact_status_tool_args, reject_truncation_envelope,
+        should_fetch_online_status_embellishments, should_print_status_logo,
     };
-    use crate::commands::daemon::{is_truncation_envelope, reject_truncation_envelope};
     use serde_json::json;
 
     #[test]
@@ -358,16 +357,21 @@ mod tests {
             "preview": "{}",
             "handle": "rh_test",
         });
-        assert!(is_truncation_envelope(&envelope));
         let err = reject_truncation_envelope(&envelope, "tracedecay_status").unwrap_err();
         let message = err.to_string();
         assert!(message.contains("truncated JSON"));
         assert!(message.contains("20000"));
         assert!(message.contains("rh_test"));
-        assert!(!is_truncation_envelope(&json!({ "node_count": 1 })));
-        assert!(!is_truncation_envelope(
-            &json!({ "truncated": true, "matches": [] })
-        ));
+        assert!(
+            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status").is_ok()
+        );
+        assert!(
+            reject_truncation_envelope(
+                &json!({ "truncated": true, "matches": [] }),
+                "tracedecay_status",
+            )
+            .is_ok()
+        );
     }
 
     #[test]
