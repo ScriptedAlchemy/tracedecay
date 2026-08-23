@@ -915,7 +915,7 @@ def _capture_variant(
                 + ", ".join(sorted(duplicate_ids))
             )
         criterion_samples.extend(samples)
-        benchmark_data.update(binary_benchmarks)
+        benchmarks.update(binary_benchmarks)
 
     fixture, fixture_process = _fixture_capture(
         fixture_binary,

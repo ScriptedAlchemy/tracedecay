@@ -1,4 +1,4 @@
-"""Persistent line-oriented JSON-RPC client for MCP runtime benchmark_data."""
+"""Persistent line-oriented JSON-RPC client for MCP runtime benchmarks."""
 
 from __future__ import annotations
 
