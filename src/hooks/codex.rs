@@ -41,6 +41,12 @@ mapped to symbols, `tracedecay:project-memory` when project decisions/preference
 `tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` when prior conversation context \
 may be missing.";
 
+/// Shipped Codex compatibility name for the shared Claude/Codex
+/// `hookSpecificOutput.additionalContext` stdout shape.
+pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
+    super::additional_context_json(event_name, additional_context)
+}
+
 /// Codex `SessionStart` hook handler.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();

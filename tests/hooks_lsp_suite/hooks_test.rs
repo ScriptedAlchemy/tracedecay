@@ -3,12 +3,12 @@ use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{
     HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
-    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
-    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
-    cursor_project_root_from_event, cursor_session_start_json, cursor_should_run_sync,
-    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_subagent_start,
-    evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
-    record_codex_subagent_start,
+    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
+    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
+    codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_should_run_sync, cursor_staleness_hint, evaluate_codex_subagent_start,
+    evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
+    kiro_post_tool_use_rel_paths, record_codex_subagent_start,
 };
 use tracedecay::storage::{pin_fixture_repository_identity, resolve_layout_for_current_profile};
 
@@ -689,7 +689,12 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
 
 #[test]
 fn test_codex_additional_context_json_uses_codex_schema() {
-    let json = additional_context_json("SessionStart", "hello context");
+    let json = codex_additional_context_json("SessionStart", "hello context");
+    assert_eq!(
+        json,
+        additional_context_json("SessionStart", "hello context"),
+        "the shipped Codex compatibility API must delegate byte-exactly to the canonical formatter"
+    );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["hookEventName"].as_str(),
