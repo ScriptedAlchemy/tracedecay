@@ -53,7 +53,8 @@ use super::owner::{
 };
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::response_handles::{
-    ResponseHandleLookup, is_valid_response_handle, retrieve_response_handle, store_response_handle,
+    ResponseHandleLookup, is_valid_response_handle, micros_to_seconds, retrieve_response_handle,
+    store_response_handle,
 };
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_runtime_core::db::engine::params;
@@ -1793,10 +1794,6 @@ fn validate_request(request: &FeedbackReadRequestV1) -> Result<(), ApplicationCo
         FeedbackReadRequestV1::Expand(request) => request.validate(),
         FeedbackReadRequestV1::List(request) => request.validate(),
     }
-}
-
-fn micros_to_seconds(micros: UtcMicros) -> i64 {
-    micros.0.div_euclid(1_000_000)
 }
 
 #[cfg(test)]

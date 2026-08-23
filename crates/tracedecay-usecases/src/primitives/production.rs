@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::grep_analysis::{
@@ -25,11 +26,11 @@ use tracedecay_application::{
     OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
     ResolvedScope, RetrievalEvidence, TemporalState,
 };
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -60,7 +61,7 @@ use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
 };
 use crate::graph::health_delta::compute_verified_health_delta;
-use crate::graph::queries::GraphQueryManager;
+use crate::graph::queries::{GraphQueryManager, is_test_marker};
 use crate::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
     request_graph_cancellation,
@@ -449,7 +450,6 @@ fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCove
 }
 
 fn now_observed() -> UtcMicros {
-    use std::time::{SystemTime, UNIX_EPOCH};
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -477,23 +477,13 @@ fn all_code_graph_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
-    const MAX_SYMBOLS: usize = 500_000;
     const PAGE_SIZE: usize = 4_096;
-    let mut after = None;
-    let mut symbols = Vec::new();
-    loop {
-        let page = graph
-            .symbols_page(after.as_ref(), PAGE_SIZE, Arc::clone(&cancellation))
-            .map_err(|_| ())?;
-        if symbols.len().saturating_add(page.symbols.len()) > MAX_SYMBOLS {
-            return Err(());
-        }
-        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-        symbols.extend(page.symbols);
-        if !page.has_more {
-            return Ok(symbols);
-        }
-    }
+    GraphQueryManager::new(graph, cancellation)
+        .page_all_symbols(
+            PAGE_SIZE,
+            "verified symbol census exceeded its analytical budget",
+        )
+        .map_err(|_| ())
 }
 
 fn logical_file_symbols(
@@ -558,15 +548,7 @@ fn test_annotation_evidence(
         .collect::<Vec<_>>();
     let markers = symbols
         .iter()
-        .filter(|symbol| {
-            symbol.metadata.as_ref().is_some_and(|metadata| {
-                metadata.kind == "annotation_usage"
-                    && matches!(
-                        metadata.simple_name.as_str(),
-                        "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-                    )
-            })
-        })
+        .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
         .map(|symbol| symbol.occurrence.clone())
         .collect::<std::collections::HashSet<_>>();
     let edges = graph
@@ -865,8 +847,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                 &reader,
                 Arc::clone(&cancellation),
                 &self.annotation_evidence,
-            )
-            else {
+            ) else {
                 return test_primitive_failed(context);
             };
             let mut coverage_map = Vec::new();
@@ -1010,8 +991,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                 &reader,
                 Arc::clone(&cancellation),
                 &self.annotation_evidence,
-            )
-            else {
+            ) else {
                 return test_primitive_failed(context);
             };
             let Ok(files_with_inline_tests) =
@@ -1721,16 +1701,27 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a FileMetadataPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
         Box::pin(async move {
-            let mut files = Vec::new();
+            let root = self.source_runtime.project_root().to_path_buf();
+            let mut handles = Vec::with_capacity(request.files.len());
             for file in &request.files {
-                let path = self.source_runtime.project_root().join(file);
-                let meta = tokio::fs::metadata(&path).await.ok();
-                files.push(FileMetadataRecord {
-                    file: file.clone(),
-                    language: None,
-                    indexed_at: None,
-                    byte_size: meta.map(|value| value.len()),
-                });
+                let path = root.join(file);
+                let file = file.clone();
+                handles.push(tokio::spawn(async move {
+                    let meta = tokio::fs::metadata(path).await.ok();
+                    FileMetadataRecord {
+                        file,
+                        language: None,
+                        indexed_at: None,
+                        byte_size: meta.map(|value| value.len()),
+                    }
+                }));
+            }
+            let mut files = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle.await {
+                    Ok(record) => files.push(record),
+                    Err(_) => return failed(EvidenceDomain::Source, now_observed()),
+                }
             }
             completed(
                 FileMetadataPrimitiveResult { files },
@@ -2442,14 +2433,23 @@ fn attributed_tests_outcome(
         visited,
         eligible,
         Some(EvidenceAuthority {
-            evidence_id: EvidenceIdentity::new(format!(
+            evidence_id: match EvidenceIdentity::new(format!(
                 "evidence.test-attribution.{}",
                 join.test_watermark
                     .evidence_digest
                     .as_str()
                     .trim_start_matches("sha256:")
-            ))
-            .unwrap_or_else(|_| panic!("validated attribution digest yields evidence identity")),
+            )) {
+                Ok(identity) => identity,
+                Err(_) => {
+                    return affected_tests_unavailable(
+                        request,
+                        finished_at,
+                        OmissionReason::Failed,
+                        FreshnessState::Unknown,
+                    );
+                }
+            },
             source_kind: "test_attribution".to_owned(),
             producer: "code_index".to_owned(),
             scope,

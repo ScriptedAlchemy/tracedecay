@@ -107,34 +107,42 @@ fn hash_source_edit_content(content: &[u8]) -> Result<ManifestDigest> {
     ManifestDigest::from_sha256_bytes(&Sha256::digest(content)).map_err(domain_error)
 }
 
+fn minted_effect_id(
+    domain: &'static str,
+    prefix: &'static str,
+    key: &tracedecay_application::IdempotencyKey,
+    input_digest: &ManifestDigest,
+) -> Result<EffectId> {
+    let digest = canonical_sha256(&(domain, key, input_digest)).map_err(domain_error)?;
+    EffectId::new(format!(
+        "{prefix}{}",
+        digest.as_str().trim_start_matches("sha256:")
+    ))
+    .map_err(application_contract_error)
+}
+
 pub(super) fn effect_id(
     key: &tracedecay_application::IdempotencyKey,
     input_digest: &ManifestDigest,
 ) -> Result<EffectId> {
-    let digest = canonical_sha256(&("tracedecay.source-edit-effect-id.v1", key, input_digest))
-        .map_err(domain_error)?;
-    EffectId::new(format!(
-        "effect.source-edit.{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(application_contract_error)
+    minted_effect_id(
+        "tracedecay.source-edit-effect-id.v1",
+        "effect.source-edit.",
+        key,
+        input_digest,
+    )
 }
 
 pub(super) fn reconciliation_attempt_effect_id(
     key: &tracedecay_application::IdempotencyKey,
     input_digest: &ManifestDigest,
 ) -> Result<EffectId> {
-    let digest = canonical_sha256(&(
+    minted_effect_id(
         "tracedecay.source-edit-reconciliation-attempt-effect-id.v1",
+        "effect.source-edit-reconciliation.",
         key,
         input_digest,
-    ))
-    .map_err(domain_error)?;
-    EffectId::new(format!(
-        "effect.source-edit-reconciliation.{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(application_contract_error)
+    )
 }
 
 pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -> Result<()> {
@@ -181,6 +189,8 @@ where
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
     #[test]
@@ -199,8 +209,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn expected_state_digest_rejects_symlinked_candidate_parent() {
-        use std::os::unix::fs::symlink;
-
         let project = tempdir().unwrap();
         let outside = tempdir().unwrap();
         fs::write(outside.path().join("lib.rs"), b"outside").unwrap();
@@ -216,8 +224,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn expected_state_digest_rejects_symlinked_candidate_file() {
-        use std::os::unix::fs::symlink;
-
         let project = tempdir().unwrap();
         let outside = tempdir().unwrap();
         let secret = outside.path().join("secret.rs");

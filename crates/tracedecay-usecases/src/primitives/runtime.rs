@@ -20,9 +20,9 @@ use tracedecay_application::retrieval::grep_analysis::{
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, ExactSymbolRequest,
     GraphImpactPrimitiveRequest, GraphRelationRequest, HealthDeltaRequest, HealthDeltaResult,
-    HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, RetrievalPortContext,
-    RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest, SourceLinesRequest,
-    SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
+    HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, PrimitiveFailureKind,
+    RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest,
+    SourceLinesRequest, SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
     SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage, SymbolGraphPortContext,
     SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolSearchPrimitiveRequest,
     TemporalRetrievalPort, TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort,
@@ -75,6 +75,40 @@ macro_rules! value_or_problem {
             Err(_) => return contract_problem($context, $operation),
         }
     };
+}
+
+macro_rules! dispatch_symbol {
+    ($runtime:expr, $context:expr, $operation:expr, $observed_at:expr, $request:expr, $method:ident, $domain:expr) => {{
+        let outcome = $runtime
+            .project_runtime
+            .symbol_graph
+            .$method(symbol_context($context, $operation, $observed_at), &$request)
+            .await;
+        symbol_outcome(
+            &$runtime.access,
+            $context,
+            $operation,
+            $domain,
+            outcome,
+        )
+    }};
+}
+
+macro_rules! dispatch_extended {
+    ($runtime:expr, $context:expr, $operation:expr, $observed_at:expr, $request:expr, $method:ident) => {{
+        let outcome = $runtime
+            .project_runtime
+            .extended
+            .$method(retrieval_context($context, $operation), &$request)
+            .await;
+        retrieval_outcome(
+            &$runtime.access,
+            $context,
+            $operation,
+            outcome,
+            $observed_at,
+        )
+    }};
 }
 
 pub type PrimitiveDispatchFuture<'a> =
@@ -666,118 +700,78 @@ async fn dispatch_admitted(
         return invalid_request(&context, &operation);
     }
     match invocation.request {
-        PrimitiveRequest::SymbolSearch(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .symbol_search(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Symbol,
-                outcome,
-            )
-        }
-        PrimitiveRequest::ExactSymbol(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .exact_symbol(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Symbol,
-                outcome,
-            )
-        }
-        PrimitiveRequest::SignatureSearch(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .signature_search(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Symbol,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Implementations(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .implementations(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::TypeHierarchy(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .type_hierarchy(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Callers(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .callers(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Callees(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .callees(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Impact(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .impact(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
+        PrimitiveRequest::SymbolSearch(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            symbol_search,
+            EvidenceDomain::Symbol
+        ),
+        PrimitiveRequest::ExactSymbol(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            exact_symbol,
+            EvidenceDomain::Symbol
+        ),
+        PrimitiveRequest::SignatureSearch(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            signature_search,
+            EvidenceDomain::Symbol
+        ),
+        PrimitiveRequest::Implementations(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            implementations,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::TypeHierarchy(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            type_hierarchy,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::Callers(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            callers,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::Callees(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            callees,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::Impact(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            impact,
+            EvidenceDomain::Graph
+        ),
         PrimitiveRequest::SourceRead(request) => {
             let outcome = runtime
                 .project_runtime
@@ -915,30 +909,30 @@ async fn dispatch_admitted(
             };
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::QualifiedName(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .qualified_name(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::CallChain(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .call_chain(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::FileDependents(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .file_dependents(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
+        PrimitiveRequest::QualifiedName(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            qualified_name
+        ),
+        PrimitiveRequest::CallChain(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            call_chain
+        ),
+        PrimitiveRequest::FileDependents(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            file_dependents
+        ),
         PrimitiveRequest::SourceLines(request) => {
             let outcome = runtime
                 .project_runtime
@@ -946,38 +940,38 @@ async fn dispatch_admitted(
                 .source_lines(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::SourceBody(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .source_body(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::SourceOutline(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .source_outline(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::ModuleApi(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .module_api(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::FileMetadata(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .file_metadata(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
+        PrimitiveRequest::SourceBody(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            source_body
+        ),
+        PrimitiveRequest::SourceOutline(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            source_outline
+        ),
+        PrimitiveRequest::ModuleApi(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            module_api
+        ),
+        PrimitiveRequest::FileMetadata(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            file_metadata
+        ),
         PrimitiveRequest::HealthRead(request) => {
             let outcome = runtime
                 .project_runtime
@@ -985,30 +979,30 @@ async fn dispatch_admitted(
                 .health_read(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::HealthDelta(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .health_delta(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::StorageStatus(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .storage_status(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::DiagnosticsRead(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .diagnostics(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
+        PrimitiveRequest::HealthDelta(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            health_delta
+        ),
+        PrimitiveRequest::StorageStatus(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            storage_status
+        ),
+        PrimitiveRequest::DiagnosticsRead(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            diagnostics
+        ),
         PrimitiveRequest::RecentTestResults(page) => {
             recent_test_results(runtime, &context, &operation, &page, observed_at).await
         }
@@ -1685,7 +1679,6 @@ fn primitive_failure<T>(
     operation: &ApplicationOperation,
     failure: tracedecay_application::retrieval::PrimitiveFailure,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    use tracedecay_application::retrieval::PrimitiveFailureKind;
     let application_problem = match failure.kind {
         PrimitiveFailureKind::InvalidRequest => ApplicationProblem::InvalidRequest {
             diagnostic: SafeDiagnostic {

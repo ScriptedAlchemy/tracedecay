@@ -75,14 +75,10 @@ use crate::operation_stream::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::response_handles::{
-    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
+    ResponseHandleLookup, micros_to_seconds, retrieve_response_handle, store_response_handle,
 };
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
-
-fn micros_to_seconds(value: UtcMicros) -> i64 {
-    value.0.div_euclid(1_000_000)
-}
 
 fn byte_offsets_to_utf16_range(
     text: &str,
