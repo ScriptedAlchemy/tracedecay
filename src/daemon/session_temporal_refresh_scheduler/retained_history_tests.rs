@@ -61,6 +61,12 @@ struct RetryThenBlockHistoricalIngestor {
     wake: tokio::sync::Notify,
 }
 
+struct BlockThirdHistoricalIngestor {
+    passes: AtomicUsize,
+    third_entered: AtomicBool,
+    release_third: tokio::sync::Notify,
+}
+
 struct PanicOnceHistoricalIngestor {
     passes: AtomicUsize,
 }
@@ -86,6 +92,40 @@ impl RetryThenBlockHistoricalIngestor {
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
         }
+    }
+}
+
+impl BlockThirdHistoricalIngestor {
+    fn new() -> Self {
+        Self {
+            passes: AtomicUsize::new(0),
+            third_entered: AtomicBool::new(false),
+            release_third: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            match self.passes.fetch_add(1, Ordering::AcqRel) {
+                0 => SessionHistoricalIngestOutcome::Complete,
+                1 => SessionHistoricalIngestOutcome::Pending {
+                    made_progress: false,
+                },
+                _ => {
+                    self.third_entered.store(true, Ordering::Release);
+                    self.release_third.notified().await;
+                    SessionHistoricalIngestOutcome::Blocked {
+                        reason_code: "fixture_complete",
+                    }
+                }
+            }
+        })
+    }
+
+    fn cancel(&self) {
+        self.release_third.notify_waiters();
     }
 }
 
@@ -215,15 +255,7 @@ async fn retained_history_worker_wakes_again_after_idle() {
 async fn history_only_retry_does_not_admit_projection_snapshots() {
     let temp = TempDir::new().unwrap();
     let authority = profile_authority(&temp, "history-only-retry").await;
-    let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
-        SessionHistoricalIngestOutcome::Complete,
-        SessionHistoricalIngestOutcome::Pending {
-            made_progress: false,
-        },
-        SessionHistoricalIngestOutcome::Blocked {
-            reason_code: "fixture_complete",
-        },
-    ]));
+    let ingestor = Arc::new(BlockThirdHistoricalIngestor::new());
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
 
     registry
@@ -254,11 +286,22 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
         .await;
     assert!(
         wait_until(
-            || ingestor.passes.load(Ordering::Acquire) == 3,
+            || ingestor.third_entered.load(Ordering::Acquire),
             Duration::from_secs(2),
         )
         .await
     );
+    let after_explicit_wake = authority
+        .database()
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("registered reader pool")
+        .snapshot_admissions;
+    assert!(
+        after_explicit_wake > baseline_admissions,
+        "the explicit ensure wake must retain its projection discovery",
+    );
+    ingestor.release_third.notify_waiters();
     assert!(
         registry
             .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
@@ -271,7 +314,7 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
             .reader_pool_occupancy()
             .expect("registered reader pool")
             .snapshot_admissions,
-        baseline_admissions,
+        after_explicit_wake,
         "history-only no-progress retries must not rediscover temporal projections",
     );
 
