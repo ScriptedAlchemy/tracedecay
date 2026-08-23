@@ -1877,8 +1877,8 @@ impl HookAnalyticsRows {
     /// hook figures (`hook_call_count`, `by_hook`, `by_prompt_category`,
     /// `hook_readiness`, `recent_hooks`) were computed over.
     fn window_payload(&self) -> AnalyticsHookWindowV1 {
-        let mut oldest_ts_unix_ms = None;
-        let mut newest_ts_unix_ms = None;
+        let mut oldest_ts_unix_ms: Option<i64> = None;
+        let mut newest_ts_unix_ms: Option<i64> = None;
         for row in &self.rows {
             let Some(timestamp) = row.get("ts_unix_ms").and_then(Value::as_i64) else {
                 continue;
