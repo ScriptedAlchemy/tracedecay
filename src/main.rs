@@ -4,6 +4,10 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process;
 
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
+
 mod agent_cmd;
 mod automation_cli;
 mod cli;
@@ -240,6 +244,13 @@ fn main() {
 }
 
 fn async_main() -> tracedecay::errors::Result<()> {
+    // Opt-in profiling. Keep the guard inside this fallible frame so every
+    // returned error drops it and emits the report before `main` may call
+    // `process::exit`. Starting it before composition-root setup captures
+    // startup as well as command execution; the explicit Tokio handle is
+    // registered after that runtime exists. These calls are no-ops when the
+    // repository's `hotpath` feature is disabled.
+    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay").build();
     // Every process-global runtime port the extracted crates invert back into
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
@@ -281,25 +292,22 @@ fn async_main() -> tracedecay::errors::Result<()> {
     // amplifying worktree warmup into CPU and memory contention. The daemon
     // owns one bounded global pool; one-shot CLI commands retain Rayon's
     // normal behavior. Operators can raise the default without a rebuild.
-    install_daemon_cpu_pool(cli.command.as_ref())?;
+    hotpath::measure_block!(
+        "daemon_cpu_pool_install",
+        install_daemon_cpu_pool(cli.command.as_ref())
+    )?;
     let worker_threads = async_worker_threads();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(worker_threads)
-        .max_blocking_threads(MAX_BLOCKING_THREADS)
-        .thread_stack_size(ASYNC_STACK_BYTES)
-        .build()
-        .map_err(|e| tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to start async runtime: {e}"),
-        })?;
-    // Opt-in profiling. The guard owns the profiler lifetime and prints its
-    // report on drop, so it is created once, here, and held until the process
-    // exits. `main` cannot carry `#[hotpath::main]`: this binary builds its own
-    // multi-thread runtime above instead of using `#[tokio::main]`, so the
-    // guard is constructed explicitly and the runtime handle is registered by
-    // hand. Both calls expand to nothing when no profiling feature is selected,
-    // which is why they need no `cfg` and the call sites stay identical.
-    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay").build();
+    let runtime = hotpath::measure_block!("tokio_runtime_build", {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(worker_threads)
+            .max_blocking_threads(MAX_BLOCKING_THREADS)
+            .thread_stack_size(ASYNC_STACK_BYTES)
+            .build()
+            .map_err(|e| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to start async runtime: {e}"),
+            })
+    })?;
     hotpath::tokio_runtime!(runtime.handle());
     // Process-level runtime shape only. Request, project-server, history, and
     // projection gauges belong on those authorities — not this bootstrap.
@@ -310,7 +318,10 @@ fn async_main() -> tracedecay::errors::Result<()> {
     });
     hotpath::val!("process_command_family").set(&command_family);
     hotpath::gauge!("process_in_command").set(1);
-    let result = hotpath::measure_block!("process_command", runtime.block_on(run(cli)));
+    let result = hotpath::measure_block!(
+        "process_command",
+        runtime.block_on(hotpath::future!(run(cli), label = "process_command_future"))
+    );
     hotpath::gauge!("process_in_command").set(0);
     // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
     // can leave OS-backed watcher work behind after their async handles abort,
@@ -365,6 +376,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     dispatch_command(command, host_bundle).await
 }
 
+#[hotpath::measure]
 async fn run_startup_preamble(command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
@@ -664,14 +676,35 @@ async fn dispatch_command(
     let family = CommandFamily::for_command(&command);
     validate_host_bundle_options(&command, family, &host_bundle)?;
     match family {
-        CommandFamily::Project => dispatch_project_command(command, host_bundle.yes).await,
-        CommandFamily::Runtime => dispatch_runtime_command(command).await,
-        CommandFamily::Agent => dispatch_agent_command(command, host_bundle).await,
-        CommandFamily::Hook => dispatch_hook_command(command).await,
-        CommandFamily::Update => dispatch_update_command(command).await,
-        CommandFamily::Configuration => dispatch_configuration_command(command).await,
-        CommandFamily::Diagnostics => dispatch_diagnostics_command(command).await,
-        CommandFamily::Knowledge => dispatch_knowledge_command(command).await,
+        CommandFamily::Project => hotpath::measure_block!(
+            "command_project",
+            dispatch_project_command(command, host_bundle.yes).await
+        ),
+        CommandFamily::Runtime => {
+            hotpath::measure_block!("command_runtime", dispatch_runtime_command(command).await)
+        }
+        CommandFamily::Agent => hotpath::measure_block!(
+            "command_agent",
+            dispatch_agent_command(command, host_bundle).await
+        ),
+        CommandFamily::Hook => {
+            hotpath::measure_block!("command_hook", dispatch_hook_command(command).await)
+        }
+        CommandFamily::Update => {
+            hotpath::measure_block!("command_update", dispatch_update_command(command).await)
+        }
+        CommandFamily::Configuration => hotpath::measure_block!(
+            "command_configuration",
+            dispatch_configuration_command(command).await
+        ),
+        CommandFamily::Diagnostics => hotpath::measure_block!(
+            "command_diagnostics",
+            dispatch_diagnostics_command(command).await
+        ),
+        CommandFamily::Knowledge => hotpath::measure_block!(
+            "command_knowledge",
+            dispatch_knowledge_command(command).await
+        ),
     }
 }
 

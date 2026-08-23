@@ -233,6 +233,7 @@ pub async fn collect_with_integrity(
     collect_with_integrity_and_generation_census(cg, include_integrity, None).await
 }
 
+#[hotpath::measure]
 pub(crate) async fn collect_with_integrity_and_generation_census(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
@@ -489,6 +490,7 @@ fn cpu_percent_from_linux_ticks(
     Some((cpu_secs / wall_secs * 100.0) as f32)
 }
 
+#[hotpath::measure]
 fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnapshot> {
     let pid = Pid::from_u32(std::process::id());
 
@@ -571,6 +573,7 @@ pub(crate) async fn collect_database(
     collect_database_with_generation_census(cg, include_integrity, None).await
 }
 
+#[hotpath::measure]
 async fn collect_database_with_generation_census(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
@@ -614,7 +617,7 @@ async fn collect_database_with_generation_census(
         },
     };
     let generation_census = match generation_census_reader {
-        Some(reader) => reader().await,
+        Some(reader) => hotpath::future!(reader(), label = "runtime_generation_census").await,
         None => GenerationCensusSnapshot::Unavailable {
             reason: GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
