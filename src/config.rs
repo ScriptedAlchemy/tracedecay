@@ -1098,29 +1098,17 @@ async fn open_runtime_configuration_from_store(
             "daemon project source binding could not be derived: {error}"
         ))
     })?;
-    let mut current = store.current().await.map_err(map_configuration_error)?;
-    let native_graph_activation_key = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
-        .map_err(|error| {
-            config_error(format!(
-                "invalid native graph activation setting key: {error}"
-            ))
-        })?;
-    if !current
-        .snapshot
-        .effective_values
-        .contains_key(&native_graph_activation_key)
+    let current = store.current().await.map_err(map_configuration_error)?;
+    let mut current = match store
+        .converge_registered_additive_defaults(&current.revision_id, now_micros())
+        .await
     {
-        current = match store
-            .converge_native_graph_activation_default(&current.revision_id, now_micros())
-            .await
-        {
-            Ok(state) => state,
-            Err(tracedecay_usecases::configuration::ConfigurationError::RevisionConflict) => {
-                store.current().await.map_err(map_configuration_error)?
-            }
-            Err(error) => return Err(map_configuration_error(error)),
-        };
-    }
+        Ok(state) => state,
+        Err(tracedecay_usecases::configuration::ConfigurationError::RevisionConflict) => {
+            store.current().await.map_err(map_configuration_error)?
+        }
+        Err(error) => return Err(map_configuration_error(error)),
+    };
     let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
         .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
     enum SourceBindingCheck {

@@ -3,9 +3,10 @@
 use super::super::mutation::{
     commit_configuration_transaction, map_store_error, validate_commit_bindings,
 };
+use super::super::write::insert_snapshot_entries;
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
-    ConfigurationStoreError, CredentialWritePort, params,
+    ConfigurationStoreError, CredentialWritePort, Executor, QueryExecutor, params,
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
@@ -18,7 +19,9 @@ use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::configuration::{
-    ConfigurationMutationOperationV1, CredentialKindV1, SettingKey,
+    CodeIndexWorkerSelectionV1, ConfigurationMutationOperationV1, ConfigurationSnapshotV1,
+    ConfigurationValueV1 as DomainConfigurationValueV1, CredentialKindV1, SettingKey,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -67,6 +70,92 @@ async fn canonical_initialization_publishes_one_final_revision_without_legacy_st
     assert_eq!(
         legacy.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn registry_added_code_index_worker_default_converges_once_as_a_child_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile_root = directory.path().join("profile");
+    let project_root = directory.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        tracedecay_domain::ProjectId::new("project.configuration-worker-convergence").unwrap(),
+    )
+    .await
+    .unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let mut legacy = root_revision();
+    let worker_key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).unwrap();
+    let mut effective_values = legacy.snapshot.effective_values;
+    let mut provenance = legacy.snapshot.provenance;
+    effective_values.remove(&worker_key);
+    provenance.remove(&worker_key);
+    legacy.snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO configuration_revisions (
+                revision_id, parent_revision_id, snapshot_id,
+                effective_behavior_digest, resolution_provenance_digest,
+                actor_id, operation_kind, created_at
+             ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                legacy.revision_id.as_str(),
+                legacy.snapshot.snapshot_id.as_str(),
+                legacy.snapshot.effective_behavior_digest.as_str(),
+                legacy.snapshot.resolution_provenance_digest.as_str(),
+                legacy.actor_id.as_str(),
+                legacy.operation_kind.as_str(),
+                legacy.created_at.0,
+            ],
+        )
+        .await
+        .unwrap();
+    insert_snapshot_entries(&transaction, &legacy.revision_id, &legacy.snapshot)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    assert!(matches!(
+        store
+            .converge_registered_additive_defaults(
+                &id("configuration.revision.stale"),
+                UtcMicros(2),
+            )
+            .await,
+        Err(ConfigurationError::RevisionConflict)
+    ));
+    let converged = store
+        .converge_registered_additive_defaults(&legacy.revision_id, UtcMicros(2))
+        .await
+        .unwrap();
+    assert_ne!(converged.revision_id, legacy.revision_id);
+    assert_eq!(
+        converged.snapshot.effective_values.get(&worker_key),
+        Some(&DomainConfigurationValueV1::CodeIndexWorkerSelection(
+            CodeIndexWorkerSelectionV1::Automatic,
+        ))
+    );
+    let unchanged = store
+        .converge_registered_additive_defaults(&converged.revision_id, UtcMicros(3))
+        .await
+        .unwrap();
+    assert_eq!(unchanged.revision_id, converged.revision_id);
+    let read = db.read_snapshot().await.unwrap();
+    let mut rows = read
+        .query("SELECT COUNT(*) FROM configuration_revisions", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        2
     );
 }
 

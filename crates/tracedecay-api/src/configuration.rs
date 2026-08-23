@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_application::{ApplicationProblemEnvelope, ApplicationProblemKind};
+use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 
 use crate::http::HttpApplicationOperation;
 
@@ -73,6 +74,8 @@ pub struct UserSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_index_workers: Option<CodeIndexWorkerSelectionV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_debounce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_timeout_secs: Option<u64>,
@@ -116,6 +119,15 @@ pub fn validate_user_settings_patch(
         errors.push(validation_error(
             "extraction_timeout_secs",
             "extraction_timeout_secs must be at least 1 second",
+        ));
+    }
+    if matches!(
+        patch.code_index_workers,
+        Some(CodeIndexWorkerSelectionV1::Exact { workers: 0 })
+    ) {
+        errors.push(validation_error(
+            "code_index_workers",
+            "code_index_workers exact mode must request at least 1 worker",
         ));
     }
     if errors.is_empty() {
@@ -214,4 +226,50 @@ fn serde_error_field(message: &str) -> Option<String> {
             let end = rest.find('`')?;
             Some(rest[..end].to_owned())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+
+    #[test]
+    fn user_worker_patch_round_trips_the_tagged_contract() {
+        let automatic = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "code_index_workers": { "mode": "automatic" }
+        }))
+        .unwrap();
+        assert_eq!(
+            automatic.code_index_workers,
+            Some(CodeIndexWorkerSelectionV1::Automatic)
+        );
+
+        let exact = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "code_index_workers": { "mode": "exact", "workers": 64 }
+        }))
+        .unwrap();
+        assert_eq!(
+            exact.code_index_workers,
+            Some(CodeIndexWorkerSelectionV1::Exact { workers: 64 })
+        );
+    }
+
+    #[test]
+    fn user_worker_patch_denies_zero_exact_workers() {
+        let patch = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "code_index_workers": { "mode": "exact", "workers": 0 }
+        }))
+        .unwrap();
+
+        let (status, Json(body)) =
+            validate_user_settings_patch(&patch, |_| true).expect_err("zero must be denied");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
+    }
 }
