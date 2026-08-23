@@ -61,8 +61,9 @@ pub use kiro::{
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
 };
 pub use steering::{
-    CURSOR_PLUGIN_SKILLS, HookWorkspaceStatus, build_codex_session_context,
-    build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,
+    CODEX_SESSION_CONTEXT_BUDGET, CURSOR_PLUGIN_SKILLS, CURSOR_SESSION_CONTEXT_BUDGET,
+    HookWorkspaceStatus, build_codex_session_context, build_codex_session_context_for_workspace,
+    build_cursor_session_context, cursor_staleness_hint,
 };
 
 #[cfg(test)]

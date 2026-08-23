@@ -45,6 +45,20 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
 #[cfg(test)]
 pub(super) const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";
 
+/// Character budget for the Cursor `sessionStart` `additional_context` text.
+///
+/// This is the steering contract, not a test detail: session context is
+/// injected on every Cursor session start, so growing it costs every session.
+/// Rewording the prose is free; exceeding this budget is a deliberate decision
+/// that must be made here, in production, rather than by relaxing a test.
+pub const CURSOR_SESSION_CONTEXT_BUDGET: usize = 1_300;
+
+/// Character budget for the Codex session/prompt steering context.
+///
+/// Same contract as [`CURSOR_SESSION_CONTEXT_BUDGET`]; Codex carries more
+/// routing guidance, so its budget is larger.
+pub const CODEX_SESSION_CONTEXT_BUDGET: usize = 2_600;
+
 /// Builds the Cursor `sessionStart` `additional_context` text.
 pub fn build_cursor_session_context(
     initialized: bool,
@@ -53,6 +67,7 @@ pub fn build_cursor_session_context(
 ) -> String {
     let mut s = index_status_line(initialized, staleness_hint);
     if initialized {
+        s.reserve(CURSOR_SESSION_CONTEXT_BUDGET.saturating_sub(s.len()));
         append_tracedecay_bootstrap_context(&mut s);
         s.push_str("Workflow skills: tracedecay:");
         s.push_str(&CURSOR_PLUGIN_SKILLS.join(", "));
@@ -112,7 +127,7 @@ pub fn build_codex_session_context_for_workspace(
     status: HookWorkspaceStatus,
     staleness_hint: Option<&str>,
 ) -> String {
-    let mut s = String::new();
+    let mut s = String::with_capacity(CODEX_SESSION_CONTEXT_BUDGET);
     match status {
         HookWorkspaceStatus::Initialized | HookWorkspaceStatus::UnindexedProject => {
             if matches!(status, HookWorkspaceStatus::Initialized) {
