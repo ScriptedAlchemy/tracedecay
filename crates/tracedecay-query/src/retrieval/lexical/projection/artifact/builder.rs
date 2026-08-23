@@ -349,6 +349,7 @@ impl CodeLexicalArtifactBuilderV1 {
         )
     }
 
+    #[hotpath::measure(label = "query.artifact.create")]
     pub fn create_with_memory_budget(
         path: impl AsRef<Path>,
         metadata: CodeLexicalProjectionMetadataV1,
@@ -381,6 +382,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 ],
             )
             .map_err(sqlite_error)?;
+        crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
             _private_file: private_file,
@@ -396,6 +398,7 @@ impl CodeLexicalArtifactBuilderV1 {
     /// Reopen only the staged artifact authority while applying the caller's
     /// scheduler epoch/deadline control to integrity, metadata, receipt, and
     /// contiguous-cursor verification.
+    #[hotpath::measure(label = "query.artifact.open_or_resume")]
     pub fn open_or_resume_with_memory_budget_and_control(
         path: impl AsRef<Path>,
         expected_metadata: CodeLexicalProjectionMetadataV1,
@@ -416,6 +419,7 @@ impl CodeLexicalArtifactBuilderV1 {
         read_receipt_with_control(&connection, control)?;
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
+        crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
             _private_file: private_file,
@@ -460,6 +464,7 @@ impl CodeLexicalArtifactBuilderV1 {
             })
     }
 
+    #[hotpath::measure(label = "query.artifact.append_page")]
     pub fn append_page(
         &mut self,
         page: &VerifiedSealedLexicalPageV1,
@@ -489,6 +494,9 @@ impl CodeLexicalArtifactBuilderV1 {
             .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
         if page.page_ordinal() < current.next_page_ordinal {
             verify_replayed_page(&self.connection, page)?;
+            hotpath::gauge!("query.artifact.pages").set(current.next_page_ordinal);
+            hotpath::gauge!("query.artifact.rows").set(current.completed_chunks);
+            hotpath::gauge!("query.artifact.bytes").set(current.completed_payload_bytes);
             return Ok(current);
         }
         if page.page_ordinal() != current.next_page_ordinal {
@@ -519,12 +527,17 @@ impl CodeLexicalArtifactBuilderV1 {
         insert_source_page(&transaction, page)?;
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
-        progress(&self.connection)
+        let progress = progress(&self.connection)?;
+        hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
+        hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
+        hotpath::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes);
+        Ok(progress)
     }
 
     /// Advance durable receipt construction without rereading the sealed
     /// generation. `maximum_work` bounds the number of staged rows (or empty
     /// section completions) this call may consume.
+    #[hotpath::measure(label = "query.artifact.advance_finalization")]
     pub fn advance_finalization(
         &mut self,
         source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -546,9 +559,9 @@ impl CodeLexicalArtifactBuilderV1 {
         )?;
         if let Some(receipt) = read_receipt(&self.connection)? {
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, source)?;
-            return Ok(CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(
-                receipt,
-            )));
+            let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
+            record_finalization_step(&step);
+            return Ok(step);
         }
 
         if load_finalization_state(&self.connection)?.is_none() {
@@ -638,11 +651,13 @@ impl CodeLexicalArtifactBuilderV1 {
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
             transaction.commit().map_err(sqlite_error)?;
-            return Ok(CodeLexicalArtifactFinalizationStepV1::Pending {
+            let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 completed_sections: u64::try_from(state.completed_sections.len())
                     .map_err(contract_number)?,
                 completed_rows: state.completed_rows,
-            });
+            };
+            record_finalization_step(&step);
+            return Ok(step);
         }
 
         if state.phase == PersistedFinalizationPhaseV1::Build {
@@ -654,11 +669,13 @@ impl CodeLexicalArtifactBuilderV1 {
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
             transaction.commit().map_err(sqlite_error)?;
-            return Ok(CodeLexicalArtifactFinalizationStepV1::Pending {
+            let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 completed_sections: u64::try_from(state.completed_sections.len())
                     .map_err(contract_number)?,
                 completed_rows: state.completed_rows,
-            });
+            };
+            record_finalization_step(&step);
+            return Ok(step);
         }
 
         if state.completed_sections.len() != SECTION_NAMES.len() {
@@ -702,11 +719,12 @@ impl CodeLexicalArtifactBuilderV1 {
             .map_err(sqlite_error)?;
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
-        Ok(CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(
-            receipt,
-        )))
+        let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
+        record_finalization_step(&step);
+        Ok(step)
     }
 
+    #[hotpath::measure(label = "query.artifact.finalize")]
     pub fn finalize(
         &mut self,
         source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -723,6 +741,9 @@ impl CodeLexicalArtifactBuilderV1 {
                 &receipt,
                 control,
             )?;
+            crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
+            hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
+            hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
             return Ok(receipt);
         }
         Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -2487,6 +2508,21 @@ fn verify_source_receipt(
     Ok(())
 }
 
+fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
+    match step {
+        CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
+            crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
+            hotpath::gauge!("query.artifact.rows").set(*completed_rows);
+        }
+        CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
+            crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
+            hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
+            hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
+        }
+    }
+}
+
+#[hotpath::measure(label = "query.artifact.verify")]
 fn verify_finalized_artifact(
     connection: &Connection,
     path: &Path,

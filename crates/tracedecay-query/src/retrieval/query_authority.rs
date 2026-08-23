@@ -329,6 +329,7 @@ impl QueryAuthorityV1 {
     /// Compose and page the exact query lanes under the accepted immutable
     /// profile, returning the authenticated query identity and canonical
     /// fallback subpayload together.
+    #[hotpath::measure(label = "query.authority.compose")]
     pub fn compose(
         &self,
         request: &RetrievalRequest,
@@ -360,6 +361,7 @@ impl QueryAuthorityV1 {
             cursor,
             request.snapshot.captured_at,
         )?;
+        hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
         let fallback = QueryFallbackSubpayload::new(
             composition.profile_id.clone(),
             page.ranked_candidates,
@@ -385,6 +387,7 @@ impl QueryAuthorityV1 {
     /// Compose and page every canonical retrieval lane under the accepted
     /// immutable profile. Candidate payloads remain unhydrated; the returned
     /// page is an authenticated slice of the frozen compact candidate set.
+    #[hotpath::measure(label = "query.authority.compose_federated")]
     pub fn compose_federated(
         &self,
         request: &RetrievalRequest,
@@ -415,6 +418,7 @@ impl QueryAuthorityV1 {
             cursor,
             request.snapshot.captured_at,
         )?;
+        hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
         Ok(AuthorizedFederatedRetrievalV1 {
             query_digest,
             composition,

@@ -356,6 +356,7 @@ impl<P> GraphLaneRetriever for GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
+    #[hotpath::measure(label = "query.lane.graph")]
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
@@ -372,19 +373,30 @@ where
                     RetrievalFailure::AuthorityUnavailable { detail },
                 ));
             }
-            Err(RetrievalPortError::Cancelled) => return Ok(RetrieverOutcome::Cancelled),
+            Err(RetrievalPortError::Cancelled) => {
+                hotpath::gauge!("query.cancel.count").inc(1u32);
+                return Ok(RetrieverOutcome::Cancelled);
+            }
             Err(error) => return Err(error),
         };
-        match outcome {
-            RetrieverOutcome::Complete(batch) => Ok(RetrieverOutcome::Complete(
-                self.enforce_batch(request, &batch, control.as_ref())?,
-            )),
-            RetrieverOutcome::Partial { value, reason } => Ok(RetrieverOutcome::Partial {
+        let outcome = match outcome {
+            RetrieverOutcome::Complete(batch) => {
+                RetrieverOutcome::Complete(self.enforce_batch(request, &batch, control.as_ref())?)
+            }
+            RetrieverOutcome::Partial { value, reason } => RetrieverOutcome::Partial {
                 value: self.enforce_batch(request, &value, control.as_ref())?,
                 reason,
-            }),
-            outcome => Ok(outcome),
-        }
+            },
+            outcome => outcome,
+        };
+        crate::hotpath_metrics::record_lane(
+            "query.lane.graph.candidates",
+            "query.lane.graph.examined",
+            "query.lane.graph.results",
+            "query.lane.graph.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 

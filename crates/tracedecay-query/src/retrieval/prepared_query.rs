@@ -158,6 +158,7 @@ impl PreparedQueryV1 {
         &self.request
     }
 
+    #[hotpath::measure(label = "query.stream.prepared_page")]
     pub fn paginate<T>(
         &self,
         bindings: &PreparedQueryBindingsV1,
@@ -236,8 +237,10 @@ impl PreparedQueryV1 {
         } else {
             (None, None)
         };
+        let page_len = end.saturating_sub(start);
+        hotpath::gauge!("query.stream.results").set(page_len);
         Ok(PreparedQueryPageV1 {
-            items: items.into_iter().skip(start).take(end - start).collect(),
+            items: items.into_iter().skip(start).take(page_len).collect(),
             total,
             next_cursor,
             expires_at,

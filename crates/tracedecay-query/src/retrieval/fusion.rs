@@ -580,6 +580,7 @@ impl CompositionKernel {
         self.compose_required(input, policy, &[lane])
     }
 
+    #[hotpath::measure(label = "query.fusion")]
     fn compose_required(
         &self,
         input: &FusionStageInput,
@@ -610,6 +611,8 @@ impl CompositionKernel {
 
         let mut all_dedupe_decisions = dedupe_decisions;
         all_dedupe_decisions.append(&mut copy_decisions);
+        hotpath::gauge!("query.fusion.candidates").set(ranked_candidates.len());
+        hotpath::gauge!("query.fusion.results").set(ranked_candidates.len());
         Ok(CompositionOutputV1 {
             profile_id: input.profile.profile_id.clone(),
             ranked_candidates,
@@ -647,6 +650,7 @@ impl CompositionKernel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "query.stream.paginate")]
     pub fn paginate_at(
         &self,
         request: &RetrievalRequest,
@@ -721,6 +725,7 @@ impl CompositionKernel {
         } else {
             None
         };
+        hotpath::gauge!("query.stream.results").set(ranked_candidates.len());
         Ok(CompositionPageV1 {
             ranked_candidates,
             cursor,
@@ -895,6 +900,7 @@ impl DeterministicFixedPointFusion {
         }
     }
 
+    #[hotpath::measure(label = "query.fusion.compact")]
     fn fuse_compact(
         &self,
         profile: &FusionProfile,

@@ -755,6 +755,7 @@ where
     A: ExactAdmissionAuthority,
     P: ExactTermPostingReadPort,
 {
+    #[hotpath::measure(label = "query.lane.exact")]
     fn retrieve_exact(
         &self,
         request: &ExactLaneRequest<'_>,
@@ -772,16 +773,24 @@ where
             }
             Err(error) => return Err(error),
         };
-        match outcome {
-            RetrieverOutcome::Complete(batch) => Ok(RetrieverOutcome::Complete(
-                self.enforce_batch(request, &batch)?,
-            )),
-            RetrieverOutcome::Partial { value, reason } => Ok(RetrieverOutcome::Partial {
+        let outcome = match outcome {
+            RetrieverOutcome::Complete(batch) => {
+                RetrieverOutcome::Complete(self.enforce_batch(request, &batch)?)
+            }
+            RetrieverOutcome::Partial { value, reason } => RetrieverOutcome::Partial {
                 value: self.enforce_batch(request, &value)?,
                 reason,
-            }),
-            outcome => Ok(outcome),
-        }
+            },
+            outcome => outcome,
+        };
+        crate::hotpath_metrics::record_lane(
+            "query.lane.exact.candidates",
+            "query.lane.exact.examined",
+            "query.lane.exact.results",
+            "query.lane.exact.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 

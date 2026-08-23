@@ -271,6 +271,16 @@ where
         record: &SemanticVectorRecordV1,
         query: &EphemeralQueryEmbeddingV1,
     ) -> Result<CanonicalSemanticDistanceV1, RetrievalPortError> {
+        crate::hotpath_metrics::measure_frequent("query.lane.semantic.score_row", || {
+            Self::score_record_inner(request, record, query)
+        })
+    }
+
+    fn score_record_inner(
+        request: &SemanticRetrievalRequestV1<'_>,
+        record: &SemanticVectorRecordV1,
+        query: &EphemeralQueryEmbeddingV1,
+    ) -> Result<CanonicalSemanticDistanceV1, RetrievalPortError> {
         if record.vector_generation != request.vector_generation
             || record.projection_key != *request.projection.projection_key()
         {
@@ -441,7 +451,10 @@ where
             }
         };
 
+        hotpath::gauge!("query.lane.semantic.examined").set(summary.examined);
+        hotpath::gauge!("query.lane.semantic.candidates").set(eligible_count);
         if self.control.is_cancelled() {
+            hotpath::gauge!("query.cancel.count").inc(1u32);
             return Ok(RetrieverOutcome::Cancelled);
         }
         if deadline_exhausted(request, self.control) {
@@ -533,12 +546,14 @@ where
     V: SemanticVectorReadPort,
     C: SemanticExecutionControl,
 {
+    #[hotpath::measure(label = "query.lane.semantic")]
     fn retrieve_semantic(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
         request.validate()?;
         if self.control.is_cancelled() {
+            hotpath::gauge!("query.cancel.count").inc(1u32);
             return Ok(RetrieverOutcome::Cancelled);
         }
         if deadline_exhausted(request, self.control) {
@@ -560,6 +575,7 @@ where
             }
         };
         if self.control.is_cancelled() {
+            hotpath::gauge!("query.cancel.count").inc(1u32);
             return Ok(RetrieverOutcome::Cancelled);
         }
         if deadline_exhausted(request, self.control) {
@@ -570,7 +586,15 @@ where
                 self.control,
             )));
         }
-        self.retrieve_complete(request, &query)
+        let outcome = self.retrieve_complete(request, &query)?;
+        crate::hotpath_metrics::record_lane(
+            "query.lane.semantic.candidates",
+            "query.lane.semantic.examined",
+            "query.lane.semantic.results",
+            "query.lane.semantic.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 

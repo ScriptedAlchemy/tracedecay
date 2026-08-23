@@ -517,6 +517,7 @@ impl CodeLexicalProjectionBuildV1 {
         })
     }
 
+    #[hotpath::measure(label = "query.artifact.projection_advance")]
     pub fn advance(
         &mut self,
         maximum_documents: usize,
@@ -640,6 +641,8 @@ impl CodeLexicalProjectionBuildV1 {
             self.phase = CodeLexicalProjectionBuildPhaseV1::Complete;
         }
         if self.phase != CodeLexicalProjectionBuildPhaseV1::Complete {
+            crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
+            hotpath::gauge!("query.artifact.rows").set(self.next_document);
             return Ok(CodeLexicalProjectionBuildStepV1::Pending {
                 completed_documents: self.next_document,
                 total_documents: self.chunks.len(),
@@ -652,6 +655,8 @@ impl CodeLexicalProjectionBuildV1 {
                 RetrievalPortError::Contract("lexical projection build state is missing".to_owned())
             })?
             .finish(self.rows.len(), self.raw_matches_normalized, deadline)?;
+        crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
+        hotpath::gauge!("query.artifact.rows").set(self.rows.len());
         Ok(CodeLexicalProjectionBuildStepV1::Ready(Box::new(
             CodeLexicalProjectionAdapterV1 {
                 metadata: self.metadata.clone(),
@@ -955,10 +960,13 @@ impl CodeLexicalProjectionAdapterV1 {
     }
 
     fn stale_outcome<T>(&self) -> Option<RetrieverOutcome<T>> {
-        (self.metadata.freshness.compatibility != FreshnessCompatibilityV1::Current)
-            .then(|| RetrieverOutcome::Stale(self.metadata.freshness.clone()))
+        (self.metadata.freshness.compatibility != FreshnessCompatibilityV1::Current).then(|| {
+            crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.lexical.residency");
+            RetrieverOutcome::Stale(self.metadata.freshness.clone())
+        })
     }
 
+    #[hotpath::measure(label = "query.lane.lexical.generate")]
     fn lexical_batch(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -1029,6 +1037,8 @@ impl CodeLexicalProjectionAdapterV1 {
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        hotpath::gauge!("query.lane.lexical.candidates").set(candidates.len());
+        hotpath::gauge!("query.lane.lexical.examined").set(self.rows.len());
         Ok(RetrieverBatch {
             coverage: RetrieverCoverage {
                 examined: self.rows.len() as u64,
@@ -1043,6 +1053,7 @@ impl CodeLexicalProjectionAdapterV1 {
         })
     }
 
+    #[hotpath::measure(label = "query.lane.fuzzy.expand")]
     fn fuzzy_expansions(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -1100,6 +1111,7 @@ impl CodeLexicalProjectionAdapterV1 {
             }
         }
         let mut by_query: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let expansion_count = selected.len();
         for (group_index, term) in selected {
             for query in &groups[group_index].queries {
                 by_query
@@ -1108,10 +1120,24 @@ impl CodeLexicalProjectionAdapterV1 {
                     .insert(term.clone());
             }
         }
+        hotpath::gauge!("query.lane.fuzzy.expansions").set(expansion_count);
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
     fn score_row(
+        &self,
+        document: u32,
+        row: &ProjectedChunkV1,
+        request: &LexicalLaneRequest<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+        phrase_document_frequencies: &BTreeMap<String, usize>,
+    ) -> LexicalRowScoreV1 {
+        crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
+            self.score_row_inner(document, row, request, fuzzy, phrase_document_frequencies)
+        })
+    }
+
+    fn score_row_inner(
         &self,
         document: u32,
         row: &ProjectedChunkV1,

@@ -72,6 +72,7 @@ impl CodeLexicalArtifactReaderV1 {
     /// that digest, and the standard receipt-bound verification then runs
     /// unchanged. This is the reopen path for a durable text head that
     /// survived a daemon restart.
+    #[hotpath::measure(label = "query.artifact.open_content_addressed")]
     pub fn open_content_addressed(
         path: impl AsRef<Path>,
         expected_file_digest: &ManifestDigest,
@@ -139,9 +140,13 @@ impl CodeLexicalArtifactReaderV1 {
             Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control)?;
         verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
         verify_named_path_identity(path, &file)?;
+        crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
+        hotpath::gauge!("query.artifact.bytes").set(expected_file_size_bytes);
+        hotpath::gauge!("query.artifact.pages").set(reader.receipt.page_count());
         Ok(reader)
     }
 
+    #[hotpath::measure(label = "query.artifact.open")]
     pub fn open_with_control(
         path: impl AsRef<Path>,
         expected: &VerifiedCodeLexicalArtifactV1,
@@ -169,7 +174,12 @@ impl CodeLexicalArtifactReaderV1 {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|error| map_reader_open_error(path, error))?;
-        Self::open_connection_with_control(connection, expected, cache_budget_bytes, control)
+        let reader =
+            Self::open_connection_with_control(connection, expected, cache_budget_bytes, control)?;
+        crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
+        hotpath::gauge!("query.artifact.bytes").set(expected.file_size_bytes());
+        hotpath::gauge!("query.artifact.pages").set(expected.page_count());
+        Ok(reader)
     }
 
     fn open_connection_with_control(
@@ -416,6 +426,7 @@ impl CodeLexicalArtifactReaderV1 {
 }
 
 impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
+    #[hotpath::measure(label = "query.lane.lexical.read")]
     fn read_lexical_postings(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -424,12 +435,21 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
         if self.receipt.freshness().compatibility
             != tracedecay_domain::FreshnessCompatibilityV1::Current
         {
+            crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.lexical.residency");
             return Ok(RetrieverOutcome::Stale(self.receipt.freshness().clone()));
         }
         let connection = self.lock_connection().map_err(map_query_artifact_error)?;
-        ArtifactQueryV1::new(&connection, &self.metadata, &self.receipt)?
-            .lexical_batch(request)
-            .map(RetrieverOutcome::Complete)
+        let batch = ArtifactQueryV1::new(&connection, &self.metadata, &self.receipt)?
+            .lexical_batch(request)?;
+        let outcome = RetrieverOutcome::Complete(batch);
+        crate::hotpath_metrics::record_lane(
+            "query.lane.lexical.candidates",
+            "query.lane.lexical.examined",
+            "query.lane.lexical.results",
+            "query.lane.lexical.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 
@@ -443,6 +463,7 @@ impl<A> ExactTermPostingReadPort for CodeExactLexicalArtifactReaderV1<A>
 where
     A: ExactAdmissionAuthority,
 {
+    #[hotpath::measure(label = "query.lane.exact.read")]
     fn read_exact_postings(
         &self,
         request: &ExactLaneRequest,
@@ -451,6 +472,7 @@ where
         if self.reader.receipt.freshness().compatibility
             != tracedecay_domain::FreshnessCompatibilityV1::Current
         {
+            crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.exact.residency");
             return Ok(RetrieverOutcome::Stale(
                 self.reader.receipt.freshness().clone(),
             ));
@@ -459,8 +481,17 @@ where
             .reader
             .lock_connection()
             .map_err(map_query_artifact_error)?;
-        ArtifactQueryV1::new(&connection, &self.reader.metadata, &self.reader.receipt)?
-            .exact_batch(request, &self.authority)
+        let outcome =
+            ArtifactQueryV1::new(&connection, &self.reader.metadata, &self.reader.receipt)?
+                .exact_batch(request, &self.authority)?;
+        crate::hotpath_metrics::record_lane(
+            "query.lane.exact.candidates",
+            "query.lane.exact.examined",
+            "query.lane.exact.results",
+            "query.lane.exact.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 
@@ -573,18 +604,23 @@ fn visit_document_ids(
     query: &DocumentQueryV1,
     mut visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
 ) -> Result<(), RetrievalPortError> {
-    let Some(sql) = &query.sql else {
-        return Ok(());
-    };
-    let mut statement = connection.prepare(sql).map_err(map_query_sql_error)?;
-    let mut rows = statement
-        .query(params_from_iter(query.parameters.iter()))
-        .map_err(map_query_sql_error)?;
-    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-        let document = row.get::<_, i64>(0).map_err(map_query_sql_error)?;
-        visitor(u32::try_from(document).map_err(contract_error)?)?;
-    }
-    Ok(())
+    hotpath::measure_block!("query.stream.visit_documents", {
+        let Some(sql) = &query.sql else {
+            return Ok(());
+        };
+        let mut statement = connection.prepare(sql).map_err(map_query_sql_error)?;
+        let mut rows = statement
+            .query(params_from_iter(query.parameters.iter()))
+            .map_err(map_query_sql_error)?;
+        let mut visited = 0u64;
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            let document = row.get::<_, i64>(0).map_err(map_query_sql_error)?;
+            visitor(u32::try_from(document).map_err(contract_error)?)?;
+            visited += 1;
+        }
+        hotpath::gauge!("query.stream.rows").set(visited);
+        Ok(())
+    })
 }
 
 const ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1: usize = 16;
@@ -903,6 +939,7 @@ impl<'a> ArtifactQueryV1<'a> {
         visit_document_ids(self.connection, query, visitor)
     }
 
+    #[hotpath::measure(label = "query.lane.fuzzy.expand")]
     fn fuzzy_expansions(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -963,6 +1000,7 @@ impl<'a> ArtifactQueryV1<'a> {
             }
         }
         let mut by_query = BTreeMap::<String, BTreeSet<String>>::new();
+        let expansion_count = selected.len();
         for (group_index, term) in selected {
             for query in &groups[group_index].queries {
                 by_query
@@ -971,6 +1009,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     .insert(term.clone());
             }
         }
+        hotpath::gauge!("query.lane.fuzzy.expansions").set(expansion_count);
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
@@ -1048,6 +1087,20 @@ impl<'a> ArtifactQueryV1<'a> {
     }
 
     fn score_row(
+        &self,
+        document: u32,
+        row: &ArtifactRowV1,
+        request: &LexicalLaneRequest<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+        phrase_frequencies: &BTreeMap<String, usize>,
+        stats: &LexicalStatsCacheV1,
+    ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
+        crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
+            self.score_row_inner(document, row, request, fuzzy, phrase_frequencies, stats)
+        })
+    }
+
+    fn score_row_inner(
         &self,
         document: u32,
         row: &ArtifactRowV1,
@@ -1471,12 +1524,14 @@ fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArt
     Ok(())
 }
 
+#[hotpath::measure(label = "query.artifact.digest")]
 fn digest_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
+    let mut bytes_read = 0u64;
     loop {
         checkpoint(control)?;
         let read = file
@@ -1485,8 +1540,10 @@ fn digest_artifact_file(
         if read == 0 {
             break;
         }
+        bytes_read += read as u64;
         hasher.update(&buffer[..read]);
     }
+    hotpath::gauge!("query.artifact.bytes").set(bytes_read);
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }

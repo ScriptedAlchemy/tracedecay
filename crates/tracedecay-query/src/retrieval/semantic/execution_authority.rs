@@ -123,6 +123,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
     /// becomes a typed lane abstention, while strict mode remains unavailable.
     /// An authenticated continuation restores its frozen order and never
     /// invokes the current reranker.
+    #[hotpath::measure(label = "query.fusion.semantic")]
     pub fn execute(
         &self,
         request: &RetrievalRequest,
@@ -193,6 +194,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
         )))
     }
 
+    #[hotpath::measure(label = "query.rerank.semantic")]
     fn execute_optional_rerank(
         &self,
         request: &RetrievalRequest,

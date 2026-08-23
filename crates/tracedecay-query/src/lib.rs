@@ -1,4 +1,5 @@
 pub mod code_search;
+mod hotpath_metrics;
 pub mod retrieval;
 
 /// Temporal session-query contracts, re-exported so historical

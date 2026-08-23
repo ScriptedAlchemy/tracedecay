@@ -242,6 +242,7 @@ where
         Self { lane }
     }
 
+    #[hotpath::measure(label = "query.lane.semantic.service")]
     pub fn execute(
         &self,
         readiness: SemanticLaneReadinessV1<'_>,
