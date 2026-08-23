@@ -30,6 +30,7 @@ pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
 mod extraction_artifact;
+pub(crate) mod hotpath_observe;
 pub mod incremental;
 pub mod parsed_extraction;
 pub mod source_mask;
@@ -270,7 +271,12 @@ pub trait LanguageExtractor: Send + Sync {
     /// language. The default preserves existing extractors without another
     /// parse or a parallel evidence authority.
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        ExtractionArtifactV1::from_result(self.extract(file_path, source))
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || ExtractionArtifactV1::from_result(self.extract(file_path, source)),
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
     }
 
     /// Extract from the shared retained tree. Implementations traverse only

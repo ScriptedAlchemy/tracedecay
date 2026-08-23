@@ -124,8 +124,15 @@ impl LanguageExtractor for SvelteExtractor {
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        let masked = Self::mask_non_script(source);
-        TypeScriptExtractor.extract_artifact(file_path, &masked)
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || {
+                let masked = Self::mask_non_script(source);
+                TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
+            },
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
     }
 
     fn extract_parsed(

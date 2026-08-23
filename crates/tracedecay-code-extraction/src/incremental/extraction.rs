@@ -41,6 +41,20 @@ impl RetainedParseDocument {
         report: &ParseReport,
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
+        crate::hotpath_observe::measure_extract_file(
+            extractor.language_name(),
+            self.source.len(),
+            || self.extract_canonical_artifact_unmeasured(extractor, report, previous),
+            crate::hotpath_observe::ExtractOutputCounts::from_extract_result,
+        )
+    }
+
+    fn extract_canonical_artifact_unmeasured(
+        &self,
+        extractor: &dyn LanguageExtractor,
+        report: &ParseReport,
+        previous: Option<&ExtractionArtifactV1>,
+    ) -> Result<ParsedExtractionArtifactV1, ParseError> {
         if report.state_epoch != self.state_epoch {
             return Err(ParseError::StaleReport);
         }

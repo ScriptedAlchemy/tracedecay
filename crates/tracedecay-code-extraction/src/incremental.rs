@@ -352,7 +352,8 @@ impl RetainedParseDocument {
                 detail: error.to_string(),
             })?;
         let parse_text = parsed_source.as_deref().unwrap_or(&source);
-        let (tree, elapsed) = parse_with_deadline(&mut parser, parse_text, None, limits)?;
+        let (tree, elapsed) =
+            parse_with_deadline(&language_id, &mut parser, parse_text, None, limits)?;
         let changed_ranges = if source.is_empty() {
             Vec::new()
         } else {
@@ -485,6 +486,7 @@ impl RetainedParseDocument {
         }
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
+            &self.language_id,
             &mut self.parser,
             parse_text,
             Some(&edited_tree),
@@ -593,8 +595,13 @@ impl RetainedParseDocument {
             validate_prepared_source(&new_source, parsed)?;
         }
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
-        let (new_tree, elapsed) =
-            parse_with_deadline(&mut self.parser, parse_text, None, self.limits)?;
+        let (new_tree, elapsed) = parse_with_deadline(
+            &self.language_id,
+            &mut self.parser,
+            parse_text,
+            None,
+            self.limits,
+        )?;
         let ranges = if new_source.is_empty() {
             Vec::new()
         } else {
@@ -652,6 +659,24 @@ fn validate_prepared_source(source: &str, prepared: &str) -> Result<(), ParseErr
 }
 
 fn parse_with_deadline(
+    language_id: &str,
+    parser: &mut Parser,
+    source: &str,
+    old_tree: Option<&Tree>,
+    limits: ParseLimits,
+) -> Result<(Tree, Duration), ParseError> {
+    crate::hotpath_observe::measure_parse_file(
+        language_id,
+        source.len(),
+        || parse_with_deadline_unmeasured(parser, source, old_tree, limits),
+        |result| match result {
+            Ok((tree, _)) => tree.root_node().named_child_count(),
+            Err(_) => 0,
+        },
+    )
+}
+
+fn parse_with_deadline_unmeasured(
     parser: &mut Parser,
     source: &str,
     old_tree: Option<&Tree>,

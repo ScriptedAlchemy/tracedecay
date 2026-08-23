@@ -97,7 +97,10 @@ impl TypeScriptExtractor {
         Self::extract_typescript_artifact(file_path, source).result
     }
 
-    fn extract_typescript_artifact(file_path: &str, source: &str) -> ExtractionArtifactV1 {
+    pub(crate) fn extract_typescript_artifact(
+        file_path: &str,
+        source: &str,
+    ) -> ExtractionArtifactV1 {
         let ext = file_path.rsplit('.').next().unwrap_or("ts");
         let tree = match Self::parse_source(source, ext) {
             Ok(tree) => tree,
@@ -1518,7 +1521,12 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        TypeScriptExtractor::extract_typescript_artifact(file_path, source)
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || TypeScriptExtractor::extract_typescript_artifact(file_path, source),
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
     }
 
     fn extract_parsed(
