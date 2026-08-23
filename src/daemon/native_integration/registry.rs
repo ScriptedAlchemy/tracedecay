@@ -373,6 +373,7 @@ impl DaemonNativeIntegrationServiceRegistry {
     /// Returns the retained owner for this exact identity, or composes exactly
     /// one: store actor, topology, mechanics, pinned-policy authorization,
     /// then durable startup recovery. A failed recovery mounts nothing.
+    #[hotpath::measure]
     pub(crate) async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,

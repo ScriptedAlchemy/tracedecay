@@ -141,6 +141,7 @@ fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Resul
 }
 
 /// Entry point for `tracedecay tool ...`.
+#[hotpath::measure]
 pub(crate) async fn run(
     project: Option<String>,
     name: Option<String>,
@@ -258,6 +259,7 @@ pub(crate) async fn run(
 /// This is the same normalized-argument, deadline, and warm-up-retry path the
 /// `tracedecay tool` fallback uses, so first-class commands cannot drift from
 /// the typed surface's transport behavior.
+#[hotpath::measure]
 pub(crate) async fn dispatch_catalogued_cli_operation(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,

@@ -42,6 +42,7 @@ pub(crate) struct AutomationEffectRecoveryReport {
     pub(crate) deferred: usize,
 }
 
+#[hotpath::measure]
 pub(crate) async fn reconcile_reserved_automation_effects_for_project(
     memory: &crate::tracedecay::TraceDecay,
     dashboard_root: &Path,

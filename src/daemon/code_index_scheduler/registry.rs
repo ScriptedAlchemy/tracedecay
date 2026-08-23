@@ -721,6 +721,7 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    #[hotpath::measure]
     pub(in crate::daemon) fn register_activation(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -2986,6 +2987,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(false)
     }
 
+    #[hotpath::measure]
     pub(in crate::daemon) async fn query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,

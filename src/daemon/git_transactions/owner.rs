@@ -438,6 +438,7 @@ pub(crate) struct DaemonGitIndexShutdownReceiptV1 {
 }
 
 impl DaemonGitIndexTransactionServiceRegistry {
+    #[hotpath::measure]
     pub(crate) async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,

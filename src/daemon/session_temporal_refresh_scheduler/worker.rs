@@ -25,6 +25,7 @@ use crate::store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 
+#[hotpath::measure]
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: RegisteredGlobalDbLeaseV1,
     state: Arc<SessionTemporalRefreshWakeState>,
@@ -46,17 +47,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 break;
             }
             state.begin_pass();
-            state.busy.store(true, Ordering::Release);
+            if !state.busy.swap(true, Ordering::AcqRel) {
+                hotpath::gauge!("background_jobs").inc(1.0);
+            }
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let history_outcome = if history_requested {
-                let history = history
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                match history {
-                    Some(history) => Some(history.run_pass().await),
-                    None => None,
-                }
+                session_history_refresh(&history).await
             } else {
                 None
             };
@@ -102,12 +98,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             };
             let report =
                 if projection_requested || state.has_requests() || history_requires_projection {
-                    let pass = run_session_temporal_refresh_pass(
-                        &database,
-                        &state,
-                        projector.as_ref(),
-                        policy,
-                    );
+                    let pass =
+                        session_projection_refresh(&database, &state, projector.as_ref(), policy);
                     tokio::pin!(pass);
                     tokio::select! {
                         biased;
@@ -144,12 +136,27 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     () = tokio::time::sleep(session_refresh_retry_delay(class, retry_attempt)) => {}
                 }
             } else if history_needs_another_pass {
+                if matches!(
+                    history_outcome,
+                    Some(
+                        SessionHistoricalIngestOutcome::Pending {
+                            made_progress: false
+                        } | SessionHistoricalIngestOutcome::Retryable {
+                            made_progress: false,
+                            ..
+                        }
+                    )
+                ) {
+                    hotpath::gauge!("no_progress_passes").inc(1.0);
+                }
                 state.mark_running();
                 retry_attempt = 0;
                 history_retry_pending = true;
+                hotpath::gauge!("history_retry_state").set(1.0);
             } else {
                 if history_outcome.is_some() {
                     history_retry_pending = false;
+                    hotpath::gauge!("history_retry_state").set(0.0);
                 }
                 state.mark_running();
                 retry_attempt = 0;
@@ -163,7 +170,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 }
             }
         }
-        state.busy.store(false, Ordering::Release);
+        if state.busy.swap(false, Ordering::AcqRel) {
+            hotpath::gauge!("background_jobs").inc(-1.0);
+        }
         state.idle.notify_waiters();
         let wake = state.wake.notified();
         if state.has_pending_work() {
@@ -175,6 +184,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 () = wake => {}
                 () = tokio::time::sleep(Duration::from_millis(250)) => {
                     history_retry_pending = false;
+                    hotpath::gauge!("history_retry_state").set(0.0);
                     state.wake_history();
                 },
             }
@@ -185,6 +195,30 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
         }
     }
+}
+
+#[hotpath::measure]
+async fn session_history_refresh(
+    history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
+) -> Option<SessionHistoricalIngestOutcome> {
+    let history = history
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match history {
+        Some(history) => Some(history.run_pass().await),
+        None => None,
+    }
+}
+
+#[hotpath::measure]
+async fn session_projection_refresh(
+    database: &RegisteredGlobalDbLeaseV1,
+    state: &Arc<SessionTemporalRefreshWakeState>,
+    projector: &dyn SessionTemporalRefreshProjector,
+    policy: SessionTemporalRefreshPolicy,
+) -> SessionTemporalRefreshPassReport {
+    run_session_temporal_refresh_pass(database, state, projector, policy).await
 }
 
 fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetryClass {
@@ -234,6 +268,7 @@ async fn process_refresh_begin_requests(
     report.saturated |= state.has_requests();
 }
 
+#[hotpath::measure]
 async fn begin_admitted_session_refreshes(
     database: &RegisteredGlobalDb,
     store: &GlobalDbSessionTemporalStore<'_>,
@@ -484,6 +519,7 @@ fn recovery_key(recovery: &SessionRefreshRecoveryV1) -> String {
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn run_session_temporal_refresh_pass(
     database: &RegisteredGlobalDbLeaseV1,
     state: &Arc<SessionTemporalRefreshWakeState>,

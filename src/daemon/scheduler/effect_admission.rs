@@ -54,6 +54,7 @@ pub(super) fn log_scheduler_admission_conflict(
     );
 }
 
+#[hotpath::measure]
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
     memory: &crate::tracedecay::TraceDecay,
@@ -234,6 +235,7 @@ pub(super) async fn abandon_reused_scheduler_skip(
     }
 }
 
+#[hotpath::measure]
 pub(in crate::daemon) async fn run_automation_scheduler_tick(
     project_path: &Path,
     cg: &TraceDecay,

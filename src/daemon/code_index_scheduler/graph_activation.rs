@@ -132,6 +132,7 @@ impl CodeGraphActivationAuthorityV1 {
         CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
     }
 
+    #[hotpath::measure]
     pub(super) async fn activate(
         &self,
         project_id: &ProjectId,

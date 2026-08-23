@@ -1342,6 +1342,7 @@ pub fn dashboard_feedback_application_router_with_executor(
     ))
 }
 
+#[hotpath::measure]
 async fn application_http_context(
     State(cancellations): State<HttpCancellationRegistry>,
     mut request: Request<Body>,
@@ -1409,7 +1410,7 @@ async fn application_http_context(
         deadline,
         cancellation: cancellation.clone(),
     });
-    let response = next.run(request).await;
+    let response = hotpath::measure_block!("http.request", next.run(request).await);
     active.finish();
     response
 }

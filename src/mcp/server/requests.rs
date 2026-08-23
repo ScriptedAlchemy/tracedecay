@@ -286,6 +286,7 @@ impl McpServer {
     }
 
     /// Returns `None` for notifications (requests without an `id`).
+    #[hotpath::measure]
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
@@ -340,6 +341,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure]
     pub(crate) async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,

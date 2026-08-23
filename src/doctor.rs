@@ -83,6 +83,7 @@ impl DoctorTestRuntime {
 }
 
 /// Runs a comprehensive health check of the tracedecay installation.
+#[hotpath::measure]
 pub async fn run_doctor() -> crate::errors::Result<()> {
     let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {
         Ok(lease) => lease,

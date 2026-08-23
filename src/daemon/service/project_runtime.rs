@@ -637,6 +637,7 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
             }
         }
         drop(fences);
+        hotpath::gauge!("request_in_flight").inc(-1.0);
         self.registry.signal_reservation_changed();
     }
 }

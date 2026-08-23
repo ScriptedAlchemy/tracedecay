@@ -110,6 +110,7 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
     )
 }
 
+#[hotpath::measure]
 pub(crate) async fn handle_status_command(
     path: Option<String>,
     project_id: Option<String>,

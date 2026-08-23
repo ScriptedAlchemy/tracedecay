@@ -156,11 +156,19 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        let dirty = self.dirty.swap(false, Ordering::AcqRel);
+        if dirty {
+            hotpath::gauge!("projection_dirty").inc(-1.0);
+        }
+        dirty
     }
 
     pub(super) fn take_historical_dirty(&self) -> bool {
-        self.historical_dirty.swap(false, Ordering::AcqRel)
+        let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
+        if dirty {
+            hotpath::gauge!("history_dirty").inc(-1.0);
+        }
+        dirty
     }
 
     pub(super) fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
@@ -228,12 +236,16 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn wake(&self) {
-        self.dirty.store(true, Ordering::Release);
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            hotpath::gauge!("projection_dirty").inc(1.0);
+        }
         self.wake.notify_one();
     }
 
     pub(super) fn wake_history(&self) {
-        self.historical_dirty.store(true, Ordering::Release);
+        if !self.historical_dirty.swap(true, Ordering::AcqRel) {
+            hotpath::gauge!("history_dirty").inc(1.0);
+        }
         self.wake.notify_one();
     }
 

@@ -653,6 +653,7 @@ impl DaemonEngine {
         })
     }
 
+    #[hotpath::measure]
     pub(super) async fn start_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -982,6 +983,7 @@ fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
@@ -1105,15 +1107,17 @@ async fn run_automation_scheduler_loop(
                 ("outcome", "start".to_string()),
             ],
         );
-        if let Err(e) = Box::pin(run_automation_scheduler_tick(
+        hotpath::gauge!("background_jobs").inc(1.0);
+        let tick_result = Box::pin(run_automation_scheduler_tick(
             &project_path,
             &cg,
             &handshake,
             &engine,
             &run_control,
         ))
-        .await
-        {
+        .await;
+        hotpath::gauge!("background_jobs").inc(-1.0);
+        if let Err(e) = tick_result {
             log_daemon_event(
                 "scheduler_tick",
                 &[
