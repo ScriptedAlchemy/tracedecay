@@ -138,7 +138,6 @@ pub(crate) fn extract_call_expression_sites(
         loop {
             let child = cursor.node();
             if child.kind() == "call_expression" {
-                // Get the callee: the first named child (usually an identifier)
                 if let Some(callee) = child.named_child(0) {
                     let callee_name = node_text(source, callee);
                     unresolved_refs.push(UnresolvedRef {

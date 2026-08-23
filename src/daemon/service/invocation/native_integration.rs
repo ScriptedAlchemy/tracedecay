@@ -1,4 +1,4 @@
-//! Plan 36 native-integration daemon invocation handler.
+//! Native-integration daemon invocation handler.
 //!
 //! This is the single transport entry point for `stack_snapshot`,
 //! `preflight_native_integration`, `apply_native_integration`,
@@ -11,16 +11,13 @@
 //! A project without a mounted owner — a non-Git project, or a request
 //! arriving before project-open admission finished — answers with the typed
 //! `authority_unmounted` result rather than a guess, a partial apply, or a
-//! local mutation fallback. Plan 36 slice 4 requires exactly this: "An
-//! unavailable daemon or capability leaves the operation explicitly
-//! preview-only or unavailable; no transport falls back to local mutation."
+//! local mutation fallback: an unavailable daemon or capability leaves the
+//! operation explicitly preview-only or unavailable, and no transport falls
+//! back to local mutation.
 //!
 //! Apply resolves its preview and one-use approval from the durable store by
 //! exact identity and digest; a missing or mismatched fact is denied without
-//! disclosing whether the target was absent or denied. Until the
-//! owner-decided approval-issuance operation lands (see the dated record in
-//! `docs/plans/tracedecay-v2/36-git-aware-change-context-and-index-transactions.md`),
-//! no production surface mints an approval, so every apply truthfully denies.
+//! disclosing whether the target was absent or denied.
 
 use super::*;
 
@@ -79,7 +76,7 @@ pub(super) async fn execute_native_integration(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     // A missing project route must stay indistinguishable from a denied one:
-    // Plan 36 forbids leaking absence-versus-denial for a named target.
+    // absence-versus-denial must never leak for a named target.
     let Some(registered) = registered else {
         return concealed_application_problem(wire_request_id);
     };

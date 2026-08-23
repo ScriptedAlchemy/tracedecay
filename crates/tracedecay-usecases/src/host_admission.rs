@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
 use tracedecay_domain::{
     BrainId, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceIdentityV1, ProjectId, RetrievalAnchorId, UserProfileId,
@@ -174,12 +173,7 @@ impl HostAdmissionReplay<'_> {
 }
 
 pub(crate) use schedule::{FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler};
-#[allow(unused_imports)]
-pub(crate) use spool::{
-    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SOURCE_BYTES,
-    DEFAULT_MAX_SPOOL_BYTES, HostAdmissionSpool, SpoolError, SpoolIntegrity,
-    SpoolOverflowDisposition,
-};
+pub(crate) use spool::{HostAdmissionSpool, SpoolError, SpoolIntegrity};
 pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
 pub use wire::{
     BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES,
@@ -190,197 +184,33 @@ pub use wire::{
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use wire::{line_outcome_to_io, read_bounded_line};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct HostAdmissionOutcome {
-    pub status: HostAdmissionStatus,
-    pub retryable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason_code: Option<&'static str>,
-}
+pub use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostProjectionDrainOutcome,
+};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HostProjectionDrainOutcome {
-    pub projected: u64,
-    pub projected_outputs: u64,
-    pub skipped: u64,
-    pub exact_duplicates: u64,
-    pub deferred: bool,
-    pub session_ids: Vec<String>,
-}
-
-impl HostAdmissionOutcome {
-    const fn new(
-        status: HostAdmissionStatus,
-        retryable: bool,
-        reason_code: Option<&'static str>,
-    ) -> Self {
-        Self {
-            status,
-            retryable,
-            reason_code,
-        }
-    }
-
-    pub const fn supported() -> Self {
-        Self::new(HostAdmissionStatus::Supported, false, None)
-    }
-
-    pub const fn accepted_for_replay() -> Self {
-        Self::new(HostAdmissionStatus::AcceptedForReplay, false, None)
-    }
-
-    pub const fn external_source_projection_pending() -> Self {
-        Self::new(
-            HostAdmissionStatus::AcceptedForReplay,
-            false,
-            Some("external_source_projection_pending"),
-        )
-    }
-
-    pub const fn retained_backpressured(reason_code: &'static str) -> Self {
-        Self::new(HostAdmissionStatus::Backpressured, true, Some(reason_code))
-    }
-
-    pub const fn retained_unavailable(reason_code: &'static str) -> Self {
-        Self::new(HostAdmissionStatus::Unavailable, true, Some(reason_code))
-    }
-
-    pub const fn degraded(reason_code: &'static str) -> Self {
-        Self::new(HostAdmissionStatus::Degraded, false, Some(reason_code))
-    }
-
-    pub const fn replay_completed(changed: bool, exact_duplicate: bool) -> Self {
-        if changed {
-            Self::new(HostAdmissionStatus::Committed, false, None)
-        } else if exact_duplicate {
-            Self::new(HostAdmissionStatus::ExactDuplicate, false, None)
-        } else {
-            Self::accepted_for_replay()
-        }
-    }
-
-    pub const fn spool_overflow() -> Self {
-        Self::new(
-            HostAdmissionStatus::Backpressured,
-            true,
-            Some("spool_overflow"),
-        )
-    }
-
-    pub const fn spool_record_too_large() -> Self {
-        Self::new(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("spool_record_too_large"),
-        )
-    }
-
-    /// Host-event wire or MCP/daemon JSON-RPC frame exceeded its respective
-    /// bound ([`wire::MAX_WIRE_MESSAGE_BYTES`] or
-    /// [`wire::MAX_MCP_JSONRPC_FRAME_BYTES`]) before durable retention.
-    /// Non-retryable; full payload is not retained.
-    pub const fn wire_record_too_large() -> Self {
-        Self::new(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some(wire::WIRE_RECORD_TOO_LARGE),
-        )
-    }
-
-    pub const fn spool_source_too_large() -> Self {
-        Self::new(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("spool_source_too_large"),
-        )
-    }
-
-    pub const fn spool_corrupted() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("spool_corrupted"),
-        )
-    }
-
-    pub const fn durable_payload_unsupported_version() -> Self {
-        Self::retained_unavailable("host_event_payload_unsupported_version")
-    }
-
-    pub const fn durable_payload_malformed() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("host_event_payload_malformed"),
-        )
-    }
-
-    pub const fn spool_ack_conflict() -> Self {
-        Self::new(
-            HostAdmissionStatus::Backpressured,
-            true,
-            Some("spool_ack_conflict"),
-        )
-    }
-
-    pub(crate) const fn spool_recovery_required() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("spool_recovery_required"),
-        )
-    }
-
-    pub const fn quarantine_full() -> Self {
-        Self::new(
-            HostAdmissionStatus::Backpressured,
-            true,
-            Some("spool_quarantine_full"),
-        )
-    }
-
-    pub(crate) const fn quarantine_corrupted() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("spool_quarantine_corrupted"),
-        )
-    }
-
-    pub(crate) const fn quarantine_recovery_required() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("spool_quarantine_recovery_required"),
-        )
-    }
-
-    const fn project_authority_unbound() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("project_authority_unbound"),
-        )
-    }
-
-    const fn project_authority_mismatch() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("project_authority_mismatch"),
-        )
-    }
-
-    const fn registered_authority_unavailable() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("registered_authority_unavailable"),
-        )
+/// Constructs a [`HostAdmissionOutcome`] for usecases-specific reason codes;
+/// the canonical constructors live on the sessions type, whose grouped
+/// constructor is private.
+pub(crate) const fn admission_outcome(
+    status: HostAdmissionStatus,
+    retryable: bool,
+    reason_code: Option<&'static str>,
+) -> HostAdmissionOutcome {
+    HostAdmissionOutcome {
+        status,
+        retryable,
+        reason_code,
     }
 }
 
-pub use tracedecay_sessions::admission::HostAdmissionScope;
+/// Durable success whose external-source projection is still queued.
+const fn external_source_projection_pending() -> HostAdmissionOutcome {
+    admission_outcome(
+        HostAdmissionStatus::AcceptedForReplay,
+        false,
+        Some("external_source_projection_pending"),
+    )
+}
 
 #[derive(Clone, Default)]
 pub struct HostAdmissionAuthorities<'a> {
@@ -570,11 +400,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         &'a self,
         request: CaptureObservationRequest,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, CaptureObservationOutcome> {
-        Box::pin(async move {
-            HostAdmissionFacade::capture_observation(self, request)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::capture_observation(self, request))
     }
 
     fn advance_non_durable_source_cursor<'a>(
@@ -582,11 +408,11 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         advance: ObservationCursorAdvance,
         cancellation: ObservationCancellation,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, CursorAdvanceOutcome> {
-        Box::pin(async move {
-            HostAdmissionFacade::advance_non_durable_source_cursor(self, advance, cancellation)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::advance_non_durable_source_cursor(
+            self,
+            advance,
+            cancellation,
+        ))
     }
 
     fn get_source_cursor<'a>(
@@ -595,11 +421,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         scope: &'a ObservationScopeV1,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ObservationSourceCursorV1>>
     {
-        Box::pin(async move {
-            HostAdmissionFacade::get_source_cursor(self, source, scope)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::get_source_cursor(self, source, scope))
     }
 
     fn drain_projection_queue<'a>(
@@ -608,16 +430,14 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         scope: &'a ObservationScopeV1,
         cancellation: &'a ObservationCancellation,
         max: usize,
-    ) -> tracedecay_sessions::admission::AdmissionFuture<
-        'a,
-        tracedecay_sessions::admission::HostProjectionDrainOutcome,
-    > {
-        Box::pin(async move {
-            HostAdmissionFacade::drain_projection_queue(self, provider, scope, cancellation, max)
-                .await
-                .map(canonical_projection_drain_outcome)
-                .map_err(canonical_admission_outcome)
-        })
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, HostProjectionDrainOutcome> {
+        Box::pin(HostAdmissionFacade::drain_projection_queue(
+            self,
+            provider,
+            scope,
+            cancellation,
+            max,
+        ))
     }
 
     fn has_session_message<'a>(
@@ -626,11 +446,9 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         provider: &'a str,
         message_id: &'a str,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
-        Box::pin(async move {
-            HostAdmissionFacade::has_session_message(self, scope, provider, message_id)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::has_session_message(
+            self, scope, provider, message_id,
+        ))
     }
 
     fn get_parse_offset<'a>(
@@ -638,11 +456,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         scope: &'a ObservationScopeV1,
         path: &'a str,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ParseOffset>> {
-        Box::pin(async move {
-            HostAdmissionFacade::get_parse_offset(self, scope, path)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::get_parse_offset(self, scope, path))
     }
 
     fn advance_parse_offset<'a>(
@@ -651,11 +465,9 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         path: &'a str,
         offset: ParseOffset,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
-        Box::pin(async move {
-            HostAdmissionFacade::advance_parse_offset(self, scope, path, offset)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::advance_parse_offset(
+            self, scope, path, offset,
+        ))
     }
 
     fn enqueue_discovery_paths<'a>(
@@ -667,11 +479,9 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         'a,
         Option<tracedecay_sessions::admission::HostDiscoveryQueueEntry>,
     > {
-        Box::pin(async move {
-            HostAdmissionFacade::enqueue_discovery_paths(self, scope, provider, paths)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::enqueue_discovery_paths(
+            self, scope, provider, paths,
+        ))
     }
 
     fn discovery_paths_after<'a>(
@@ -684,11 +494,13 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         'a,
         Vec<tracedecay_sessions::admission::HostDiscoveryQueueEntry>,
     > {
-        Box::pin(async move {
-            HostAdmissionFacade::discovery_paths_after(self, scope, provider, after_sequence, limit)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        Box::pin(HostAdmissionFacade::discovery_paths_after(
+            self,
+            scope,
+            provider,
+            after_sequence,
+            limit,
+        ))
     }
 
     fn discovery_path<'a>(
@@ -700,65 +512,9 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         'a,
         Option<tracedecay_sessions::admission::HostDiscoveryQueueEntry>,
     > {
-        Box::pin(async move {
-            HostAdmissionFacade::discovery_path(self, scope, provider, sequence)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
-    }
-}
-
-const fn canonical_admission_status(
-    status: HostAdmissionStatus,
-) -> tracedecay_sessions::admission::HostAdmissionStatus {
-    match status {
-        HostAdmissionStatus::Supported => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Supported
-        }
-        HostAdmissionStatus::Degraded => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Degraded
-        }
-        HostAdmissionStatus::Unavailable => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Unavailable
-        }
-        HostAdmissionStatus::Unknown => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Unknown
-        }
-        HostAdmissionStatus::Backpressured => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Backpressured
-        }
-        HostAdmissionStatus::AcceptedForReplay => {
-            tracedecay_sessions::admission::HostAdmissionStatus::AcceptedForReplay
-        }
-        HostAdmissionStatus::Committed => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Committed
-        }
-        HostAdmissionStatus::ExactDuplicate => {
-            tracedecay_sessions::admission::HostAdmissionStatus::ExactDuplicate
-        }
-    }
-}
-
-const fn canonical_admission_outcome(
-    outcome: HostAdmissionOutcome,
-) -> tracedecay_sessions::admission::HostAdmissionOutcome {
-    tracedecay_sessions::admission::HostAdmissionOutcome {
-        status: canonical_admission_status(outcome.status),
-        retryable: outcome.retryable,
-        reason_code: outcome.reason_code,
-    }
-}
-
-fn canonical_projection_drain_outcome(
-    outcome: HostProjectionDrainOutcome,
-) -> tracedecay_sessions::admission::HostProjectionDrainOutcome {
-    tracedecay_sessions::admission::HostProjectionDrainOutcome {
-        projected: outcome.projected,
-        projected_outputs: outcome.projected_outputs,
-        skipped: outcome.skipped,
-        exact_duplicates: outcome.exact_duplicates,
-        deferred: outcome.deferred,
-        session_ids: outcome.session_ids,
+        Box::pin(HostAdmissionFacade::discovery_path(
+            self, scope, provider, sequence,
+        ))
     }
 }
 
@@ -769,7 +525,7 @@ impl<'a> HostAdmissionFacade<'a> {
 
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
         if !supported_provider(provider) {
-            return HostAdmissionOutcome::new(
+            return admission_outcome(
                 HostAdmissionStatus::Unknown,
                 false,
                 Some("unknown_provider"),
@@ -886,7 +642,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ) -> Result<ObservationApplication<GlobalDbObservationStore>, HostAdmissionOutcome> {
         let store = self.store(provider, scope)?;
         let sanitizer = RecordSanitizerV1::observation_v1().map_err(|_| {
-            HostAdmissionOutcome::new(
+            admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 false,
                 Some("sanitizer_unavailable"),
@@ -1049,7 +805,7 @@ impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
 }
 
 const fn projection_store_unavailable() -> HostAdmissionOutcome {
-    HostAdmissionOutcome::new(
+    admission_outcome(
         HostAdmissionStatus::Unavailable,
         true,
         Some("projection_store_unavailable"),
@@ -1106,34 +862,34 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
         CaptureObservationOutcome::AcceptedForReplay { outcome, .. }
             if matches!(*outcome, ObservationPersistOutcome::ExactDuplicate(_)) =>
         {
-            HostAdmissionOutcome::new(
+            admission_outcome(
                 HostAdmissionStatus::ExactDuplicate,
                 false,
                 Some("external_source_projection_pending"),
             )
         }
         CaptureObservationOutcome::AcceptedForReplay { .. } => {
-            HostAdmissionOutcome::external_source_projection_pending()
+            external_source_projection_pending()
         }
         CaptureObservationOutcome::Persisted { outcome, .. } => match *outcome {
             ObservationPersistOutcome::Committed(_) => {
-                HostAdmissionOutcome::new(HostAdmissionStatus::Committed, false, None)
+                admission_outcome(HostAdmissionStatus::Committed, false, None)
             }
             ObservationPersistOutcome::ExactDuplicate(_) => {
-                HostAdmissionOutcome::new(HostAdmissionStatus::ExactDuplicate, false, None)
+                admission_outcome(HostAdmissionStatus::ExactDuplicate, false, None)
             }
-            ObservationPersistOutcome::CoveredDuplicate(_) => HostAdmissionOutcome::new(
+            ObservationPersistOutcome::CoveredDuplicate(_) => admission_outcome(
                 HostAdmissionStatus::Committed,
                 false,
                 Some("duplicate_coverage_committed"),
             ),
         },
-        CaptureObservationOutcome::Rejected { .. } => HostAdmissionOutcome::new(
+        CaptureObservationOutcome::Rejected { .. } => admission_outcome(
             HostAdmissionStatus::Degraded,
             false,
             Some("sanitizer_rejected"),
         ),
-        CaptureObservationOutcome::Quarantined { .. } => HostAdmissionOutcome::new(
+        CaptureObservationOutcome::Quarantined { .. } => admission_outcome(
             HostAdmissionStatus::Degraded,
             false,
             Some("sanitizer_quarantined"),
@@ -1222,43 +978,43 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         }
         _ => "observation_store_failed",
     };
-    HostAdmissionOutcome::new(HostAdmissionStatus::Degraded, false, Some(reason_code))
+    admission_outcome(HostAdmissionStatus::Degraded, false, Some(reason_code))
 }
 
 fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
     match error {
-        ObservationApplicationError::Cancelled => HostAdmissionOutcome::new(
+        ObservationApplicationError::Cancelled => admission_outcome(
             HostAdmissionStatus::Backpressured,
             true,
             Some("admission_cancelled"),
         ),
         ObservationApplicationError::Store(ObservationStoreError::CursorConflict { .. }) => {
-            HostAdmissionOutcome::new(
+            admission_outcome(
                 HostAdmissionStatus::Backpressured,
                 true,
                 Some("cursor_conflict"),
             )
         }
         ObservationApplicationError::Store(ObservationStoreError::Storage { .. }) => {
-            HostAdmissionOutcome::new(
+            admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 true,
                 Some("authority_write_failed"),
             )
         }
-        ObservationApplicationError::Contract(_) => HostAdmissionOutcome::new(
+        ObservationApplicationError::Contract(_) => admission_outcome(
             HostAdmissionStatus::Degraded,
             false,
             Some("invalid_observation_contract"),
         ),
         ObservationApplicationError::Privacy(
             PrivacySanitizerError::InvalidPolicy | PrivacySanitizerError::DetectorUnavailable,
-        ) => HostAdmissionOutcome::new(
+        ) => admission_outcome(
             HostAdmissionStatus::Unavailable,
             true,
             Some("privacy_authority_unavailable"),
         ),
-        ObservationApplicationError::Privacy(_) => HostAdmissionOutcome::new(
+        ObservationApplicationError::Privacy(_) => admission_outcome(
             HostAdmissionStatus::Degraded,
             false,
             Some("privacy_boundary_failed"),

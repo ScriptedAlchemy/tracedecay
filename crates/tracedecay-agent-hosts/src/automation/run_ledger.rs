@@ -251,14 +251,17 @@ pub async fn write_run_artifact(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| config_error(format!("failed to create run artifact directory: {e}")))?;
+            .map_err(|e| TraceDecayError::File {
+                message: format!("failed to create run artifact directory: {e}"),
+                path: parent.display().to_string(),
+            })?;
     }
-    tokio::fs::write(&path, &bytes).await.map_err(|e| {
-        config_error(format!(
-            "failed to write automation run artifact '{}': {e}",
-            path.display()
-        ))
-    })?;
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| TraceDecayError::File {
+            message: format!("failed to write automation run artifact: {e}"),
+            path: path.display().to_string(),
+        })?;
 
     Ok(artifact)
 }
@@ -299,12 +302,12 @@ pub async fn read_run_artifact_payload(
     let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
     crate::storage::reject_symlink_components(&path, "automation artifact")
         .map_err(TraceDecayError::from)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        config_error(format!(
-            "failed to read automation run artifact '{}': {e}",
-            path.display()
-        ))
-    })?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| TraceDecayError::File {
+            message: format!("failed to read automation run artifact: {e}"),
+            path: path.display().to_string(),
+        })?;
     let actual_hash = super::artifact_refs::sha256_bytes(&bytes);
     if actual_hash != artifact.sha256 {
         return Err(config_error(format!(
@@ -332,11 +335,9 @@ pub async fn append_run_record(
     tokio::task::spawn_blocking(move || append_jsonl_line_locked(&write_path, &line))
         .await
         .map_err(|e| config_error(format!("failed to join automation run ledger write: {e}")))?
-        .map_err(|e| {
-            config_error(format!(
-                "failed to write automation run ledger '{}': {e}",
-                path.display()
-            ))
+        .map_err(|e| TraceDecayError::File {
+            message: format!("failed to write automation run ledger: {e}"),
+            path: path.display().to_string(),
         })?;
     Ok(())
 }

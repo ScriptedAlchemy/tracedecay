@@ -196,7 +196,7 @@ pub(super) async fn count_unresolved(
         .await?;
     let count: i64 = rows.next().await?.map_or(Ok(0), |row| row.get(0))?;
     u64::try_from(count)
-        .map_err(|_| GitCorrelationError::Db("negative git history failure count".to_string()))
+        .map_err(|_| GitCorrelationError::Corrupt("negative git history failure count".to_string()))
 }
 
 pub(super) async fn persist_unresolved<S: GitCorrelationSessionStore>(

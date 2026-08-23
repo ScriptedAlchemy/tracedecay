@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::context::{RequestAdmission, RequestContext};
 use crate::diagnostics::{
     DiagnosticProviderIdentity, DiagnosticProviderResult, ProviderSourceIdentity,
@@ -110,11 +112,12 @@ impl FeedbackCycleAdvisoryV1 {
                 field: "feedback advisory finding",
             });
         }
-        if self.findings.iter().enumerate().any(|(index, finding)| {
-            self.findings[index.saturating_add(1)..]
-                .iter()
-                .any(|other| other.finding_id == finding.finding_id)
-        }) {
+        let mut seen_finding_ids = BTreeSet::new();
+        if self
+            .findings
+            .iter()
+            .any(|finding| !seen_finding_ids.insert(&finding.finding_id))
+        {
             return Err(ApplicationContractError::Duplicate {
                 field: "feedback advisory finding",
             });
@@ -280,10 +283,6 @@ enum FeedbackCycleFinishPath {
         runtime: Option<FeedbackRuntimeStateV1>,
         stage_emission: FeedbackCycleStageEmission,
     },
-    AfterCheckedRuntime {
-        runtime: Option<FeedbackRuntimeStateV1>,
-        stage_emission: FeedbackCycleStageEmission,
-    },
 }
 
 enum FeedbackCycleStep {
@@ -384,13 +383,7 @@ where
         let mut progress = None::<FeedbackCycleProgress>;
         loop {
             match self
-                .advance_feedback_cycle_stage(
-                    context,
-                    &mut progress,
-                    request.clone(),
-                    stage,
-                    &advisory,
-                )
+                .advance_feedback_cycle_stage(context, &mut progress, &request, stage, &advisory)
                 .await?
             {
                 FeedbackCycleStep::Continue(next) => stage = *next,
@@ -414,49 +407,44 @@ where
         &self,
         context: &RequestContext,
         progress: &mut Option<FeedbackCycleProgress>,
-        request: FeedbackCycleExecutionRequest,
+        request: &FeedbackCycleExecutionRequest,
         stage: FeedbackCycleStage,
         advisory: &FeedbackCycleAdvisoryV1,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
         match stage {
             FeedbackCycleStage::ValidateAndScope => {
-                self.handle_validate_and_scope(context, &request)
+                self.handle_validate_and_scope(context, request)
             }
-            FeedbackCycleStage::Admit => self.handle_admit(context, progress, &request),
+            FeedbackCycleStage::Admit => self.handle_admit(context, progress, request),
             FeedbackCycleStage::CheckInterruption => {
-                self.handle_check_interruption(context, &request)
+                self.handle_check_interruption(context, request)
             }
             FeedbackCycleStage::ResolveRuntime => {
-                self.handle_resolve_runtime(context, progress, &request)
-                    .await
+                self.handle_resolve_runtime(context, progress, request).await
             }
-            FeedbackCycleStage::ValidateRuntime => self.handle_validate_runtime(progress, &request),
-            FeedbackCycleStage::CheckUserStop => self.handle_check_user_stop(progress, &request),
+            FeedbackCycleStage::ValidateRuntime => self.handle_validate_runtime(progress, request),
+            FeedbackCycleStage::CheckUserStop => self.handle_check_user_stop(progress, request),
             FeedbackCycleStage::CheckBudgetAndProviders => {
-                self.handle_check_budget_and_providers(progress, &request)
+                self.handle_check_budget_and_providers(progress, request)
             }
             FeedbackCycleStage::LoadBaselines => {
-                self.handle_load_baselines(context, progress, &request)
-                    .await
+                self.handle_load_baselines(context, progress, request).await
             }
             FeedbackCycleStage::LoadDiagnostics => {
-                self.handle_load_diagnostics(context, progress, &request)
-                    .await
+                self.handle_load_diagnostics(context, progress, request).await
             }
             FeedbackCycleStage::ClassifyDiagnostics => {
-                self.handle_classify_diagnostics(progress, &request, advisory)
+                self.handle_classify_diagnostics(progress, request, advisory)
             }
             FeedbackCycleStage::ResolveImpact => {
-                self.handle_resolve_impact(context, progress, &request)
-                    .await
+                self.handle_resolve_impact(context, progress, request).await
             }
             FeedbackCycleStage::LookupDedupe => {
-                self.handle_lookup_dedupe(context, progress, &request, advisory)
+                self.handle_lookup_dedupe(context, progress, request, advisory)
                     .await
             }
             FeedbackCycleStage::AssembleResult => {
-                self.handle_assemble_result(context, progress, &request)
-                    .await
+                self.handle_assemble_result(context, progress, request).await
             }
         }
     }
@@ -693,7 +681,7 @@ where
                 .runtime_override(context, request, progress.runtime.as_ref())
                 .await
             {
-                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                     termination,
                     states,
                     Vec::new(),
@@ -729,7 +717,7 @@ where
             .runtime_override(context, request, progress.runtime.as_ref())
             .await
         {
-            return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                 termination,
                 states,
                 Vec::new(),
@@ -759,11 +747,11 @@ where
             collect_diagnostics(request, &progress.diagnostics, &resolved_baselines)?;
         provider_states.extend(advisory.providers.iter().map(|provider| provider.state));
         findings.extend(advisory.findings.iter().cloned());
-        if findings.iter().enumerate().any(|(index, finding)| {
-            findings[index.saturating_add(1)..]
-                .iter()
-                .any(|other| other.finding_id == finding.finding_id)
-        }) {
+        let mut seen_finding_ids = BTreeSet::new();
+        if findings
+            .iter()
+            .any(|finding| !seen_finding_ids.insert(&finding.finding_id))
+        {
             return Err(ApplicationContractError::Duplicate {
                 field: "feedback cycle finding",
             });
@@ -774,7 +762,7 @@ where
         if let Some(termination) =
             terminal_before_impact(&provider_states, &progress.baseline_states)
         {
-            return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                 termination,
                 provider_states,
                 progress.baseline_states.clone(),
@@ -806,7 +794,7 @@ where
                 progress.impact_state = Some(state);
             }
             FeedbackImpactResolution::Cancelled => {
-                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                     FeedbackCycleTerminationV1::Cancelled,
                     vec![ProviderEvaluationStateV1::Cancelled],
                     Vec::new(),
@@ -815,7 +803,7 @@ where
                 )));
             }
             FeedbackImpactResolution::TimedOut => {
-                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                     FeedbackCycleTerminationV1::BudgetExceeded,
                     vec![ProviderEvaluationStateV1::TimedOut],
                     Vec::new(),
@@ -828,7 +816,7 @@ where
             .runtime_override(context, request, progress.runtime.as_ref())
             .await
         {
-            return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+            return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                 termination,
                 states,
                 Vec::new(),
@@ -875,7 +863,7 @@ where
                 .runtime_override(context, request, progress.runtime.as_ref())
                 .await
             {
-                return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+                return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                     termination,
                     states,
                     Vec::new(),
@@ -886,7 +874,7 @@ where
             match dedupe_state {
                 FeedbackCycleDedupeState::Duplicate => {
                     return Ok(FeedbackCycleStep::terminal(
-                        after_checked_runtime_terminal_with_dedupe(
+                        after_runtime_terminal_with_dedupe(
                             FeedbackCycleTerminationV1::DuplicateNoop,
                             Vec::new(),
                             Some(key),
@@ -897,7 +885,7 @@ where
                 }
                 FeedbackCycleDedupeState::Unavailable => {
                     return Ok(FeedbackCycleStep::terminal(
-                        after_checked_runtime_terminal_with_dedupe(
+                        after_runtime_terminal_with_dedupe(
                             FeedbackCycleTerminationV1::DaemonUnavailable,
                             vec![ProviderEvaluationStateV1::Unavailable],
                             Some(key),
@@ -907,7 +895,7 @@ where
                     ));
                 }
                 FeedbackCycleDedupeState::Cancelled => {
-                    return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+                    return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                         FeedbackCycleTerminationV1::Cancelled,
                         vec![ProviderEvaluationStateV1::Cancelled],
                         Vec::new(),
@@ -916,7 +904,7 @@ where
                     )));
                 }
                 FeedbackCycleDedupeState::TimedOut => {
-                    return Ok(FeedbackCycleStep::terminal(after_checked_runtime_terminal(
+                    return Ok(FeedbackCycleStep::terminal(after_runtime_terminal_with_baselines(
                         FeedbackCycleTerminationV1::BudgetExceeded,
                         vec![ProviderEvaluationStateV1::TimedOut],
                         Vec::new(),
@@ -956,7 +944,7 @@ where
             request.input.request.durability(),
         );
         let result = self
-            .finish_after_checked_runtime(
+            .finish_after_runtime(
                 context,
                 request,
                 &progress.admission,
@@ -988,10 +976,6 @@ where
                 FeedbackCycleFinishPath::AfterRuntime {
                     stage_emission: FeedbackCycleStageEmission::Suppressed,
                     ..
-                }
-                | FeedbackCycleFinishPath::AfterCheckedRuntime {
-                    stage_emission: FeedbackCycleStageEmission::Suppressed,
-                    ..
                 },
                 _,
             ) => &[][..],
@@ -999,18 +983,10 @@ where
                 FeedbackCycleFinishPath::AfterRuntime {
                     stage_emission: FeedbackCycleStageEmission::FromProgress,
                     ..
-                }
-                | FeedbackCycleFinishPath::AfterCheckedRuntime {
-                    stage_emission: FeedbackCycleStageEmission::FromProgress,
-                    ..
                 },
                 Some(progress),
             ) => progress.completed_stages.as_slice(),
-            (
-                FeedbackCycleFinishPath::AfterRuntime { .. }
-                | FeedbackCycleFinishPath::AfterCheckedRuntime { .. },
-                None,
-            ) => &[][..],
+            (FeedbackCycleFinishPath::AfterRuntime { .. }, None) => &[][..],
         };
         let advisory_provider_states = progress.map_or_else(Vec::new, |progress| {
             progress.advisory_provider_states.clone()
@@ -1036,29 +1012,6 @@ where
                     })?
                     .admission;
                 self.finish_after_runtime(
-                    context,
-                    request,
-                    admission,
-                    runtime.as_ref(),
-                    terminal.dedupe_key,
-                    terminal.termination,
-                    terminal.provider_states,
-                    advisory_provider_states,
-                    terminal.baseline_states,
-                    terminal.impact,
-                    terminal.impact_state,
-                    terminal.findings,
-                    completed_stages,
-                )
-                .await
-            }
-            FeedbackCycleFinishPath::AfterCheckedRuntime { runtime, .. } => {
-                let admission = &progress
-                    .ok_or(ApplicationContractError::Inconsistent {
-                        field: "feedback cycle admission state",
-                    })?
-                    .admission;
-                self.finish_after_checked_runtime(
                     context,
                     request,
                     admission,
@@ -1135,41 +1088,6 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn finish_after_runtime(
-        &self,
-        context: &RequestContext,
-        request: &FeedbackCycleExecutionRequest,
-        admission: &FeedbackRouteAdmission,
-        initial_runtime: Option<&FeedbackRuntimeStateV1>,
-        dedupe_key: Option<FeedbackDedupeKeyV1>,
-        termination: FeedbackCycleTerminationV1,
-        provider_states: Vec<ProviderEvaluationStateV1>,
-        advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
-        baseline_states: Vec<FeedbackBaselineStateV1>,
-        impact: Option<FeedbackImpactV1>,
-        impact_state: Option<FeedbackImpactStateV1>,
-        findings: Vec<FeedbackFindingV1>,
-        completed_stages: &[FeedbackEvaluationStageV1],
-    ) -> Result<FeedbackCycleExecutionResult, ApplicationContractError> {
-        self.finish_after_checked_runtime(
-            context,
-            request,
-            admission,
-            initial_runtime,
-            dedupe_key,
-            termination,
-            provider_states,
-            advisory_provider_states,
-            baseline_states,
-            impact,
-            impact_state,
-            findings,
-            completed_stages,
-        )
-        .await
-    }
-
     async fn runtime_override(
         &self,
         context: &RequestContext,
@@ -1205,7 +1123,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn finish_after_checked_runtime(
+    async fn finish_after_runtime(
         &self,
         context: &RequestContext,
         request: &FeedbackCycleExecutionRequest,
@@ -1702,20 +1620,18 @@ fn collect_diagnostics(
         .any(|result| !request.providers.contains(&result.identity));
 
     for (provider_index, expected) in request.providers.iter().enumerate() {
-        let matched = results
-            .iter()
-            .filter(|result| result.identity == *expected)
-            .collect::<Vec<_>>();
-        if matched.len() != 1 {
-            states.push(if matched.is_empty() {
-                ProviderEvaluationStateV1::Absent
-            } else {
-                ProviderEvaluationStateV1::Failed
-            });
-            continue;
-        }
-
-        let result = matched[0];
+        let mut matched = results.iter().filter(|result| result.identity == *expected);
+        let result = match (matched.next(), matched.next()) {
+            (Some(result), None) => result,
+            (None, _) => {
+                states.push(ProviderEvaluationStateV1::Absent);
+                continue;
+            }
+            (Some(_), Some(_)) => {
+                states.push(ProviderEvaluationStateV1::Failed);
+                continue;
+            }
+        };
         if result.validate().is_err() || !provider_matches_input(&result.identity, &request.input) {
             states.push(ProviderEvaluationStateV1::Failed);
             continue;
@@ -1986,7 +1902,7 @@ fn after_runtime_terminal(
     )
 }
 
-fn after_checked_runtime_terminal(
+fn after_runtime_terminal_with_baselines(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,
     baseline_states: Vec<FeedbackBaselineStateV1>,
@@ -1998,7 +1914,7 @@ fn after_checked_runtime_terminal(
         ..early_terminal(
             termination,
             provider_states,
-            FeedbackCycleFinishPath::AfterCheckedRuntime {
+            FeedbackCycleFinishPath::AfterRuntime {
                 runtime,
                 stage_emission,
             },
@@ -2006,7 +1922,7 @@ fn after_checked_runtime_terminal(
     }
 }
 
-fn after_checked_runtime_terminal_with_dedupe(
+fn after_runtime_terminal_with_dedupe(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,
     dedupe_key: Option<FeedbackDedupeKeyV1>,
@@ -2018,7 +1934,7 @@ fn after_checked_runtime_terminal_with_dedupe(
         ..early_terminal(
             termination,
             provider_states,
-            FeedbackCycleFinishPath::AfterCheckedRuntime {
+            FeedbackCycleFinishPath::AfterRuntime {
                 runtime,
                 stage_emission,
             },

@@ -1344,24 +1344,31 @@ fn scan_layout<R: Read + Seek>(
         if read == 0 {
             break;
         }
-        for byte in &buffer[..read] {
-            if observed < admitted_len {
-                if let Some(hasher) = file_hasher.as_mut() {
-                    hasher.update([*byte]);
-                }
-                scanner.observe(*byte, observed)?;
-            }
-            observed = observed.checked_add(1).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical source length overflowed".to_owned(),
-                )
-            })?;
-        }
-        remaining -= u64::try_from(read).map_err(|_| {
+        let read_bytes = u64::try_from(read).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical source read exceeds u64".to_owned(),
             )
         })?;
+        // Only bytes below the admitted length are hashed and scanned; split
+        // the buffer at that boundary and feed whole slices, not single bytes.
+        let admitted = usize::try_from(read_bytes.min(admitted_len.saturating_sub(observed)))
+            .map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical read window exceeds the platform limit".to_owned(),
+                )
+            })?;
+        if admitted > 0 {
+            if let Some(hasher) = file_hasher.as_mut() {
+                hasher.update(&buffer[..admitted]);
+            }
+            scanner.observe_slice(&buffer[..admitted], observed)?;
+        }
+        observed = observed.checked_add(read_bytes).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical source length overflowed".to_owned(),
+            )
+        })?;
+        remaining -= read_bytes;
     }
     if observed != admitted_len {
         return Err(CodeIndexProductionErrorV1::Contract(
@@ -1402,11 +1409,70 @@ struct LayoutScanner {
     maximum_file_bytes: u64,
 }
 
+/// Transition of the generation-payload hash span produced by one observed
+/// byte.
+enum GenerationSpanEvent {
+    None,
+    Opened,
+    Closed,
+}
+
 impl LayoutScanner {
-    fn observe(&mut self, byte: u8, offset: u64) -> Result<(), CodeIndexProductionErrorV1> {
-        if let Some(hasher) = self.generation_hasher.as_mut() {
-            hasher.update([byte]);
+    /// Observe one contiguous run of admitted bytes starting at `base_offset`.
+    ///
+    /// The generation hasher receives one update per contiguous in-generation
+    /// byte range instead of one update per byte; the hashed bytes and their
+    /// order are identical.
+    fn observe_slice(
+        &mut self,
+        bytes: &[u8],
+        base_offset: u64,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let mut active_from = self.generation_hasher.is_some().then_some(0usize);
+        for (index, &byte) in bytes.iter().enumerate() {
+            let offset = u64::try_from(index)
+                .ok()
+                .and_then(|index| base_offset.checked_add(index))
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical source length overflowed".to_owned(),
+                    )
+                })?;
+            match self.observe(byte, offset)? {
+                GenerationSpanEvent::None => {}
+                GenerationSpanEvent::Opened => active_from = Some(index),
+                GenerationSpanEvent::Closed => {
+                    let start = active_from.take().ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed generation digest state is missing".to_owned(),
+                        )
+                    })?;
+                    let mut hasher = self.generation_hasher.take().ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed generation digest state is missing".to_owned(),
+                        )
+                    })?;
+                    hasher.update(&bytes[start..=index]);
+                    self.generation_digest = Some(digest_hasher(hasher)?);
+                }
+            }
         }
+        if let Some(hasher) = self.generation_hasher.as_mut() {
+            let start = active_from.ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation digest state is missing".to_owned(),
+                )
+            })?;
+            hasher.update(&bytes[start..]);
+        }
+        Ok(())
+    }
+
+    fn observe(
+        &mut self,
+        byte: u8,
+        offset: u64,
+    ) -> Result<GenerationSpanEvent, CodeIndexProductionErrorV1> {
         if self.in_string {
             if self.escaped {
                 self.escaped = false;
@@ -1415,7 +1481,7 @@ impl LayoutScanner {
                 } else {
                     self.string_overflowed = true;
                 }
-                return Ok(());
+                return Ok(GenerationSpanEvent::None);
             }
             match byte {
                 b'\\' => self.escaped = true,
@@ -1455,9 +1521,10 @@ impl LayoutScanner {
                     }
                 }
             }
-            return Ok(());
+            return Ok(GenerationSpanEvent::None);
         }
 
+        let mut event = GenerationSpanEvent::None;
         match byte {
             b'"' => {
                 self.in_string = true;
@@ -1470,9 +1537,8 @@ impl LayoutScanner {
             b'{' => {
                 if self.pending_key.as_deref() == Some("generation") && self.brace_depth == 1 {
                     self.generation_depth = Some(self.brace_depth + 1);
-                    let mut hasher = Sha256::new();
-                    hasher.update([byte]);
-                    self.generation_hasher = Some(hasher);
+                    self.generation_hasher = Some(Sha256::new());
+                    event = GenerationSpanEvent::Opened;
                 }
                 if self.files_depth == Some(self.bracket_depth)
                     && self.generation_depth == Some(self.brace_depth)
@@ -1509,12 +1575,7 @@ impl LayoutScanner {
                     self.current_file_start = None;
                 }
                 if self.generation_depth == Some(self.brace_depth) {
-                    let hasher = self.generation_hasher.take().ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed generation digest state is missing".to_owned(),
-                        )
-                    })?;
-                    self.generation_digest = Some(digest_hasher(hasher)?);
+                    event = GenerationSpanEvent::Closed;
                 }
                 self.brace_depth = self.brace_depth.checked_sub(1).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
@@ -1558,7 +1619,7 @@ impl LayoutScanner {
             byte if byte.is_ascii_whitespace() => {}
             _ => self.completed_string = None,
         }
-        Ok(())
+        Ok(event)
     }
 
     fn finish(self) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
@@ -1801,6 +1862,6 @@ fn hash_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProduct
 }
 
 fn digest_hasher(hasher: Sha256) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
-    ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
 }

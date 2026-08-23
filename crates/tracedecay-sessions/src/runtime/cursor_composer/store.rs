@@ -3,9 +3,10 @@
 //! composer chat stores.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 
 use serde_json::Value;
+
+pub(super) use hex::encode as encode_hex;
 
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::snapshot_observation::MAX_SNAPSHOT_METADATA_BYTES;
@@ -36,24 +37,6 @@ fn read_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
         }
     }
     None
-}
-
-fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
-        .collect()
-}
-
-pub(super) fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// Extract length-delimited field-1 entries that are exactly 32 bytes long and
@@ -230,7 +213,7 @@ fn read_store_meta_bounded_sync(
             byte_len: decoded_bytes,
         };
     };
-    let Some(bytes) = decode_hex(&hex) else {
+    let Ok(bytes) = hex::decode(&hex) else {
         return BoundedSqliteValue::Malformed {
             byte_len: decoded_bytes,
         };

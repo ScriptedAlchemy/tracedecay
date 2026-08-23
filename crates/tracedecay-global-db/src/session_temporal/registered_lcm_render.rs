@@ -15,6 +15,9 @@ use tracedecay_sessions::lcm::contracts::{
     LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessageMetadata, LcmRawMessageOverview,
     LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
+use tracedecay_sessions::runtime::lcm::raw::{
+    RAW_MESSAGE_METADATA_SELECT_COLUMNS, raw_message_metadata_from_row,
+};
 
 macro_rules! field {
     ($row:expr, $column:expr) => {
@@ -500,40 +503,16 @@ async fn find_raw_message(
     snapshot: &(impl QueryExecutor + ?Sized),
     store_id: i64,
 ) -> Result<Option<LcmRawMessageMetadata>, LcmError> {
-    let mut rows = query(
-        snapshot,
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                '' AS snippet_text, legacy_source, legacy_truncated, metadata_json
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
          FROM lcm_raw_messages
-         WHERE store_id = ?1",
-        params![store_id],
-    )
-    .await?;
+         WHERE store_id = ?1"
+    );
+    let mut rows = query(snapshot, &sql, params![store_id]).await?;
     let Some(row) = next_row(&mut rows).await? else {
         return Ok(None);
     };
     raw_message_metadata_from_row(&row).map(Some)
-}
-
-fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
-    let storage_kind_text: String = field!(row, 9)?;
-    let storage_kind = storage_kind(&storage_kind_text)?;
-    Ok(LcmRawMessageMetadata {
-        provider: field!(row, 0)?,
-        message_id: field!(row, 1)?,
-        session_id: field!(row, 2)?,
-        store_id: field!(row, 3)?,
-        role: field!(row, 4)?,
-        ordinal: field!(row, 5)?,
-        timestamp: field!(row, 6)?,
-        content_hash: field!(row, 8)?,
-        storage_kind,
-        payload_ref: field!(row, 10)?,
-        legacy_source: field!(row, 12, i64).unwrap_or(0) != 0,
-        legacy_truncated: field!(row, 13, i64).unwrap_or(0) != 0,
-        metadata_json: field!(row, 14)?,
-    })
 }
 
 async fn load_summary_node(
@@ -817,9 +796,7 @@ async fn load_raw_messages(
     }
     let placeholders = build_qmark_placeholders(store_ids.len());
     let sql = format!(
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                '' AS snippet_text, legacy_source, legacy_truncated, metadata_json
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
          FROM lcm_raw_messages
          WHERE store_id IN ({placeholders})"
     );

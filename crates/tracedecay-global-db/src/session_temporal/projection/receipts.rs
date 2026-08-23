@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, RetrievalAnchorRecord};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::db::engine::{Executor, params};
@@ -285,9 +286,7 @@ pub(super) async fn validate_canonical_assertion_completeness(
 }
 
 pub(in crate::session_temporal) fn digest_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{}", hex::encode(hasher.finalize()))
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
 
 pub async fn record_canonical_observation_effect(

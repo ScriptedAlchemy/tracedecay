@@ -21,6 +21,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/stock-host.sh"
 SCRIPT_PATH="$REPO_ROOT/scripts/opencode_stock_integration.sh"
 DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
 STAGE=""
@@ -89,15 +90,10 @@ main() {
     local tracedecay_bin opencode_bin opencode_candidate operator_home
     local fake_home project config status
 
-    tracedecay_bin="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
-    tracedecay_bin="$(cd "$(dirname "$tracedecay_bin")" && pwd)/$(basename "$tracedecay_bin")"
+    tracedecay_bin="$(resolve_tracedecay_bin)"
     opencode_candidate="${OPENCODE_BIN:-$(command -v opencode || true)}"
     operator_home="$HOME"
 
-    if [[ ! -x "$tracedecay_bin" ]]; then
-        echo "error: tracedecay binary not found at $tracedecay_bin (build with: cargo build --bin tracedecay)" >&2
-        return 1
-    fi
     if [[ -z "$opencode_candidate" || ! -x "$opencode_candidate" ]]; then
         echo "error: stock opencode binary not found (set OPENCODE_BIN or npm install --global opencode-ai)" >&2
         return 1
@@ -106,7 +102,7 @@ main() {
     STAGE="$(mktemp -d -t opencode-stock-XXXXXX)"
     fake_home="$STAGE/home"
     project="$STAGE/project"
-    mkdir -p "$fake_home" "$project/src" "$STAGE/bin"
+    mkdir -p "$fake_home" "$project/src"
     trap 'rm -rf "$STAGE"' EXIT
     opencode_bin="$(resolve_stock_opencode_bin \
         "$opencode_candidate" "$fake_home" "$operator_home")"
@@ -114,24 +110,12 @@ main() {
     echo "== stock opencode: $opencode_bin ($("$opencode_bin" --version))"
     echo "== tracedecay binary: $tracedecay_bin ($("$tracedecay_bin" --version))"
 
-    # The installer records the PATH-resolved `tracedecay` in the host
-    # registration and deliberately refuses transient cargo-target binaries.
-    # Shim the binary under test into a neutral directory (the lifecycle
-    # acceptance suite's pattern) so an operator's installed release can never
-    # satisfy this gate.
-    ln "$tracedecay_bin" "$STAGE/bin/tracedecay" 2>/dev/null \
-        || cp "$tracedecay_bin" "$STAGE/bin/tracedecay"
-    chmod 0755 "$STAGE/bin/tracedecay"
-    tracedecay_bin="$STAGE/bin/tracedecay"
-    PATH="$STAGE/bin:$PATH"
-    export PATH
-    unset CARGO_TARGET_DIR
+    shim_tracedecay_bin "$tracedecay_bin" "$STAGE"
+    tracedecay_bin="$STOCK_HOST_TRACEDECAY_BIN"
 
     printf 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n' > "$project/src/lib.rs"
     printf '[package]\nname = "throwaway"\nversion = "0.1.0"\nedition = "2021"\n' > "$project/Cargo.toml"
-    git -C "$project" init -q
-    git -C "$project" add -A
-    git -C "$project" -c user.email=ci@tracedecay -c user.name=ci commit -qm init
+    seed_throwaway_project "$project"
 
     echo "== tracedecay install --agent opencode"
     (cd "$project" && HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \

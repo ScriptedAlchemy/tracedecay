@@ -365,18 +365,29 @@ async fn live_payload_count(
     }
 }
 
-const ANCHOR_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM retrieval_anchors a
-     WHERE (?1 IS NULL OR a.projection_generation = ?1)
-       AND json_extract(a.anchor_json, '$.__retention_released') IS NULL";
+// The release passes write the marker consts verbatim (and the restore scan
+// matches them exactly), so a direct string comparison is the released test —
+// no JSON parse of every multi-KB live payload.
+fn anchor_payload_count_sql() -> String {
+    format!(
+        "SELECT COUNT(*) FROM retrieval_anchors a
+         WHERE (?1 IS NULL OR a.projection_generation = ?1)
+           AND a.anchor_json <> '{ANCHOR_RELEASED_MARKER}'"
+    )
+}
 
-const OBSERVATION_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM observations o
-     WHERE (?1 IS NULL OR EXISTS (
-         SELECT 1 FROM observation_retrieval_anchors b
-         JOIN retrieval_anchors a ON a.anchor_id = b.anchor_id
-         WHERE b.observation_id = o.observation_id
-           AND a.projection_generation = ?1
-     ))
-       AND json_extract(o.observation_json, '$.__retention_released') IS NULL";
+fn observation_payload_count_sql() -> String {
+    format!(
+        "SELECT COUNT(*) FROM observations o
+         WHERE (?1 IS NULL OR EXISTS (
+             SELECT 1 FROM observation_retrieval_anchors b
+             JOIN retrieval_anchors a ON a.anchor_id = b.anchor_id
+             WHERE b.observation_id = o.observation_id
+               AND a.projection_generation = ?1
+         ))
+           AND o.observation_json <> '{OBSERVATION_RELEASED_MARKER}'"
+    )
+}
 
 const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advances";
 
@@ -392,9 +403,9 @@ pub async fn run_observation_retention(
 ) -> Result<ObservationRetentionReport> {
     let reader = database.read_connection();
     let anchor_payloads_before =
-        live_payload_count(&reader, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, &anchor_payload_count_sql(), generation).await;
     let observation_payloads_before =
-        live_payload_count(&reader, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, &observation_payload_count_sql(), generation).await;
     let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await;
     let freelist_before = pragma_u64(&reader, "freelist_count").await;
     let page_count_before = pragma_u64(&reader, "page_count").await;
@@ -440,9 +451,9 @@ pub async fn run_observation_retention(
     report.ended_at = now;
     let reader = database.read_connection();
     report.anchor_payloads_after =
-        live_payload_count(&reader, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, &anchor_payload_count_sql(), generation).await;
     report.observation_payloads_after =
-        live_payload_count(&reader, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, &observation_payload_count_sql(), generation).await;
     report.cursor_advances_after = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await;
     report.freelist_after = pragma_u64(&reader, "freelist_count").await;
     report.page_count_after = pragma_u64(&reader, "page_count").await;
@@ -520,7 +531,7 @@ async fn run_anchor_pass(
                 ) AS effective_at
          FROM retrieval_anchors a
          WHERE (?1 IS NULL OR a.projection_generation = ?1)
-           AND json_extract(a.anchor_json, '$.__retention_released') IS NULL
+           AND a.anchor_json <> '{ANCHOR_RELEASED_MARKER}'
            AND {RELEASED_DISPOSITION}
          ORDER BY a.anchor_id ASC
          LIMIT ?3"
@@ -636,7 +647,8 @@ async fn run_observation_pass(
     // maintenance transaction temporarily suspends only its UPDATE guard,
     // rewrites the payload, and restores the exact canonical trigger before
     // commit.
-    let sql = "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
+    let sql = format!(
+        "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
                 released.effective_at
          FROM observations o
          JOIN (
@@ -677,10 +689,10 @@ async fn run_observation_pass(
                )
              GROUP BY b.observation_id
          ) released ON released.observation_id = o.observation_id
-         WHERE json_extract(o.observation_json, '$.__retention_released') IS NULL
+         WHERE o.observation_json <> '{OBSERVATION_RELEASED_MARKER}'
          ORDER BY o.sequence ASC
          LIMIT ?3"
-        .to_string();
+    );
     let transaction = if mode.is_apply() {
         Some(
             database
@@ -800,7 +812,7 @@ async fn run_provenance_pass(
          JOIN retrieval_anchors a ON a.anchor_id = p.retrieval_anchor_id
          WHERE (?1 IS NULL OR a.projection_generation = ?1)
            AND p.retrieval_anchor_id IS NOT NULL
-           AND json_extract(p.availability_json, '$.__retention_released') IS NULL
+           AND p.availability_json <> '{PROVENANCE_RELEASED_MARKER}'
            AND {RELEASED_DISPOSITION}
          ORDER BY p.observation_id ASC
          LIMIT ?3"

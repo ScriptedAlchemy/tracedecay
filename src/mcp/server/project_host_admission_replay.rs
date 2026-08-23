@@ -18,7 +18,9 @@ use tracedecay_usecases::host_admission::{
     replay_backoff,
 };
 
-const REPLAY_BACKOFF_SHIFT_CAP: u32 = 6;
+/// Matches the per-profile worker's cap so both replay workers apply the same
+/// documented backoff schedule, saturating at the shared 2s absolute ceiling.
+const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;
@@ -233,8 +235,8 @@ mod tests {
         assert_eq!(project_replay_backoff(1), Duration::from_millis(25));
         assert_eq!(project_replay_backoff(2), Duration::from_millis(50));
         assert_eq!(project_replay_backoff(3), Duration::from_millis(100));
-        // shift caps at 6 → 25ms * 64 = 1.6s (below the 2s absolute ceiling)
-        assert_eq!(project_replay_backoff(20), Duration::from_millis(1_600));
+        // the shared schedule saturates at the 2s absolute ceiling
+        assert_eq!(project_replay_backoff(20), Duration::from_secs(2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

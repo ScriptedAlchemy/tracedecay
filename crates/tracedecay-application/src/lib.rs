@@ -23,6 +23,7 @@
 
 pub mod advisory;
 pub mod authorization;
+mod bearer_token;
 pub mod clock;
 pub mod configuration;
 mod configuration_wire;

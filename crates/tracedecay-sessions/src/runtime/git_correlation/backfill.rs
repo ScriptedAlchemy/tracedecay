@@ -1,3 +1,4 @@
+use tracedecay_capture::normalize_timestamp_secs;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::attribution::{
@@ -44,25 +45,10 @@ pub struct SessionActivityRow {
     pub message_max_ts: Option<i64>,
 }
 
-/// Millisecond/second boundary for stored session timestamps: any value at or
-/// above this is treated as unix millis and divided by 1000 (mirrors
-/// `RegisteredGlobalDb::latest_session_activity_secs` and
-/// `kiro::normalize_timestamp`).
-const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
-
-/// Normalizes provider timestamps to unix seconds.
-fn normalize_activity_ts(ts: i64) -> i64 {
-    if ts >= UNIX_TIMESTAMP_MILLIS_THRESHOLD {
-        ts / 1000
-    } else {
-        ts
-    }
-}
-
 impl SessionActivityRow {
     /// Coarse `[start, end]` window from the widest pair of known bounds, or
     /// `None` when the session carries no usable timestamp at all. Each bound is
-    /// normalized to unix seconds (see [`normalize_activity_ts`]) so mixed
+    /// normalized to unix seconds (see [`normalize_timestamp_secs`]) so mixed
     /// seconds/millis rows on legacy stores produce a seconds-scale window.
     pub fn window(&self) -> Option<(i64, i64)> {
         let mut lo: Option<i64> = None;
@@ -75,7 +61,7 @@ impl SessionActivityRow {
         ]
         .into_iter()
         .flatten()
-        .map(normalize_activity_ts)
+        .map(normalize_timestamp_secs)
         {
             lo = Some(lo.map_or(ts, |cur| cur.min(ts)));
             hi = Some(hi.map_or(ts, |cur| cur.max(ts)));

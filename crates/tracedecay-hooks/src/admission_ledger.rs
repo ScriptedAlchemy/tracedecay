@@ -113,6 +113,8 @@ pub enum HookAdmissionLedgerError {
     InvalidLimits,
     #[error("hook admission ledger record is not canonically encodable")]
     RecordUnencodable,
+    #[error("hook admission ledger record is not canonically decodable")]
+    RecordUndecodable,
     #[error("hook admission ledger identity is invalid")]
     InvalidIdentity,
     #[error("hook admission ledger is busy in another daemon")]
@@ -463,7 +465,7 @@ fn read_work_completions(
     let Some(bytes) = read_bounded(&completions_path(root), maximum)? else {
         return Ok(Vec::new());
     };
-    serde_json::from_slice(&bytes).map_err(|_| HookAdmissionLedgerError::Io)
+    serde_json::from_slice(&bytes).map_err(|_| HookAdmissionLedgerError::RecordUndecodable)
 }
 
 fn is_expired(admitted_at: UtcMicros, now: UtcMicros, max_age_micros: i64) -> bool {

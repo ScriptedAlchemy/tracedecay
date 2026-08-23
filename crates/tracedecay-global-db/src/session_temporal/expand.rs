@@ -1,6 +1,6 @@
 //! Generation-bound temporal session retrieval.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
@@ -264,75 +264,16 @@ impl RegisteredGlobalDb {
         };
         remaining = remaining.saturating_sub(copies.len());
 
-        let mut assertions = Vec::new();
-        let mut seen_assertions = BTreeSet::new();
-        if remaining != 0 {
-            for (_, anchor_id) in &occurrence_anchors {
-                let mut assertion_rows = read
-                    .query(
-                        "SELECT assertion_id, assertion_kind,
-                                subject_anchor_id, object_anchor_id,
-                                knowledge_at, valid_time_json, evidence_json
-                         FROM session_assertions AS assertion
-                         WHERE assertion.session_id = ?1
-                           AND assertion.generation = ?2
-                           AND (
-                               assertion.subject_anchor_id = ?3
-                               OR assertion.object_anchor_id = ?3
-                           )
-                           AND (
-                               ?4 <> 'as_of'
-                               OR (
-                                   assertion.knowledge_at <= ?5
-                                   AND json_extract(
-                                       assertion.valid_time_json, '$.kind'
-                                   ) = 'known'
-                                   AND json_extract(
-                                       assertion.valid_time_json, '$.valid_at'
-                                   ) <= ?5
-                               )
-                           )
-                           AND (
-                               ?4 <> 'current'
-                               OR NOT EXISTS (
-                                   SELECT 1
-                                   FROM session_assertion_supersession AS supersession
-                                   WHERE supersession.session_id = assertion.session_id
-                                     AND supersession.generation = assertion.generation
-                                     AND supersession.superseded_assertion_id =
-                                         assertion.assertion_id
-                               )
-                           )
-                         ORDER BY assertion.knowledge_at, assertion.assertion_id",
-                        params![
-                            request.session_id().as_str(),
-                            generation,
-                            anchor_id.as_str(),
-                            request.temporal_mode().as_str(),
-                            cutoff
-                        ],
-                    )
-                    .await
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?;
-                while remaining != 0
-                    && let Some(row) = assertion_rows
-                        .next()
-                        .await
-                        .map_err(|error| storage(EXPAND_OPERATION, error))?
-                {
-                    let assertion_id = row
-                        .get::<String>(0)
-                        .map_err(|error| storage(EXPAND_OPERATION, error))?;
-                    if seen_assertions.insert(assertion_id.clone()) {
-                        assertions.push(assertion_from_row(&row, assertion_id)?);
-                        remaining -= 1;
-                    }
-                }
-                if remaining == 0 {
-                    break;
-                }
-            }
-        }
+        let assertions = assertions_for_anchors(
+            &read,
+            request.session_id(),
+            generation,
+            &occurrence_anchors,
+            request.temporal_mode().as_str(),
+            cutoff,
+            remaining,
+        )
+        .await?;
 
         let next_after_occurrence_id = has_more
             .then(|| occurrences.last().map(|item| item.occurrence_id.clone()))
@@ -452,39 +393,134 @@ fn relation_summary_relations(
     relations.map_err(map_session_relation_error)
 }
 
-async fn summary_anchor_for(
+async fn assertions_for_anchors(
     read: &DatabaseEngineReadSnapshot,
     session_id: &SessionId,
-    summary_id: &str,
-) -> SessionStoreResult<RetrievalAnchorId> {
-    let mut rows = read
+    generation: i64,
+    occurrence_anchors: &[(
+        tracedecay_domain::MessageOccurrenceIdV1,
+        RetrievalAnchorId,
+    )],
+    temporal_mode: &str,
+    cutoff: i64,
+    mut remaining: usize,
+) -> SessionStoreResult<Vec<TemporalAssertionRecordV1>> {
+    if remaining == 0 || occurrence_anchors.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded_anchors = serde_json::to_string(
+        &occurrence_anchors
+            .iter()
+            .map(|(_, anchor_id)| anchor_id.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let mut assertion_rows = read
         .query(
-            "SELECT summary_anchor_id
-             FROM session_summary_nodes
-             WHERE session_id = ?1 AND summary_id = ?2
-             LIMIT 2",
-            params![session_id.as_str(), summary_id],
+            "SELECT assertion_id, assertion_kind,
+                    subject_anchor_id, object_anchor_id,
+                    knowledge_at, valid_time_json, evidence_json
+             FROM session_assertions AS assertion
+             WHERE assertion.session_id = ?1
+               AND assertion.generation = ?2
+               AND (
+                   assertion.subject_anchor_id IN (SELECT value FROM json_each(?3))
+                   OR assertion.object_anchor_id IN (SELECT value FROM json_each(?3))
+               )
+               AND (
+                   ?4 <> 'as_of'
+                   OR (
+                       assertion.knowledge_at <= ?5
+                       AND json_extract(
+                           assertion.valid_time_json, '$.kind'
+                       ) = 'known'
+                       AND json_extract(
+                           assertion.valid_time_json, '$.valid_at'
+                       ) <= ?5
+                   )
+               )
+               AND (
+                   ?4 <> 'current'
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM session_assertion_supersession AS supersession
+                       WHERE supersession.session_id = assertion.session_id
+                         AND supersession.generation = assertion.generation
+                         AND supersession.superseded_assertion_id =
+                             assertion.assertion_id
+                   )
+               )
+             ORDER BY assertion.knowledge_at, assertion.assertion_id",
+            params![
+                session_id.as_str(),
+                generation,
+                encoded_anchors,
+                temporal_mode,
+                cutoff
+            ],
         )
         .await
         .map_err(|error| storage(EXPAND_OPERATION, error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage(EXPAND_OPERATION, error))?
-        .ok_or_else(|| map_session_relation_error(SessionRelationError::Corrupt))?;
-    let anchor_id = decode_text(
-        row.get::<String>(0)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-    )?;
-    if rows
-        .next()
-        .await
-        .map_err(|error| storage(EXPAND_OPERATION, error))?
-        .is_some()
+    let mut assertions = Vec::new();
+    let mut seen_assertions = BTreeSet::new();
+    while remaining != 0
+        && let Some(row) = assertion_rows
+            .next()
+            .await
+            .map_err(|error| storage(EXPAND_OPERATION, error))?
     {
+        let assertion_id = row
+            .get::<String>(0)
+            .map_err(|error| storage(EXPAND_OPERATION, error))?;
+        if seen_assertions.insert(assertion_id.clone()) {
+            assertions.push(assertion_from_row(&row, assertion_id)?);
+            remaining -= 1;
+        }
+    }
+    Ok(assertions)
+}
+
+async fn summary_anchors_for(
+    read: &DatabaseEngineReadSnapshot,
+    session_id: &SessionId,
+    summary_ids: &BTreeSet<String>,
+) -> SessionStoreResult<BTreeMap<String, RetrievalAnchorId>> {
+    if summary_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_ids = serde_json::to_string(summary_ids)
+        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let mut rows = read
+        .query(
+            "SELECT summary_id, summary_anchor_id
+             FROM session_summary_nodes
+             WHERE session_id = ?1
+               AND summary_id IN (SELECT value FROM json_each(?2))",
+            params![session_id.as_str(), encoded_ids],
+        )
+        .await
+        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let mut anchors = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(EXPAND_OPERATION, error))?
+    {
+        let summary_id = row
+            .get::<String>(0)
+            .map_err(|error| storage(EXPAND_OPERATION, error))?;
+        let anchor_id = decode_text(
+            row.get::<String>(1)
+                .map_err(|error| storage(EXPAND_OPERATION, error))?,
+        )?;
+        if anchors.insert(summary_id, anchor_id).is_some() {
+            return Err(map_session_relation_error(SessionRelationError::Corrupt));
+        }
+    }
+    if anchors.len() != summary_ids.len() {
         return Err(map_session_relation_error(SessionRelationError::Corrupt));
     }
-    Ok(anchor_id)
+    Ok(anchors)
 }
 
 async fn retrieve_summary_page(
@@ -582,6 +618,16 @@ async fn retrieve_summary_page(
     if relations.len() != summary_seeds.len() {
         return Err(map_session_relation_error(SessionRelationError::Corrupt));
     }
+    let referenced_summary_ids = relations
+        .iter()
+        .flat_map(|relation| relation.sources.iter())
+        .filter_map(|source| match source {
+            SummarySourceRef::Summary { summary_id } => Some(summary_id.clone()),
+            SummarySourceRef::Anchor { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let summary_anchors =
+        summary_anchors_for(read, request.session_id(), &referenced_summary_ids).await?;
     let mut summaries = Vec::with_capacity(summary_seeds.len());
     for (seed, relation) in summary_seeds.into_iter().zip(relations) {
         if relation.summary_id != seed.summary_id.as_str() {
@@ -591,8 +637,12 @@ async fn retrieve_summary_page(
         for source in relation.sources {
             match source {
                 SummarySourceRef::Anchor { anchor_id } => source_anchors.push(anchor_id),
-                SummarySourceRef::Summary { summary_id } => source_anchors
-                    .push(summary_anchor_for(read, request.session_id(), &summary_id).await?),
+                SummarySourceRef::Summary { summary_id } => source_anchors.push(
+                    summary_anchors
+                        .get(&summary_id)
+                        .cloned()
+                        .ok_or_else(|| map_session_relation_error(SessionRelationError::Corrupt))?,
+                ),
             }
         }
         let mut summary = SessionSummaryRecordV1::new(

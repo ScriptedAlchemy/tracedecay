@@ -4073,14 +4073,10 @@ fn resolve_named_binding(
     )
 }
 
-/// Resolve any application-catalog transport binding by its public tool name.
-///
-/// Typed application surfaces continue through [`ApplicationSurfaceOperation`].
-/// Catalog bindings whose typed adapters are still being migrated use this
-/// gate before entering their retained compatibility owner.
 /// Resolves a public tool name through the application catalog for one host surface.
 ///
-/// Compatibility-owned tools use this boundary before entering their retained
+/// Typed application surfaces continue through [`ApplicationSurfaceOperation`];
+/// compatibility-owned tools use this boundary before entering their retained
 /// execution adapter, so catalog metadata remains the single binding authority.
 pub fn resolve_catalog_tool_binding(
     surface: BindingSurface,

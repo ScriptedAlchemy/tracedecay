@@ -49,12 +49,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -104,7 +109,6 @@ impl ZigExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -179,7 +183,6 @@ impl ZigExtractor {
     /// and plain `const X: type = value` are all `variable_declaration` nodes.
     /// We dispatch based on the value child.
     fn visit_variable_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Get the name from the first identifier child.
         let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 

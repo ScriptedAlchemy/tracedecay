@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
-use super::super::{HostAdmissionOutcome, HostAdmissionStatus};
+use super::super::{HostAdmissionOutcome, HostAdmissionStatus, admission_outcome};
 use super::{SpoolOverflowDisposition, frames::FORMAT_VERSION};
 
 const HOST_ADMISSION_SPOOL_AUTHORITY: &str = "host-admission spool";
@@ -68,7 +68,7 @@ impl SpoolError {
                 | SpoolOverflowDisposition::MaxBytesPerSource
                 | SpoolOverflowDisposition::MaxRecordsPerSource,
             ) => HostAdmissionOutcome::spool_overflow(),
-            Self::UnsupportedVersion(_) => HostAdmissionOutcome::new(
+            Self::UnsupportedVersion(_) => admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 false,
                 Some("spool_reset_required"),
@@ -85,7 +85,7 @@ impl SpoolError {
             Self::QuarantineRecoveryRequired => {
                 HostAdmissionOutcome::quarantine_recovery_required()
             }
-            Self::Io => HostAdmissionOutcome::new(
+            Self::Io => admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 true,
                 Some("spool_io_failed"),

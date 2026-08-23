@@ -1,5 +1,6 @@
 //! Pure deterministic reducers for canonical observation projections.
 
+use serde::Deserialize;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationFactV1, CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
@@ -17,10 +18,9 @@ use crate::{
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone()).map_err(|_| {
-            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-        })?;
+    let envelope = CanonicalObservationEnvelopeV1::deserialize(observation.payload()).map_err(
+        |_| ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload),
+    )?;
     envelope
         .validate()
         .map_err(ProjectionStoreError::Contract)?;
@@ -71,7 +71,8 @@ pub fn derive_canonical_projection(
         .as_ref()
         .and_then(|fields| fields.project_path.clone())
         .unwrap_or(fallback_project_path);
-    let session_metadata_json = canonical_session_metadata(&provider, session_fields.as_ref())?;
+    let session_metadata = canonical_session_metadata_map(&provider, session_fields.as_ref());
+    let session_metadata_json = serialize_metadata_map(&session_metadata)?;
     let session = SessionRecord {
         provider: provider.clone(),
         session_id: session_id.clone(),
@@ -91,7 +92,7 @@ pub fn derive_canonical_projection(
         transcript_path: session_fields
             .as_ref()
             .and_then(|fields| fields.transcript_path.clone()),
-        metadata_json: session_metadata_json.clone(),
+        metadata_json: session_metadata_json,
         parent_session_id: envelope
             .relations()
             .parent_session_id()
@@ -110,7 +111,10 @@ pub fn derive_canonical_projection(
     let ordinal = i64::try_from(ordinal).map_err(|_| {
         ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
     })?;
-    let metadata_json = canonical_message_metadata(&envelope, session_metadata_json.as_deref())?;
+    let metadata_json = canonical_message_metadata(
+        &envelope,
+        (!session_metadata.is_empty()).then_some(&session_metadata),
+    )?;
     let base_message_id = if provider == "claude" {
         envelope.stable_record_id().as_str().to_owned()
     } else {
@@ -237,69 +241,83 @@ fn canonical_session_fields(
     })
 }
 
-fn canonical_session_metadata(
+fn canonical_session_metadata_map(
     provider: &str,
     session: Option<&CanonicalSessionFields>,
-) -> ProjectionStoreResult<Option<String>> {
+) -> serde_json::Map<String, serde_json::Value> {
     let mut metadata = serde_json::Map::new();
-    if let Some(session) = session {
-        if let Some(source) = &session.source {
-            metadata.insert("source".to_owned(), source.clone().into());
-        }
-        if let Some(profile) = &session.profile {
-            metadata.insert("profile".to_owned(), profile.clone().into());
-        }
-        if let Some(native_source) = &session.native_source {
-            metadata.insert(format!("{provider}_source"), native_source.clone().into());
-        }
-        let location_namespace = format!("{provider}_session");
-        if let Some(location_path) = session
-            .location_path
-            .as_ref()
-            .or(session.project_path.as_ref())
-        {
-            metadata.insert(
-                format!("{location_namespace}_cwd"),
-                location_path.clone().into(),
-            );
-            metadata.insert(
-                format!("{location_namespace}_worktree"),
-                location_path.clone().into(),
-            );
-        }
-        if let Some(provenance) = &session.location_provenance {
-            metadata.insert(
-                format!("{location_namespace}_location_provenance"),
-                provenance.clone().into(),
-            );
-        }
+    let Some(session) = session else {
+        return metadata;
+    };
+    if let Some(source) = &session.source {
+        metadata.insert(
+            "source".to_owned(),
+            serde_json::Value::String(source.clone()),
+        );
     }
+    if let Some(profile) = &session.profile {
+        metadata.insert(
+            "profile".to_owned(),
+            serde_json::Value::String(profile.clone()),
+        );
+    }
+    if let Some(native_source) = &session.native_source {
+        metadata.insert(
+            format!("{provider}_source"),
+            serde_json::Value::String(native_source.clone()),
+        );
+    }
+    let location_namespace = format!("{provider}_session");
+    if let Some(location_path) = session
+        .location_path
+        .as_ref()
+        .or(session.project_path.as_ref())
+    {
+        let location = serde_json::Value::String(location_path.clone());
+        metadata.insert(format!("{location_namespace}_cwd"), location.clone());
+        metadata.insert(format!("{location_namespace}_worktree"), location);
+    }
+    if let Some(provenance) = &session.location_provenance {
+        metadata.insert(
+            format!("{location_namespace}_location_provenance"),
+            serde_json::Value::String(provenance.clone()),
+        );
+    }
+    metadata
+}
+
+fn serialize_metadata_map(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> ProjectionStoreResult<Option<String>> {
     if metadata.is_empty() {
         Ok(None)
     } else {
-        serde_json::to_string(&metadata).map(Some).map_err(|_| {
+        serde_json::to_string(metadata).map(Some).map_err(|_| {
             ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
         })
     }
 }
 
+fn canonical_session_metadata(
+    provider: &str,
+    session: Option<&CanonicalSessionFields>,
+) -> ProjectionStoreResult<Option<String>> {
+    serialize_metadata_map(&canonical_session_metadata_map(provider, session))
+}
+
 fn canonical_message_metadata(
     envelope: &CanonicalObservationEnvelopeV1,
-    session_metadata_json: Option<&str>,
+    session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ProjectionStoreResult<String> {
-    let mut metadata = serde_json::to_value(envelope)
+    let serde_json::Value::Object(mut metadata) = serde_json::to_value(envelope)
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))?
-        .as_object()
-        .cloned()
-        .ok_or_else(|| {
-            ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
-        })?;
-    if let Some(session_metadata_json) = session_metadata_json {
-        let session_metadata: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(session_metadata_json).map_err(|_| {
-                ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
-            })?;
-        metadata.extend(session_metadata);
+    else {
+        return Err(ProjectionStoreError::Contract(
+            ObservationContractError::CanonicalEncoding,
+        ));
+    };
+    if let Some(session_metadata) = session_metadata {
+        metadata.extend(session_metadata.clone());
     }
     if let Some(normalize) =
         tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
@@ -1116,11 +1134,10 @@ mod tests {
             arguments: json!({"prompt": "explore"}),
         }]);
         let session_metadata =
-            canonical_session_metadata("cursor", Some(&cursor_transcript_session_fields()))
-                .unwrap();
+            canonical_session_metadata_map("cursor", Some(&cursor_transcript_session_fields()));
 
         let metadata: serde_json::Value = serde_json::from_str(
-            &canonical_message_metadata(&envelope, session_metadata.as_deref()).unwrap(),
+            &canonical_message_metadata(&envelope, Some(&session_metadata)).unwrap(),
         )
         .unwrap();
         assert_eq!(metadata["tool_calls"][0]["id"], "tool.dispatch");
@@ -1141,9 +1158,10 @@ mod tests {
         let other_metadata: serde_json::Value = serde_json::from_str(
             &canonical_message_metadata(
                 &envelope,
-                canonical_session_metadata("cursor", Some(&other_source))
-                    .unwrap()
-                    .as_deref(),
+                Some(&canonical_session_metadata_map(
+                    "cursor",
+                    Some(&other_source),
+                )),
             )
             .unwrap(),
         )
@@ -1315,8 +1333,9 @@ mod tests {
             "provider usage must not become session or message metadata"
         );
 
+        let session_metadata_map = canonical_session_metadata_map("codex", Some(&fields));
         let message_metadata: serde_json::Value = serde_json::from_str(
-            &canonical_message_metadata(&envelope, session_metadata.as_deref()).unwrap(),
+            &canonical_message_metadata(&envelope, Some(&session_metadata_map)).unwrap(),
         )
         .unwrap();
         assert_eq!(

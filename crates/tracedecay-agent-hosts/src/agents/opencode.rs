@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `OpenCode` agent integration.
 //!
 //! Handles `TraceDecay`'s MCP and custom LSP registration in `OpenCode`'s config,

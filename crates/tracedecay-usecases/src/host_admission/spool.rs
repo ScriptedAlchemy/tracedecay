@@ -48,14 +48,7 @@ use quarantine::TerminalQuarantine;
 use recovery::recover_pending;
 
 pub use bounds::SpoolBounds;
-pub(crate) use bounds::{
-    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SOURCE_BYTES,
-    DEFAULT_MAX_SPOOL_BYTES, SpoolOverflowDisposition,
-};
-// Re-exported to preserve the pre-split `spool::DEFAULT_MAX_*_PER_SOURCE` paths;
-// their only consumer (`SpoolBounds::default`) lives in `bounds` itself.
-#[allow(unused_imports)]
-pub(crate) use bounds::{DEFAULT_MAX_RECORDS_PER_SOURCE, DEFAULT_MAX_SPOOL_BYTES_PER_SOURCE};
+pub(crate) use bounds::SpoolOverflowDisposition;
 pub(crate) use types::{SpoolError, SpoolIntegrity};
 pub use types::{SpoolOpenReport, SpoolRecord, TerminalReason};
 

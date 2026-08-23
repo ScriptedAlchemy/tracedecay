@@ -949,7 +949,6 @@ fn compute_fingerprints(
     let mut computed_fingerprints = 0usize;
 
     for (file_path, file_nodes) in by_file {
-        // Figure out which tree-sitter language this file maps to.
         let Some(extractor) = registry.extractor_for_file(&file_path) else {
             return Err(redundancy_graph_problem(
                 "verified redundancy symbol has no registered extractor",

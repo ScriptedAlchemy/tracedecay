@@ -1588,26 +1588,33 @@ async fn stage_rebuild_provenance(
 ) -> ProjectionStoreResult<()> {
     let provenance = projection.provenance();
     let message = projection.message();
-    conn.execute(
-        "INSERT OR IGNORE INTO observation_projection_rebuild_provenance (
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO observation_projection_rebuild_provenance (
             projector_version, generation, observation_id, output_ordinal, retrieval_anchor_id,
             receipt_id, output_provider, output_message_id, output_digest, message_created
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            generation,
-            provenance.observation_id().as_str(),
-            i64::from(projection.output_ordinal()),
-            provenance.retrieval_anchor_id().as_str(),
-            provenance.receipt_id(),
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            projection.output_digest()?.as_str(),
-            i64::from(message_created),
-        ],
-    )
-    .await
-    .map_err(|error| storage("stage projection provenance", error))?;
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                provenance.observation_id().as_str(),
+                i64::from(projection.output_ordinal()),
+                provenance.retrieval_anchor_id().as_str(),
+                provenance.receipt_id(),
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                projection.output_digest()?.as_str(),
+                i64::from(message_created),
+            ],
+        )
+        .await
+        .map_err(|error| storage("stage projection provenance", error))?;
+    // A fresh insert wrote exactly the tuple above inside this transaction, so
+    // only a conflicting pre-existing row can disagree with this derivation;
+    // confine the verification read to conflicts.
+    if inserted == 1 {
+        return Ok(());
+    }
     let mut rows = conn
         .query(
             "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id,

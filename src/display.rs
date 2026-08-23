@@ -98,7 +98,6 @@ pub struct CostRow {
     pub efficiency_pct: f64,
 }
 
-/// Prints only the header section of the status table (version, tokens, sync times).
 /// Optional branch info for the status display.
 pub struct BranchInfo {
     pub branch: String,
@@ -106,6 +105,7 @@ pub struct BranchInfo {
     pub is_fallback: bool,
 }
 
+/// Prints only the header section of the status table (version, tokens, sync times).
 pub fn print_status_header(
     census: &GenerationCensusSnapshot,
     freshness: Option<&CodeIndexWorktreeFreshnessV1>,
@@ -236,7 +236,6 @@ fn compute_cell_width(cells: &Option<Vec<(&'static str, String)>>) -> usize {
     (widest + 3).clamp(22, MAX_CELL_WIDTH)
 }
 
-/// Print the top title row: version (left) + country flags (right).
 /// Returns a shuffled copy of `flags` using xorshift64 seeded from time + PID.
 ///
 /// Avoids pulling in `rand` for what is purely a cosmetic per-render shuffle.
@@ -264,6 +263,7 @@ fn shuffle_flags(flags: &[String]) -> Vec<String> {
     out
 }
 
+/// Print the top title row: version (left) + country flags (right).
 fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
     let version = crate::version::build_version();
     let title = format!("   TraceDecay v{version}");

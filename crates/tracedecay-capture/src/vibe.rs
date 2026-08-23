@@ -9,6 +9,8 @@ use tracedecay_domain::{
 };
 
 use crate::ObservationRecordParseErrorV1;
+use crate::content::content_is_empty;
+use crate::timestamp::timestamp_secs;
 
 const PROVIDER: &str = "vibe";
 
@@ -84,29 +86,6 @@ fn canonical_role(native: &Value) -> Result<CanonicalMessageRoleV1, ObservationR
         "assistant" | "model" => Ok(CanonicalMessageRoleV1::Assistant),
         _ => Err(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope),
     }
-}
-
-fn content_is_empty(content: &Value) -> bool {
-    match content {
-        Value::Null => true,
-        Value::String(text) => text.trim().is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Object(map) => map.is_empty(),
-        Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
-fn timestamp_secs(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-        .map(|timestamp| {
-            if timestamp >= 1_000_000_000_000 {
-                timestamp / 1000
-            } else {
-                timestamp
-            }
-        })
 }
 
 fn append_tool_invocations(

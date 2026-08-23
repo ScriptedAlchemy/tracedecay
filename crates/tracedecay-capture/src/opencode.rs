@@ -10,6 +10,7 @@ use tracedecay_domain::{
 };
 
 use crate::ObservationRecordParseErrorV1;
+use crate::timestamp::normalize_timestamp_secs;
 
 const PROVIDER: &str = "opencode";
 
@@ -289,14 +290,10 @@ fn canonical_role(role: &str) -> CanonicalMessageRoleV1 {
     }
 }
 
+/// OpenCode's `time.created` is strictly numeric; string forms stay
+/// unsupported, so only the millis/seconds normalization is shared.
 fn timestamp_secs(value: Option<&Value>) -> Option<i64> {
-    value.and_then(Value::as_i64).map(|timestamp| {
-        if timestamp >= 1_000_000_000_000 {
-            timestamp / 1000
-        } else {
-            timestamp
-        }
-    })
+    value.and_then(Value::as_i64).map(normalize_timestamp_secs)
 }
 
 const fn invalid() -> ObservationRecordParseErrorV1 {

@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_application::{
     CancellationSignal, NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
@@ -538,5 +541,3 @@ fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
         values.push(value);
     }
 }
-use std::collections::BTreeMap;
-use std::sync::Mutex;

@@ -1165,16 +1165,6 @@ impl LcmTestRuntime {
         self.runtime.lcm_compress_for_test(request).await
     }
 
-    pub async fn lcm_compress_for_test(
-        &self,
-        request: tracedecay_sessions::runtime::lcm::LcmCompressionRequest,
-    ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmCompressionResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
-    > {
-        self.runtime.lcm_compress_for_test(request).await
-    }
-
     pub async fn lcm_status(
         &self,
         provider: &str,

@@ -1,5 +1,5 @@
 //! Dashboard CRUD + run endpoints for user-defined scheduled jobs
-//! (Hermes cron parity, audit R9). Routes live beside the automation config
+//! (Hermes cron parity). Routes live beside the automation config
 //! endpoints:
 //!
 //! - `GET/POST /api/automation/jobs`

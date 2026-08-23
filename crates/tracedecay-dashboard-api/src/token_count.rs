@@ -30,7 +30,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::DashboardState;
-use super::util::query_rows;
+use super::util::{query_rows, str_field};
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 

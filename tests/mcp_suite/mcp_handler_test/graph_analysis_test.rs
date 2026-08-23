@@ -2,13 +2,13 @@
 
 mod graph_readiness;
 
+use crate::common::fixture::git_run;
 use crate::support::*;
 use graph_readiness::{find_node_id, wait_for_current_graph};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
@@ -138,57 +138,39 @@ async fn setup_empty_analysis_project() -> (ProductionCompositionFixture, (), ()
     (fixture, (), ())
 }
 
+fn write_integration_test_risk_sources(project: &Path) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"risk_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), "pub mod api;\n").unwrap();
+    fs::write(
+        project.join("src/api.rs"),
+        "pub fn public_entry() -> String { format_greeting(\"world\") }\n\
+         pub fn unused_public_api() -> String { \"unused\".to_string() }\n\
+         fn format_greeting(name: &str) -> String { format!(\"Hello, {}!\", name) }\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tests/integration_api.rs"),
+        "use risk_fixture::api::public_entry;\n\
+         #[test]\nfn integration_public_entry() {\n    assert_eq!(public_entry(), \"Hello, world!\");\n}\n",
+    )
+    .unwrap();
+}
+
 async fn setup_integration_test_risk_project() -> (ProductionCompositionFixture, ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::create_dir_all(project.join("tests")).unwrap();
-        fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = \"risk_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(project.join("src/lib.rs"), "pub mod api;\n").unwrap();
-        fs::write(
-            project.join("src/api.rs"),
-            "pub fn public_entry() -> String { format_greeting(\"world\") }\n\
-             pub fn unused_public_api() -> String { \"unused\".to_string() }\n\
-             fn format_greeting(name: &str) -> String { format!(\"Hello, {}!\", name) }\n",
-        )
-        .unwrap();
-        fs::write(
-            project.join("tests/integration_api.rs"),
-            "use risk_fixture::api::public_entry;\n\
-             #[test]\nfn integration_public_entry() {\n    assert_eq!(public_entry(), \"Hello, world!\");\n}\n",
-        )
-        .unwrap();
-    })
-    .await;
+    let fixture =
+        production_composition_fixture_with_sources(write_integration_test_risk_sources).await;
     (fixture, ())
 }
 
 async fn setup_test_risk_non_src_fixture() -> (ProductionCompositionFixture, ()) {
     let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::create_dir_all(project.join("tests")).unwrap();
-        fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = \"risk_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(project.join("src/lib.rs"), "pub mod api;\n").unwrap();
-        fs::write(
-            project.join("src/api.rs"),
-            "pub fn public_entry() -> String { format_greeting(\"world\") }\n\
-             pub fn unused_public_api() -> String { \"unused\".to_string() }\n\
-             fn format_greeting(name: &str) -> String { format!(\"Hello, {}!\", name) }\n",
-        )
-        .unwrap();
-        fs::write(
-            project.join("tests/integration_api.rs"),
-            "use risk_fixture::api::public_entry;\n\
-             #[test]\nfn integration_public_entry() {\n    assert_eq!(public_entry(), \"Hello, world!\");\n}\n",
-        )
-        .unwrap();
+        write_integration_test_risk_sources(project);
         fs::write(
             project.join("build.rs"),
             "fn build_script_helper(flag: &str) -> String { format!(\"cargo:warning={flag}\") }\n\
@@ -257,9 +239,10 @@ pub fn safe_add(a: u64, b: u64) -> u64 {
 
 async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
     if !project.join(".git").is_dir() {
-        for args in [
-            &["init", "--quiet"][..],
-            &["add", "."][..],
+        git_run(project, &["init", "--quiet"]);
+        git_run(project, &["add", "."]);
+        git_run(
+            project,
             &[
                 "-c",
                 "user.name=TraceDecay Tests",
@@ -269,15 +252,8 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
                 "--quiet",
                 "-m",
                 "fixture",
-            ][..],
-        ] {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(project)
-                .status()
-                .expect("graph-analysis fixture git command");
-            assert!(status.success(), "git {args:?} must succeed");
-        }
+            ],
+        );
     }
     let isolation_root = project
         .parent()
@@ -297,19 +273,6 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 
 #[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
-    fn git(project: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(project)
-            .output()
-            .expect("git command failed to spawn");
-        assert!(
-            status.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-    }
-
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
@@ -320,12 +283,12 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "test@test.com"]);
-    git(project, &["config", "user.name", "Test"]);
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "initial"]);
-    git(project, &["branch", "-M", "main"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "test@test.com"]);
+    git_run(project, &["config", "user.name", "Test"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "initial"]);
+    git_run(project, &["branch", "-M", "main"]);
 
     let _initialized = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
     let tracedecay_dir = resolve_layout_for_current_profile(project)
@@ -338,7 +301,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     .unwrap();
 
     let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
-    git(project, &["checkout", "-b", "feature"]);
+    git_run(project, &["checkout", "-b", "feature"]);
 
     // Branch drift diagnostics moved off `tracedecay_branch_list` (now the
     // paginated branch-ref snapshot read) to the active-project context's
@@ -769,22 +732,14 @@ async fn commit_context_clean_worktree_returns_json() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-    }
-
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "t@t"]);
-    git(project, &["config", "user.name", "t"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join(".gitignore"), ".tracedecay/\nhome/\n").unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn clean() {}\n").unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
 
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(
@@ -819,33 +774,13 @@ async fn test_changelog_with_real_git() {
     fs::create_dir_all(project.join("src")).unwrap();
 
     // Initialize git repo and make a first commit
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project)
-        .output()
-        .expect("git init failed");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "test@test.com"]);
+    git_run(project, &["config", "user.name", "Test"]);
 
     fs::write(project.join("src/lib.rs"), "pub fn original() {}\n").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "initial"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "initial"]);
 
     // Make a second commit with changes
     fs::write(
@@ -853,16 +788,8 @@ async fn test_changelog_with_real_git() {
         "pub fn original() {}\npub fn added() {}\n",
     )
     .unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "add function"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "add function"]);
 
     let (cg, _env) = init_test_project(project).await;
 
@@ -1819,49 +1746,21 @@ async fn changelog_filters_directory_paths() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project)
-        .output()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "t@t"])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "t"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("src/sub")).unwrap();
     fs::write(project.join("src/sub/keep.rs"), "pub fn k() {}\n").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
     fs::write(
         project.join("src/sub/keep.rs"),
         "pub fn k() { let _ = 1; }\n",
     )
     .unwrap();
     fs::write(project.join("src/sub/added.rs"), "pub fn a() {}\n").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "two"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "two"]);
     let (cg, _env) = init_test_project(project).await;
 
     let result = handle_tool_call(
@@ -2822,26 +2721,19 @@ async fn changelog_filters_deleted_directory_entries() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-    }
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "t@t"]);
-    git(project, &["config", "user.name", "t"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("crates/sub")).unwrap();
     fs::write(project.join("crates/sub/keep.rs"), "pub fn k() {}\n").unwrap();
     fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
     // Remove the whole subtree so gix's tree-diff yields a directory-mode
     // deletion entry.
     fs::remove_dir_all(project.join("crates")).unwrap();
-    git(project, &["add", "-A"]);
-    git(project, &["commit", "-m", "drop crates"]);
+    git_run(project, &["add", "-A"]);
+    git_run(project, &["commit", "-m", "drop crates"]);
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
@@ -2879,16 +2771,9 @@ async fn pr_context_collapses_cargo_toml_keys() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-    }
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "t@t"]);
-    git(project, &["config", "user.name", "t"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("Cargo.toml"),
@@ -2896,8 +2781,8 @@ async fn pr_context_collapses_cargo_toml_keys() {
     )
     .unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
     // Second commit: bloat Cargo.toml with many deps.
     let mut bloated = String::from(
         "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
@@ -2906,8 +2791,8 @@ async fn pr_context_collapses_cargo_toml_keys() {
         let _ = writeln!(bloated, "dep{i} = \"0.1.{i}\"");
     }
     fs::write(project.join("Cargo.toml"), &bloated).unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "deps"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "deps"]);
 
     let (cg, _env) = init_test_project(project).await;
 

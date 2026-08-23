@@ -240,7 +240,7 @@ pub(super) fn find_string_field_in_json(encoded: &str, field: &str) -> Option<St
         .and_then(|value| find_string_field(&value, field))
 }
 
-pub(super) fn canonical_evidence_hash(value: &Value) -> String {
+pub(super) fn canonical_evidence_hash(value: &Value) -> Result<String> {
     fn canonicalize(value: &Value) -> Value {
         match value {
             Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
@@ -725,7 +725,7 @@ pub(super) async fn build_session_reflector_evidence(
         "recent_session_slices": recent_session_slices,
         "hits": hits,
     });
-    let evidence_hash = Some(canonical_evidence_hash(&evidence));
+    let evidence_hash = Some(canonical_evidence_hash(&evidence)?);
     let has_grep_hits = evidence
         .get("hits")
         .and_then(Value::as_array)
@@ -829,7 +829,7 @@ pub(super) async fn build_skill_writer_evidence(
                 "query": query,
                 "recent_session_slices": recent_session_slices,
                 "hits": hits,
-            }))),
+            }))?),
         });
     }
     let existing_skills = list_managed_skills(&profile_root).await?;
@@ -899,7 +899,7 @@ pub(super) async fn build_skill_writer_evidence(
             }))
             .collect::<Vec<_>>(),
     });
-    let evidence_hash = Some(canonical_evidence_hash(&evidence));
+    let evidence_hash = Some(canonical_evidence_hash(&evidence)?);
     let has_grep_hits = evidence
         .get("hits")
         .and_then(Value::as_array)

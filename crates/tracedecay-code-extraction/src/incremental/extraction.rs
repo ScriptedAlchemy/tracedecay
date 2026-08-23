@@ -20,7 +20,14 @@ impl RetainedParseDocument {
         report: &ParseReport,
         previous: Option<&ExtractionResult>,
     ) -> Result<ParsedExtraction, ParseError> {
-        let previous_artifact = previous.cloned().map(ExtractionArtifactV1::from_result);
+        // Only the Noop and Incremental paths read the prior extraction; the
+        // Initial and Reset paths must not pay its deep clone.
+        let previous_artifact = match report.reuse {
+            ParseReuse::Noop | ParseReuse::Incremental => {
+                previous.cloned().map(ExtractionArtifactV1::from_result)
+            }
+            ParseReuse::Initial | ParseReuse::Reset { .. } => None,
+        };
         self.extract_canonical_artifact(extractor, report, previous_artifact.as_ref())
             .map(ParsedExtractionArtifactV1::into_parsed)
     }
@@ -96,9 +103,10 @@ impl RetainedParseDocument {
             );
         }
 
-        let delta = extractor.extract_parsed_artifact(
+        let delta = extractor.extract_parsed_artifact_prepared(
             self.identity.logical_path(),
             &self.source,
+            self.parsed_source_text(),
             &self.tree,
             ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
         );
@@ -128,9 +136,10 @@ impl RetainedParseDocument {
         extractor: &dyn LanguageExtractor,
         reason: Option<ParsedExtractionResetReason>,
     ) -> ParsedExtractionArtifactV1 {
-        let extracted = extractor.extract_parsed_artifact(
+        let extracted = extractor.extract_parsed_artifact_prepared(
             self.identity.logical_path(),
             &self.source,
+            self.parsed_source_text(),
             &self.tree,
             ParsedExtractionScope::FullDocument,
         );

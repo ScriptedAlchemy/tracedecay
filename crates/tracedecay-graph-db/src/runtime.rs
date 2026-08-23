@@ -302,8 +302,7 @@ impl GraphDb {
         &self,
         mut publication_request: GraphPublication,
     ) -> Result<GraphCommit, GraphDbError> {
-        let publication_digest = publication_request.validate_and_digest()?;
-        let batch_digest = publication_request.batch.validate_and_digest()?;
+        let digests = publication_request.validate_and_digest()?;
         let _snapshot_gate = self.inner.snapshot_gate.write();
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -317,7 +316,7 @@ impl GraphDb {
             &publication_request.namespace,
             &publication_request.idempotency_key,
         )? {
-            return if existing.digest == publication_digest {
+            return if existing.digest == digests.publication {
                 Ok(existing.commit)
             } else {
                 Err(GraphDbError::Conflict)
@@ -334,7 +333,7 @@ impl GraphDb {
         }
         let publication_record = (
             publication_request.idempotency_key,
-            publication_digest,
+            digests.publication,
             publication_request.input_digest.as_str().to_owned(),
         );
         let mut state = self.state_write_guard()?;
@@ -343,7 +342,7 @@ impl GraphDb {
             &mut state,
             publication_request.batch,
             mutation::CommitMetadata {
-                digest: batch_digest,
+                digest: digests.batch,
                 generation_dependency_digest: None,
                 publication_record: Some(publication_record),
             },
@@ -764,7 +763,15 @@ impl GraphDb {
             .quarantined_projections
             .read()
             .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
-        if quarantined.contains(&(namespace.clone(), projection.clone())) {
+        if quarantined.is_empty() {
+            return Ok(());
+        }
+        let is_quarantined = quarantined
+            .iter()
+            .any(|(quarantined_namespace, quarantined_projection)| {
+                quarantined_namespace == namespace && quarantined_projection == projection
+            });
+        if is_quarantined {
             Err(projection_mismatch(
                 namespace,
                 projection,

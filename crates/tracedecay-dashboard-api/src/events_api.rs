@@ -1,7 +1,7 @@
 //! `GET /api/events` — the dashboard's typed Server-Sent Events stream.
 //!
-//! The dashboard frontend replaces polling with one revision-monotone SSE path (plan
-//! 11 §"Finalized implementation architecture" → SSE module). Every event
+//! The dashboard frontend replaces polling with one revision-monotone SSE path.
+//! Every event
 //! carries stream/run identity, a monotone event revision, an entity revision,
 //! exact scope, observation time, an optional source watermark, and coverage.
 //! The client reducer deduplicates by `(stream, event_revision)`, rejects stale
@@ -71,7 +71,7 @@ use crate::application::event_lane::{
 };
 
 /// Poll cadence for the source pollers and heartbeat. Kept modest so a settled
-/// dashboard coalesces to well under the plan's render budget.
+/// dashboard coalesces to well under the client's render budget.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Transport-level keep-alive comment cadence.
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -791,10 +791,6 @@ fn accumulate_record(
         family: record.pulse.family,
         project_root: record.pulse.project_root.clone(),
     };
-    if let Some(bucket) = pending.get_mut(&key) {
-        bucket.absorb_record(record);
-        return;
-    }
     pending.entry(key).or_default().absorb_record(record);
 }
 
@@ -832,9 +828,17 @@ async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
     count.hash(&mut hasher);
     let mut roots = HashMap::with_capacity(projects.len());
     for project in &projects {
-        // Hash a stable identity for each project row. `Debug` is deterministic
-        // for the record and avoids depending on a specific public accessor.
-        format!("{project:?}").hash(&mut hasher);
+        // Hash every identity field of the record directly: allocation-free,
+        // and immune to `Debug` formatting changes firing a spurious
+        // `project_registry_changed` at every connected client.
+        project.project_id.hash(&mut hasher);
+        project.canonical_root.hash(&mut hasher);
+        project.display_root.hash(&mut hasher);
+        project.git_common_dir.hash(&mut hasher);
+        project.git_remote_url.hash(&mut hasher);
+        project.default_branch.hash(&mut hasher);
+        project.created_at.hash(&mut hasher);
+        project.last_seen_at.hash(&mut hasher);
         roots.insert(
             PathBuf::from(&project.canonical_root),
             project.project_id.clone(),
@@ -1420,7 +1424,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
         let registry = registered_database_for_test(&project.path().join("registry.db")).await;
         dash.savings_db_path = registry.db_path().display().to_string();

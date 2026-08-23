@@ -1479,7 +1479,7 @@ mod tests {
         assert_eq!(
             fs::metadata(&wal_path).unwrap().len(),
             pinned_wal_bytes,
-            "a busy truncate must not report reclaim the WAL file disproves"
+            "a busy truncate must not reclaim the WAL file"
         );
 
         drop(pinned_snapshot);

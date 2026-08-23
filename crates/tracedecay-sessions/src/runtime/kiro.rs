@@ -26,6 +26,7 @@ use crate::decode_kiro_workspace_path;
 use tracedecay_capture::kiro::{
     KiroSnapshotMessage, snapshot_native_payload, stable_message_id as stable_kiro_message_id,
 };
+use tracedecay_capture::normalize_timestamp_secs;
 
 use crate::admission::HostAdmission;
 #[cfg(test)]
@@ -868,11 +869,7 @@ fn normalized_role(entry: &Value) -> Option<&'static str> {
 
 fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     if let Some(ts) = value.as_i64() {
-        return Some(if ts >= 1_000_000_000_000 {
-            ts / 1000
-        } else {
-            ts
-        });
+        return Some(normalize_timestamp_secs(ts));
     }
     value
         .as_str()

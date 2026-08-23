@@ -2,6 +2,8 @@
 //!
 //! Claude and Codex share the common hook JSON shape.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
 use super::codex::codex_additional_context_json;
@@ -9,10 +11,9 @@ use super::post_tool_use::is_post_tool_use_failure_event;
 use super::steering::{cursor_index_signals_for_root, index_status_line};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_project_root, event_project_root_with_identity,
-    event_project_root_with_identity_from_json, event_session_id, process_cwd_project_root,
-    prompt_like_text, read_hook_event, record_hook_analytics, record_hook_invoked_parsed,
-    research_block_reason,
+    event_project_root, event_project_root_with_identity, event_session_id,
+    process_cwd_project_root, prompt_like_text, read_hook_event, record_hook_analytics,
+    record_hook_invoked_parsed, research_block_reason,
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
@@ -135,8 +136,7 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 /// Claude Code `SessionStart` hook handler.
 pub async fn hook_claude_session_start() -> i32 {
     let event = read_hook_event!();
-    let output = claude_session_start_response(&event).await;
-    let root = event_project_root_with_identity_from_json(&event).await;
+    let (root, output) = claude_session_start_response(&event).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
@@ -151,7 +151,9 @@ pub async fn hook_claude_session_start() -> i32 {
     0
 }
 
-async fn claude_session_start_response(event: &str) -> String {
+/// Returns the identity-resolved root alongside the response so the handler
+/// does not repeat the registry-probing resolution for output delivery.
+async fn claude_session_start_response(event: &str) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     // Resolve the project root the same identity-aware way the printed context
     // does, including global-only stores and fresh harness-created worktrees.
@@ -163,7 +165,7 @@ async fn claude_session_start_response(event: &str) -> String {
         event,
         &parsed,
     );
-    super::dispatch::dispatch_for_scope(
+    let output = super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -175,7 +177,8 @@ async fn claude_session_start_response(event: &str) -> String {
     .map_or_else(
         || serde_json::json!({}).to_string(),
         |guidance| codex_additional_context_json("SessionStart", &guidance),
-    )
+    );
+    (root, output)
 }
 
 /// Compact routing guidance emitted to a Claude subagent at start. Kept short
@@ -281,9 +284,9 @@ async fn claude_subagent_start_context(parsed: &Value) -> Option<String> {
 /// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    if let Some(response) = claude_post_tool_use_response(&event).await {
-        let root = event_project_root_with_identity_from_json(&event).await;
-        if !super::write_hook_output(
+    let (root, response) = claude_post_tool_use_response(&event).await;
+    if let Some(response) = response
+        && !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
@@ -291,14 +294,15 @@ pub async fn hook_claude_post_tool_use() -> i32 {
             None,
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
 
-async fn claude_post_tool_use_response(event: &str) -> Option<String> {
+/// Returns the identity-resolved root alongside the response so the handler
+/// does not repeat the registry-probing resolution for output delivery.
+async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<String>) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let hook_event_name = if is_post_tool_use_failure_event(&parsed) {
         "PostToolUseFailure"
@@ -313,7 +317,7 @@ async fn claude_post_tool_use_response(event: &str) -> Option<String> {
         event,
         &parsed,
     );
-    super::dispatch::dispatch_for_scope(
+    let response = super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -322,7 +326,8 @@ async fn claude_post_tool_use_response(event: &str) -> Option<String> {
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten()
-    .map(|guidance| codex_additional_context_json(hook_event_name, &guidance))
+    .map(|guidance| codex_additional_context_json(hook_event_name, &guidance));
+    (root, response)
 }
 
 /// `UserPromptSubmit` hook handler: resets the project counter and injects
@@ -395,8 +400,7 @@ pub async fn hook_stop() -> i32 {
         }
         Err(_) => String::new(),
     };
-    let output = claude_stop_response_for_event(&event).await;
-    let root = event_project_root_with_identity_from_json(&event).await;
+    let (root, output) = claude_stop_response_for_event(&event).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
@@ -411,12 +415,14 @@ pub async fn hook_stop() -> i32 {
     0
 }
 
-async fn claude_stop_response_for_event(event: &str) -> String {
+/// Returns the identity-resolved root alongside the response so the handler
+/// does not repeat the registry-probing resolution for output delivery.
+async fn claude_stop_response_for_event(event: &str) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
         record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", event, &parsed);
-    super::dispatch::dispatch_for_scope(
+    let output = super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -428,7 +434,8 @@ async fn claude_stop_response_for_event(event: &str) -> String {
     .map_or_else(
         || serde_json::json!({}).to_string(),
         |guidance| codex_additional_context_json("Stop", &guidance),
-    )
+    );
+    (root, output)
 }
 
 /// Incrementally ingests one live projectless Claude session into the profile

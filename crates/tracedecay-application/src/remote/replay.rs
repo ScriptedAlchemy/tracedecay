@@ -6,7 +6,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +29,7 @@ use super::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_protocol_problem, remote_replay_result_contract_v1,
 };
+use crate::clock::now_micros;
 use crate::{
     ApplicationContractError, ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt, PolicyDecisionRef,
@@ -456,13 +456,8 @@ pub struct SystemRemoteReplayClockV1;
 
 impl RemoteReplayClockPortV1 for SystemRemoteReplayClockV1 {
     fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)?
-            .as_micros();
-        i64::try_from(micros)
-            .map(UtcMicros)
-            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
+        // Canonical saturating wall-clock semantics shared by every runtime.
+        Ok(now_micros())
     }
 }
 
@@ -961,9 +956,9 @@ fn with_replay_attempt<T>(
         .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
     let result = operation(replay_attempt);
     if result.is_err() {
-        spool
-            .abandon_replay_attempt(event_id, replay_attempt)
-            .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
+        // Best-effort cleanup: a failed abandon must not mask the operation
+        // error that triggered it.
+        let _ = spool.abandon_replay_attempt(event_id, replay_attempt);
     }
     result
 }
@@ -1152,25 +1147,19 @@ pub fn mark_remote_capture_gc_eligible(
     {
         return Err(RemoteReplayApplicationErrorV1::InvalidSpoolState);
     }
-    let replay_attempt = spool
-        .begin_replay_attempt(&frame.event_id, observed_at)
-        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    let result = transition(
-        spool,
-        frame,
-        RemoteReplayStateV1::Acknowledged,
-        RemoteReplayStateV1::GarbageCollectionEligible,
-        replay_attempt,
-        observed_at,
-        None,
-        Some(receipt),
-    );
-    if result.is_err() {
-        spool
-            .abandon_replay_attempt(&frame.event_id, replay_attempt)
-            .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    }
-    result.map(|_| ())
+    with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
+        transition(
+            spool,
+            frame,
+            RemoteReplayStateV1::Acknowledged,
+            RemoteReplayStateV1::GarbageCollectionEligible,
+            replay_attempt,
+            observed_at,
+            None,
+            Some(receipt),
+        )
+        .map(|_| ())
+    })
 }
 
 fn validate_scope_and_fence(

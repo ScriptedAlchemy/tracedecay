@@ -1,4 +1,3 @@
-#![allow(dead_code)] // shared test support helpers
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

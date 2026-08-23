@@ -414,11 +414,25 @@ pub(crate) fn measure_host_event_payload_bytes(event_json: &str) -> Option<u64> 
     u64::try_from(event_json.len()).ok()
 }
 
-/// Length-only JSON wire size. Serialized bytes are dropped immediately.
+/// Length-only JSON wire size. Serialization streams into a counting sink so
+/// the measurement never materializes a second copy of the payload bytes.
 pub(crate) fn measure_json_payload_bytes<T: Serialize + ?Sized>(value: &T) -> Option<u64> {
-    serde_json::to_vec(value)
-        .ok()
-        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+    struct CountingSink(u64);
+
+    impl std::io::Write for CountingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len() as u64);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut sink = CountingSink(0);
+    serde_json::to_writer(&mut sink, value).ok()?;
+    Some(sink.0)
 }
 
 pub(crate) fn elapsed_us(started: Instant) -> u64 {

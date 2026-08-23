@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     RetrievalGrainV1, SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES,
     SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionContractError, SessionId,
@@ -219,7 +220,7 @@ impl TemporalParticipantManifest {
                 maximum: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES,
             });
         }
-        let epoch_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+        let epoch_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
         Ok(Self {
             entries,
             epoch_digest,

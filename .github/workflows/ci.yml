@@ -21,6 +21,21 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
+  # Single source of truth for the fork/base-branch guard: heavy jobs run on
+  # pushes, on PRs from this repository, and on fork PRs that target an
+  # integration branch. Guarded jobs `needs:`-check this job's output instead
+  # of each repeating the expression, so the branch list lives in one place.
+  scope-gate:
+    name: Scope gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-heavy: ${{ steps.decide.outputs.run-heavy }}
+    steps:
+      - name: Decide whether guarded jobs run
+        id: decide
+        run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
+
   pr-dogfood:
     name: PR checkout dogfood
     if: github.event_name == 'pull_request'
@@ -144,7 +159,8 @@ jobs:
 
   test:
     name: Test ${{ matrix.name }}
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -179,9 +195,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -206,7 +222,8 @@ jobs:
 
   windows-build:
     name: Build Windows tests
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: windows-latest
     # Full-workspace `nextest archive` on hosted windows-latest has been
     # dying at exactly 30m with no failed step. 45 leaves headroom for a
@@ -216,24 +233,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Tune Windows runner for build I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the compiler's many short-lived
-          # object/incremental files; hosted runners are elevated, so turn it
-          # off and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
+        uses: ./.github/actions/tune-windows-runner
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -291,31 +291,9 @@ jobs:
           fetch-depth: 0
 
       - name: Tune Windows runner for test I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the many short-lived SQLite/tempdir
-          # files these tests create; hosted runners are elevated, so turn it off
-          # and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
-          # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
-          # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
-          # the nextest test processes follows.
-          $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
-          New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
-          "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        uses: ./.github/actions/tune-windows-runner
+        with:
+          redirect-temp: "true"
 
       - uses: actions/setup-node@v4
         with:
@@ -326,10 +304,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        shell: pwsh
-        run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       # The architecture tests exec `cargo metadata` at runtime, and they run
       # concurrently under nextest: without the pinned toolchain installed,
@@ -407,8 +384,8 @@ jobs:
 
   windows-test:
     name: Test Windows
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: windows-test-shard
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: [windows-test-shard, scope-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Check Windows shards
@@ -421,7 +398,8 @@ jobs:
 
   clippy:
     name: Clippy
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -447,7 +425,8 @@ jobs:
   # promote once the workspace is clean under `-D warnings`.
   hawk:
     name: Hawk
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -488,7 +467,8 @@ jobs:
 
   fmt:
     name: Format
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -499,7 +479,8 @@ jobs:
 
   dashboard:
     name: Dashboard
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -541,9 +522,9 @@ jobs:
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -570,8 +551,8 @@ jobs:
     name: Dashboard accessibility
     # `needs:` keeps this job from reporting a second red when the real fault
     # is that the dashboard bundle never built or its unit tests failed.
-    needs: dashboard
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: [dashboard, scope-gate]
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     # Locally axe:audit takes ~3.3 min and axe:explorer ~1.3 min, and each one
@@ -616,7 +597,8 @@ jobs:
 
   hermes-integration:
     name: Hermes integration (stock)
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -633,9 +615,9 @@ jobs:
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
@@ -675,7 +657,8 @@ jobs:
 
   host-stock-integration:
     name: Claude Code + OpenCode integration (stock)
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

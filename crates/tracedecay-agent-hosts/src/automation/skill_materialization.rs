@@ -31,6 +31,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 
 use super::config_error;
 pub use crate::automation::managed_skills::managed_skill_root;
@@ -349,8 +351,6 @@ fn recompute_on_disk_package(
     dir: &Path,
     provenance: &FileProvenance,
 ) -> Result<Option<MaterializationManifest>> {
-    use sha2::{Digest, Sha256};
-
     let Some(recorded) = provenance.content_hash.as_deref() else {
         return Ok(None);
     };
@@ -386,7 +386,7 @@ fn recompute_on_disk_package(
         hasher.update(bytes);
         files.insert(key, hash_bytes(bytes));
     }
-    let recomputed = format!("sha256:{}", hex::encode(hasher.finalize()));
+    let recomputed = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
     if recomputed != recorded {
         return Ok(None);
     }
@@ -421,8 +421,7 @@ fn on_disk_body_markdown(contents: &str) -> Option<String> {
 }
 
 fn hash_body(body: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())))
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(body.as_bytes()))
 }
 
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
@@ -504,8 +503,7 @@ impl Drop for PackageLock {
 }
 
 fn package_lock_path(package_dir: &Path) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    let key = hex::encode(Sha256::digest(package_dir.to_string_lossy().as_bytes()));
+    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
     std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
 }
 
@@ -1307,8 +1305,7 @@ fn prune_skill_dir(scope: &MaterializationScope, slug: &str) {
 /// Short, stable disambiguator derived from a full skill id, used to suffix a
 /// host slug when two distinct ids collide on the same base slug.
 fn short_id_hash(skill_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(skill_id.as_bytes()))[..8].to_string()
+    sha256_hex(skill_id.as_bytes())[..8].to_string()
 }
 
 /// Assigns a host slug to every active skill, disambiguating collisions.

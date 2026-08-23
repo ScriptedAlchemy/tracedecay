@@ -1,5 +1,5 @@
 //! `GET /api/storage/telemetry` — per-store size, free-page ratio, and typed
-//! budget/growth dimensions (plan 38 §7 read models over the dashboard envelope).
+//! budget/growth dimensions served over the dashboard envelope.
 //!
 //! The size samples are **real**: the dashboard invokes the application
 //! [`StoreSizeTelemetryPort`] over retained runtime health readers. The runtime
@@ -682,7 +682,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_telemetry_context_reuses_the_state_resolved_scope() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state, _) = state_for_test().await;
 
         let context = storage_telemetry_context(&state).expect("telemetry context");
@@ -699,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_telemetry_without_resolved_scope_fails_closed() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state, _) = state_for_test().await;
         state.resolved_scope = None;
 
@@ -723,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_reports_real_observed_sizes_for_held_stores() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state, graph_total_bytes) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 
@@ -788,7 +788,7 @@ mod tests {
 
     #[tokio::test]
     async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state, _) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 

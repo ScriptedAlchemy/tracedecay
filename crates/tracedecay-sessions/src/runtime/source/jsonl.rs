@@ -155,6 +155,22 @@ fn jsonl_prefix_digest(file: &mut std::fs::File, extent: u64) -> std::io::Result
     Ok(digest)
 }
 
+/// Memoized [`bounded_jsonl_snapshot_fingerprint`]: the hash walks the whole
+/// extent, so callers compute it at most once per scan and only on paths that
+/// actually consume it.
+fn memoized_jsonl_snapshot_fingerprint(
+    cache: &mut Option<u64>,
+    file: &mut std::fs::File,
+    extent: u64,
+) -> std::io::Result<u64> {
+    if let Some(fingerprint) = *cache {
+        return Ok(fingerprint);
+    }
+    let fingerprint = bounded_jsonl_snapshot_fingerprint(file, extent)?;
+    *cache = Some(fingerprint);
+    Ok(fingerprint)
+}
+
 fn bounded_jsonl_snapshot_fingerprint(
     file: &mut std::fs::File,
     extent: u64,
@@ -609,7 +625,9 @@ struct JsonlScanGeneration {
     mtime: u64,
     file_id: u64,
     file_identity: u64,
-    snapshot_fingerprint: u64,
+    /// `None` only when the scan proved it would read nothing, so no batch —
+    /// and therefore no revalidation — consumes it.
+    snapshot_fingerprint: Option<u64>,
     seek_to: u64,
     replacement: bool,
 }
@@ -634,9 +652,11 @@ impl PreparedJsonlScan {
         let mtime = file_mtime_secs(&metadata);
         let file_identity = stable_jsonl_file_id(&mut file, &metadata)
             .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        let snapshot_fingerprint = bounded_jsonl_snapshot_fingerprint(&mut file, file_size)
-            .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        after_generation_capture();
+        // The snapshot fingerprint hashes the whole extent, so it is captured
+        // lazily: only rewrite-marker minting and scans that will actually
+        // read bytes pay for it. A no-change poll whose cursor already sits
+        // at end-of-file skips the hash entirely.
+        let mut snapshot_fingerprint = None;
         let (seek_to, file_id) = if let Some(resume_state) = resume_state {
             let resume_matches = previous.position > 0
                 && previous.file_id == resume_state.generation
@@ -654,7 +674,14 @@ impl PreparedJsonlScan {
                         rewritten_jsonl_generation(
                             resume_state,
                             file_identity,
-                            snapshot_fingerprint,
+                            memoized_jsonl_snapshot_fingerprint(
+                                &mut snapshot_fingerprint,
+                                &mut file,
+                                file_size,
+                            )
+                            .map_err(|error| {
+                                TranscriptIngestError::scan_io("fingerprint", path, error)
+                            })?,
                             file_size,
                             mtime,
                         )
@@ -690,6 +717,14 @@ impl PreparedJsonlScan {
         } else {
             (0, file_identity)
         };
+        // The fingerprint must be captured before `after_generation_capture`
+        // (the seam that simulates concurrent mutation) so revalidation still
+        // rejects same-handle rewrites that race the scan.
+        if seek_to < file_size {
+            memoized_jsonl_snapshot_fingerprint(&mut snapshot_fingerprint, &mut file, file_size)
+                .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+        }
+        after_generation_capture();
         // A generation that is not the file's own identity was minted for a
         // rewrite, so it stays flagged for every batch it covers. The rewind
         // clause additionally covers the first batch after a file was replaced
@@ -1047,8 +1082,10 @@ impl RawJsonlBatchScanner {
         let final_snapshot =
             bounded_jsonl_snapshot_fingerprint(&mut file, self.generation.file_size)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+        // Every scan that reads bytes captured its fingerprint, so a missing
+        // one here fails closed as a generation change.
         if final_file_id != self.generation.file_identity
-            || final_snapshot != self.generation.snapshot_fingerprint
+            || Some(final_snapshot) != self.generation.snapshot_fingerprint
             || final_metadata.len() < self.read_through
         {
             return Err(TranscriptIngestError::ScanGenerationChanged {

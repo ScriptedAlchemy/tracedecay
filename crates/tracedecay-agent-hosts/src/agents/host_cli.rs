@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-08
 //! Bounded driver for a host's own plugin-lifecycle CLI.
 //!
 //! Some hosts own their plugin registration, cache, and enabled state

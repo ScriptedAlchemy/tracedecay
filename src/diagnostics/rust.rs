@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `cargo check --message-format=json` driver.
 //!
 //! Each `compiler-message` line in the JSON stream produces zero or more

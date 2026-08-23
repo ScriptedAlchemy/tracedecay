@@ -110,7 +110,6 @@ impl RustExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -884,7 +883,6 @@ impl RustExtractor {
         // Extract attribute annotations (e.g. #[cfg(test)]).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit the module body.
         state.node_stack.push((name, id));
         if let Some(body) = node.child_by_field_name("body") {
             Self::visit_children(state, body);

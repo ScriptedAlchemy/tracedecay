@@ -214,12 +214,8 @@ pub enum RetrievalContractError {
     DigestMismatch,
     #[error("canonical serialization failed: {0}")]
     CanonicalSerialization(String),
-}
-
-impl From<DomainError> for RetrievalContractError {
-    fn from(error: DomainError) -> Self {
-        Self::CanonicalSerialization(error.to_string())
-    }
+    #[error(transparent)]
+    Domain(#[from] DomainError),
 }
 
 /// Runtime-backed retrieval lanes. Each lane is independently testable,

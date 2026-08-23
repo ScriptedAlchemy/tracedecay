@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
 use std::hash::BuildHasher;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use serde_json::Value;
 #[cfg(test)]
@@ -90,12 +92,48 @@ fn cursor_observation_context(
     }
 }
 
+/// Memoizes parent-transcript dispatch-model lookups per subagent transcript
+/// and agent id. A dispatch record never changes once written, so a found
+/// model holds for every later incremental batch of the same subagent
+/// transcript; misses stay uncached because the parent transcript may simply
+/// not have recorded the dispatch yet.
+#[derive(Default)]
+struct DispatchModelCache {
+    models: Mutex<HashMap<(PathBuf, String), String>>,
+}
+
+impl DispatchModelCache {
+    fn parent_dispatch_model(
+        &self,
+        path: &Path,
+        parent_session_id: &str,
+        agent_id: &str,
+    ) -> Option<String> {
+        let key = (path.to_path_buf(), agent_id.to_string());
+        if let Some(model) = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return Some(model.clone());
+        }
+        let model = parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)?;
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, model.clone());
+        Some(model)
+    }
+}
+
 /// A Cursor hook event scoped to one transcript file.
 struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
     include_subagents: bool,
     user_scope: bool,
+    dispatch_models: DispatchModelCache,
 }
 
 impl TranscriptSource for CursorEventSource {
@@ -130,6 +168,7 @@ impl TranscriptSource for CursorEventSource {
             prev,
             max_new_bytes,
             self.user_scope,
+            &self.dispatch_models,
         )
     }
 
@@ -290,6 +329,7 @@ fn parse_cursor_jsonl(
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
     user_scope: bool,
+    dispatch_models: &DispatchModelCache,
 ) -> Option<ParsedTranscript> {
     let new = stream_new_jsonl(path, prev, max_new_bytes)?;
     // A truncate-and-rewrite can reuse every byte offset from the previous
@@ -303,9 +343,16 @@ fn parse_cursor_jsonl(
         || parent_session_id.to_string(),
         |(session_id, _agent_id)| session_id.clone(),
     );
-    let subagent_model = subagent.as_ref().and_then(|(_, agent_id)| {
-        parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
-    });
+    // The dispatch-model lookup rescans the parent transcript, so a no-change
+    // poll (no new lines, and therefore no message needing the fallback)
+    // skips it entirely.
+    let subagent_model = if new.lines.is_empty() {
+        None
+    } else {
+        subagent.as_ref().and_then(|(_, agent_id)| {
+            dispatch_models.parent_dispatch_model(path, parent_session_id, agent_id)
+        })
+    };
     let event_cwd = event_cwd(event);
     let event_location_provenance = event_location_provenance(event);
     let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
@@ -479,6 +526,7 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         transcript_path,
         include_subagents: true,
         user_scope: false,
+        dispatch_models: DispatchModelCache::default(),
     };
     let scope = ObservationScopeV1::Project { project_id };
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
@@ -619,6 +667,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         transcript_path,
         include_subagents: true,
         user_scope: true,
+        dispatch_models: DispatchModelCache::default(),
     };
     let scope = ObservationScopeV1::Profile;
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
@@ -826,6 +875,7 @@ pub struct CursorSweepSource {
     /// one of these are skipped so the two Cursor sources never double-ingest.
     skip_session_ids: std::collections::HashSet<String>,
     user_registered_slugs: Option<std::collections::HashSet<String>>,
+    dispatch_models: DispatchModelCache,
 }
 
 impl CursorSweepSource {
@@ -842,6 +892,7 @@ impl CursorSweepSource {
             cursor_projects_dir: home.join(".cursor").join("projects"),
             skip_session_ids: std::collections::HashSet::new(),
             user_registered_slugs: None,
+            dispatch_models: DispatchModelCache::default(),
         }
     }
 
@@ -996,6 +1047,7 @@ impl TranscriptSource for CursorSweepSource {
             prev,
             max_new_bytes,
             user_scope,
+            &self.dispatch_models,
         )
     }
 
@@ -2004,6 +2056,7 @@ mod tests {
         )
         .unwrap();
 
+        let dispatch_models = DispatchModelCache::default();
         let first = parse_cursor_jsonl(
             &event,
             "session-redacted",
@@ -2011,6 +2064,7 @@ mod tests {
             StoredCursor::default(),
             None,
             false,
+            &dispatch_models,
         )
         .unwrap();
         assert_eq!(first.messages.len(), 1);
@@ -2032,6 +2086,7 @@ mod tests {
             first.new_cursor,
             Some(1),
             false,
+            &dispatch_models,
         )
         .unwrap();
         assert_eq!(head.messages.len(), 1);
@@ -2045,6 +2100,7 @@ mod tests {
             head.new_cursor,
             Some(1),
             false,
+            &dispatch_models,
         )
         .unwrap();
         assert_eq!(tail.messages.len(), 1);

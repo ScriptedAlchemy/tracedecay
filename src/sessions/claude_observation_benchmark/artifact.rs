@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+pub(super) use tracedecay_domain::canonical_text::sha256_hex;
+
 use super::metrics::{
     aggregate_samples, ticks_to_ms, validate_no_op_invariants, validate_no_op_samples,
 };
@@ -661,10 +663,6 @@ fn boolean(fields: &Map<String, Value>, name: &str) -> Result<bool, String> {
 
 fn float_close(left: f64, right: f64) -> bool {
     (left - right).abs() <= left.abs().max(right.abs()).max(1.0) * 1e-12
-}
-
-pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 pub(super) fn is_lower_hex(value: &str, length: usize) -> bool {

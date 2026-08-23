@@ -647,15 +647,6 @@ fn codex_marketplace_identity_rejects_path_and_trust_key_injection() {
     }
 }
 
-/// The composed Codex deploy set (sourced from the shared `plugin/` tree
-/// via `codex_files`) must cover every shared model-invocable skill and the
-/// 13 canonical `tracedecay-*` workflow dispatchers, plus Codex's manifest,
-/// `.mcp.json`, hooks, and README. Codex has no slash-command or
-/// `disable-model-invocation` surface, so it ships all 29 skills in their
-/// canonical (model-invocable) form. The single shared tree means there is
-/// no cross-bundle parity to enforce anymore — this replaces the old
-/// `codex_skills_match_the_cursor_source_for_parity` /
-/// `codex_bundle_ships_exactly_the_model_invocable_cursor_skills` checks.
 /// Every file under a skills root, relative to it, forward-slashed.
 fn skill_tree_files(root: &Path) -> Vec<String> {
     let mut files: Vec<String> = crate::agents::collect_regular_files(root)
@@ -671,6 +662,12 @@ fn skill_tree_files(root: &Path) -> Vec<String> {
     files
 }
 
+/// The composed Codex deploy set (sourced from the shared `plugin/` tree
+/// via `codex_files`) must cover every shared model-invocable skill and the
+/// 13 canonical `tracedecay-*` workflow dispatchers, plus Codex's manifest,
+/// `.mcp.json`, hooks, and README. Codex has no slash-command or
+/// `disable-model-invocation` surface, so it ships all skills in their
+/// canonical (model-invocable) form.
 #[test]
 fn codex_embedded_file_list_covers_the_whole_source_bundle() {
     let deploy: std::collections::BTreeSet<String> = codex_embedded_plugin_files()

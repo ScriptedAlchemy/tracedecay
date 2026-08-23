@@ -7,6 +7,7 @@ use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ActorId, FactOwnerV1};
 
 use super::ExternalSkillDeploymentDisposition;
+#[cfg(test)]
 use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
@@ -669,7 +670,7 @@ async fn run_combined_review_for_retrieval(
     let combined_evidence_hash = Some(canonical_evidence_hash(&json!({
         "session_reflection_evidence": reflector_bundle.evidence,
         "skill_writer_evidence": skill_bundle.evidence,
-    })));
+    }))?);
     let request = AgentTaskRequest::new(
         run_id.clone(),
         AgentTaskKind::CombinedReview,
@@ -817,7 +818,7 @@ async fn run_combined_review_for_retrieval(
             Some(canonical_evidence_hash(&json!({
                 "session_reflection_evidence": reflector_bundle.evidence,
                 "skill_writer_evidence": skill_bundle.evidence,
-            }))),
+            }))?),
             json!({
                 "previous_output": output.clone(),
                 "validation_errors": validation_repairs.last(),
@@ -1235,7 +1236,7 @@ fn combined_reflector_failure_projection(output: &Value) -> Value {
         "schema_version": 1,
         "proposed": {
             "count": facts.len(),
-            "sha256": sha256_json(&json!(facts)),
+            "sha256": sha256_json(&json!(facts)).expect("hash reflector facts"),
         },
     })
 }

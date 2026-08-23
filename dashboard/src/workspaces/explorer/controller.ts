@@ -147,8 +147,17 @@ export function useExplorerController(): ExplorerController {
     enabled: activeRunIdForQuery !== '',
     refetchInterval: (queryState) => {
       const result = queryState.state.data;
-      if (result?.outcome !== 'envelope') return 250;
-      return runIsTerminal(result.envelope.payload.state) ? false : 250;
+      // No data yet: the first read has not landed, keep the fast tick.
+      if (result === undefined) return 250;
+      // A transport failure (daemon offline, refused read) is a state to
+      // render, not a condition to poll at 4 Hz indefinitely.
+      if (result.outcome === 'transport') return false;
+      if (runIsTerminal(result.envelope.payload.state)) return false;
+      // A long-pending run escalates off the fast tick rather than holding
+      // 250 ms for its whole life: 250 ms → 1 s → 2 s.
+      const reads = queryState.state.dataUpdateCount;
+      if (reads <= 4) return 250;
+      return reads <= 8 ? 1000 : 2000;
     },
   });
   const cancelRun = useMutation({

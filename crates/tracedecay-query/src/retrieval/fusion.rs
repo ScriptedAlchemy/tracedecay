@@ -16,6 +16,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CandidateContribution, CandidateSetDigest, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FusedCandidate, FusionProfile,
@@ -258,9 +259,9 @@ impl RetrievalCursorKeyringV1 {
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
         mac.update(&bytes);
-        let mac = QueryMac::new(format!(
-            "hmac-sha256:{}",
-            hex::encode(mac.finalize().into_bytes())
+        let mac = QueryMac::new(encode_tagged_lowercase_hex(
+            "hmac-sha256:",
+            &mac.finalize().into_bytes(),
         ))?;
         Ok(QueryDigest::new(
             self.privacy_domain.clone(),
@@ -285,9 +286,9 @@ impl RetrievalCursorKeyringV1 {
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
         mac.update(&bytes);
-        let mac = QueryMac::new(format!(
-            "hmac-sha256:{}",
-            hex::encode(mac.finalize().into_bytes())
+        let mac = QueryMac::new(encode_tagged_lowercase_hex(
+            "hmac-sha256:",
+            &mac.finalize().into_bytes(),
         ))?;
         Ok(QueryDigest::new(
             self.privacy_domain.clone(),
@@ -1170,7 +1171,7 @@ fn digest_value<T: Serialize + ?Sized>(
 ) -> Result<String, RetrievalError> {
     let bytes = serde_json::to_vec(&(domain, value))
         .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    Ok(encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1292,9 +1293,9 @@ fn keyed_mac(
     let mut mac = Hmac::<Sha256>::new_from_slice(secret)
         .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
     mac.update(authenticated);
-    QueryMac::new(format!(
-        "hmac-sha256:{}",
-        hex::encode(mac.finalize().into_bytes())
+    QueryMac::new(encode_tagged_lowercase_hex(
+        "hmac-sha256:",
+        &mac.finalize().into_bytes(),
     ))
     .map_err(QueryDigestAuthenticationError::from)
 }

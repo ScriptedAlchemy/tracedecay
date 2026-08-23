@@ -86,217 +86,251 @@ export function LoomPage() {
         note="sessions and durable causal relations on a measured time axis"
       />
       <TemporalBoundary pending={temporal.isPending} result={temporal.data}>
-        {(envelope) => {
-          const data = envelope.payload;
-          const rows = data.sessions ?? [];
-
-          if (data.available === false) {
-            return (
-              <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-                <div className="flex max-w-sm flex-col items-center gap-3 text-center">
-                  <StateChip kind="unknown" detail="session store not readable" />
-                  <p className="text-xs leading-relaxed text-text-muted">
-                    The daemon answered but reported its session store
-                    unavailable, so there is no thread to place on the axis.{' '}
-                    <span className="text-text-secondary">
-                      This is the store saying so, not an empty result.
-                    </span>
-                  </p>
-                </div>
-              </div>
-            );
-          }
-
-          // Packing needs to know what OVERLAPS ON SCREEN, which is a question
-          // about scale, not about the data: at a week per screen two sessions
-          // an hour apart are the same mark. So the extent is measured first,
-          // converted into the seconds one mark's height covers, and only then
-          // is the weave composed. Composing with a zero gap instead left every
-          // non-overlapping thread in sub-column zero, which stacked a whole
-          // host's threads on one centre line and spent none of the column.
-          const extent = extentOf(threadsFrom(rows).threads);
-          const minGap = extent
-            ? ((extent.end - extent.start) / PLOT_HEIGHT) * MARK_PITCH_PX
-            : 0;
-          const weave = composeWeave(rows, minGap);
-          const selected =
-            weave.threads.find((thread) => thread.id === selectedId) ?? null;
-          const selectedCommits = selected
-            ? data.commits.filter(
-                (commit) =>
-                  commit.provider === selected.host &&
-                  commit.session_id === selected.sessionId,
-              )
-            : [];
-          const selectedFiles = selected
-            ? data.edited_files.filter(
-                (file) =>
-                  file.provider === selected.host && file.session_id === selected.sessionId,
-              )
-            : [];
-          const selectedSpans = selected
-            ? data.branch_spans.filter(
-                (span) =>
-                  span.provider === selected.host && span.session_id === selected.sessionId,
-              )
-            : [];
-          const commitStatus =
-            data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
-          const branchStatus =
-            data.source_statuses.find((source) => source.id === 'branch_worktree') ?? null;
-          const measuredEnds = weave.threads.length - weave.openEndedCount;
-          const messages = weave.threads.reduce(
-            (sum, thread) => sum + thread.messages,
-            0,
-          );
-
-          return (
-            <div className="flex min-h-0 flex-1 flex-col">
-              <ReadoutBar
-                label="Weave readings"
-                elevation="raised"
-                items={[
-                  {
-                    label: 'threads',
-                    value: weave.threads.length.toLocaleString(),
-                    note: data.total ? `of ${formatCount(data.total)} in store` : undefined,
-                  },
-                  { label: 'hosts', value: weave.hosts.length },
-                  { label: 'messages', value: formatCount(messages) },
-                  {
-                    label: 'measured extent',
-                    value: `${measuredEnds}/${weave.threads.length}`,
-                    note: 'recorded end or last-message observation',
-                    fraction:
-                      weave.threads.length > 0
-                        ? measuredEnds / weave.threads.length
-                        : null,
-                  },
-                  {
-                    label: 'window',
-                    value: weave.extent
-                      ? formatDurationSeconds(weave.extent.end - weave.extent.start)
-                      : '—',
-                    note: weave.extent ? formatMoment(weave.extent.end) : undefined,
-                  },
-                  {
-                    label: 'busiest day',
-                    value: busiestDay ? formatCount(busiestDay.count) : '—',
-                    // A dash must say why: a timeline still loading, a refused
-                    // read, and a served-but-empty timeline are three different
-                    // facts, not one "unread".
-                    note: busiestDay
-                      ? busiestDay.bucket
-                      : timeline.isPending
-                        ? 'timeline loading'
-                        : timeline.data?.outcome === 'envelope'
-                          ? 'no timeline activity recorded'
-                          : 'timeline read failed',
-                  },
-                ]}
-              />
-
-              {/* The scrolling body takes a name and the tab stop: the weave
-                * canvas and tables can overflow it with nothing focusable in
-                * view (axe: scrollable-region-focusable). */}
-              <div
-                role="region"
-                aria-label="Loom content"
-                tabIndex={0}
-                className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row"
-              >
-                <div className="flex min-w-0 flex-1 flex-col gap-2">
-                  {weave.threads.length === 0 ? (
-                    <EmptyWeave undated={weave.undated} rows={rows.length} />
-                  ) : (
-                    <>
-                      <WeaveCanvas
-                        weave={weave}
-                        selectedId={selectedId}
-                        onSelect={setSelectedId}
-                        ariaLabel={weaveDescription(weave)}
-                      />
-                      <WeaveAxis weave={weave} />
-                      <ThreadTable
-                        threads={weave.threads}
-                        selectedId={selectedId}
-                        onSelect={setSelectedId}
-                      />
-                    </>
-                  )}
-                </div>
-
-                <aside className="flex w-full shrink-0 flex-col gap-3 xl:w-[22rem]">
-                  <Panel legend="Causal crossings">
-                    <div className="flex flex-col gap-2">
-                      <p className="text-2xs leading-relaxed text-text-muted">
-                        Counts below are the persisted causal rows returned for
-                        this exact session page. Provider, granularity and
-                        coverage come from the temporal response.
-                      </p>
-                      {data.source_statuses.map((source) => (
-                        <div key={source.id} className="flex flex-col gap-1">
-                          <span className="td-legend text-text-secondary">
-                            {source.label}
-                          </span>
-                          <StateChip
-                            kind={source.state}
-                            detail={sourceDetail(source)}
-                          />
-                          <span className="td-value truncate text-3xs text-text-muted">
-                            {source.granularity}
-                            {source.item_count == null ? '' : ` · ${source.item_count} rows`}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </Panel>
-
-                  <Panel legend="Read identity">
-                    <div className="flex flex-col gap-2">
-                      <StateChip
-                        kind={freshnessKind(envelope.freshness.state)}
-                        detail={
-                          envelope.freshness.observed_at_micros == null
-                            ? 'observation time unrecorded'
-                            : `observed ${formatMoment(envelope.freshness.observed_at_micros / 1_000_000)}`
-                        }
-                      />
-                      <StateChip
-                        kind={data.temporal_refresh.state}
-                        detail={`${data.temporal_refresh.active_generations} active temporal generations · ${
-                          data.temporal_refresh.latest_activated_at_micros == null
-                            ? 'activation time unrecorded'
-                            : `latest activation ${formatMoment(data.temporal_refresh.latest_activated_at_micros / 1_000_000)}`
-                        } · ${data.temporal_refresh.authority}`}
-                      />
-                      <p className="text-3xs leading-relaxed text-text-muted">
-                        {coverageDetail(envelope)}
-                      </p>
-                      <p className="text-3xs leading-relaxed text-text-muted">
-                        {envelope.source_watermark
-                          ? `${envelope.source_watermark.source} · ${envelope.source_watermark.watermark}`
-                          : 'No temporal source watermark was recorded.'}
-                      </p>
-                    </div>
-                  </Panel>
-
-                  <ThreadChain
-                    thread={selected}
-                    relations={{
-                      commits: selectedCommits,
-                      editedFiles: selectedFiles,
-                      branchSpans: selectedSpans,
-                      commitStatus,
-                      branchStatus,
-                    }}
-                  />
-                </aside>
-              </div>
-            </div>
-          );
-        }}
+        {(envelope) => (
+          <TemporalBody
+            envelope={envelope}
+            busiestDay={busiestDay}
+            timelinePending={timeline.isPending}
+            timelineServed={timeline.data?.outcome === 'envelope'}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+        )}
       </TemporalBoundary>
+    </div>
+  );
+}
+
+/**
+ * The served-envelope body, as a component rather than inline in the boundary
+ * render prop, so the weave composition can be memoized on the temporal
+ * payload: selecting a thread repaints without re-packing 200 sessions.
+ */
+function TemporalBody({
+  envelope,
+  busiestDay,
+  timelinePending,
+  timelineServed,
+  selectedId,
+  onSelect,
+}: {
+  envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>;
+  busiestDay: { bucket: string; count: number } | null;
+  timelinePending: boolean;
+  timelineServed: boolean;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  const data = envelope.payload;
+  const rows = data.sessions ?? [];
+
+  // Packing needs to know what OVERLAPS ON SCREEN, which is a question
+  // about scale, not about the data: at a week per screen two sessions
+  // an hour apart are the same mark. So the extent is measured first,
+  // converted into the seconds one mark's height covers, and only then
+  // is the weave composed. Composing with a zero gap instead left every
+  // non-overlapping thread in sub-column zero, which stacked a whole
+  // host's threads on one centre line and spent none of the column.
+  const weave = useMemo(() => {
+    const reading = threadsFrom(data.sessions ?? []);
+    const extent = extentOf(reading.threads);
+    const minGap = extent
+      ? ((extent.end - extent.start) / PLOT_HEIGHT) * MARK_PITCH_PX
+      : 0;
+    return composeWeave(reading, minGap);
+  }, [data.sessions]);
+
+  if (data.available === false) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+          <StateChip kind="unknown" detail="session store not readable" />
+          <p className="text-xs leading-relaxed text-text-muted">
+            The daemon answered but reported its session store
+            unavailable, so there is no thread to place on the axis.{' '}
+            <span className="text-text-secondary">
+              This is the store saying so, not an empty result.
+            </span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const selected =
+    weave.threads.find((thread) => thread.id === selectedId) ?? null;
+  const selectedCommits = selected
+    ? data.commits.filter(
+        (commit) =>
+          commit.provider === selected.host &&
+          commit.session_id === selected.sessionId,
+      )
+    : [];
+  const selectedFiles = selected
+    ? data.edited_files.filter(
+        (file) =>
+          file.provider === selected.host && file.session_id === selected.sessionId,
+      )
+    : [];
+  const selectedSpans = selected
+    ? data.branch_spans.filter(
+        (span) =>
+          span.provider === selected.host && span.session_id === selected.sessionId,
+      )
+    : [];
+  const commitStatus =
+    data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
+  const branchStatus =
+    data.source_statuses.find((source) => source.id === 'branch_worktree') ?? null;
+  const measuredEnds = weave.threads.length - weave.openEndedCount;
+  const messages = weave.threads.reduce(
+    (sum, thread) => sum + thread.messages,
+    0,
+  );
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ReadoutBar
+        label="Weave readings"
+        elevation="raised"
+        items={[
+          {
+            label: 'threads',
+            value: weave.threads.length.toLocaleString(),
+            note: data.total ? `of ${formatCount(data.total)} in store` : undefined,
+          },
+          { label: 'hosts', value: weave.hosts.length },
+          { label: 'messages', value: formatCount(messages) },
+          {
+            label: 'measured extent',
+            value: `${measuredEnds}/${weave.threads.length}`,
+            note: 'recorded end or last-message observation',
+            fraction:
+              weave.threads.length > 0
+                ? measuredEnds / weave.threads.length
+                : null,
+          },
+          {
+            label: 'window',
+            value: weave.extent
+              ? formatDurationSeconds(weave.extent.end - weave.extent.start)
+              : '—',
+            note: weave.extent ? formatMoment(weave.extent.end) : undefined,
+          },
+          {
+            label: 'busiest day',
+            value: busiestDay ? formatCount(busiestDay.count) : '—',
+            // A dash must say why: a timeline still loading, a refused
+            // read, and a served-but-empty timeline are three different
+            // facts, not one "unread".
+            note: busiestDay
+              ? busiestDay.bucket
+              : timelinePending
+                ? 'timeline loading'
+                : timelineServed
+                  ? 'no timeline activity recorded'
+                  : 'timeline read failed',
+          },
+        ]}
+      />
+
+      {/* The scrolling body takes a name and the tab stop: the weave
+        * canvas and tables can overflow it with nothing focusable in
+        * view (axe: scrollable-region-focusable). */}
+      <div
+        role="region"
+        aria-label="Loom content"
+        tabIndex={0}
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row"
+      >
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          {weave.threads.length === 0 ? (
+            <EmptyWeave undated={weave.undated} rows={rows.length} />
+          ) : (
+            <>
+              <WeaveCanvas
+                weave={weave}
+                selectedId={selectedId}
+                onSelect={onSelect}
+                ariaLabel={weaveDescription(weave)}
+              />
+              <WeaveAxis weave={weave} />
+              <ThreadTable
+                threads={weave.threads}
+                selectedId={selectedId}
+                onSelect={onSelect}
+              />
+            </>
+          )}
+        </div>
+
+        <aside className="flex w-full shrink-0 flex-col gap-3 xl:w-[22rem]">
+          <Panel legend="Causal crossings">
+            <div className="flex flex-col gap-2">
+              <p className="text-2xs leading-relaxed text-text-muted">
+                Counts below are the persisted causal rows returned for
+                this exact session page. Provider, granularity and
+                coverage come from the temporal response.
+              </p>
+              {data.source_statuses.map((source) => (
+                <div key={source.id} className="flex flex-col gap-1">
+                  <span className="td-legend text-text-secondary">
+                    {source.label}
+                  </span>
+                  <StateChip
+                    kind={source.state}
+                    detail={sourceDetail(source)}
+                  />
+                  <span className="td-value truncate text-3xs text-text-muted">
+                    {source.granularity}
+                    {source.item_count == null ? '' : ` · ${source.item_count} rows`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </Panel>
+
+          <Panel legend="Read identity">
+            <div className="flex flex-col gap-2">
+              <StateChip
+                kind={freshnessKind(envelope.freshness.state)}
+                detail={
+                  envelope.freshness.observed_at_micros == null
+                    ? 'observation time unrecorded'
+                    : `observed ${formatMoment(envelope.freshness.observed_at_micros / 1_000_000)}`
+                }
+              />
+              <StateChip
+                kind={data.temporal_refresh.state}
+                detail={`${data.temporal_refresh.active_generations} active temporal generations · ${
+                  data.temporal_refresh.latest_activated_at_micros == null
+                    ? 'activation time unrecorded'
+                    : `latest activation ${formatMoment(data.temporal_refresh.latest_activated_at_micros / 1_000_000)}`
+                } · ${data.temporal_refresh.authority}`}
+              />
+              <p className="text-3xs leading-relaxed text-text-muted">
+                {coverageDetail(envelope)}
+              </p>
+              <p className="text-3xs leading-relaxed text-text-muted">
+                {envelope.source_watermark
+                  ? `${envelope.source_watermark.source} · ${envelope.source_watermark.watermark}`
+                  : 'No temporal source watermark was recorded.'}
+              </p>
+            </div>
+          </Panel>
+
+          <ThreadChain
+            thread={selected}
+            relations={{
+              commits: selectedCommits,
+              editedFiles: selectedFiles,
+              branchSpans: selectedSpans,
+              commitStatus,
+              branchStatus,
+            }}
+          />
+        </aside>
+      </div>
     </div>
   );
 }

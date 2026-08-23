@@ -156,8 +156,8 @@ pub use api_types::{
     TranscriptBatch,
 };
 pub use support::{
-    AccountingMode, env_flag, env_value_truthy, estimate_tokens, global_accounting_enabled,
-    global_accounting_mode, global_db_path, global_db_path_is_overridden,
+    AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,
+    global_db_path, global_db_path_is_overridden,
 };
 use support::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query, downrank_inventory_messages,

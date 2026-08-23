@@ -11,7 +11,7 @@ include = ["/src/**"]
 [features]
 # Explicit opt-in (same policy as the query kernel): exposes the registered
 # global-db harness to dependent crates' test builds only.
-test-helpers = ["tracedecay-runtime-core/test-helpers"]
+test-helpers = ["tracedecay-runtime-core/test-helpers", "dep:tempfile"]
 
 [dependencies]
 base64 = "0.22"
@@ -39,10 +39,11 @@ tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-# Test-only harnesses in this crate build temporary stores; kept as a normal
-# dependency because `#[cfg(test)]` modules are compiled inside the lib target
-# and the root crate re-exports `tests::` harness helpers.
-tempfile = "3"
+# Test-only harnesses in this crate build temporary stores. Optional and
+# activated by `test-helpers` (the only non-`cfg(test)` consumer is the
+# re-exported `tests::` harness); the crate's own `cfg(test)` builds resolve
+# it from dev-dependencies, so production builds never link it.
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }

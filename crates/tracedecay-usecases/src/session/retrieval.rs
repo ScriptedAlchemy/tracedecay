@@ -1,7 +1,9 @@
 use std::fmt;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
     ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
     SessionId, TemporalModeV1,
@@ -684,9 +686,9 @@ fn digest_grant(grant: &crate::session::types::SessionAuthorizationGrant) -> Str
         actor_id: grant.scope().actor_id().as_str(),
         grant_id: grant.id().as_str(),
         grant_revision: grant.revision(),
-        capability_digest: hex::encode(grant.capability_digest().as_bytes()),
-        policy_digest: hex::encode(grant.policy_digest().as_bytes()),
-        configuration_digest: hex::encode(grant.configuration_digest().as_bytes()),
+        capability_digest: encode_lowercase_hex(grant.capability_digest().as_bytes()),
+        policy_digest: encode_lowercase_hex(grant.policy_digest().as_bytes()),
+        configuration_digest: encode_lowercase_hex(grant.configuration_digest().as_bytes()),
         access: match grant.scope().access() {
             SessionAccess::Read => "read",
             SessionAccess::Search => "search",
@@ -710,7 +712,7 @@ fn digest_grant(grant: &crate::session::types::SessionAuthorizationGrant) -> Str
 }
 
 fn digest_policy(policy_digest: PolicyDigest) -> String {
-    format!("sha256:{}", hex::encode(policy_digest.as_bytes()))
+    encode_tagged_lowercase_hex("sha256:", policy_digest.as_bytes())
 }
 
 fn digest_request(
@@ -761,9 +763,9 @@ fn digest_request(
         actor_id: context.actor().as_str(),
         grant_id: grant.id().as_str(),
         grant_revision: grant.revision(),
-        grant_capability_digest: hex::encode(grant.capability_digest().as_bytes()),
-        grant_policy_digest: hex::encode(grant.policy_digest().as_bytes()),
-        grant_configuration_digest: hex::encode(grant.configuration_digest().as_bytes()),
+        grant_capability_digest: encode_lowercase_hex(grant.capability_digest().as_bytes()),
+        grant_policy_digest: encode_lowercase_hex(grant.policy_digest().as_bytes()),
+        grant_configuration_digest: encode_lowercase_hex(grant.configuration_digest().as_bytes()),
         access: "hydrate",
         scope_kind: query.retrieval_scope.kind(),
         session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
@@ -821,7 +823,7 @@ fn digest_request(
         },
         schema_version: configuration.schema_version,
         ranking_version: configuration.ranking_version,
-        configuration_version: hex::encode(binding.configuration_digest().as_bytes()),
+        configuration_version: encode_lowercase_hex(binding.configuration_digest().as_bytes()),
     })
 }
 
@@ -867,10 +869,7 @@ fn sha256_json(value: &impl Serialize) -> String {
 }
 
 fn sha256_binding(bytes: &[u8]) -> String {
-    format!(
-        "sha256:{}",
-        tracedecay_domain::canonical_text::sha256_hex(bytes)
-    )
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
 
 #[cfg(test)]

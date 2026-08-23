@@ -263,7 +263,7 @@ struct FileGenerationArtifactsV1 {
 enum IncrementFileMaterializationV1 {
     CarryForward(FileGenerationArtifactsV1),
     ReExtracted {
-        file: SanitizedCodeFileV1,
+        reuse_key: ManifestDigest,
         artifact: FileGenerationArtifactsV1,
         fallback: bool,
     },
@@ -348,7 +348,10 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         Some(rebound)
     }
 
-    fn insert(&self, key: ManifestDigest, artifact: FileGenerationArtifactsV1) {
+    /// Record one artifact under its physical reuse key. The artifact is
+    /// cloned only when the key is actually admitted, so re-recording an
+    /// already-pooled key (every warm rebuild) costs a lock, not a deep copy.
+    fn insert(&self, key: ManifestDigest, artifact: &FileGenerationArtifactsV1) {
         let mut state = self
             .state
             .lock()
@@ -363,7 +366,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
             state.artifacts.remove(&evicted);
         }
         state.insertion_order.push_back(key.clone());
-        state.artifacts.insert(key, Arc::new(artifact));
+        state.artifacts.insert(key, Arc::new(artifact.clone()));
         state.inserted = state.inserted.saturating_add(1);
     }
 
@@ -444,6 +447,11 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// evidence digest are a pure function of the immutable generation. Only
     /// success is cached.
     attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
+    /// Amortized chunk policy-revision census. Owner-compatibility dispatch
+    /// needs the one policy revision the chunks were sealed under; scanning
+    /// every chunk on each `active_generation` call re-derived a value that is
+    /// a pure function of the immutable generation.
+    chunk_policy: OnceLock<ChunkPolicyRevisionSummaryV1>,
     /// Reclaimable code-graph publication manifest. Concurrent seat retries
     /// share a complete build while a publication caller owns it, but the
     /// generation does not pin the full entity/relation projection after the
@@ -460,6 +468,16 @@ struct CodeGraphManifestMemoV1 {
     projection: GraphProjectionIdentity,
     projector_revision: GraphProjectorRevision,
     manifest: Weak<GraphGenerationManifest>,
+}
+
+/// The chunk policy-revision census of one immutable generation: no chunks at
+/// all, one uniform revision, or disagreeing revisions (which no owner
+/// configuration can ever be compatible with).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChunkPolicyRevisionSummaryV1 {
+    Empty,
+    Uniform(PolicyRevisionId),
+    Mixed,
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -545,6 +563,26 @@ impl CodeIndexPublishedGenerationV1 {
                 Err(poisoned) => poisoned.into_inner(),
             };
             admitted.strong_count() > 0
+        })
+    }
+
+    /// The chunk policy-revision census, computed once per in-memory
+    /// generation. Chunks are immutable after construction, so the census is
+    /// a pure function of the generation and owner-compatibility checks
+    /// reduce to one comparison instead of an O(chunks) scan per call.
+    fn chunk_policy_summary(&self) -> &ChunkPolicyRevisionSummaryV1 {
+        self.chunk_policy.get_or_init(|| {
+            let mut chunks = self.chunks.chunks().iter();
+            let Some(first) = chunks.next() else {
+                return ChunkPolicyRevisionSummaryV1::Empty;
+            };
+            if chunks.any(|chunk| {
+                chunk.sensitivity.policy_revision != first.sensitivity.policy_revision
+            }) {
+                ChunkPolicyRevisionSummaryV1::Mixed
+            } else {
+                ChunkPolicyRevisionSummaryV1::Uniform(first.sensitivity.policy_revision.clone())
+            }
         })
     }
 
@@ -1134,11 +1172,13 @@ where
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
                 || active.manifest.privacy_key_epoch != self.config.privacy_key_epoch
-                || active
-                    .chunks
-                    .chunks()
-                    .iter()
-                    .any(|chunk| chunk.sensitivity.policy_revision != self.config.policy_revision)
+                || match active.chunk_policy_summary() {
+                    ChunkPolicyRevisionSummaryV1::Empty => false,
+                    ChunkPolicyRevisionSummaryV1::Uniform(revision) => {
+                        *revision != self.config.policy_revision
+                    }
+                    ChunkPolicyRevisionSummaryV1::Mixed => true,
+                }
             {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "active generation is incompatible with the production owner configuration"
@@ -1312,6 +1352,7 @@ where
             validated: OnceLock::new(),
             admitted: OnceLock::new(),
             attribution: OnceLock::new(),
+            chunk_policy: OnceLock::new(),
             graph_manifest: OnceLock::new(),
         };
         candidate.validate()?;
@@ -1367,6 +1408,10 @@ where
         }
     }
 
+    /// Extract one file's generation artifacts, returning the physical reuse
+    /// key alongside them: callers record artifacts into the pool in canonical
+    /// snapshot order after the parallel sweep, and the key binds the same
+    /// inputs either way, so recomputing it per recording was pure waste.
     #[allow(clippy::too_many_arguments)]
     fn extract_file(
         config: &CodeIndexProductionConfigV1,
@@ -1381,8 +1426,7 @@ where
         file: &SanitizedCodeFileV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
-        record_physical_artifact: bool,
-    ) -> Result<FileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
+    ) -> Result<(ManifestDigest, FileGenerationArtifactsV1), CodeIndexProductionErrorV1> {
         Self::checkpoint(control)?;
         let captured = captured_files
             .get(&file.file_occurrence_id)
@@ -1413,7 +1457,7 @@ where
             Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
         if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound) {
             Self::checkpoint(control)?;
-            return Ok(reused);
+            return Ok((physical_reuse_key, reused));
         }
         let snapshot = &capability.snapshot().snapshot;
         let parser = extractor
@@ -1497,10 +1541,7 @@ where
             artifacts,
             exact_authority,
         };
-        if record_physical_artifact {
-            physical_artifacts.insert(physical_reuse_key, artifact.clone());
-        }
-        Ok(artifact)
+        Ok((physical_reuse_key, artifact))
     }
 
     fn physical_reuse_key(
@@ -1526,33 +1567,6 @@ where
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
     }
 
-    fn record_physical_artifact(
-        config: &CodeIndexProductionConfigV1,
-        physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
-        intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
-        file: &SanitizedCodeFileV1,
-        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
-        artifact: &FileGenerationArtifactsV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        let captured = captured_files
-            .get(&file.file_occurrence_id)
-            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
-        let language = file.language.as_ref().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "present snapshot file has no declared language".to_owned(),
-            )
-        })?;
-        let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "validated snapshot language has no descriptor".to_owned(),
-            )
-        })?;
-        let physical_reuse_key =
-            Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-        physical_artifacts.insert(physical_reuse_key, artifact.clone());
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn materialize_full(
         &self,
@@ -1574,7 +1588,7 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let files = collect_bounded_ordered(&present_files, |file| {
+        let extracted = collect_bounded_ordered(&present_files, |file| {
             Self::extract_file(
                 config,
                 physical_artifacts,
@@ -1588,22 +1602,16 @@ where
                 file,
                 captured_files,
                 control,
-                false,
             )
         })?;
         // Parallel completion order is intentionally not cache authority.
         // Record artifacts in canonical snapshot order so bounded eviction and
         // subsequent physical reuse remain deterministic.
-        for (file, artifact) in present_files.into_iter().zip(&files) {
+        let mut files = Vec::with_capacity(extracted.len());
+        for (reuse_key, artifact) in extracted {
             Self::checkpoint(control)?;
-            Self::record_physical_artifact(
-                config,
-                physical_artifacts,
-                intake,
-                file,
-                captured_files,
-                artifact,
-            )?;
+            physical_artifacts.insert(reuse_key, &artifact);
+            files.push(artifact);
         }
         Self::checkpoint(control)?;
         staged_generation(manifest.generation_id.clone(), files, Vec::new())

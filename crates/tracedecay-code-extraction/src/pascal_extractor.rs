@@ -59,12 +59,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -113,7 +118,6 @@ impl PascalExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -425,7 +429,6 @@ impl PascalExtractor {
 
         // Look for the type body: declClass, declIntf, or plain type.
         if let Some(class_node) = find_direct_child_by_kind(node, "declClass") {
-            // Check if it's a record or class.
             if find_direct_child_by_kind(class_node, "kRecord").is_some() {
                 Self::visit_record_type(state, &name, class_node, node);
             } else {

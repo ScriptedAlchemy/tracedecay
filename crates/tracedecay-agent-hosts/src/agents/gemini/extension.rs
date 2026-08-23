@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-08
 //! Staging and host-CLI driving for the tracedecay Gemini CLI extension.
 //!
 //! Gemini CLI owns extension registration, enablement, and the installed copy

@@ -69,6 +69,7 @@ impl PublicCodeProject {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRegistryView {
     pub summary: ProjectRegistrySummary,
     pub project_tree: Vec<ProjectRepoGroup>,

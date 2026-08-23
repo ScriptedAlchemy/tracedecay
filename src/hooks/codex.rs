@@ -108,7 +108,8 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         // prompt-only review followed immediately by a final-turn review.
         let _ = ingest_user_codex_session(session_id, Some(&hook_telemetry)).await;
     }
-    let context = Box::pin(codex_user_prompt_submit_context_for_event(&event)).await;
+    let context =
+        Box::pin(codex_user_prompt_submit_context_with_root(&event, root.as_deref())).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
@@ -124,7 +125,15 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 }
 
 pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
-    let (mut context, status) = codex_session_context_for_event(event).await;
+    let root = event_project_root_with_identity_from_json(event).await;
+    codex_user_prompt_submit_context_with_root(event, root.as_deref()).await
+}
+
+/// [`codex_user_prompt_submit_context_for_event`] for handlers that already
+/// resolved the identity-aware project root, so the registry probe runs once
+/// per event.
+async fn codex_user_prompt_submit_context_with_root(event: &str, root: Option<&Path>) -> String {
+    let (mut context, status) = codex_session_context_with_root(event, root).await;
     if !matches!(status, HookWorkspaceStatus::Generic)
         && let Some(hint) = codex_prompt_hint(event)
     {
@@ -134,14 +143,24 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
 }
 
 /// Builds Codex session/prompt context.
+#[cfg(test)]
 async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let cwd = event_cwd_from_parsed(&parsed);
     let root = event_project_root_with_identity(&parsed).await;
+    codex_session_context_with_root(event_json, root.as_deref()).await
+}
+
+/// Builds Codex session/prompt context from an already-resolved root.
+async fn codex_session_context_with_root(
+    event_json: &str,
+    root: Option<&Path>,
+) -> (String, HookWorkspaceStatus) {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let cwd = event_cwd_from_parsed(&parsed);
     let session_id = event_session_id(&parsed);
-    let status = codex_workspace_status(root.as_deref(), cwd.as_deref());
-    record_workspace_status_analytics(root.as_deref(), status, session_id.as_deref());
-    let staleness = match (status, root.as_deref()) {
+    let status = codex_workspace_status(root, cwd.as_deref());
+    record_workspace_status_analytics(root, status, session_id.as_deref());
+    let staleness = match (status, root) {
         (HookWorkspaceStatus::Initialized, Some(r)) => {
             let (staleness, _) = cursor_index_signals_for_root(r).await;
             staleness

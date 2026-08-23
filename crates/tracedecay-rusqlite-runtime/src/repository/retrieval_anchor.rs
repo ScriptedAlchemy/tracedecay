@@ -18,7 +18,7 @@ impl RetrievalAnchorExecutor {
         record: &RetrievalAnchorDispositionRecordV1,
     ) -> rusqlite::Result<()> {
         record.validate().map_err(invalid)?;
-        let owner = encode(record.owner())?;
+        let owner_json = encode(record.owner())?;
         let record_json = encode(record)?;
         if let Some(existing) = savepoint
             .query_row(
@@ -35,7 +35,7 @@ impl RetrievalAnchorExecutor {
                 Err(invalid("retrieval anchor disposition replay conflict"))
             };
         }
-        let current = current_state(savepoint, record.anchor_id(), &owner)?;
+        let current = current_state(savepoint, record.anchor_id(), record.owner(), &owner_json)?;
         if !transition_allowed(current, record.state()) {
             return Err(invalid("invalid retrieval anchor disposition transition"));
         }
@@ -47,7 +47,7 @@ impl RetrievalAnchorExecutor {
             params![
                 record.disposition_id(),
                 record.anchor_id().as_str(),
-                owner,
+                owner_json,
                 record.state().as_str(),
                 record.superseded_by().map(RetrievalAnchorId::as_str),
                 record.reason_class().as_str(),
@@ -66,7 +66,7 @@ impl RetrievalAnchorExecutor {
                  WHERE source_anchor_id = ?1 AND owner_json = ?2",
                 params![
                     record.anchor_id().as_str(),
-                    encode(record.owner())?,
+                    owner_json,
                     record.disposition_id(),
                     record.effective_at().0,
                 ],
@@ -81,11 +81,12 @@ impl RetrievalAnchorExecutor {
         derivative: &RetrievalAnchorDerivativeV1,
     ) -> rusqlite::Result<()> {
         derivative.validate().map_err(invalid)?;
-        let owner = encode(derivative.owner())?;
+        let owner_json = encode(derivative.owner())?;
         if !AnchorDispositionStateV1::serves_derivatives(current_state(
             savepoint,
             derivative.source_anchor_id(),
-            &owner,
+            derivative.owner(),
+            &owner_json,
         )?) {
             return Err(invalid(
                 "cannot publish lineage from an unavailable retrieval anchor",
@@ -99,7 +100,7 @@ impl RetrievalAnchorExecutor {
                     "source_anchor_id",
                     derivative.source_anchor_id().as_str().into(),
                 ),
-                ("owner_json", owner.into()),
+                ("owner_json", owner_json.into()),
                 ("derivative_kind", derivative.kind().as_str().into()),
                 ("derivative_id", derivative.derivative_id().into()),
             ],
@@ -121,7 +122,7 @@ impl RetrievalAnchorExecutor {
                 read_anchor(snapshot, anchor_id, owner).map(RetrievalAnchorReadResultV1::Anchor)
             }
             RetrievalAnchorReadOperationV1::CurrentDisposition { anchor_id, owner } => {
-                current_record(snapshot, anchor_id, owner)
+                current_record(snapshot, anchor_id, owner, &encode(owner)?)
                     .map(RetrievalAnchorReadResultV1::CurrentDisposition)
             }
             RetrievalAnchorReadOperationV1::Derivatives { anchor_id, owner } => {
@@ -129,7 +130,7 @@ impl RetrievalAnchorExecutor {
                     .map(RetrievalAnchorReadResultV1::Derivatives)
             }
             RetrievalAnchorReadOperationV1::Tombstone { anchor_id, owner } => {
-                let tombstone = current_record(snapshot, anchor_id, owner)?
+                let tombstone = current_record(snapshot, anchor_id, owner, &encode(owner)?)?
                     .filter(|record| {
                         matches!(
                             record.state(),
@@ -166,6 +167,7 @@ fn read_anchor(
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
         connection,
         anchor_id,
+        owner,
         &owner_json,
     )?) {
         return Ok(None);
@@ -182,7 +184,7 @@ fn read_anchor(
             let record: StoredRetrievalAnchorRecordV1 = decode(record_json)?;
             record.validate().map_err(invalid)?;
             if record.anchor_id() != anchor_id
-                || record.owner() != owner.clone()
+                || record.owner() != owner
                 || record.projection_generation().as_str() != projection_generation
             {
                 return Err(invalid("retrieval anchor record identity mismatch"));
@@ -195,18 +197,19 @@ fn read_anchor(
 fn current_state(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
+    owner: &RetrievalAnchorOwnerV1,
     owner_json: &str,
 ) -> rusqlite::Result<Option<AnchorDispositionStateV1>> {
-    let owner: RetrievalAnchorOwnerV1 = decode(owner_json.to_owned())?;
-    current_record(connection, anchor_id, &owner).map(|record| record.map(|record| record.state()))
+    current_record(connection, anchor_id, owner, owner_json)
+        .map(|record| record.map(|record| record.state()))
 }
 
 fn current_record(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
     owner: &RetrievalAnchorOwnerV1,
+    owner_json: &str,
 ) -> rusqlite::Result<Option<RetrievalAnchorDispositionRecordV1>> {
-    let owner_json = encode(owner)?;
     connection
         .query_row(
             "SELECT disposition_id, state, superseded_by, reason_class,
@@ -262,11 +265,12 @@ fn read_derivatives(
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
         connection,
         anchor_id,
+        owner,
         &owner_json,
     )?) {
         return Ok(Vec::new());
     }
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT lineage.derivative_kind, lineage.derivative_id, lineage.direct_evidence
          FROM retrieval_anchor_reverse_lineage AS lineage
          WHERE lineage.source_anchor_id = ?1 AND lineage.owner_json = ?2

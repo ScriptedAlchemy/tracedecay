@@ -5,7 +5,7 @@
 //! tool arguments, output, and provider identifiers; opaque IDs are supplied
 //! later by the daemon-issued binding/material contract.
 
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -299,175 +299,227 @@ pub fn decode_bound_native_hook_event(
 }
 
 // Provider schemas intentionally allow unknown fields: documented hosts add
-// forward-compatible metadata. Every field consumed for identity or routing is
-// strongly typed below, so wrong types fail without retaining raw payloads.
-#[allow(dead_code)]
+// forward-compatible metadata. Fields consumed for identity or routing are
+// strongly typed below so wrong types fail; fields the decoders check only
+// for documented presence deserialize as underscore-named [`IgnoredAny`] so
+// a matched event keeps its checked-in shape without rematerializing the
+// payload's prompts, paths, tool arguments, or output.
 #[derive(Deserialize)]
 struct ClaudePostToolUseEvent {
-    session_id: String,
-    transcript_path: String,
-    cwd: String,
-    prompt_id: String,
-    permission_mode: String,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "transcript_path")]
+    _transcript_path: IgnoredAny,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+    #[serde(rename = "prompt_id")]
+    _prompt_id: IgnoredAny,
+    #[serde(rename = "permission_mode")]
+    _permission_mode: IgnoredAny,
     tool_name: String,
-    tool_input: Value,
-    tool_response: Value,
+    #[serde(rename = "tool_input")]
+    _tool_input: IgnoredAny,
+    #[serde(rename = "tool_response")]
+    _tool_response: IgnoredAny,
     tool_use_id: String,
-    duration_ms: u64,
+    #[serde(rename = "duration_ms")]
+    _duration_ms: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ClaudeStopEvent {
-    session_id: String,
-    transcript_path: String,
-    cwd: String,
-    prompt_id: String,
-    permission_mode: String,
-    stop_hook_active: bool,
-    last_assistant_message: String,
-    background_tasks: Vec<Value>,
-    session_crons: Vec<Value>,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "transcript_path")]
+    _transcript_path: IgnoredAny,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+    #[serde(rename = "prompt_id")]
+    _prompt_id: IgnoredAny,
+    #[serde(rename = "permission_mode")]
+    _permission_mode: IgnoredAny,
+    #[serde(rename = "stop_hook_active")]
+    _stop_hook_active: IgnoredAny,
+    #[serde(rename = "last_assistant_message")]
+    _last_assistant_message: IgnoredAny,
+    #[serde(rename = "background_tasks")]
+    _background_tasks: IgnoredAny,
+    #[serde(rename = "session_crons")]
+    _session_crons: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct CodexStopEvent {
-    session_id: String,
-    turn_id: String,
-    transcript_path: Option<String>,
-    cwd: String,
-    model: String,
-    permission_mode: String,
-    stop_hook_active: bool,
-    last_assistant_message: String,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "turn_id")]
+    _turn_id: IgnoredAny,
+    #[serde(rename = "transcript_path")]
+    _transcript_path: Option<IgnoredAny>,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+    #[serde(rename = "model")]
+    _model: IgnoredAny,
+    #[serde(rename = "permission_mode")]
+    _permission_mode: IgnoredAny,
+    #[serde(rename = "stop_hook_active")]
+    _stop_hook_active: IgnoredAny,
+    #[serde(rename = "last_assistant_message")]
+    _last_assistant_message: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct CodexPostToolUseEvent {
-    session_id: String,
-    turn_id: String,
-    cwd: String,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "turn_id")]
+    _turn_id: IgnoredAny,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
     tool_name: String,
     tool_use_id: String,
-    tool_input: Value,
-    tool_response: Value,
+    #[serde(rename = "tool_input")]
+    _tool_input: IgnoredAny,
+    #[serde(rename = "tool_response")]
+    _tool_response: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct CursorAfterFileEditEvent {
-    conversation_id: String,
-    generation_id: String,
-    model: String,
-    file_path: String,
+    #[serde(rename = "conversation_id")]
+    _conversation_id: IgnoredAny,
+    #[serde(rename = "generation_id")]
+    _generation_id: IgnoredAny,
+    #[serde(rename = "model")]
+    _model: IgnoredAny,
+    #[serde(rename = "file_path")]
+    _file_path: IgnoredAny,
     edits: Vec<CursorEdit>,
-    session_id: String,
-    cursor_version: String,
-    workspace_roots: Vec<String>,
-    user_email: Option<String>,
-    transcript_path: String,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "cursor_version")]
+    _cursor_version: IgnoredAny,
+    workspace_roots: Vec<IgnoredAny>,
+    #[serde(rename = "user_email")]
+    _user_email: Option<IgnoredAny>,
+    #[serde(rename = "transcript_path")]
+    _transcript_path: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct CursorEdit {
-    old_string: String,
-    new_string: String,
+    #[serde(rename = "old_string")]
+    _old_string: IgnoredAny,
+    #[serde(rename = "new_string")]
+    _new_string: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct CursorStopEvent {
-    conversation_id: String,
-    generation_id: String,
-    model: String,
+    #[serde(rename = "conversation_id")]
+    _conversation_id: IgnoredAny,
+    #[serde(rename = "generation_id")]
+    _generation_id: IgnoredAny,
+    #[serde(rename = "model")]
+    _model: IgnoredAny,
     status: String,
-    loop_count: u64,
+    #[serde(rename = "loop_count")]
+    _loop_count: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesWriteEvent {
-    cwd: String,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
     extra: HermesToolExtra,
-    session_id: String,
-    tool_input: Value,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "tool_input")]
+    _tool_input: IgnoredAny,
     tool_name: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesToolExtra {
     status: String,
     tool_call_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesTerminalReceiptEvent {
     agent: String,
-    event: String,
+    #[serde(rename = "event")]
+    _event: IgnoredAny,
     route: HermesTerminalReceiptRoute,
     receipt: HermesTerminalReceipt,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesTerminalReceiptRoute {
     session_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesTerminalReceipt {
     tool_call_id: String,
     status: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesSessionEndEvent {
-    cwd: String,
-    extra: HermesSessionEndExtra,
-    session_id: String,
-    tool_input: Option<Value>,
-    tool_name: Option<String>,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+    #[serde(rename = "extra")]
+    _extra: HermesSessionEndExtra,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    tool_input: Option<IgnoredAny>,
+    tool_name: Option<IgnoredAny>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HermesSessionEndExtra {
-    completed: bool,
-    interrupted: bool,
-    model: String,
-    platform: String,
-    task_id: String,
-    telemetry_schema_version: String,
-    turn_id: String,
+    #[serde(rename = "completed")]
+    _completed: IgnoredAny,
+    #[serde(rename = "interrupted")]
+    _interrupted: IgnoredAny,
+    #[serde(rename = "model")]
+    _model: IgnoredAny,
+    #[serde(rename = "platform")]
+    _platform: IgnoredAny,
+    #[serde(rename = "task_id")]
+    _task_id: IgnoredAny,
+    #[serde(rename = "telemetry_schema_version")]
+    _telemetry_schema_version: IgnoredAny,
+    #[serde(rename = "turn_id")]
+    _turn_id: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct KimiPostToolUseEvent {
-    session_id: String,
-    cwd: String,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
     tool_name: String,
-    tool_input: serde_json::Map<String, Value>,
-    tool_call_id: String,
-    tool_output: Value,
+    #[serde(rename = "tool_input")]
+    _tool_input: IgnoredAny,
+    #[serde(rename = "tool_call_id")]
+    _tool_call_id: IgnoredAny,
+    #[serde(rename = "tool_output")]
+    _tool_output: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct KimiStopEvent {
-    session_id: String,
-    cwd: String,
-    stop_hook_active: bool,
+    #[serde(rename = "session_id")]
+    _session_id: IgnoredAny,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+    #[serde(rename = "stop_hook_active")]
+    _stop_hook_active: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct OpenCodeEventProperties {
     file: Option<String>,
@@ -476,63 +528,63 @@ struct OpenCodeEventProperties {
     status: Option<OpenCodeSessionStatus>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct OpenCodeSessionStatus {
     #[serde(rename = "type")]
     kind: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct OpenCodeBusEvent {
-    id: String,
+    #[serde(rename = "id")]
+    _id: IgnoredAny,
     properties: OpenCodeEventProperties,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenCodeLspUpdatedEvent {
     id: String,
     #[serde(rename = "type")]
-    kind: String,
-    properties: OpenCodeLspUpdatedProperties,
+    _kind: IgnoredAny,
+    #[serde(rename = "properties")]
+    _properties: OpenCodeLspUpdatedProperties,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenCodeLspUpdatedProperties {}
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct OpenCodeToolAfterEvent {
     input: OpenCodeToolAfterInput,
-    output: OpenCodeToolAfterOutput,
+    #[serde(rename = "output")]
+    _output: OpenCodeToolAfterOutput,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct OpenCodeToolAfterInput {
     tool: String,
     #[serde(rename = "sessionID")]
-    session_id: String,
+    _session_id: IgnoredAny,
     #[serde(rename = "callID")]
-    call_id: String,
-    args: Value,
+    _call_id: IgnoredAny,
+    #[serde(rename = "args")]
+    _args: IgnoredAny,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct OpenCodeToolAfterOutput {
-    title: String,
-    output: String,
-    metadata: Value,
+    #[serde(rename = "title")]
+    _title: IgnoredAny,
+    #[serde(rename = "output")]
+    _output: IgnoredAny,
+    #[serde(rename = "metadata")]
+    _metadata: IgnoredAny,
 }
 
 fn decode_shape<T: DeserializeOwned>(raw: &Value) -> Result<T, NativeHookDecodeError> {
-    serde_json::from_value(raw.clone()).map_err(|_| NativeHookDecodeError::MalformedPayload)
+    T::deserialize(raw).map_err(|_| NativeHookDecodeError::MalformedPayload)
 }
 
 fn decode_claude(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {

@@ -529,17 +529,6 @@ enum LatestLineageField {
 }
 
 impl LatestLineageField {
-    fn read(row: &crate::db::engine::Row, present: i32, value: i32) -> FactStoreResult<Self> {
-        if row_i64(row, present, QUERY_OPERATION)? == 0 {
-            return Ok(Self::Absent);
-        }
-        Ok(Self::Present(row_optional_string(
-            row,
-            value,
-            QUERY_OPERATION,
-        )?))
-    }
-
     /// Yields the field, rejecting an event that exists without one.
     fn require(self, malformed: &'static str) -> FactStoreResult<Option<String>> {
         match self {
@@ -559,9 +548,8 @@ struct FactLineageProbe {
 
 /// Reads the lineage log once for all three metadata projections.
 ///
-/// Every projection filters the same `(fact_id, owner, occurred_at <= cutoff)`
-/// key, so they ride one statement as correlated subqueries rather than three
-/// sequential round trips.
+/// Newest-first scan of the shared `(fact_id, owner, occurred_at <= cutoff)`
+/// key replaces five correlated subqueries that each re-walk the same rows.
 async fn probe_fact_lineage_tx(
     snapshot: &Transaction<'_>,
     owner: &OwnerKey,
@@ -570,42 +558,13 @@ async fn probe_fact_lineage_tx(
 ) -> FactStoreResult<FactLineageProbe> {
     let mut rows = snapshot
         .query(
-            "SELECT
-               EXISTS (
-                 SELECT 1 FROM memory_v2_lineage_events
-                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                   AND occurred_at <= ?4
-               ),
-               EXISTS (
-                 SELECT 1 FROM memory_v2_lineage_events
-                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                   AND occurred_at <= ?4
-                   AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
-               ),
-               (
-                 SELECT json_extract(event_json, '$.kind.assertion_id')
-                 FROM memory_v2_lineage_events
-                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                   AND occurred_at <= ?4
-                   AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
-                 ORDER BY occurred_at DESC, event_id DESC
-                 LIMIT 1
-               ),
-               EXISTS (
-                 SELECT 1 FROM memory_v2_lineage_events
-                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                   AND occurred_at <= ?4
-                   AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
-               ),
-               (
-                 SELECT json_extract(event_json, '$.kind.current')
-                 FROM memory_v2_lineage_events
-                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                   AND occurred_at <= ?4
-                   AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
-                 ORDER BY occurred_at DESC, event_id DESC
-                 LIMIT 1
-               )",
+            "SELECT json_extract(event_json, '$.kind.kind'),
+                    json_extract(event_json, '$.kind.assertion_id'),
+                    json_extract(event_json, '$.kind.current')
+             FROM memory_v2_lineage_events
+             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+               AND occurred_at <= ?4
+             ORDER BY occurred_at DESC, event_id DESC",
             params![
                 fact_id.as_str(),
                 owner.kind,
@@ -615,18 +574,40 @@ async fn probe_fact_lineage_tx(
         )
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let row = rows
+    let mut observed_event = false;
+    let mut latest_assertion = LatestLineageField::Absent;
+    let mut latest_payload_access = LatestLineageField::Absent;
+    while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?
-        .ok_or_else(|| storage_message(QUERY_OPERATION, "lineage probe returned no rows"))?;
-    let probe = FactLineageProbe {
-        observed_event: row_i64(&row, 0, QUERY_OPERATION)? != 0,
-        latest_assertion: LatestLineageField::read(&row, 1, 2)?,
-        latest_payload_access: LatestLineageField::read(&row, 3, 4)?,
-    };
+    {
+        observed_event = true;
+        match row_optional_string(&row, 0, QUERY_OPERATION)?.as_deref() {
+            Some("assertion_recorded") if matches!(latest_assertion, LatestLineageField::Absent) => {
+                latest_assertion =
+                    LatestLineageField::Present(row_optional_string(&row, 1, QUERY_OPERATION)?);
+            }
+            Some("payload_access_changed")
+                if matches!(latest_payload_access, LatestLineageField::Absent) =>
+            {
+                latest_payload_access =
+                    LatestLineageField::Present(row_optional_string(&row, 2, QUERY_OPERATION)?);
+            }
+            _ => {}
+        }
+        if !matches!(latest_assertion, LatestLineageField::Absent)
+            && !matches!(latest_payload_access, LatestLineageField::Absent)
+        {
+            break;
+        }
+    }
     drop(rows);
-    Ok(probe)
+    Ok(FactLineageProbe {
+        observed_event,
+        latest_assertion,
+        latest_payload_access,
+    })
 }
 
 async fn fact_contradiction_ids_tx(

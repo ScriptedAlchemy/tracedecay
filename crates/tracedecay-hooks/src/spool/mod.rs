@@ -419,7 +419,14 @@ impl HookSpoolV1 {
         self.meta = next_meta;
         self.pending.remove(index);
         self.release_usage(&removed);
-        self.compact_pending()?;
+        // Compaction rewrites every remaining frame, so draining N records
+        // must not rewrite the file once per acknowledgement (O(N^2) bytes).
+        // Reclaim only when acknowledged frames occupy at least as much of
+        // the file as the live ones; a fully drained spool always compacts
+        // to zero, and append reclaims on demand when the byte cap nears.
+        if self.physical_len > self.pending_bytes().saturating_mul(2) {
+            self.compact_pending()?;
+        }
         Ok(true)
     }
 

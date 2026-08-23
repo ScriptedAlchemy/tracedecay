@@ -292,12 +292,24 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistration
     }
 }
 
+/// Maps the registry's two refusals into one per-runtime registration enum.
+/// Callers match on the per-runtime variants (and each carries its own error
+/// message), so the enums keep their own `AlreadyRegistered`/`RegistryClosed`
+/// shapes and only this mapping is shared.
+pub(super) fn registry_registration_refusal<E>(
+    error: ProjectRuntimeRegistryError,
+    already_registered: E,
+    registry_closed: E,
+) -> E {
+    match error {
+        ProjectRuntimeRegistryError::AlreadyRegistered => already_registered,
+        ProjectRuntimeRegistryError::Closed => registry_closed,
+    }
+}
+
 impl From<ProjectRuntimeRegistryError> for DaemonFeedbackRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        match error {
-            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
-            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
+        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
     }
 }
 
@@ -559,10 +571,7 @@ impl From<FeedbackCyclePublicationError> for DaemonAdvisoryRuntimeRegistrationEr
 
 impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        match error {
-            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
-            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
+        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
     }
 }
 

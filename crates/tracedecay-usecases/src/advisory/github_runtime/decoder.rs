@@ -612,8 +612,7 @@ fn provider_state(
 }
 
 fn body_digest(body: &str) -> Option<ManifestDigest> {
-    let digest = Sha256::digest(body.as_bytes());
-    ManifestDigest::new(format!("sha256:{}", hex::encode(digest))).ok()
+    ManifestDigest::from_sha256_bytes(&Sha256::digest(body.as_bytes())).ok()
 }
 
 fn retained_review_body(body: &str) -> Option<String> {

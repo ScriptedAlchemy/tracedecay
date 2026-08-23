@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
@@ -172,12 +173,12 @@ export function WorkPage() {
   // The accounting read behind the topology lens's integration and stack
   // cards; issued only when that lens is the camera.
   const topologyMetrics = useWorkTopologyMetrics(projection === 'topology');
-  const attemptReading = workAttemptReading(attempts.data);
+  const attemptReading = useMemo(() => workAttemptReading(attempts.data), [attempts.data]);
   // The graph hook bootstraps against profile ownership, then re-reads against
   // the exact repository scope returned in the daemon's response envelope.
   const graph = useWorkGraphViews(true);
-  const graphReading = workGraphReading(graph.data);
-  const result = currentWorkProductView(graph.data);
+  const graphReading = useMemo(() => workGraphReading(graph.data), [graph.data]);
+  const result = useMemo(() => currentWorkProductView(graph.data), [graph.data]);
   const value = result?.outcome === 'value' ? result.value : undefined;
 
   const selectedProjection = value?.projections.find(

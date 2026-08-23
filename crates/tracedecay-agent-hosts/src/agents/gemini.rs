@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-08
 //! Gemini CLI agent integration.
 //!
 //! Gemini CLI has a first-party extension lifecycle — `gemini extensions

@@ -1,6 +1,11 @@
 use std::path::Path;
 
-use super::{RegisteredGlobalDb, SavingsDay, SavingsTotal, global_db_operation_error};
+use tracedecay_runtime_core::db::engine::Value;
+
+use super::{
+    RegisteredGlobalDb, SavingsDay, SavingsTotal, global_db_operation_error,
+    push_optional_analytics_filter,
+};
 
 impl RegisteredGlobalDb {
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
@@ -201,39 +206,21 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| format!("failed to begin savings snapshot: {error}"))?;
-        let rows = match project_id {
-            Some(project) => {
-                snapshot
-                    .query(
-                        "SELECT COALESCE(SUM(CASE
-                                WHEN before_tokens > after_tokens
-                                THEN before_tokens - after_tokens
-                                ELSE 0 END), 0),
-                                COUNT(*),
-                                COALESCE(MAX(id), 0)
-                         FROM savings_ledger
-                         WHERE project_path = ?1 AND ts >= ?2",
-                        tracedecay_runtime_core::db::engine::params![project, since],
-                    )
-                    .await
-            }
-            None => {
-                snapshot
-                    .query(
-                        "SELECT COALESCE(SUM(CASE
-                                WHEN before_tokens > after_tokens
-                                THEN before_tokens - after_tokens
-                                ELSE 0 END), 0),
-                                COUNT(*),
-                                COALESCE(MAX(id), 0)
-                         FROM savings_ledger
-                         WHERE ts >= ?1",
-                        tracedecay_runtime_core::db::engine::params![since],
-                    )
-                    .await
-            }
-        };
-        let mut rows = rows.map_err(|error| format!("failed to query savings totals: {error}"))?;
+        let (sql, values) = savings_scope_query(
+            "SELECT COALESCE(SUM(CASE
+                    WHEN before_tokens > after_tokens
+                    THEN before_tokens - after_tokens
+                    ELSE 0 END), 0),
+                    COUNT(*),
+                    COALESCE(MAX(id), 0)
+             FROM savings_ledger",
+            project_id,
+            since,
+        );
+        let mut rows = snapshot
+            .query(&sql, values)
+            .await
+            .map_err(|error| format!("failed to query savings totals: {error}"))?;
         let row = rows
             .next()
             .await
@@ -262,41 +249,19 @@ impl RegisteredGlobalDb {
         let Ok(snapshot) = self.read_snapshot().await else {
             return Vec::new();
         };
-        let rows = match project.as_deref() {
-            Some(project) => {
-                snapshot
-                    .query(
-                        "SELECT (ts / 86400) * 86400 AS day,
-                                COALESCE(SUM(CASE
-                                    WHEN before_tokens > after_tokens
-                                    THEN before_tokens - after_tokens
-                                    ELSE 0 END), 0),
-                                COUNT(*)
-                         FROM savings_ledger
-                         WHERE project_path = ?1 AND ts >= ?2
-                         GROUP BY day ORDER BY day DESC",
-                        tracedecay_runtime_core::db::engine::params![project, since],
-                    )
-                    .await
-            }
-            None => {
-                snapshot
-                    .query(
-                        "SELECT (ts / 86400) * 86400 AS day,
-                                COALESCE(SUM(CASE
-                                    WHEN before_tokens > after_tokens
-                                    THEN before_tokens - after_tokens
-                                    ELSE 0 END), 0),
-                                COUNT(*)
-                         FROM savings_ledger
-                         WHERE ts >= ?1
-                         GROUP BY day ORDER BY day DESC",
-                        tracedecay_runtime_core::db::engine::params![since],
-                    )
-                    .await
-            }
-        };
-        let Ok(mut rows) = rows else {
+        let (mut sql, values) = savings_scope_query(
+            "SELECT (ts / 86400) * 86400 AS day,
+                    COALESCE(SUM(CASE
+                        WHEN before_tokens > after_tokens
+                        THEN before_tokens - after_tokens
+                        ELSE 0 END), 0),
+                    COUNT(*)
+             FROM savings_ledger",
+            project.as_deref(),
+            since,
+        );
+        sql.push_str(" GROUP BY day ORDER BY day DESC");
+        let Ok(mut rows) = snapshot.query(&sql, values).await else {
             return Vec::new();
         };
         let mut history = Vec::new();
@@ -309,4 +274,17 @@ impl RegisteredGlobalDb {
         }
         history
     }
+}
+
+fn savings_scope_query(
+    select: &str,
+    project_id: Option<&str>,
+    since: i64,
+) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    push_optional_analytics_filter(&mut clauses, &mut values, "project_path", project_id);
+    values.push(Value::Integer(since));
+    clauses.push(format!("ts >= ?{}", values.len()));
+    (format!("{select} WHERE {}", clauses.join(" AND ")), values)
 }

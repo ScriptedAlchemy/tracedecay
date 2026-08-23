@@ -257,8 +257,6 @@ pub struct MessageRecordBuilder<'a> {
     timestamp: Option<i64>,
     model: Option<&'a str>,
     tool_names: Option<&'a str>,
-    source_path: Option<&'a str>,
-    source_offset: Option<i64>,
     metadata_json: Option<&'a str>,
 }
 
@@ -283,8 +281,6 @@ impl<'a> MessageRecordBuilder<'a> {
             timestamp: Some(1_715_000_030),
             model: Some("test-model"),
             tool_names: None,
-            source_path: None,
-            source_offset: None,
             metadata_json: None,
         }
     }
@@ -301,12 +297,6 @@ impl<'a> MessageRecordBuilder<'a> {
 
     pub fn with_tool_names(mut self, tool_names: Option<&'a str>) -> Self {
         self.tool_names = tool_names;
-        self
-    }
-
-    pub fn with_source(mut self, path: Option<&'a str>, offset: Option<i64>) -> Self {
-        self.source_path = path;
-        self.source_offset = offset;
         self
     }
 
@@ -327,8 +317,8 @@ impl<'a> MessageRecordBuilder<'a> {
             kind: Some(self.kind.to_owned()),
             model: self.model.map(str::to_owned),
             tool_names: self.tool_names.map(str::to_owned),
-            source_path: self.source_path.map(str::to_owned),
-            source_offset: self.source_offset,
+            source_path: None,
+            source_offset: None,
             metadata_json: self.metadata_json.map(str::to_owned),
         }
     }

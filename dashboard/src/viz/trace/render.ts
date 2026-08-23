@@ -342,9 +342,14 @@ export function createRenderer(
     if (tracking > 0) {
       const track = tracking * typeScale();
       const glyphs = [...body];
-      const total = glyphs.reduce((sum, g) => sum + ctx.measureText(g).width + track, -track);
+      // One measurement per glyph, reused for both the alignment total and the
+      // cursor advance — this runs per label per frame, and `measureText` is
+      // the expensive call in it.
+      const widths = glyphs.map((glyph) => ctx.measureText(glyph).width);
+      const total = widths.reduce((sum, width) => sum + width + track, -track);
       let cursor = align === 'right' ? x - total : align === 'center' ? x - total / 2 : x;
-      for (const glyph of glyphs) {
+      for (let i = 0; i < glyphs.length; i += 1) {
+        const glyph = glyphs[i]!;
         if (halo) {
           ctx.strokeStyle = pal.surface0;
           ctx.lineWidth = haloWidth;
@@ -352,7 +357,7 @@ export function createRenderer(
         }
         ctx.fillStyle = color ?? pal.textMuted;
         ctx.fillText(glyph, cursor, y);
-        cursor += ctx.measureText(glyph).width + track;
+        cursor += widths[i]! + track;
       }
       return;
     }

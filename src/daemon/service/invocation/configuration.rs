@@ -2,6 +2,8 @@
 
 use super::*;
 
+use super::registrars::registry_registration_refusal;
+
 mod settlement;
 
 use settlement::{configuration_effect, reconcile_configuration_runtime};
@@ -913,10 +915,7 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonSemanticRuntimeRegistration
 
 impl From<ProjectRuntimeRegistryError> for DaemonSemanticRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        match error {
-            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
-            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
+        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
     }
 }
 

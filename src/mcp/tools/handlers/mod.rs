@@ -432,11 +432,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         let dispatch: std::pin::Pin<
                             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
                         > = Box::pin(dispatch_profile_retained_application_tool(
-                            operation,
-                            tool_name,
-                            cg,
-                            args,
-                            options.clone(),
+                            operation, tool_name, cg, args, options,
                         ));
                         return dispatch.await;
                     }
@@ -479,10 +475,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
             ));
         }
         let selected_scope_prefix = scope_prefix;
-        let project_session_db = options
-            .registered_project_session_db
-            .as_ref()
-            .or(options.session_authorities.project);
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the
@@ -497,10 +489,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
             // the canonical application handler.
             ensure_mcp_dispatch_available(tool_name)?;
             return boxed_send(dispatch_application_surface_tools(
-                tool_name,
-                cg,
-                args,
-                options.clone(),
+                tool_name, cg, args, options,
             ))
             .await;
         }
@@ -583,6 +572,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 std::time::Duration::ZERO,
             ));
         };
+        // The lease is cloned out of `options` (one field, not the whole
+        // struct) so the dispatch arms below can take `options` by value.
+        let project_session_db_lease = options.registered_project_session_db.clone();
+        let project_session_db = project_session_db_lease
+            .as_ref()
+            .or(options.session_authorities.project);
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {
@@ -591,7 +586,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         cg,
                         args,
                         selected_scope_prefix,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
@@ -604,12 +599,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         scope_prefix,
                         selected_scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
                 Some(McpToolDispatchGroup::Admin) => {
-                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Analysis) => {
                     boxed_send(dispatch_analysis_tools(
@@ -618,15 +613,15 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
                 Some(McpToolDispatchGroup::Git) => {
-                    boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Edit) => {
-                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Health) => {
                     boxed_send(dispatch_health_tools(
@@ -635,7 +630,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
@@ -646,21 +641,16 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
                 Some(McpToolDispatchGroup::Memory) => {
-                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::SessionWorkflow) => {
-                    boxed_send(dispatch_session_workflow_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        options.clone(),
-                    ))
-                    .await
+                    boxed_send(dispatch_session_workflow_tools(tool_name, cg, args, options))
+                        .await
                 }
                 // Typed daemon surface tools already returned above; reaching here means
                 // the name resolves to no reachable dispatch entry.

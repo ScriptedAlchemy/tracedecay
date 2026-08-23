@@ -29,6 +29,7 @@ use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -133,6 +134,24 @@ fn completed<T>(
     })
 }
 
+fn empty_primitive_page() -> PageState {
+    PageState {
+        sort_contract_id: PRIMITIVE_SORT_CONTRACT.clone(),
+        sort_revision: 1,
+        total: Some(0),
+        returned: 0,
+        cursor: None,
+        expires_at: None,
+    }
+}
+
+fn primitive_page(
+    total: Option<u64>,
+    returned: u64,
+) -> Result<PageState, ApplicationContractError> {
+    PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, total, returned)
+}
+
 fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOutcome<T> {
     RetrievalPortOutcome::Failed(RetrievalEvidence {
         payload: None,
@@ -152,8 +171,7 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         omissions: Vec::new(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(0), 0)
-            .unwrap_or_else(|_| panic!("empty page")),
+        page: empty_primitive_page(),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -216,8 +234,7 @@ fn omitted_evidence<T>(
         }],
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, None, 0)
-            .unwrap_or_else(|_| panic!("diagnostic unavailable page")),
+        page: empty_primitive_page(),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -264,8 +281,10 @@ fn diagnostics_result(
     let next_cursor_text = next_cursor
         .as_ref()
         .map(|cursor| cursor.as_str().to_owned());
-    let mut page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(total), returned)
-        .unwrap_or_else(|_| panic!("diagnostic result page"));
+    let mut page = match primitive_page(Some(total), returned) {
+        Ok(page) => page,
+        Err(_) => return failed(EvidenceDomain::Diagnostic, finished_at),
+    };
     page.cursor = next_cursor.map(|cursor| PageCursor::Opaque { cursor });
     page.expires_at = page.cursor.as_ref().and_then(|_| {
         finished_at
@@ -477,17 +496,23 @@ fn all_code_graph_symbols(
     }
 }
 
-fn symbol_at_location(
+fn logical_file_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
     file: &str,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
+    graph
+        .symbols_in_logical_file(file, 100_000, cancellation)
+        .map_err(|_| ())
+}
+
+fn symbol_at_line(
+    symbols: &[CodeGraphSymbolSummaryV1],
     line_1based: u32,
 ) -> Result<Option<CodeGraphSymbolSummaryV1>, ()> {
     let line = line_1based.checked_sub(1).ok_or(())?;
-    let mut enclosing = graph
-        .symbols_in_logical_file(file, 100_000, cancellation)
-        .map_err(|_| ())?
-        .into_iter()
+    let mut enclosing = symbols
+        .iter()
         .filter(|symbol| {
             symbol.metadata.as_ref().is_some_and(|metadata| {
                 metadata.line_span > 0
@@ -506,7 +531,7 @@ fn symbol_at_location(
             .cmp(&right.metadata.as_ref().map(|metadata| metadata.line_span))
             .then(left.occurrence.cmp(&right.occurrence))
     });
-    Ok(enclosing.into_iter().next())
+    Ok(enclosing.into_iter().next().cloned())
 }
 
 fn test_annotation_evidence(
@@ -661,6 +686,12 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 }
             };
             let mut matches = Vec::with_capacity(scan.hits.len());
+            // Hits cluster within files, so the per-file symbol list is read
+            // from the graph once and reused for every hit in that file.
+            let mut symbols_by_file: std::collections::HashMap<
+                String,
+                Vec<CodeGraphSymbolSummaryV1>,
+            > = std::collections::HashMap::new();
             // A graph read that fails cannot distinguish "this line is in no
             // symbol" from "the enclosing symbol could not be read", so the
             // page reports itself incomplete rather than attributing the hit
@@ -670,14 +701,19 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
-                let enclosing = match symbol_at_location(
-                    &reader,
-                    Arc::clone(&graph_cancellation),
-                    &hit.file,
-                    hit.line,
-                ) {
+                if !symbols_by_file.contains_key(&hit.file)
+                    && let Ok(symbols) =
+                        logical_file_symbols(&reader, Arc::clone(&graph_cancellation), &hit.file)
+                {
+                    symbols_by_file.insert(hit.file.clone(), symbols);
+                }
+                let enclosing = match symbols_by_file
+                    .get(&hit.file)
+                    .ok_or(())
+                    .and_then(|symbols| symbol_at_line(symbols, hit.line))
+                {
                     Ok(enclosing) => enclosing,
-                    Err(_) => {
+                    Err(()) => {
                         unread_enclosing_symbols = true;
                         None
                     }
@@ -1196,7 +1232,7 @@ fn storage_status_history_path(
     digest.update(store_path.as_bytes());
     data_root
         .join("storage-status-history-v1")
-        .join(format!("{}.json", hex::encode(digest.finalize())))
+        .join(format!("{}.json", encode_lowercase_hex(&digest.finalize())))
 }
 
 fn update_storage_status_history(
@@ -2478,8 +2514,7 @@ fn affected_tests_evidence(
             .collect(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, eligible, returned)
-            .unwrap_or_else(|_| panic!("affected-tests page")),
+        page: primitive_page(eligible, returned).unwrap_or_else(|_| empty_primitive_page()),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,

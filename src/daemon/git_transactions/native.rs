@@ -4,6 +4,7 @@
 //! expiring durable preview input, so a daemon restart never invalidates an
 //! otherwise current immutable preview.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -275,23 +276,28 @@ impl NativeGitIndexPreviewAssembler {
             .read_authority()
             .hunk_refs(&scope, preview_id, snapshot_digest)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        // Digest every current ref once up front so the selected-hunk loop is
+        // a map lookup instead of re-digesting all refs per requested hunk.
+        let mut current_by_digest = BTreeMap::new();
+        for reference in &current_refs {
+            if let Ok(digest) = reference.compute_digest() {
+                current_by_digest.entry(digest).or_insert(reference);
+            }
+        }
+        let diff_text = read_scope_diff(&self.repository_root, &scope)?;
         let mut patches = Vec::with_capacity(selected_hunks.len());
         for requested in selected_hunks {
             let requested_digest = requested
                 .compute_digest()
                 .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-            let current = current_refs
-                .iter()
-                .find(|reference| {
-                    reference
-                        .compute_digest()
-                        .is_ok_and(|digest| digest == requested_digest)
-                })
+            let current = current_by_digest
+                .get(&requested_digest)
+                .copied()
                 .ok_or(GitIndexTransactionPortError::StalePreview)?;
             if current != requested {
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
-            let bytes = extract_patch(&self.repository_root, &scope, requested)?;
+            let bytes = extract_patch_from_diff(&diff_text, requested)?;
             patches.push(
                 ValidatedIndexPatch::new(requested.clone(), bytes).map_err(map_native_error)?,
             );
@@ -938,11 +944,10 @@ struct PatchDigestMaterial<'a> {
     body: &'a [String],
 }
 
-fn extract_patch(
+fn read_scope_diff(
     repository_root: &Path,
     scope: &GitDiffScopeV1,
-    hunk: &tracedecay_domain::HunkRefV1,
-) -> Result<Vec<u8>, GitIndexTransactionPortError> {
+) -> Result<String, GitIndexTransactionPortError> {
     let mut command = read_git_command(repository_root);
     command
         .arg("diff")
@@ -954,7 +959,6 @@ fn extract_patch(
     if matches!(scope, GitDiffScopeV1::Staged) {
         command.arg("--cached");
     }
-    command.arg("--").arg(&hunk.path);
     let output = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -963,8 +967,21 @@ fn extract_patch(
     if !output.status.success() {
         return Err(GitIndexTransactionPortError::StalePreview);
     }
-    let text = std::str::from_utf8(&output.stdout)
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    String::from_utf8(output.stdout).map_err(|_| GitIndexTransactionPortError::StalePreview)
+}
+
+fn extract_patch(
+    repository_root: &Path,
+    scope: &GitDiffScopeV1,
+    hunk: &tracedecay_domain::HunkRefV1,
+) -> Result<Vec<u8>, GitIndexTransactionPortError> {
+    extract_patch_from_diff(&read_scope_diff(repository_root, scope)?, hunk)
+}
+
+fn extract_patch_from_diff(
+    text: &str,
+    hunk: &tracedecay_domain::HunkRefV1,
+) -> Result<Vec<u8>, GitIndexTransactionPortError> {
     let lines = text.lines().collect::<Vec<_>>();
     let mut old_marker = None;
     let mut new_marker = None;
@@ -978,6 +995,9 @@ fn extract_patch(
             continue;
         }
         if !line.starts_with("@@ ") {
+            continue;
+        }
+        if !diff_markers_match_path(old_marker, new_marker, &hunk.path) {
             continue;
         }
         let Some(normalized) = normalize_hunk_header(line) else {
@@ -1018,6 +1038,27 @@ fn extract_patch(
         return Ok(patch);
     }
     Err(GitIndexTransactionPortError::StalePreview)
+}
+
+fn diff_markers_match_path(old_marker: Option<&str>, new_marker: Option<&str>, path: &str) -> bool {
+    [old_marker, new_marker]
+        .into_iter()
+        .flatten()
+        .any(|marker| marker_path(marker).is_some_and(|candidate| candidate == path))
+}
+
+fn marker_path(line: &str) -> Option<&str> {
+    let rest = line
+        .strip_prefix("--- ")
+        .or_else(|| line.strip_prefix("+++ "))?;
+    if rest == "/dev/null" {
+        return None;
+    }
+    Some(
+        rest.strip_prefix("a/")
+            .or_else(|| rest.strip_prefix("b/"))
+            .unwrap_or(rest),
+    )
 }
 
 fn normalize_hunk_header(header: &str) -> Option<String> {

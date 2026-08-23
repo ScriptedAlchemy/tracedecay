@@ -3,8 +3,7 @@
 //!
 //! These values are immutable logical records: no storage rows, no parser
 //! acquisition, no runtime, no transport. Implementations live in
-//! `src/code_index/` (root modules) and move to `crates/tracedecay-code-index`
-//! unchanged only if the Plan 19 extraction gate approves a crate.
+//! `src/code_index/` (root modules) and `crates/tracedecay-code-index`.
 //!
 //! Ownership: Plan 25 owns these code-specific contracts. Plan 15 owns the
 //! shared retrieval kernel (`crate::retrieval`); Plan 35 owns

@@ -115,40 +115,17 @@ pub async fn hook_cursor_session_end() -> i32 {
 
 async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, hook_name, &event);
-    if hook_name == "stop"
-        && let Some(root) = root.as_deref()
-        && let Some(guidance) = super::dispatch::dispatch(
-            tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-    {
-        let outcome = ingest_cursor_transcript_for_event_inner(
-            &event,
-            Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-            CURSOR_STOP_INGEST_BUDGET,
-            Some(&hook_telemetry),
-        )
-        .await;
-        if outcome.user_scope && outcome.messages_upserted > 0 {
-            let session_id = event_session_id_from_json(&event);
-            super::schedule_user_session_review("cursor", session_id.as_deref()).await;
-        }
-        let output = if let Some(guidance) = guidance {
-            serde_json::json!({ "additional_context": guidance }).to_string()
-        } else {
-            serde_json::json!({}).to_string()
-        };
+    // One parse feeds root resolution, the analytics row, the ingest scope,
+    // and the session-review id; payloads can approach the wire cap.
+    let Ok(parsed) = serde_json::from_str::<Value>(&event) else {
+        // A malformed event keeps the fail-open telemetry row and empty
+        // output the handler always produced, but is never ingested.
+        let hook_telemetry = record_hook_invoked(None, HintAgent::Cursor, hook_name, &event);
         if !super::write_hook_output(
-            Some(root),
+            None,
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
-            &output,
+            &serde_json::json!({}).to_string(),
             Some(&hook_telemetry),
         )
         .await
@@ -156,23 +133,46 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
             return 1;
         }
         return 0;
-    }
+    };
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let hook_telemetry =
+        record_hook_invoked_parsed(root.as_deref(), HintAgent::Cursor, hook_name, &event, &parsed);
+    let guidance = if hook_name == "stop"
+        && let Some(root) = root.as_deref()
+    {
+        super::dispatch::dispatch(
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+        .flatten()
+    } else {
+        None
+    };
     let outcome = ingest_cursor_transcript_for_event_inner(
         &event,
+        root.as_deref(),
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
         CURSOR_STOP_INGEST_BUDGET,
         Some(&hook_telemetry),
     )
     .await;
     if outcome.user_scope && outcome.messages_upserted > 0 {
-        let session_id = event_session_id_from_json(&event);
+        let session_id = event_session_id(&parsed);
         super::schedule_user_session_review("cursor", session_id.as_deref()).await;
     }
+    let output = guidance.map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
+    );
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
-        &serde_json::json!({}).to_string(),
+        &output,
         Some(&hook_telemetry),
     )
     .await
@@ -299,8 +299,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// Cursor `sessionStart` hook handler.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    let output = cursor_session_start_response(&event).await;
-    let root = cursor_project_root_from_event_with_identity(&event).await;
+    let (root, output) = cursor_session_start_response(&event).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
@@ -315,7 +314,9 @@ pub async fn hook_cursor_session_start() -> i32 {
     0
 }
 
-async fn cursor_session_start_response(event: &str) -> String {
+/// Returns the identity-resolved root alongside the response so the handler
+/// does not repeat the registry-probing resolution for output delivery.
+async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String) {
     let root = cursor_project_root_from_event_with_identity(event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", event);
@@ -328,7 +329,8 @@ async fn cursor_session_start_response(event: &str) -> String {
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten();
-    cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""))
+    let output = cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""));
+    (root, output)
 }
 
 /// Cursor `afterShellExecution` hook handler.
@@ -715,14 +717,11 @@ struct CursorIngestOutcome {
 
 async fn ingest_cursor_transcript_for_event_inner(
     event_json: &str,
+    project_root: Option<&Path>,
     max_new_bytes: Option<u64>,
     budget: Duration,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> CursorIngestOutcome {
-    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-        return CursorIngestOutcome::default();
-    };
-    let project_root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
     let mut args = serde_json::json!({
         "action": "ingest_transcript",
         "provider": "cursor",
@@ -738,7 +737,7 @@ async fn ingest_cursor_transcript_for_event_inner(
     }
     match tokio::time::timeout(
         budget,
-        super::daemon_hook_action(project_root.as_deref(), args, telemetry),
+        super::daemon_hook_action(project_root, args, telemetry),
     )
     .await
     {
@@ -772,13 +771,6 @@ async fn ingest_cursor_transcript_for_event_inner(
             CursorIngestOutcome::default()
         }
     }
-}
-
-fn event_session_id_from_json(event_json: &str) -> Option<String> {
-    serde_json::from_str::<Value>(event_json)
-        .ok()
-        .as_ref()
-        .and_then(event_session_id)
 }
 
 fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
@@ -916,6 +908,7 @@ mod tests {
 
         let outcome = ingest_cursor_transcript_for_event_inner(
             &event,
+            None,
             Some(4_096),
             Duration::from_millis(250),
             None,

@@ -14,6 +14,7 @@ use tracedecay_agent_hosts::automation::automatic_facts::{
     read_shipped_fact_proposal_bytes,
 };
 use tracedecay_application::retained_surfaces::AutomationTaskV1;
+use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
@@ -587,7 +588,7 @@ fn capture_exact_source(path: &Path, expected: &[u8]) -> Result<Option<PathBuf>>
 fn remove_exact_source(path: &Path, expected: &[u8]) -> Result<()> {
     complete_after_pending_removal(&RetirementClosure {
         source_path: path.to_path_buf(),
-        source_digest: format!("sha256:{}", hex::encode(Sha256::digest(expected))),
+        source_digest: encode_tagged_lowercase_hex("sha256:", &Sha256::digest(expected)),
         capture_path: capture_exact_source(path, expected)?,
     })
 }
@@ -600,7 +601,7 @@ fn remove_exact_source_with_capture(
 ) -> Result<()> {
     complete_after_pending_removal(&RetirementClosure {
         source_path: path.to_path_buf(),
-        source_digest: format!("sha256:{}", hex::encode(Sha256::digest(expected))),
+        source_digest: encode_tagged_lowercase_hex("sha256:", &Sha256::digest(expected)),
         capture_path: capture_exact_source_with_capture(path, expected, after_capture)?,
     })
 }
@@ -948,22 +949,15 @@ fn validate_digest(digest: &str) -> Result<()> {
 }
 
 fn canonical_digest_body(digest: &str) -> Result<&str> {
-    let raw = digest
-        .strip_prefix("sha256:")
-        .ok_or_else(|| contract_error("retirement digest is not canonical SHA-256"))?;
-    if raw.len() == 64
-        && raw
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(raw)
+    if is_tagged_lowercase_hex(digest, "sha256:", 64) {
+        Ok(&digest["sha256:".len()..])
     } else {
         Err(contract_error("retirement digest is not canonical SHA-256"))
     }
 }
 
 fn require_digest(bytes: &[u8], expected: &str) -> Result<()> {
-    let actual = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+    let actual = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes));
     if actual == expected {
         Ok(())
     } else {
@@ -1023,7 +1017,7 @@ mod tests {
     }
 
     fn plan(root: &Path, bytes: &[u8]) -> RetirementPlan {
-        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes));
         RetirementPlan {
             binding: RetirementBinding {
                 source_digest: digest.clone(),
@@ -1053,7 +1047,7 @@ mod tests {
     fn retirement_plan_rejects_unbounded_terminal_bytes() {
         let root = tempfile::tempdir().unwrap();
         let source_bytes = vec![b'x'; MAX_SHIPPED_FACT_PROPOSAL_BYTES + 1];
-        let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(&source_bytes)));
+        let source_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&source_bytes));
 
         let error = match classify(ShippedFactProposalDisposition::TerminalHistory {
             source_path: root.path().join("fact_proposals.json"),

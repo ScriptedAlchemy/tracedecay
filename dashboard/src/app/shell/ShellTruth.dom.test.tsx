@@ -327,7 +327,7 @@ describe('shared shell truthfulness', () => {
   });
 
   /**
-   * F1: the scope bar's registry read had a private query key that no event
+   * The scope bar's registry read had a private query key that no event
    * named, and no poll. It is where activation is reconciled, so a rename or an
    * active-project switch left every write control in the product acting on the
    * pre-change answer for the rest of the session.
@@ -557,7 +557,7 @@ function stubRoutes(routes: Record<string, unknown | { status: number; body: unk
       if (typeof framed.status === 'number') {
         return jsonResponse(framed.status, framed.body);
       }
-        return jsonResponse(200, fixtureEnvelope(match));
+      return jsonResponse(200, fixtureEnvelope(match));
     }),
   );
 }

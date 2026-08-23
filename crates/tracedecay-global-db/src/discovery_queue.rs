@@ -24,6 +24,22 @@ fn provider_prefix(provider: &str) -> Result<String, String> {
     Ok(format!("{DISCOVERY_QUEUE_PREFIX}{provider}/v1/"))
 }
 
+/// Exclusive BINARY range for `parse_offsets.file_path` (TEXT PK, default
+/// BINARY collation). `LIKE prefix%` cannot use that index.
+fn exclusive_prefix_range(prefix: &str) -> Result<(String, String), String> {
+    let mut upper = prefix.as_bytes().to_vec();
+    let Some(last) = upper.last_mut() else {
+        return Err("host discovery queue prefix is empty".to_owned());
+    };
+    if *last == 0xFF {
+        return Err("host discovery queue prefix has no exclusive upper bound".to_owned());
+    }
+    *last += 1;
+    let upper = String::from_utf8(upper)
+        .map_err(|_| "host discovery queue prefix upper bound is not UTF-8".to_owned())?;
+    Ok((prefix.to_owned(), upper))
+}
+
 fn path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
@@ -110,13 +126,13 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| format!("begin host discovery queue transaction: {error}"))?;
-        let pattern = format!("{prefix}%");
+        let (range_start, range_end) = exclusive_prefix_range(&prefix)?;
         let mut sequence_rows = transaction
             .query(
                 "SELECT COALESCE(MAX(byte_offset), 0)
                  FROM parse_offsets
-                 WHERE file_path LIKE ?1 AND file_id = 1",
-                params![pattern],
+                 WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1",
+                params![range_start, range_end],
             )
             .await
             .map_err(|error| format!("read host discovery queue tail: {error}"))?;
@@ -187,7 +203,7 @@ impl RegisteredGlobalDb {
         limit: usize,
     ) -> Result<Vec<HostDiscoveryQueueEntry>, String> {
         let prefix = provider_prefix(provider)?;
-        let pattern = format!("{prefix}%");
+        let (range_start, range_end) = exclusive_prefix_range(&prefix)?;
         let after_sequence = i64::try_from(after_sequence)
             .map_err(|_| "host discovery queue cursor exceeds SQLite range".to_owned())?;
         let limit = i64::try_from(limit)
@@ -197,10 +213,11 @@ impl RegisteredGlobalDb {
             .query(
                 "SELECT byte_offset, file_path
                  FROM parse_offsets
-                 WHERE file_path LIKE ?1 AND file_id = 1 AND byte_offset > ?2
+                 WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1
+                   AND byte_offset > ?3
                  ORDER BY byte_offset ASC
-                 LIMIT ?3",
-                params![pattern, after_sequence, limit],
+                 LIMIT ?4",
+                params![range_start, range_end, after_sequence, limit],
             )
             .await
             .map_err(|error| format!("query host discovery queue: {error}"))?;
@@ -227,7 +244,7 @@ impl RegisteredGlobalDb {
         sequence: u64,
     ) -> Result<Option<HostDiscoveryQueueEntry>, String> {
         let prefix = provider_prefix(provider)?;
-        let pattern = format!("{prefix}%");
+        let (range_start, range_end) = exclusive_prefix_range(&prefix)?;
         let sequence = i64::try_from(sequence)
             .map_err(|_| "host discovery queue sequence exceeds SQLite range".to_owned())?;
         let mut rows = self
@@ -235,8 +252,9 @@ impl RegisteredGlobalDb {
             .query(
                 "SELECT byte_offset, file_path
                  FROM parse_offsets
-                 WHERE file_path LIKE ?1 AND file_id = 1 AND byte_offset = ?2",
-                params![pattern, sequence],
+                 WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1
+                   AND byte_offset = ?3",
+                params![range_start, range_end, sequence],
             )
             .await
             .map_err(|error| format!("query host discovery queue identity: {error}"))?;

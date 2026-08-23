@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Kimi Code CLI agent integration.
 //!
 //! Kimi Code currently exposes plugin lifecycle only through its interactive

@@ -121,12 +121,11 @@ impl<T: QueueItem> FairQueue<T> {
         drain_deque(&mut self.health, &predicate, &mut removed);
         let keys = self.clients.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            let empty = {
-                let queue = self.clients.get_mut(&key).expect("collected queue key");
-                drain_deque(&mut queue.items, &predicate, &mut removed);
-                queue.items.is_empty()
+            let Some(queue) = self.clients.get_mut(&key) else {
+                continue;
             };
-            if empty {
+            drain_deque(&mut queue.items, &predicate, &mut removed);
+            if queue.items.is_empty() {
                 self.clients.remove(&key);
                 self.rotation.retain(|candidate| candidate != &key);
             }
@@ -212,18 +211,22 @@ impl<T: QueueItem> FairQueue<T> {
             let visits = self.rotation.len();
             let mut progressed = false;
             for _ in 0..visits {
-                let key = self.rotation.pop_front().expect("observed rotation entry");
+                let Some(key) = self.rotation.pop_front() else {
+                    break;
+                };
                 let (items, empty) = {
-                    let queue = self.clients.get_mut(&key).expect("rotation queue exists");
+                    let Some(queue) = self.clients.get_mut(&key) else {
+                        continue;
+                    };
                     queue.add_quantum(key.weight());
                     let mut items = Vec::new();
-                    while let Some(front) = queue.items.front() {
+                    while let Some(item) = queue.items.pop_front() {
                         if queue.operation_deficit == 0
-                            || queue.byte_deficit < front.admission_bytes()
+                            || queue.byte_deficit < item.admission_bytes()
                         {
+                            queue.items.push_front(item);
                             break;
                         }
-                        let item = queue.items.pop_front().expect("front exists");
                         queue.operation_deficit -= 1;
                         queue.byte_deficit -= item.admission_bytes();
                         items.push(item);

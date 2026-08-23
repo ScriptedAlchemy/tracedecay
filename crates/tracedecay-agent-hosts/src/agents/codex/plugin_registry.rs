@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-14
 //! Codex's own non-interactive plugin registry, driven for Core activation.
 //!
 //! # What shipped, and what this module adopts

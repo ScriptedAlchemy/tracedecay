@@ -12,8 +12,7 @@
 //!
 //! Root wiring: the root implements [`AutomationSessionStore`] for
 //! `RegisteredGlobalDb` (each method forwards to the identically named
-//! inherent method, converting the analytics query/record field-for-field),
-//! and registers [`register_canonical_project_key`] with
+//! inherent method) and registers [`register_canonical_project_key`] with
 //! `RegisteredGlobalDb::canonical_project_key`.
 
 use std::path::Path;
@@ -23,46 +22,10 @@ use std::sync::OnceLock;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreRuntimeBindingV1;
 
+pub use tracedecay_global_db::{AnalyticsEventQuery, AnalyticsEventRecord};
+
 /// Boxed future returned by the port's asynchronous reads.
 pub type StoreFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-
-/// Selector for a bounded analytics-event scan.
-///
-/// Every field is an optional narrowing except `limit`, which is mandatory:
-/// automation must never issue an unbounded scan against the profile database.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct AnalyticsEventQuery {
-    pub provider: Option<String>,
-    pub project_id: Option<String>,
-    pub session_id: Option<String>,
-    pub event_kind: Option<String>,
-    /// Inclusive lower bound on `timestamp` (unix seconds). `None` = unbounded.
-    pub since: Option<i64>,
-    /// Exclusive upper bound on `timestamp` (unix seconds). `None` = unbounded.
-    pub until: Option<i64>,
-    /// Exclusive row-id cursor used by bounded reverse-chronological scans.
-    pub before_id: Option<i64>,
-    pub limit: usize,
-}
-
-/// One stored analytics event, as skill-usage ingest classifies it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnalyticsEventRecord {
-    pub id: i64,
-    pub provider: String,
-    pub project_id: String,
-    pub session_id: Option<String>,
-    pub timestamp: i64,
-    pub event_kind: String,
-    pub hook_name: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_category: Option<String>,
-    pub skill_name: Option<String>,
-    pub hint_category: Option<String>,
-    pub hint_id: Option<String>,
-    pub outcome: Option<String>,
-    pub metadata_json: Option<String>,
-}
 
 /// The reads automation performs against the registered profile database.
 pub trait AutomationSessionStore: Send + Sync {
@@ -118,39 +81,7 @@ impl AutomationSessionStore for tracedecay_global_db::RegisteredGlobalDb {
         &'a self,
         query: &'a AnalyticsEventQuery,
     ) -> StoreFuture<'a, Result<Vec<AnalyticsEventRecord>, String>> {
-        Box::pin(async move {
-            let records = self
-                .query_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
-                    provider: query.provider.clone(),
-                    project_id: query.project_id.clone(),
-                    session_id: query.session_id.clone(),
-                    event_kind: query.event_kind.clone(),
-                    since: query.since,
-                    until: query.until,
-                    before_id: query.before_id,
-                    limit: query.limit,
-                })
-                .await?;
-            Ok(records
-                .into_iter()
-                .map(|record| AnalyticsEventRecord {
-                    id: record.id,
-                    provider: record.provider,
-                    project_id: record.project_id,
-                    session_id: record.session_id,
-                    timestamp: record.timestamp,
-                    event_kind: record.event_kind,
-                    hook_name: record.hook_name,
-                    tool_name: record.tool_name,
-                    tool_category: record.tool_category,
-                    skill_name: record.skill_name,
-                    hint_category: record.hint_category,
-                    hint_id: record.hint_id,
-                    outcome: record.outcome,
-                    metadata_json: record.metadata_json,
-                })
-                .collect())
-        })
+        Box::pin(self.query_analytics_events(query))
     }
 }
 

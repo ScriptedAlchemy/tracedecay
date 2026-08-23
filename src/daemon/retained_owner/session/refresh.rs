@@ -3,12 +3,14 @@
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
     RetainedErrorV1, RetainedOutcomeStatusV1, RetainedSurfaceResultV1, SessionRefreshBeginResultV1,
-    SessionRefreshCancelResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
-    SessionRefreshStatusResultV1,
+    SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1, SessionRefreshProgressV1,
+    SessionRefreshReceiptV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
+    TemporalCoverageV1,
 };
 
 use crate::mcp::tools::{
-    SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
+    SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
+    SessionRefreshReceiptView, SessionRefreshServiceOutcome,
 };
 
 pub(super) fn status_result(
@@ -282,17 +284,72 @@ fn refresh_error(code: &str, message: &str) -> RetainedErrorV1 {
 fn refresh_progress(
     value: SessionRefreshProgressView,
 ) -> Result<SessionRefreshProgressV1, RetainedSurfaceExecutionErrorV1> {
-    serde_json::to_value(value)
-        .and_then(serde_json::from_value)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    Ok(SessionRefreshProgressV1::from(value))
 }
 
 fn refresh_receipt(
     value: SessionRefreshReceiptView,
 ) -> Result<SessionRefreshReceiptV1, RetainedSurfaceExecutionErrorV1> {
-    serde_json::to_value(value)
-        .and_then(serde_json::from_value)
+    SessionRefreshReceiptV1::try_from(value)
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+}
+
+impl From<SessionRefreshFrontierView> for SessionRefreshFrontierResultV1 {
+    fn from(value: SessionRefreshFrontierView) -> Self {
+        Self {
+            observed_through: value.observed_through,
+            committed_through: value.committed_through,
+        }
+    }
+}
+
+impl From<SessionRefreshCoverageView> for TemporalCoverageV1 {
+    fn from(value: SessionRefreshCoverageView) -> Self {
+        Self {
+            visible: value.visible,
+            hidden: value.hidden,
+            unknown: value.unknown,
+            redacted: value.redacted,
+        }
+    }
+}
+
+impl From<SessionRefreshProgressView> for SessionRefreshProgressV1 {
+    fn from(value: SessionRefreshProgressView) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            session_id: value.session_id,
+            frontier: value.frontier.into(),
+            coverage: value.coverage.into(),
+            source_coverage: value.source_coverage,
+            committed_batches: value.committed_batches,
+            committed_records: value.committed_records,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl TryFrom<SessionRefreshReceiptView> for SessionRefreshReceiptV1 {
+    type Error = ();
+
+    fn try_from(value: SessionRefreshReceiptView) -> Result<Self, Self::Error> {
+        let state = match value.state.as_str() {
+            "complete" => SessionRefreshTerminalStateResultV1::Complete,
+            "failed" => SessionRefreshTerminalStateResultV1::Failed,
+            "cancelled" => SessionRefreshTerminalStateResultV1::Cancelled,
+            _ => return Err(()),
+        };
+        Ok(Self {
+            operation_id: value.operation_id,
+            session_id: value.session_id,
+            frontier: value.frontier.into(),
+            coverage: value.coverage.into(),
+            source_coverage: value.source_coverage,
+            state,
+            failure_code: value.failure_code,
+            terminal_at: value.terminal_at,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -71,12 +71,13 @@ pub fn encode_lowercase_hex(bytes: &[u8]) -> String {
 /// include its separator, e.g. `"sha256:"`.
 #[must_use]
 pub fn encode_tagged_lowercase_hex(tag: &str, bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
     let mut encoded = String::with_capacity(tag.len() + bytes.len() * 2);
     encoded.push_str(tag);
     for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
     encoded
 }

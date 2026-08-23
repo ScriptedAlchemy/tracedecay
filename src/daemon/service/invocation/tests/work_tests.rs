@@ -1,5 +1,4 @@
-//! `work` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `work` module test coverage.
 
 use super::*;
 

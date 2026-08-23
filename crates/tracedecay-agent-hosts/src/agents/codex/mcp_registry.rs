@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-08
 //! Codex's own non-interactive MCP registry, driven for the MCP-only install.
 //!
 //! # What Codex owns, and what TraceDecay is allowed to do

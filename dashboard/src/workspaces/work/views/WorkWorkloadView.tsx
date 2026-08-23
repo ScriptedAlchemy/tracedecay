@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { MeterRow, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -117,9 +118,15 @@ export function WorkWorkloadView({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workloadReading(snapshot.projections, graph);
+  const reading = useMemo(
+    () => workloadReading(snapshot.projections, graph),
+    [snapshot.projections, graph],
+  );
   const coverage = coverageReading(snapshot.coverage);
-  const members = regionMembers(snapshot.projections, graph);
+  const members = useMemo(
+    () => regionMembers(snapshot.projections, graph),
+    [snapshot.projections, graph],
+  );
   const attributed = reading.taskCount - reading.unattributed.length;
   const runtime = reading.runtime;
 

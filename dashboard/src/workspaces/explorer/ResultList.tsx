@@ -15,7 +15,8 @@ import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import type { AbsenceVerdict } from './absence.ts';
 import type { ExplorerFacet } from './controller.ts';
 import { LANE_BY_ID, LANE_ICON } from './laneChrome.ts';
-import { relativeTime, type Hit, type LaneId } from './model.ts';
+import { compactRelativeAge } from '../../ui/time.ts';
+import { type Hit, type LaneId } from './model.ts';
 
 export function ResultList({
   hits,
@@ -123,7 +124,7 @@ function HitRow({
 }) {
   const spec = LANE_BY_ID[hit.lane];
   const Icon = LANE_ICON[hit.lane];
-  const age = relativeTime(hit.stamp);
+  const age = compactRelativeAge(hit.stamp, Date.now() / 1000);
   return (
     <DataRow
       selected={selected}

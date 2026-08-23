@@ -31,6 +31,11 @@
  * depth-2 query, so hop 2 is assembled here — bounded, deduped, and counted.
  */
 import type {
+  GraphEdgeV1,
+  GraphNeighborsPayloadV1,
+  GraphNodeV1,
+} from '../../contracts/generated.ts';
+import type {
   SensoryChannel,
   TraceChannel,
   TraceChannelDirection,

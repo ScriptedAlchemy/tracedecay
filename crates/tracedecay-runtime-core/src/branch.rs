@@ -207,7 +207,6 @@ pub fn sanitize_branch_name(name: &str) -> String {
             prev_underscore = false;
         }
     }
-    // Strip leading/trailing underscores
     result.trim_matches('_').to_string()
 }
 

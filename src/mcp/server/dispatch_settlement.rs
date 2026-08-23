@@ -231,6 +231,10 @@ impl RetainedDispatchRegistry {
 
 pub(super) struct RetainedDispatchAuthority {
     cancellations: std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    /// Signalled on every cancellation registration so a cancellation
+    /// notification that raced route resolution can sleep until the request
+    /// registers instead of polling the map.
+    cancellation_registered: tokio::sync::Notify,
     registry: RetainedDispatchRegistry,
     server: std::sync::Weak<super::McpServer>,
 }
@@ -239,6 +243,7 @@ impl RetainedDispatchAuthority {
     pub(super) fn new(server: std::sync::Weak<super::McpServer>) -> Self {
         Self {
             cancellations: std::sync::Mutex::new(HashMap::new()),
+            cancellation_registered: tokio::sync::Notify::new(),
             registry: RetainedDispatchRegistry::new(),
             server,
         }
@@ -248,6 +253,19 @@ impl RetainedDispatchAuthority {
         &self,
     ) -> &std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>> {
         &self.cancellations
+    }
+
+    pub(super) fn register_cancellation(
+        &self,
+        request_id: String,
+        cancellation: tracedecay_application::CancellationSignal,
+    ) {
+        super::requests::recover_lock(&self.cancellations).insert(request_id, cancellation);
+        self.cancellation_registered.notify_waiters();
+    }
+
+    pub(super) fn cancellation_registered(&self) -> &tokio::sync::Notify {
+        &self.cancellation_registered
     }
 
     pub(super) fn registry(&self) -> &RetainedDispatchRegistry {
@@ -338,8 +356,8 @@ impl super::McpServer {
             })
             .flatten();
         if let Some(request_id) = registered_request_id.as_ref() {
-            super::requests::recover_lock(self.dispatch_authority.cancellations())
-                .insert(request_id.clone(), cancellation.clone());
+            self.dispatch_authority
+                .register_cancellation(request_id.clone(), cancellation.clone());
         }
         let registration = ApplicationCancellationRegistration::new(
             self.dispatch_authority.cancellations(),

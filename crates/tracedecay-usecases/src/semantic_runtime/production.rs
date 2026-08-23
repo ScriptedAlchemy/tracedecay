@@ -2690,7 +2690,7 @@ fn semantic_projection_request(
     let mut changes = if incremental {
         source.changes.clone()
     } else {
-        let mut changes = ChangedCodeChunkSetV1 {
+        ChangedCodeChunkSetV1 {
             from_generation: None,
             to_generation: generation.manifest().generation_id.clone(),
             manifest_digest: source.changes.manifest_digest.clone(),
@@ -2706,14 +2706,12 @@ fn semantic_projection_request(
                 .collect(),
             deleted: Vec::new(),
             reused: Vec::new(),
-        };
-        changes.manifest_digest = changes
-            .compute_digest()
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
-        changes
+        }
     };
-    // Recompute the manifest digest even for an incremental retarget so a
-    // malformed source handoff cannot cross the semantic boundary.
+    // One digest computation serves both branches: it derives the digest of a
+    // freshly built full-rebuild change set, and it recomputes an incremental
+    // retarget's digest so a malformed source handoff cannot cross the
+    // semantic boundary.
     changes.manifest_digest = changes
         .compute_digest()
         .map_err(SemanticRuntimeScheduleFailureV1::projection)?;

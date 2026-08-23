@@ -196,7 +196,7 @@ pub(super) fn manifest_digest<T: Serialize + ?Sized>(
             .to_le_bytes(),
     );
     hasher.update(bytes);
-    ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 

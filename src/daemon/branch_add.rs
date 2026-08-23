@@ -718,23 +718,20 @@ async fn rollback_failed_branch_tracking(
     if !publication_rolled_back {
         return Ok(());
     }
-    let prepared_rolled_back = match prepared {
-        Some(prepared) => match crate::branch::rollback_prepared_branch_tracking(
-            data_root, prepared,
-        )
-        .map_err(|error| {
-            TraceDecayError::project_route(
-                BRANCH_TRACKING_FAILED,
-                true,
-                format!("branch publication failed: {cause}; branch rollback failed: {error}"),
-            )
-        })? {
-            crate::branch::PreparedBranchRollbackOutcome::RolledBack => true,
-            crate::branch::PreparedBranchRollbackOutcome::NoMatch => false,
-        },
-        None => true,
-    };
-    let _ = (publication, prepared_rolled_back);
+    if let Some(prepared) = prepared {
+        match crate::branch::rollback_prepared_branch_tracking(data_root, prepared).map_err(
+            |error| {
+                TraceDecayError::project_route(
+                    BRANCH_TRACKING_FAILED,
+                    true,
+                    format!("branch publication failed: {cause}; branch rollback failed: {error}"),
+                )
+            },
+        )? {
+            crate::branch::PreparedBranchRollbackOutcome::RolledBack
+            | crate::branch::PreparedBranchRollbackOutcome::NoMatch => {}
+        }
+    }
     Ok(())
 }
 

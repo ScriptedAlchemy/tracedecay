@@ -1,17 +1,63 @@
+// Candidate queries read the provider from `session_occurrences.source_provider`,
+// the NOT NULL, CHECK-validated column the projection batch writes from the same
+// canonical observation (and byte-verifies via `require_exact_occurrence`), so no
+// query re-parses the observation JSON blob per scanned row.
+
+// The anchor-owner authority predicate shared by every root-scope query: a
+// participant is readable when its anchor owner matches the authorized root
+// (profile owners under the 'user' root, project owners under project roots).
+// `ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY` alone additionally accepts
+// session-owned anchors; that deliberate divergence is the `with_session_owner`
+// arm and is documented at that query's definition.
+macro_rules! anchor_owner_authority_predicate {
+    () => {
+        "(
+          (authority_session.project_key = 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+          OR
+          (authority_session.project_key <> 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+           AND json_extract(authority_anchor.owner_json, '$.project_id')
+               = authority_session.project_key)
+      )"
+    };
+    (with_session_owner) => {
+        anchor_owner_authority_predicate!(with_session_owner: "n.session_id")
+    };
+    (with_session_owner: $session_id:literal) => {
+        concat!(
+            "(
+          (authority_session.project_key = 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+          OR
+          (authority_session.project_key <> 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+           AND json_extract(authority_anchor.owner_json, '$.project_id')
+               = authority_session.project_key)
+          OR
+          (json_extract(authority_anchor.owner_json, '$.kind') = 'session'
+           AND json_extract(authority_anchor.owner_json, '$.project_key')
+               = authority_session.project_key
+           AND json_extract(authority_anchor.owner_json, '$.session_id') = ",
+            $session_id,
+            "
+           AND json_extract(authority_anchor.owner_json, '$.provider')
+               = authority_session.provider)
+      )"
+        )
+    };
+}
+
+pub(super) use anchor_owner_authority_predicate;
+
 pub(super) const EXACT_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           COALESCE(json_extract(
-               provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude'),
+           o.source_provider,
            o.snippet_text, ?4
     FROM session_occurrences AS o
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     WHERE o.session_id = ?1 AND o.generation = ?2
-      AND (?3 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?3)
+      AND (?3 IS NULL OR o.source_provider = ?3)
       AND instr(o.snippet_text, ?4) > 0
       AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
       AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
@@ -20,9 +66,7 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
       AND length(CAST(o.session_id AS BLOB)) <= ?9
       AND length(CAST(o.role AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') AS BLOB)) <= ?9
+      AND length(CAST(o.source_provider AS BLOB)) <= ?9
       AND length(CAST(o.snippet_text AS BLOB)) <= ?11
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
@@ -30,25 +74,17 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
           + length(CAST(o.role AS BLOB))
-          + length(CAST(COALESCE(json_extract(
-              provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB)) <= ?10
+          + length(CAST(o.source_provider AS BLOB)) <= ?10
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?12";
 
 pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           COALESCE(json_extract(
-               provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude')
+           o.source_provider
     FROM session_occurrences AS o
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     WHERE o.session_id = ?1 AND o.generation = ?2
-      AND (?3 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?3)
+      AND (?3 IS NULL OR o.source_provider = ?3)
       AND (o.knowledge_at < ?4 OR (o.knowledge_at = ?4 AND o.occurrence_id > ?5))
       AND length(CAST(o.occurrence_id AS BLOB)) <= ?6
       AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?7
@@ -56,18 +92,14 @@ pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?8
       AND length(CAST(o.session_id AS BLOB)) <= ?8
       AND length(CAST(o.role AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') AS BLOB)) <= ?8
+      AND length(CAST(o.source_provider AS BLOB)) <= ?8
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
           + length(CAST(o.role AS BLOB))
-          + length(CAST(COALESCE(json_extract(
-              provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB)) <= ?9
+          + length(CAST(o.source_provider AS BLOB)) <= ?9
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?10";
 
@@ -110,16 +142,10 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = "
         SELECT o.occurrence_id AS stable_id, o.retrieval_anchor_id AS anchor_id,
                o.knowledge_at AS knowledge_at, o.message_id AS logical_message,
                o.turn_id AS turn_id, o.session_id AS session_id, o.role AS evidence_role,
-               COALESCE(json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ), 'claude') AS provider
+               o.source_provider AS provider
         FROM session_occurrences AS o
-        JOIN observations AS provider_observation
-          ON provider_observation.observation_id = o.source_observation_id
         WHERE o.session_id = ?1 AND o.generation = ?2
-          AND (?3 IS NULL OR COALESCE(json_extract(
-              provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') = ?3)
+          AND (?3 IS NULL OR o.source_provider = ?3)
           AND o.retrieval_anchor_id = ?4
         UNION ALL
         SELECT n.summary_id, n.summary_anchor_id, n.created_at, NULL, NULL, n.session_id,
@@ -133,35 +159,26 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = "
     ORDER BY knowledge_at DESC, stable_id
     LIMIT ?7";
 
-pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = "
+pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role, authority_session.provider
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
      AND o.generation = frozen.generation
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
       ON authority_session.session_id = o.session_id
-     AND authority_session.provider = COALESCE(json_extract(
-         provider_observation.observation_json, '$.identity.source.provider'
-     ), 'claude')
+     AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
     WHERE frozen.state = 'active'
       AND (?2 IS NULL OR authority_session.provider = ?2)
       AND o.retrieval_anchor_id = ?3
-      AND (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-      )
+      AND ",
+    anchor_owner_authority_predicate!(),
+    "
       AND (
           o.knowledge_at < ?4
           OR (
@@ -173,22 +190,17 @@ pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = "
           )
       )
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?7";
+    LIMIT ?7"
+);
 
 pub(super) const OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           COALESCE(json_extract(
-               provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude')
+           o.source_provider
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     WHERE o.session_id = ?1 AND o.generation = ?2
-      AND (?3 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?3)
+      AND (?3 IS NULL OR o.source_provider = ?3)
       AND session_occurrences_fts MATCH ?4
       AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
       AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
@@ -197,34 +209,24 @@ pub(super) const OCCURRENCE_FTS_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
       AND length(CAST(o.session_id AS BLOB)) <= ?9
       AND length(CAST(o.role AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') AS BLOB)) <= ?9
+      AND length(CAST(o.source_provider AS BLOB)) <= ?9
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
           + length(CAST(o.role AS BLOB))
-          + length(CAST(COALESCE(json_extract(
-              provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB)) <= ?10
+          + length(CAST(o.source_provider AS BLOB)) <= ?10
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?11";
 
 pub(super) const TIME_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           COALESCE(json_extract(
-               provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude')
+           o.source_provider
     FROM session_occurrences AS o INDEXED BY idx_session_occurrences_generation_order
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     WHERE o.session_id = ?1 AND o.generation = ?2
-      AND (?3 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?3)
+      AND (?3 IS NULL OR o.source_provider = ?3)
       AND o.knowledge_at >= ?4 AND o.knowledge_at < ?5
       AND (o.knowledge_at < ?6 OR (o.knowledge_at = ?6 AND o.occurrence_id > ?7))
       AND length(CAST(o.occurrence_id AS BLOB)) <= ?8
@@ -233,18 +235,14 @@ pub(super) const TIME_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
       AND length(CAST(o.session_id AS BLOB)) <= ?10
       AND length(CAST(o.role AS BLOB)) <= ?10
-      AND length(CAST(COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') AS BLOB)) <= ?10
+      AND length(CAST(o.source_provider AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
           + length(CAST(o.role AS BLOB))
-          + length(CAST(COALESCE(json_extract(
-              provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB)) <= ?11
+          + length(CAST(o.source_provider AS BLOB)) <= ?11
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?12";
 
@@ -277,7 +275,8 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = "
     ORDER BY n.created_at DESC, n.summary_id
     LIMIT ?10";
 
-pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
+pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider, o.snippet_text, ?3
@@ -286,28 +285,16 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
       ON frozen.session_id = o.session_id
      AND frozen.generation = o.generation
      AND frozen.state = 'active'
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
       ON authority_session.session_id = o.session_id
-     AND authority_session.provider = COALESCE(json_extract(
-         provider_observation.observation_json, '$.identity.source.provider'
-     ), 'claude')
+     AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
-    WHERE (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-      )
-      AND (?2 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?2)
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND (?2 IS NULL OR o.source_provider = ?2)
       AND instr(o.snippet_text, ?3) > 0
       AND (
           o.knowledge_at < ?4
@@ -337,9 +324,11 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?13";
+    LIMIT ?13"
+);
 
-pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = "
+pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider
@@ -349,28 +338,16 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = "
       ON frozen.session_id = o.session_id
      AND frozen.generation = o.generation
      AND frozen.state = 'active'
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
       ON authority_session.session_id = o.session_id
-     AND authority_session.provider = COALESCE(json_extract(
-         provider_observation.observation_json, '$.identity.source.provider'
-     ), 'claude')
+     AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
-    WHERE (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-      )
-      AND (?2 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?2)
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND (?2 IS NULL OR o.source_provider = ?2)
       AND session_occurrences_fts MATCH ?3
       AND (
           o.knowledge_at < ?4
@@ -399,9 +376,11 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = "
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?12";
+    LIMIT ?12"
+);
 
-pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = "
+pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider
@@ -409,29 +388,17 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = "
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
      AND o.generation = frozen.generation
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
       ON authority_session.session_id = o.session_id
-     AND authority_session.provider = COALESCE(json_extract(
-         provider_observation.observation_json, '$.identity.source.provider'
-     ), 'claude')
+     AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
     WHERE frozen.state = 'active'
-      AND (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-      )
-      AND (?2 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?2)
+      AND ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND (?2 IS NULL OR o.source_provider = ?2)
       AND o.knowledge_at >= ?3 AND o.knowledge_at < ?4
       AND (
           o.knowledge_at < ?5
@@ -460,9 +427,11 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = "
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?12
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?13";
+    LIMIT ?13"
+);
 
-pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
+pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
            authority_session.provider
@@ -481,15 +450,9 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
       ON authority_session.session_id = n.session_id
      AND authority_session.provider = json_extract(n.publication_json, '$.provider')
      AND authority_session.project_key = ?1
-    WHERE (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-      )
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
       AND session_summary_nodes_fts MATCH ?2
       AND a.availability <> 'unavailable'
       AND (
@@ -513,13 +476,16 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.session_id AS BLOB)) + 9 <= ?10
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
-    LIMIT ?11";
+    LIMIT ?11"
+);
 
 // The root browse's summary listing across every participant with an active
 // generation, carried on the Summary channel behind the anchor-owner
 // authority predicate (the same shape as `ROOT_SUMMARY_CANDIDATE_QUERY`
-// without its full-text filter).
-pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = "
+// without its full-text filter, plus a third session-owner arm this listing
+// alone accepts).
+pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
            authority_session.provider
@@ -537,22 +503,9 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = "
       ON authority_session.session_id = n.session_id
      AND authority_session.provider = json_extract(n.publication_json, '$.provider')
      AND authority_session.project_key = ?1
-    WHERE (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-          OR
-          (json_extract(authority_anchor.owner_json, '$.kind') = 'session'
-           AND json_extract(authority_anchor.owner_json, '$.project_key')
-               = authority_session.project_key
-           AND json_extract(authority_anchor.owner_json, '$.session_id') = n.session_id
-           AND json_extract(authority_anchor.owner_json, '$.provider')
-               = authority_session.provider)
-      )
+    WHERE ",
+    anchor_owner_authority_predicate!(with_session_owner),
+    "
       AND (?2 IS NULL OR authority_session.provider = ?2)
       AND a.availability <> 'unavailable'
       AND (
@@ -576,7 +529,8 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = "
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.session_id AS BLOB)) + 9 <= ?10
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
-    LIMIT ?11";
+    LIMIT ?11"
+);
 
 pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
@@ -584,21 +538,15 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
            CASE WHEN evidence.member_count = 1
                 THEN first_occurrence.message_id ELSE NULL END,
            NULL, evidence.session_id, evidence.evidence_kind,
-           COALESCE(json_extract(
-               provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude')
+           first_occurrence.source_provider
     FROM session_derived_evidence AS evidence
     JOIN session_occurrences AS first_occurrence
       ON first_occurrence.session_id = evidence.session_id
      AND first_occurrence.generation = evidence.generation
      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = first_occurrence.source_observation_id
     WHERE evidence.session_id = ?1 AND evidence.generation = ?2
       AND evidence.evidence_kind = ?3
-      AND (?4 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?4)
+      AND (?4 IS NULL OR first_occurrence.source_provider = ?4)
       AND EXISTS (
           SELECT 1
           FROM session_derived_evidence_members AS member
@@ -627,7 +575,8 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
 // Fresh stores have no planner statistics. CROSS JOIN pins authorized sessions
 // as the outer loop so SQLite probes evidence by session/generation/kind instead
 // of scanning every evidence row before applying the root boundary.
-pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
+pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
            CASE WHEN evidence.member_count = 1
@@ -638,7 +587,6 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
     CROSS JOIN session_temporal_generations AS frozen
     CROSS JOIN session_derived_evidence AS evidence
     CROSS JOIN session_occurrences AS first_occurrence
-    CROSS JOIN observations AS provider_observation
     CROSS JOIN retrieval_anchors AS authority_anchor
     WHERE authority_session.project_key = ?1
       AND (?3 IS NULL OR authority_session.provider = ?3)
@@ -650,11 +598,8 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
       AND first_occurrence.session_id = evidence.session_id
       AND first_occurrence.generation = evidence.generation
       AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-      AND provider_observation.observation_id = first_occurrence.source_observation_id
       AND authority_anchor.anchor_id = evidence.retrieval_anchor_id
-      AND authority_session.provider = COALESCE(json_extract(
-         provider_observation.observation_json, '$.identity.source.provider'
-     ), 'claude')
+      AND authority_session.provider = first_occurrence.source_provider
       AND EXISTS (
           SELECT 1
           FROM session_derived_evidence_members AS member
@@ -670,15 +615,9 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
             AND member.evidence_id = evidence.evidence_id
             AND session_occurrences_fts MATCH ?4
       )
-      AND (
-          (authority_session.project_key = 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-          OR
-          (authority_session.project_key <> 'user'
-           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-           AND json_extract(authority_anchor.owner_json, '$.project_id')
-               = authority_session.project_key)
-      )
+      AND ",
+    anchor_owner_authority_predicate!(),
+    "
       AND (
           first_occurrence.knowledge_at < ?5
           OR (
@@ -693,4 +632,5 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
           )
       )
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
-    LIMIT ?8";
+    LIMIT ?8"
+);

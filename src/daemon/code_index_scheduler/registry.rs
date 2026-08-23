@@ -1639,6 +1639,48 @@ impl CodeIndexSchedulerRegistryV1 {
         state.trigger = Self::pack_trigger(trigger);
     }
 
+    /// Seat an already-sealed retained generation as serving, but only while
+    /// it is still the active durable publication: install it, bump the
+    /// serving epoch, and re-offer semantic scheduling, then wake the worker.
+    /// Both graph-activation outcomes that leave the sealed artifact servable
+    /// (typed refusal and success) share this exact swap.
+    async fn seat_retained_serving_generation(
+        scheduler: &Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+        serving_generation: &Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+        serving_generation_epoch: &Arc<AtomicU64>,
+        wake: &Arc<tokio::sync::Notify>,
+        retained: LatestCompleteCodeIndexV1,
+    ) {
+        let swap_scheduler = Arc::clone(scheduler);
+        let swap_serving = Arc::clone(serving_generation);
+        let swap_serving_epoch = Arc::clone(serving_generation_epoch);
+        let seated = tokio::task::spawn_blocking(move || {
+            let scheduler = swap_scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if scheduler
+                .active_publication_matches(&retained)
+                .unwrap_or(false)
+            {
+                let mut serving = swap_serving
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *serving = Some(retained.clone());
+                swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
+                drop(serving);
+                let _ = scheduler.schedule_semantic_generation(retained.generation());
+                true
+            } else {
+                false
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if seated {
+            wake.notify_one();
+        }
+    }
+
     /// Returns the pass's service time so the caller can attach the same
     /// measurement to the canonical index-lifecycle observation.
     fn record_reconcile_receipt(
@@ -2286,36 +2328,14 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Err(error) if error.is_graph_activation_refusal() => {
                                     next_seat_attempt_at = None;
                                     seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
-                                    let swap_scheduler = Arc::clone(&scheduler);
-                                    let swap_serving = Arc::clone(&serving_generation);
-                                    let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
-                                    let seated = tokio::task::spawn_blocking(move || {
-                                        let scheduler = swap_scheduler
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                        if scheduler
-                                            .active_publication_matches(&retained)
-                                            .unwrap_or(false)
-                                        {
-                                            let mut serving = swap_serving
-                                                .write()
-                                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                            *serving = Some(retained.clone());
-                                            swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
-                                            drop(serving);
-                                            let _ = scheduler.schedule_semantic_generation(
-                                                retained.generation(),
-                                            );
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    })
-                                    .await
-                                    .unwrap_or(false);
-                                    if seated {
-                                        worker_wake.notify_one();
-                                    }
+                                    Self::seat_retained_serving_generation(
+                                        &scheduler,
+                                        &serving_generation,
+                                        &serving_generation_epoch,
+                                        &worker_wake,
+                                        retained,
+                                    )
+                                    .await;
                                 }
                                 Err(error) => {
                                     let retryable = error.is_retryable_activation();
@@ -2347,36 +2367,14 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Ok(()) => {
                                     next_seat_attempt_at = None;
                                     seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
-                                    let swap_scheduler = Arc::clone(&scheduler);
-                                    let swap_serving = Arc::clone(&serving_generation);
-                                    let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
-                                    let seated = tokio::task::spawn_blocking(move || {
-                                        let scheduler = swap_scheduler
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                        if scheduler
-                                            .active_publication_matches(&retained)
-                                            .unwrap_or(false)
-                                        {
-                                            let mut serving = swap_serving
-                                                .write()
-                                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                            *serving = Some(retained.clone());
-                                            swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
-                                            drop(serving);
-                                            let _ = scheduler.schedule_semantic_generation(
-                                                retained.generation(),
-                                            );
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    })
-                                    .await
-                                    .unwrap_or(false);
-                                    if seated {
-                                        worker_wake.notify_one();
-                                    }
+                                    Self::seat_retained_serving_generation(
+                                        &scheduler,
+                                        &serving_generation,
+                                        &serving_generation_epoch,
+                                        &worker_wake,
+                                        retained,
+                                    )
+                                    .await;
                                 }
                             }
                         }

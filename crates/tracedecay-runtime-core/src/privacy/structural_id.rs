@@ -1,3 +1,5 @@
+use tracedecay_domain::canonical_text::is_tagged_lowercase_hex;
+
 use super::length_prefixed_sha256_hex;
 use super::structured_text::sanitize_provider_metadata_text;
 
@@ -12,17 +14,8 @@ pub struct StructuralIdProtectionError;
 /// True when `value` is already a protected structural-ID token or an opaque
 /// Claude observation source digest that must not be re-hashed.
 pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
-    has_canonical_sha256_suffix(value, PROTECTION_PREFIX_V1)
-        || has_canonical_sha256_suffix(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1)
-}
-
-fn has_canonical_sha256_suffix(value: &str, prefix: &str) -> bool {
-    value.strip_prefix(prefix).is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    is_tagged_lowercase_hex(value, PROTECTION_PREFIX_V1, 64)
+        || is_tagged_lowercase_hex(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1, 64)
 }
 
 /// Replaces credential-shaped structural identifiers with a stable,

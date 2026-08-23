@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! MCP server that reads JSON-RPC 2.0 messages from stdin and writes
 //! responses to stdout.
 //!
@@ -643,14 +642,16 @@ impl McpServer {
         let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
         let resolver_slot = Arc::clone(&active_server_slot);
-        let active_root = canonical_or_original(&retained_root);
+        let active_root = crate::lifecycle_lease::canonical_or_original(&retained_root);
         let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
             let retained_servers = retained_servers.clone();
             let resolver_slot = Arc::clone(&resolver_slot);
             let active_root = active_root.clone();
             Box::pin(async move {
-                let requested = canonical_or_original(&request.requested_worktree_root);
-                let registered = canonical_or_original(&request.registered_root);
+                let requested =
+                    crate::lifecycle_lease::canonical_or_original(&request.requested_worktree_root);
+                let registered =
+                    crate::lifecycle_lease::canonical_or_original(&request.registered_root);
                 let project_id = request
                     .owner
                     .as_ref()
@@ -658,7 +659,8 @@ impl McpServer {
                 let mut matches = Vec::new();
                 for server in &retained_servers {
                     let graph = server.cg_snapshot().await;
-                    let root = canonical_or_original(graph.project_root());
+                    let root =
+                        crate::lifecycle_lease::canonical_or_original(graph.project_root());
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });
@@ -1338,11 +1340,6 @@ impl McpServer {
 
         stats
     }
-}
-
-#[cfg(any(test, feature = "test-transport"))]
-fn canonical_or_original(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {

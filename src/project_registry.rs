@@ -2,26 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
 // The registry data structs (and `PublicCodeProject::from_record`) are the
 // canonical copies beside the dashboard read model. The root keeps the superset
-// pieces: the `Serialize/Deserialize/JsonSchema`-deriving `ProjectRegistryView`
-// (the crate's bare struct can't back the CLI/MCP JSON round-trips), the
-// label-disambiguating view builder/renderer, and the alias/store-wired
-// `PublicProjectRegistryContext`.
+// pieces: the label-disambiguating view builder/renderer and the
+// alias/store-wired `PublicProjectRegistryContext`.
 pub use tracedecay_dashboard_api::project_registry::{
-    ProjectRegistryEntry, ProjectRegistrySummary, ProjectRepoGroup, PublicCodeProject,
+    ProjectRegistryEntry, ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup,
+    PublicCodeProject,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRegistryView {
-    pub summary: ProjectRegistrySummary,
-    pub project_tree: Vec<ProjectRepoGroup>,
-}
 
 #[derive(Debug, Serialize)]
 pub struct PublicProjectRegistryContext<'a> {

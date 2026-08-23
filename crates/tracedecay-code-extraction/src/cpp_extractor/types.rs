@@ -87,7 +87,14 @@ impl CppExtractor {
         if find_direct_child_by_kind(spec, "field_declaration_list").is_some() {
             let struct_name = find_direct_child_by_kind(spec, "type_identifier")
                 .map_or_else(|| name, |node| state.node_text(node));
-            Self::create_struct_node(state, &struct_name, spec, docstring);
+            Self::create_record_node(
+                state,
+                &struct_name,
+                spec,
+                docstring,
+                NodeKind::Struct,
+                Visibility::Pub,
+            );
         }
     }
 
@@ -259,7 +266,7 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Union, name, start_line);
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let signature = text
             .find('{')
             .map(|position| text[..position].trim().to_string());
@@ -310,7 +317,7 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Enum, name, start_line);
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let signature = text
             .find('{')
             .map(|position| text[..position].trim().to_string());

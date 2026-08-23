@@ -52,12 +52,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -106,7 +111,6 @@ impl GwBasicExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -440,12 +444,9 @@ impl GwBasicExtractor {
                         body_end += 1;
                         break;
                     }
-                    // Also check for inline RETURN in IF statements
-                    // (e.g. `1010 IF ... THEN PRINT "ERROR": RETURN`)
-                    if Self::line_has_return(lines[body_end].node) {
-                        // Keep going — the inline RETURN doesn't end the subroutine
-                        // unless it's the last statement before the next REM block.
-                    }
+                    // An inline RETURN in an IF statement (e.g. `1010 IF ...
+                    // THEN PRINT "ERROR": RETURN`) does not end the subroutine;
+                    // only a standalone return_statement line does.
                     // Stop at the next REM block (which would be the start of another subroutine).
                     if lines[body_end].statement_kind == "comment" {
                         break;
@@ -573,26 +574,6 @@ impl GwBasicExtractor {
                 }
             }
         }
-    }
-
-    /// Check if a line node contains a `return_statement` anywhere in its AST.
-    fn line_has_return(node: TsNode<'_>) -> bool {
-        if node.kind() == "return_statement" {
-            return true;
-        }
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if Self::line_has_return(child) {
-                    return true;
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        false
     }
 
     /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).

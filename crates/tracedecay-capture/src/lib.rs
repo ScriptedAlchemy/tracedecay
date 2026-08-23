@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod codex;
+mod content;
 pub mod cursor;
 pub mod cursor_composer;
 pub mod kimi;
@@ -17,5 +18,6 @@ pub use parse::{
     parse_claude_record_v1, parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
 pub use timestamp::{
-    parse_cursor_human_timestamp, parse_rfc3339_timestamp, parse_yyyy_mm_dd_utc_start,
+    normalize_timestamp_secs, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
+    parse_yyyy_mm_dd_utc_start,
 };

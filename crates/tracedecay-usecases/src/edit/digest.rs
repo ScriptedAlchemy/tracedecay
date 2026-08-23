@@ -104,8 +104,7 @@ pub(super) fn planned_source_edit_state_digest(
 }
 
 fn hash_source_edit_content(content: &[u8]) -> Result<ManifestDigest> {
-    ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(content))))
-        .map_err(domain_error)
+    ManifestDigest::from_sha256_bytes(&Sha256::digest(content)).map_err(domain_error)
 }
 
 pub(super) fn effect_id(

@@ -439,12 +439,8 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                INDEXED BY idx_session_occurrences_root_generation_order
                ON o.session_id = frozen.session_id
               AND o.generation = frozen.generation
-             JOIN observations AS provider_observation
-               ON provider_observation.observation_id = o.source_observation_id
              WHERE frozen.state = 'active'
-               AND (NULL IS NULL OR json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ) = NULL)
+               AND (NULL IS NULL OR o.source_provider = NULL)
                AND o.knowledge_at >= 0
                AND o.knowledge_at < 12500
                AND (
@@ -469,12 +465,8 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                INDEXED BY idx_session_occurrences_root_generation_order
                ON o.session_id = frozen.session_id
               AND o.generation = frozen.generation
-             JOIN observations AS provider_observation
-               ON provider_observation.observation_id = o.source_observation_id
              WHERE frozen.state = 'active'
-               AND (NULL IS NULL OR json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ) = NULL)
+               AND (NULL IS NULL OR o.source_provider = NULL)
                AND o.knowledge_at >= 0
                AND o.knowledge_at < 12500
                AND (
@@ -502,12 +494,8 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                INDEXED BY idx_session_occurrences_root_generation_order
                ON o.session_id = frozen.session_id
               AND o.generation = frozen.generation
-             JOIN observations AS provider_observation
-               ON provider_observation.observation_id = o.source_observation_id
              WHERE frozen.state = 'active'
-               AND ('claude' IS NULL OR json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ) = 'claude')
+               AND ('claude' IS NULL OR o.source_provider = 'claude')
                AND o.knowledge_at >= 0
                AND o.knowledge_at < 12500
                AND (

@@ -875,7 +875,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error: Some(error),
         })?;
         record.input_hash.clone_from(&self.input_hash);
-        record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        record.output_hash = record.proposed_ops.as_ref().map(sha256_json).transpose()?;
         record.fallback_status = Some("backend_failed_noop".to_string());
         apply_retry_report(&mut record, retry_report);
         let exact_failure_class = retry_report
@@ -930,7 +930,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error: Some(error),
         })?;
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
     }
@@ -965,7 +965,7 @@ impl<'a> AgentRunFinalizer<'a> {
         record.rejected_ops = rejected_ops;
         record.validation_report = validation_report;
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
     }
@@ -1024,7 +1024,7 @@ impl<'a> AgentRunFinalizer<'a> {
         mut record: AutomationRunLedgerRecord,
     ) -> Result<AutomationRunLedgerRecord> {
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         record.artifacts = write_improvement_artifacts(
             self.dashboard_root,
             self.run_id,
@@ -1044,7 +1044,7 @@ impl<'a> AgentRunFinalizer<'a> {
         retry_report: &AgentTaskRetryReport,
     ) -> Result<AutomationRunLedgerRecord> {
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
     }
@@ -1101,7 +1101,7 @@ impl<'a> AgentRunFinalizer<'a> {
             .append_failed_record(
                 response.model.clone(),
                 evidence_hash,
-                Some(failed_output_projection(self.task, field, &output)),
+                Some(failed_output_projection(self.task, field, &output)?),
                 err.to_string(),
                 retry_report,
             )
@@ -1112,10 +1112,11 @@ impl<'a> AgentRunFinalizer<'a> {
         })
     }
 
-    fn finish_record(&self, record: &mut AutomationRunLedgerRecord) {
+    fn finish_record(&self, record: &mut AutomationRunLedgerRecord) -> Result<()> {
         record.input_hash.clone_from(&self.input_hash);
-        record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        record.output_hash = record.proposed_ops.as_ref().map(sha256_json).transpose()?;
         self.annotate_combined_run(record);
+        Ok(())
     }
 
     fn record(&self, outcome: RunRecordOutcome) -> Result<AutomationRunLedgerRecord> {
@@ -1207,17 +1208,17 @@ impl<'a> AgentRunFinalizer<'a> {
     }
 }
 
-fn failed_output_projection(task: AgentTaskKind, field: &str, output: &Value) -> Value {
-    if task == AgentTaskKind::SessionReflector {
+fn failed_output_projection(task: AgentTaskKind, field: &str, output: &Value) -> Result<Value> {
+    Ok(if task == AgentTaskKind::SessionReflector {
         json!({
             "schema_version": 1,
             "expected_field": field,
-            "output_sha256": sha256_json(output),
+            "output_sha256": sha256_json(output)?,
             "output_kind": if output.is_object() { "object" } else { "non_object" },
         })
     } else {
         output.clone()
-    }
+    })
 }
 
 fn apply_retry_report(record: &mut AutomationRunLedgerRecord, retry_report: &AgentTaskRetryReport) {

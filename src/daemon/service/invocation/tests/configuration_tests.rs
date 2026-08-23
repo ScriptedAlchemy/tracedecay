@@ -1,5 +1,4 @@
-//! `configuration` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `configuration` module test coverage.
 
 use super::*;
 

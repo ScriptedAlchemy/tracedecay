@@ -8,7 +8,7 @@ use super::filesystem_authority::{
 use super::{LcmError, gc, load_payload_metadata, util, validate_payload_ref};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
-use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, Value as SqlValue, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {
@@ -378,14 +378,17 @@ async fn tombstone_residual_placeholders(
     conn: &(impl Executor + ?Sized),
     payload_ref: &str,
 ) -> Result<usize, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE payload_ref = ?1 OR content LIKE ?2 OR snippet_text LIKE ?2 OR index_text LIKE ?2 OR metadata_json LIKE ?2",
-            params![payload_ref, format!("%{payload_ref}%")],
-        )
-        .await?;
+    let like_sql = gc::placeholder_text_like_sql(1);
+    let sql = format!(
+        "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
+         FROM lcm_raw_messages
+         WHERE payload_ref = ? OR {like_sql}"
+    );
+    let mut values = vec![SqlValue::Text(payload_ref.to_string())];
+    values.extend(gc::bind_placeholder_like_patterns(&[format!(
+        "%{payload_ref}%"
+    )]));
+    let mut rows = conn.query(&sql, values).await?;
     let mut updates = Vec::new();
     while let Some(row) = rows.next().await? {
         let store_id: i64 = row.get(0)?;

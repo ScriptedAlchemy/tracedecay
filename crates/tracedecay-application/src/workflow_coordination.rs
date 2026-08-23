@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 
 use crate::RequestContext;
+use crate::bearer_token::BearerTokenSecret;
 use crate::work_handoff_frontier::WorkHandoffFrontierV1;
 use crate::workflow_admission::{
     WorkflowCatalogAdmissionError, admit_workflow_definition_operations,
@@ -16,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId, canonical_sha256,
+    WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId,
 };
 
 /// Fixed task-handoff grant lifetime (60 seconds), as `UtcMicros` duration micros.
@@ -662,23 +663,19 @@ fn coordination_authority_error(
 }
 
 pub struct TaskHandoffToken {
-    secret: String,
+    secret: BearerTokenSecret,
 }
 
 impl TaskHandoffToken {
     pub fn new(secret: String) -> Result<Self, TaskHandoffError> {
-        let byte_len = secret.len();
-        if !(32..=512).contains(&byte_len)
-            || secret.trim() != secret
-            || secret.chars().any(char::is_control)
-        {
-            return Err(TaskHandoffError::InvalidToken);
-        }
-        Ok(Self { secret })
+        Ok(Self {
+            secret: BearerTokenSecret::new(secret).map_err(|_| TaskHandoffError::InvalidToken)?,
+        })
     }
 
     fn digest(&self) -> Result<ManifestDigest, TaskHandoffError> {
-        canonical_sha256(&("tracedecay.application.task-handoff.v1", &self.secret))
+        self.secret
+            .digest("tracedecay.application.task-handoff.v1")
             .map_err(|_| TaskHandoffError::InvalidToken)
     }
 }

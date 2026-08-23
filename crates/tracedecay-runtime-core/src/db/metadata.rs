@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};

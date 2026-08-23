@@ -62,6 +62,39 @@ pub(super) fn accounting_project_root<'a>(
     }
 }
 
+/// Bounded snapshot of tool arguments for analytics and post-dispatch policy.
+///
+/// Full argument bodies (which can carry multi-KB edit payloads) are embedded
+/// in analytics events only for skill-view tools; every other consumer of the
+/// snapshot (`mcp/tool_analytics.rs`, `server/live_transcript_refresh.rs`)
+/// reads only the scalar fields listed here, so copying just those preserves
+/// behavior without deep-copying the whole payload per call.
+fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
+    const ANALYTICS_ARGUMENT_KEYS: &[&str] = &[
+        "action",
+        "transcript_projection",
+        "user_scope",
+        "storage_scope",
+        "include_memory",
+        "memory_limit",
+        "memory_min_trust",
+    ];
+
+    if crate::analytics::is_skill_view_tool(tool_name) {
+        return arguments.clone();
+    }
+    let Some(map) = arguments.as_object() else {
+        return arguments.clone();
+    };
+    let mut snapshot = serde_json::Map::new();
+    for key in ANALYTICS_ARGUMENT_KEYS {
+        if let Some(value) = map.get(*key) {
+            snapshot.insert((*key).to_string(), value.clone());
+        }
+    }
+    Value::Object(snapshot)
+}
+
 /// Locks a server-side `std::sync::Mutex`, recovering from poisoning.
 ///
 /// A panic anywhere in a client task poisons every `Mutex` a guard was alive
@@ -780,7 +813,7 @@ impl McpServer {
 
         Ok(PreparedToolCall {
             tool_name: tool_name.to_string(),
-            analytics_arguments: arguments.clone(),
+            analytics_arguments: analytics_arguments_snapshot(tool_name, &arguments),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
             caller_deadline: crate::mcp::tool_call_deadline::caller_tool_call_deadline(Some(
@@ -900,14 +933,13 @@ impl McpServer {
         // before minus what this response actually delivered.
         let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
         let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
-        self.persist_saved_tokens(net_saved_tokens).await;
-        crate::monitor::write_entry(
+        self.spawn_token_accounting_persist(
             cg.project_root(),
-            "tracedecay",
             tool_name,
             net_saved_tokens,
             raw_file_tokens,
-        );
+        )
+        .await;
         self.maybe_flush_worldwide().await;
 
         // Append per-call token savings to the response content.
@@ -1375,8 +1407,9 @@ impl McpServer {
         // transport teardown reaches the selected worker, while target
         // shutdown still owns and joins its admitted task.
         if let Some(request_id) = target_request_id.as_ref() {
-            recover_lock(dispatch_server.dispatch_authority.cancellations())
-                .insert(request_id.clone(), control.cancellation());
+            dispatch_server
+                .dispatch_authority
+                .register_cancellation(request_id.clone(), control.cancellation());
         }
         let _target_cancellation_registration = ApplicationCancellationRegistration::new(
             dispatch_server.dispatch_authority.cancellations(),

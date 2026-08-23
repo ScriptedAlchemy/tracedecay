@@ -1,5 +1,5 @@
 //! `GET /api/code-index/freshness` — per-mounted-worktree code-index generation
-//! and freshness state (plan 11 §"Typed presentation contracts").
+//! and freshness state.
 //!
 //! The authoritative source is the daemon-owned
 //! `crate::daemon::code_index_scheduler` registry, which holds the map of live
@@ -163,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_is_typed_unsupported_without_daemon_authority() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
         let Json(envelope) = freshness(State(state)).await;
 
@@ -175,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_projects_exact_live_scheduler_identity() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -212,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -241,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { None })));
 

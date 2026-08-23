@@ -11,13 +11,17 @@ impl CppExtractor {
     /// Extract a function definition (has a body).
     pub(super) fn visit_function_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         let in_class = state.class_depth > 0;
+        // Extract the name once: the constructor/destructor checks and the
+        // node itself all need it, and each extraction is a declarator
+        // subtree search plus an allocation.
+        let extracted_name = Self::extract_function_name(state, node);
         if in_class {
-            if Self::is_constructor(state, node) {
-                Self::visit_constructor(state, node);
+            if Self::is_constructor(state, extracted_name.as_deref()) {
+                Self::visit_constructor(state, node, extracted_name);
                 return;
             }
-            if Self::is_destructor(state, node) {
-                Self::visit_destructor(state, node);
+            if Self::is_destructor(node, extracted_name.as_deref()) {
+                Self::visit_destructor(state, node, extracted_name);
                 return;
             }
         }
@@ -30,8 +34,7 @@ impl CppExtractor {
         } else {
             Visibility::Pub
         };
-        let name =
-            Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
+        let name = extracted_name.unwrap_or_else(|| "<anonymous>".to_string());
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -90,20 +93,18 @@ impl CppExtractor {
         }
     }
 
-    pub(super) fn is_constructor(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        let name = Self::extract_function_name(state, node);
-        if let Some(name) = &name
+    pub(super) fn is_constructor(state: &ExtractionState, name: Option<&str>) -> bool {
+        if let Some(name) = name
             && let Some((class_name, _)) = state.node_stack.last()
-            && name == class_name
+            && name == class_name.as_str()
         {
             return true;
         }
         false
     }
 
-    pub(super) fn is_destructor(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        let name = Self::extract_function_name(state, node);
-        if let Some(name) = &name
+    pub(super) fn is_destructor(node: TsNode<'_>, name: Option<&str>) -> bool {
+        if let Some(name) = name
             && name.starts_with('~')
         {
             return true;
@@ -111,9 +112,12 @@ impl CppExtractor {
         find_descendant_by_kind(node, "destructor_name").is_some()
     }
 
-    pub(super) fn visit_constructor(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name =
-            Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
+    pub(super) fn visit_constructor(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        name: Option<String>,
+    ) {
+        let name = name.unwrap_or_else(|| "<anonymous>".to_string());
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -162,9 +166,12 @@ impl CppExtractor {
         }
     }
 
-    pub(super) fn visit_destructor(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::extract_function_name(state, node)
-            .unwrap_or_else(|| Self::extract_destructor_name(state, node));
+    pub(super) fn visit_destructor(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        name: Option<String>,
+    ) {
+        let name = name.unwrap_or_else(|| Self::extract_destructor_name(state, node));
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -255,7 +262,10 @@ impl CppExtractor {
     }
 
     pub(super) fn extract_function_signature(state: &ExtractionState, node: TsNode<'_>) -> String {
-        let text = state.node_text(node);
+        // Borrow the node text and own only the header before the body's
+        // opening `{` — materializing the full node would copy the entire
+        // (possibly huge) function body just to throw it away.
+        let text = state.node_str(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {
@@ -295,8 +305,7 @@ impl CppExtractor {
         if let Some((class_name, _)) = state.node_stack.last()
             && name == *class_name
         {
-            let text = state.node_text(node);
-            let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+            let signature = Some(Self::extract_function_signature(state, node));
             let docstring = Self::extract_docstring(state, node);
             let start_line = node.start_position().row as u32;
             let end_line = node.end_position().row as u32;
@@ -341,8 +350,7 @@ impl CppExtractor {
             }
             return;
         }
-        let text = state.node_text(node);
-        let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+        let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -452,8 +460,7 @@ impl CppExtractor {
         };
         let name =
             Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let text = state.node_text(node);
-        let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+        let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;

@@ -15,9 +15,10 @@ import type {
   ExplorerReadContextV1,
   ExplorerSessionSizeV1,
 } from "../../contracts/generated.ts";
+import { compactRelativeAge } from "../../ui/time.ts";
 import { useExplorerSessionContext } from "./controller.ts";
 import { LANE_BY_ID, LANE_ICON } from "./laneChrome.ts";
-import { relativeTime, type Hit } from "./model.ts";
+import { type Hit } from "./model.ts";
 
 export function HitInspector({
   hit,
@@ -30,7 +31,7 @@ export function HitInspector({
 }) {
   const spec = LANE_BY_ID[hit.lane];
   const Icon = LANE_ICON[hit.lane];
-  const age = relativeTime(hit.stamp);
+  const age = compactRelativeAge(hit.stamp, Date.now() / 1000);
   const sessionId = sessionIdOf(hit);
   const session = useExplorerSessionContext(sessionId);
   return (

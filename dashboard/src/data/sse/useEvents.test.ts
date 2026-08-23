@@ -39,7 +39,6 @@ function event(
 
 describe("SSE query invalidation", () => {
   it("maps typed invalidations to canonical query roots", () => {
-    expect(typeof invalidationKeysForBatch).toBe("function");
     expect(
       invalidationKeysForBatch({
         events: [
@@ -57,7 +56,6 @@ describe("SSE query invalidation", () => {
   });
 
   it("invalidates all canonical queries after a revision gap", () => {
-    expect(typeof invalidationKeysForBatch).toBe("function");
     expect(
       invalidationKeysForBatch({
         events: [],

@@ -24,13 +24,6 @@ pub enum TraceDecayError {
     #[error("file error: {message} (path: {path})")]
     File { message: String, path: String },
 
-    #[error("parse error: {message} (path: {path}, line: {line:?})")]
-    Parse {
-        message: String,
-        path: String,
-        line: Option<u32>,
-    },
-
     #[error("database error: {message} (operation: {operation})")]
     Database { message: String, operation: String },
 
@@ -245,30 +238,6 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("not found"), "message missing: {s}");
         assert!(s.contains("/tmp/foo.rs"), "path missing: {s}");
-    }
-
-    #[test]
-    fn parse_error_display_includes_line() {
-        let err = TraceDecayError::Parse {
-            message: "unexpected token".to_string(),
-            path: "src/main.rs".to_string(),
-            line: Some(42),
-        };
-        let s = err.to_string();
-        assert!(s.contains("unexpected token"), "{s}");
-        assert!(s.contains("src/main.rs"), "{s}");
-        assert!(s.contains("42"), "{s}");
-    }
-
-    #[test]
-    fn parse_error_display_no_line() {
-        let err = TraceDecayError::Parse {
-            message: "eof".to_string(),
-            path: "src/lib.rs".to_string(),
-            line: None,
-        };
-        let s = err.to_string();
-        assert!(s.contains("eof"), "{s}");
     }
 
     #[test]

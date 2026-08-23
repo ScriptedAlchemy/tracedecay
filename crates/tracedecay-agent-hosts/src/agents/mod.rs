@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Agent integration layer for CLI tools (Claude Code, `OpenCode`, Codex, etc.).
 //!
 //! Each supported agent implements the [`AgentIntegration`] trait for native
@@ -778,6 +777,10 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     })
 }
 
+pub fn config_backup_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak", path.display()))
+}
+
 /// Create a backup copy of a config file before modifying it.
 ///
 /// The backup itself is written atomically: content is first written to a
@@ -791,10 +794,6 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
 /// - File exists but cannot be read (permissions, I/O error).
 /// - Staging file cannot be written (disk full, permissions).
 /// - Staging file cannot be renamed to `.bak` (cross-device, permissions).
-pub fn config_backup_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.bak", path.display()))
-}
-
 pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -802,7 +801,6 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     let backup_path = config_backup_path(path);
     let staging_path = PathBuf::from(format!("{}.bak.new", path.display()));
 
-    // Read original content
     let content = std::fs::read(path).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to read {} for backup: {e}\n  \
@@ -810,7 +808,6 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
             path.display()
         ),
     })?;
-    // Write to staging file
     std::fs::write(&staging_path, &content).map_err(|e| {
         std::fs::remove_file(&staging_path).ok();
         TraceDecayError::Config {
@@ -913,12 +910,11 @@ pub fn safe_write_json_file(
     value: &serde_json::Value,
     backup: Option<&Path>,
 ) -> Result<()> {
-    // 1. Serialize
     let pretty = serde_json::to_string_pretty(value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize JSON for {}: {e}", path.display()),
     })?;
 
-    // 2. Re-parse to verify the serialized output is valid JSON
+    // Re-parse to verify the serialized output is valid JSON.
     if serde_json::from_str::<serde_json::Value>(&pretty).is_err() {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -2281,7 +2277,6 @@ pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
 
     let hook_path = hooks_dir.join("post-commit");
 
-    // Check if already installed.
     if hook_path.exists()
         && let Ok(contents) = std::fs::read_to_string(&hook_path)
         && contents.contains(HOOK_MARKER)
@@ -2309,7 +2304,6 @@ pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
         return;
     }
 
-    // Create the hooks directory if needed.
     if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
         eprintln!(
             "  \x1b[31m✘\x1b[0m Failed to create {}: {e}",
@@ -2331,7 +2325,6 @@ pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
         );
     }
 
-    // Append to or create the hook file.
     let snippet = post_commit_snippet(tracedecay_bin);
 
     if hook_path.exists() {
@@ -2433,7 +2426,6 @@ fn parse_gitconfig_value(path: &Path, section: &str, key: &str) -> Option<String
             && k.trim().to_ascii_lowercase() == key_lower
         {
             let v = v.trim();
-            // Strip surrounding quotes if present.
             let v = v
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))

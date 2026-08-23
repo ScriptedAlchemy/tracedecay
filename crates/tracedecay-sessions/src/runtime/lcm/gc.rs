@@ -16,10 +16,16 @@ use super::{
 
 mod orphan_scan;
 mod pending_delete;
+mod placeholder_scan;
 use orphan_scan::{payload_file_present, preview_orphan_files, stage_orphan_files};
 pub use pending_delete::{
     PayloadDeleteDrain, drain_pending_payload_delete_in_transaction,
     drain_pending_payload_deletes_in_transaction, stage_payload_delete,
+};
+pub(crate) use placeholder_scan::{
+    PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
+    bind_placeholder_like_patterns, count_placeholder_text_rows, gc_prefix_like_patterns,
+    live_prefix_like_patterns, placeholder_text_like_sql, scan_placeholder_text_rows,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -449,15 +455,7 @@ async fn run_payload_gc_preview(
         &mut report,
     )
     .await?;
-    preview_dangling_placeholders(
-        conn,
-        dir.as_deref(),
-        &all_metadata_refs,
-        provider,
-        session_id,
-        &mut report,
-    )
-    .await?;
+    preview_dangling_placeholders(dir.as_deref(), &all_metadata_refs, &referenced, &mut report);
     report.ended_at = now;
     Ok(report)
 }
@@ -620,10 +618,14 @@ pub async fn run_payload_gc_in_transaction(
         report: &mut report,
     })
     .await?;
+    // Reusing the phase-A/B/C reference set is exact here: any ref those
+    // phases tombstoned out of the live reference set is a member of
+    // `all_metadata_refs`, which this phase subtracts anyway.
     rewrite_dangling_placeholders(
         conn,
         dir.as_deref(),
         &all_metadata_refs,
+        &referenced,
         provider,
         session_id,
         apply,
@@ -748,15 +750,12 @@ async fn preview_missing_metadata(
     Ok(())
 }
 
-async fn preview_dangling_placeholders(
-    conn: &(impl QueryExecutor + ?Sized),
+fn preview_dangling_placeholders(
     dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,
-    provider: &str,
-    session_id: Option<&str>,
+    referenced: &BTreeSet<String>,
     report: &mut LcmGcReport,
-) -> Result<(), LcmError> {
-    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
+) {
     for payload_ref in referenced.difference(metadata_refs) {
         match payload_file_present(dir, payload_ref) {
             Ok(true) => {}
@@ -770,7 +769,6 @@ async fn preview_dangling_placeholders(
             }
         }
     }
-    Ok(())
 }
 
 struct ReapUnreferencedMetadataRequest<'a, E: Executor + ?Sized> {
@@ -801,14 +799,12 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         remaining,
         report,
     } = request;
-    for payload_ref in metadata_refs.intersection(referenced) {
-        if apply {
-            conn.execute(
-                "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1 AND state = 'unreferenced'",
-                params![payload_ref.as_str()],
-            )
-            .await?;
-        }
+    if apply {
+        let still_referenced = metadata_refs
+            .intersection(referenced)
+            .cloned()
+            .collect::<Vec<_>>();
+        delete_gc_marks_in_state(conn, &still_referenced, "unreferenced").await?;
     }
 
     for payload_ref in metadata_refs.difference(referenced) {
@@ -914,6 +910,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
         report,
     } = request;
     let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let mut present_refs = Vec::new();
     for payload_ref in metadata_refs.intersection(referenced) {
         let file_present = match payload_file_present(dir.as_deref(), payload_ref) {
             Ok(present) => present,
@@ -924,11 +921,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
         };
         if file_present {
             if apply {
-                conn.execute(
-                    "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1 AND state = 'missing'",
-                    params![payload_ref.as_str()],
-                )
-                .await?;
+                present_refs.push(payload_ref.clone());
             }
             continue;
         }
@@ -977,6 +970,9 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
         }
         *remaining -= 1;
     }
+    if apply {
+        delete_gc_marks_in_state(conn, &present_refs, "missing").await?;
+    }
     Ok(())
 }
 
@@ -984,92 +980,63 @@ pub async fn rewrite_dangling_placeholders(
     conn: &(impl Executor + ?Sized),
     dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,
+    referenced: &BTreeSet<String>,
     provider: &str,
     session_id: Option<&str>,
     apply: bool,
     report: &mut LcmGcReport,
 ) -> Result<(), LcmError> {
-    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
+    let mut dangling = BTreeSet::new();
     for payload_ref in referenced.difference(metadata_refs) {
         match payload_file_present(dir, payload_ref) {
             Ok(true) => continue,
-            Ok(false) => {}
+            Ok(false) => {
+                dangling.insert(payload_ref.clone());
+            }
             Err(err) => {
                 report.add_error(payload_ref, "dangling_payload_stat_failed", err.to_string());
-                continue;
             }
         }
-        let changed = if apply {
-            tombstone_dangling_ref_in_transaction(conn, payload_ref, provider, session_id).await?
-        } else {
-            0
-        };
-        if apply {
-            report.totals.placeholders_rewritten += changed;
-        }
+    }
+    for payload_ref in &dangling {
         report.dangling.add(payload_ref, 0);
+    }
+    if apply && !dangling.is_empty() {
+        report.totals.placeholders_rewritten +=
+            tombstone_dangling_refs_in_transaction(conn, &dangling, provider, session_id).await?;
     }
     Ok(())
 }
 
-async fn tombstone_dangling_ref_in_transaction(
+async fn tombstone_dangling_refs_in_transaction(
     conn: &(impl Executor + ?Sized),
-    payload_ref: &str,
+    dangling: &BTreeSet<String>,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<usize, LcmError> {
-    let mut rows = conn
-    .query(
-        "SELECT store_id, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
-               AND (content LIKE ?3 OR snippet_text LIKE ?3 OR index_text LIKE ?3 OR metadata_json LIKE ?3)",
-        params![provider, session_id, format!("%{payload_ref}%")],
+    let rows = scan_placeholder_text_rows(
+        conn,
+        PlaceholderScanScope::ExactProvider {
+            provider,
+            session_id,
+        },
+        &live_prefix_like_patterns(),
     )
     .await?;
-    let mut updates = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let content: Option<String> = row.get(1).unwrap_or(None);
-        let snippet_text: String = row.get(2)?;
-        let index_text: String = row.get(3)?;
-        let metadata_json: Option<String> = row.get(4).unwrap_or(None);
-        let mut changed = 0usize;
-        let new_content = content.map(|text| {
-            let tombstoned = tombstone_placeholder_in_text(&text, payload_ref);
-            if tombstoned != text {
-                changed += 1;
-            }
-            tombstoned
-        });
-        let new_snippet = tombstone_placeholder_in_text(&snippet_text, payload_ref);
-        if new_snippet != snippet_text {
-            changed += 1;
-        }
-        let new_index = tombstone_placeholder_in_text(&index_text, payload_ref);
-        if new_index != index_text {
-            changed += 1;
-        }
-        let new_metadata = metadata_json.map(|text| {
-            let tombstoned = tombstone_placeholder_in_text(&text, payload_ref);
-            if tombstoned != text {
-                changed += 1;
-            }
-            tombstoned
-        });
-        if changed > 0 {
-            updates.push((
-                store_id,
-                new_content,
-                new_snippet,
-                new_index,
-                new_metadata,
-                changed,
-            ));
-        }
-    }
     let mut total = 0usize;
-    for (store_id, content, snippet_text, index_text, metadata_json, changed) in updates {
+    for row in rows {
+        if !row
+            .texts()
+            .any(|text| dangling.iter().any(|payload_ref| text.contains(payload_ref)))
+        {
+            continue;
+        }
+        let store_id = row.store_id;
+        let (content, snippet_text, index_text, metadata_json, changed) =
+            tombstone_row_for_refs(row, dangling);
+        if changed == 0 {
+            continue;
+        }
         conn.execute(
             "UPDATE lcm_raw_messages
              SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
@@ -1086,6 +1053,64 @@ async fn tombstone_dangling_ref_in_transaction(
         total += changed;
     }
     Ok(total)
+}
+
+fn tombstone_row_for_refs(
+    row: PlaceholderTextRow,
+    payload_refs: &BTreeSet<String>,
+) -> (Option<String>, String, String, Option<String>, usize) {
+    let mut changed = 0usize;
+    let content = row.content.map(|text| {
+        let (tombstoned, field_changes) = tombstone_text_for_refs(&text, payload_refs);
+        changed += field_changes;
+        tombstoned
+    });
+    let (snippet_text, snippet_changes) = tombstone_text_for_refs(&row.snippet_text, payload_refs);
+    changed += snippet_changes;
+    let (index_text, index_changes) = tombstone_text_for_refs(&row.index_text, payload_refs);
+    changed += index_changes;
+    let metadata_json = row.metadata_json.map(|text| {
+        let (tombstoned, field_changes) = tombstone_text_for_refs(&text, payload_refs);
+        changed += field_changes;
+        tombstoned
+    });
+    (content, snippet_text, index_text, metadata_json, changed)
+}
+
+fn tombstone_text_for_refs(text: &str, payload_refs: &BTreeSet<String>) -> (String, usize) {
+    let mut out = text.to_string();
+    let mut changed = 0usize;
+    for payload_ref in payload_refs {
+        let tombstoned = tombstone_placeholder_in_text(&out, payload_ref);
+        if tombstoned != out {
+            changed += 1;
+            out = tombstoned;
+        }
+    }
+    (out, changed)
+}
+
+async fn delete_gc_marks_in_state(
+    conn: &(impl Executor + ?Sized),
+    payload_refs: &[String],
+    state: &str,
+) -> Result<(), LcmError> {
+    for chunk in payload_refs.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "DELETE FROM lcm_gc_marks
+             WHERE state = ? AND payload_ref IN ({placeholders})"
+        );
+        let mut values = vec![SqlValue::Text(state.to_string())];
+        values.extend(chunk.iter().cloned().map(SqlValue::Text));
+        conn.execute(&sql, values).await?;
+    }
+    Ok(())
 }
 
 async fn gc_mark(
@@ -1107,7 +1132,7 @@ async fn gc_mark(
 
 /// Batch form of [`gc_mark`] for read-only preview passes that would otherwise
 /// issue one query per candidate payload ref.
-async fn gc_marks(
+pub(crate) async fn gc_marks(
     conn: &(impl QueryExecutor + ?Sized),
     payload_refs: &[String],
 ) -> Result<HashMap<String, (String, i64)>, LcmError> {

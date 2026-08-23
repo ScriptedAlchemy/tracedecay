@@ -206,32 +206,53 @@ impl McpShutdownState {
     }
 }
 
+/// One buffered request line plus the identity a queued cancellation can
+/// target, extracted once at enqueue so each cancellation notification does
+/// not re-parse every pending line.
+struct QueuedRequestLine {
+    line: String,
+    /// `Some(id)` only when the line is a `tools/call` for a
+    /// live-cancellable tool — the only lines a queued cancellation matches.
+    cancellable_request_id: Option<Value>,
+}
+
+impl QueuedRequestLine {
+    fn new(line: String) -> Self {
+        let cancellable_request_id = serde_json::from_str::<JsonRpcRequest>(line.trim())
+            .ok()
+            .as_ref()
+            .and_then(cancellable_queued_request_id);
+        Self {
+            line,
+            cancellable_request_id,
+        }
+    }
+}
+
+fn cancellable_queued_request_id(request: &JsonRpcRequest) -> Option<Value> {
+    let cancellable = request.method == "tools/call"
+        && request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .is_some_and(super::requests::tool_supports_live_cancellation);
+    if !cancellable {
+        return None;
+    }
+    request.id.clone()
+}
+
 fn queued_cancellable_request_key(
-    pending_lines: &VecDeque<String>,
+    pending_lines: &VecDeque<QueuedRequestLine>,
     request_id: &Value,
     connection_scope: &str,
 ) -> Option<String> {
     let expected = application_surface_request_id(request_id, connection_scope)?;
     pending_lines
         .iter()
-        .any(|line| {
-            let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
-                return false;
-            };
-            request.method == "tools/call"
-                && request
-                    .params
-                    .as_ref()
-                    .and_then(|params| params.get("name"))
-                    .and_then(Value::as_str)
-                    .is_some_and(super::requests::tool_supports_live_cancellation)
-                && request
-                    .id
-                    .as_ref()
-                    .and_then(|id| application_surface_request_id(id, connection_scope))
-                    .as_ref()
-                    == Some(&expected)
-        })
+        .filter_map(|queued| queued.cancellable_request_id.as_ref())
+        .any(|id| application_surface_request_id(id, connection_scope).as_ref() == Some(&expected))
         .then_some(expected)
 }
 
@@ -275,7 +296,7 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<String>,
+        pending_lines: &mut VecDeque<QueuedRequestLine>,
         pending_cancellations: &mut HashSet<String>,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
@@ -308,8 +329,17 @@ impl McpServer {
                     std::future::pending::<()>().await;
                     return;
                 };
-                while !self.cancel_application_surface_request(cancellation_id, &connection_scope) {
-                    tokio::task::yield_now().await;
+                loop {
+                    // Register interest *before* re-probing so a registration
+                    // between the probe and the await cannot be missed.
+                    let registered = self.dispatch_authority.cancellation_registered().notified();
+                    tokio::pin!(registered);
+                    registered.as_mut().enable();
+                    if self.cancel_application_surface_request(cancellation_id, &connection_scope)
+                    {
+                        return;
+                    }
+                    registered.await;
                 }
             };
             tokio::pin!(wait_for_current_cancellation_registration);
@@ -402,7 +432,13 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(line);
+                    pending_lines.push_back(QueuedRequestLine {
+                        cancellable_request_id: parsed
+                            .as_ref()
+                            .ok()
+                            .and_then(cancellable_queued_request_id),
+                        line,
+                    });
                 }
             }
         }
@@ -418,7 +454,7 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<String>,
+        pending_lines: &mut VecDeque<QueuedRequestLine>,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
@@ -495,7 +531,7 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(line);
+                    pending_lines.push_back(QueuedRequestLine::new(line));
                 }
             }
         }
@@ -565,8 +601,8 @@ impl McpServer {
         let mut pending_cancellations = HashSet::new();
 
         'connection: loop {
-            let line: String = if let Some(line) = pending_lines.pop_front() {
-                line
+            let line: String = if let Some(queued) = pending_lines.pop_front() {
+                queued.line
             } else {
                 let read = {
                     #[cfg(unix)]
@@ -858,7 +894,6 @@ impl McpServer {
         let tokens_saved = self.tokens_saved.load(Ordering::Relaxed);
 
         let cg = self.cg_snapshot().await;
-        // Persist final tokens-saved value
         if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
             tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
             failures.push(format!("persist tokens saved: {e}"));
@@ -1181,7 +1216,7 @@ mod cancellable_queue_tests {
 
     #[test]
     fn queued_request_cancellation_is_type_preserving() {
-        let pending = VecDeque::from([
+        let pending: VecDeque<QueuedRequestLine> = [
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": "1",
@@ -1196,7 +1231,10 @@ mod cancellable_queue_tests {
                 "params": {"name": "tracedecay_git_status", "arguments": {}},
             })
             .to_string(),
-        ]);
+        ]
+        .into_iter()
+        .map(QueuedRequestLine::new)
+        .collect();
 
         assert!(
             queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")

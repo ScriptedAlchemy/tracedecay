@@ -10,6 +10,8 @@ use tracedecay_domain::{
 };
 
 use crate::ObservationRecordParseErrorV1;
+use crate::content::content_is_empty;
+use crate::timestamp::timestamp_secs;
 
 const PROVIDER: &str = "kimi";
 const COMPACTION_PREFIX: &str =
@@ -53,7 +55,7 @@ pub fn normalize_observation(
                             .get("model")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
-                        timestamp: timestamp_secs(native.get("timestamp")),
+                        timestamp: native.get("timestamp").and_then(timestamp_secs),
                     });
                     if content_text(&message_content)
                         .is_some_and(|text| text.starts_with(COMPACTION_PREFIX))
@@ -87,7 +89,7 @@ pub fn normalize_observation(
         }),
     }
 
-    let timestamp = timestamp_secs(native.get("timestamp"));
+    let timestamp = native.get("timestamp").and_then(timestamp_secs);
     let mut evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range);
     if let Some(timestamp) = timestamp {
@@ -314,32 +316,6 @@ fn content_text(content: &Value) -> Option<&str> {
                 .and_then(Value::as_str)
         })
     })
-}
-
-fn content_is_empty(content: &Value) -> bool {
-    match content {
-        Value::Null => true,
-        Value::String(text) => text.trim().is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Object(map) => map.is_empty(),
-        Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
-fn timestamp_secs(value: Option<&Value>) -> Option<i64> {
-    value
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-        })
-        .map(|timestamp| {
-            if timestamp >= 1_000_000_000_000 {
-                timestamp / 1000
-            } else {
-                timestamp
-            }
-        })
 }
 
 const fn invalid() -> ObservationRecordParseErrorV1 {

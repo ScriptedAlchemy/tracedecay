@@ -315,8 +315,11 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let selected_project_responses = self.selected_project_responses.clone();
         let work_delivery_settlement = self.work_delivery_settlement.clone();
         async move {
-            let value = serde_json::to_value(&item)
+            let mut bytes = serde_json::to_vec(&item)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            bytes.push(b'\n');
             let request_key = Self::response_request_key(&value);
             let selected_response_lease = match selected_project_responses {
                 Some(authority) => authority
@@ -324,9 +327,6 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     .map_err(|error| std::io::Error::other(error.to_string()))?,
                 None => None,
             };
-            let mut bytes = serde_json::to_vec(&value)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            bytes.push(b'\n');
             let RmcpResponseWrite::Write(delivery_attempt) =
                 Self::take_response_write(active_requests, request_key)?
             else {

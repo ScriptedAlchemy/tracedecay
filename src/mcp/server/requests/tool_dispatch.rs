@@ -69,9 +69,13 @@ impl McpServer {
         let selected_project = match routed_project {
             Some(project) => Some(project),
             None => {
+                // The resolver reads only the registered-project selector
+                // keys (`registered_project_context`). Copy just those fields
+                // instead of the full handler payload.
+                let selector_arguments = registered_project_selector_arguments(&handler_arguments);
                 crate::mcp::tools::handlers::resolve_registered_project_route_for_tool(
                     tool_name.to_owned(),
-                    handler_arguments.clone(),
+                    selector_arguments,
                     self.registry_db.as_deref(),
                     self.retained_project_server_resolver.clone(),
                 )
@@ -318,7 +322,7 @@ impl McpServer {
         if let Some(read_flight) = read_flight {
             match read_flight {
                 ReadFlightClaim::Leader(leader) => match dispatch.await {
-                    Ok(result) => Ok((*leader.complete(result)).clone()),
+                    Ok(result) => Ok(leader.complete(result)),
                     Err(error) => Err(error),
                 },
                 ReadFlightClaim::Follower(follower) => match follower.wait().await {
@@ -330,4 +334,25 @@ impl McpServer {
             dispatch.await
         }
     }
+}
+
+/// Keys [`registered_project_context`] reads when resolving a selected project.
+fn registered_project_selector_arguments(arguments: &Value) -> Value {
+    const SELECTOR_KEYS: &[&str] = &[
+        "project_selector",
+        "project_id",
+        "project_path",
+        "project_root",
+        "root",
+    ];
+    let Some(map) = arguments.as_object() else {
+        return json!({});
+    };
+    let mut snapshot = serde_json::Map::with_capacity(SELECTOR_KEYS.len());
+    for key in SELECTOR_KEYS {
+        if let Some(value) = map.get(*key) {
+            snapshot.insert((*key).to_string(), value.clone());
+        }
+    }
+    Value::Object(snapshot)
 }

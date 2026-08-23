@@ -340,26 +340,16 @@ async fn tombstoned_raw_ref_exists(
     conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
 ) -> Result<bool, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE content LIKE ?1 OR snippet_text LIKE ?1 OR index_text LIKE ?1 OR metadata_json LIKE ?1",
-            params![format!("%{payload_ref}%")],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        for index in 0..4 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            if value
-                .as_deref()
-                .is_some_and(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    let rows = gc::scan_placeholder_text_rows(
+        conn,
+        gc::PlaceholderScanScope::Unscoped,
+        &gc::gc_prefix_like_patterns(),
+    )
+    .await?;
+    Ok(rows.iter().any(|row| {
+        row.texts()
+            .any(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
+    }))
 }
 
 async fn ensure_current_raw_payload_ref(

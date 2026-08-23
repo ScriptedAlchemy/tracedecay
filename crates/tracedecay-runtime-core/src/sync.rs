@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 use std::path::Path;
 
 use sha2::{Digest, Sha256};

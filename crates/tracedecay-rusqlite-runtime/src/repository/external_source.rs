@@ -1,5 +1,7 @@
 //! Canonical SQLite projection for owner-bound external source state.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1};
 use tracedecay_store::{
@@ -176,12 +178,15 @@ impl ExternalSourceExecutor {
             };
         }
         let current = load_state(savepoint, &binding)?;
-        validate_revision_collisions(savepoint, &binding, commit)?;
+        let mutation_encodings = validate_revision_collisions(savepoint, &binding, commit)?;
         match apply_source_commit(current.as_ref(), commit.clone()).map_err(invalid)? {
             SourceCommitApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
-            SourceCommitApplyOutcomeV1::Committed(state) => {
-                persist_source_commit(savepoint, state.as_ref(), state.receipt())
-            }
+            SourceCommitApplyOutcomeV1::Committed(state) => persist_source_commit(
+                savepoint,
+                state.as_ref(),
+                state.receipt(),
+                mutation_encodings,
+            ),
         }
     }
 
@@ -540,6 +545,7 @@ fn persist_source_commit(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
     receipt: &SourceCommitReceiptV1,
+    mut mutation_encodings: BTreeMap<String, String>,
 ) -> rusqlite::Result<()> {
     state.validate().map_err(invalid)?;
     receipt.validate().map_err(invalid)?;
@@ -548,7 +554,10 @@ fn persist_source_commit(
     let predecessor = frontier_key(receipt.prior_source_frontier());
     let successor = receipt.source_frontier().digest().as_str();
     let receipt_json = encode(receipt)?;
-    savepoint.execute(
+    // `INSERT OR IGNORE` reports zero changed rows only when a conflict was
+    // swallowed; only then can the stored row differ from this write, so the
+    // read-back proof is needed only on that path.
+    let changed = savepoint.execute(
         "INSERT OR IGNORE INTO external_source_commit_receipts_v1 (
             binding_id, idempotency_key, request_digest,
             definition_revision, binding_revision,
@@ -570,19 +579,27 @@ fn persist_source_commit(
             receipt_json,
         ],
     )?;
-    verify_encoded_row(
-        savepoint,
-        "SELECT receipt_json FROM external_source_commit_receipts_v1
-         WHERE binding_id = ?1 AND idempotency_key = ?2",
-        binding.binding_id.as_str(),
-        receipt.idempotency_key().as_str(),
-        &receipt_json,
-        "external source commit receipt collision",
-    )?;
+    if changed == 0 {
+        verify_encoded_row(
+            savepoint,
+            "SELECT receipt_json FROM external_source_commit_receipts_v1
+             WHERE binding_id = ?1 AND idempotency_key = ?2",
+            binding.binding_id.as_str(),
+            receipt.idempotency_key().as_str(),
+            &receipt_json,
+            "external source commit receipt collision",
+        )?;
+    }
     for mutation in receipt.mutations() {
-        let mutation_json = encode(mutation)?;
+        // The collision validation already encoded every commit mutation; the
+        // receipt carries those same mutations through, so a miss here only
+        // means the encoding was not pre-computed and is re-derived.
+        let mutation_json = match mutation_encodings.remove(mutation.mutation_digest().as_str()) {
+            Some(encoded) => encoded,
+            None => encode(mutation)?,
+        };
         let native_object = mutation.observation().native_object();
-        savepoint.execute(
+        let changed = savepoint.execute(
             "INSERT OR IGNORE INTO external_source_mutations_v1 (
                 binding_id, mutation_digest, native_object_digest,
                 revision_digest, source_receipt_digest, mutation_json
@@ -596,15 +613,17 @@ fn persist_source_commit(
                 mutation_json,
             ],
         )?;
-        verify_encoded_row(
-            savepoint,
-            "SELECT mutation_json FROM external_source_mutations_v1
-             WHERE binding_id = ?1 AND mutation_digest = ?2",
-            binding.binding_id.as_str(),
-            mutation.mutation_digest().as_str(),
-            &mutation_json,
-            "external source mutation collision",
-        )?;
+        if changed == 0 {
+            verify_encoded_row(
+                savepoint,
+                "SELECT mutation_json FROM external_source_mutations_v1
+                 WHERE binding_id = ?1 AND mutation_digest = ?2",
+                binding.binding_id.as_str(),
+                mutation.mutation_digest().as_str(),
+                &mutation_json,
+                "external source mutation collision",
+            )?;
+        }
         savepoint.execute(
             "INSERT INTO external_source_objects_v1 (
                 binding_id, native_object_digest, partition_digest,
@@ -625,7 +644,7 @@ fn persist_source_commit(
     }
     for edge in receipt.lineage() {
         let encoded = encode(edge)?;
-        savepoint.execute(
+        let changed = savepoint.execute(
             "INSERT OR IGNORE INTO external_source_lineage_v1 (
                 binding_id, lineage_digest, source_receipt_digest, lineage_json
              ) VALUES (?1, ?2, ?3, ?4)",
@@ -636,22 +655,24 @@ fn persist_source_commit(
                 encoded,
             ],
         )?;
-        verify_encoded_row(
-            savepoint,
-            "SELECT lineage_json FROM external_source_lineage_v1
-             WHERE binding_id = ?1 AND lineage_digest = ?2",
-            binding.binding_id.as_str(),
-            edge.lineage_digest().as_str(),
-            &encoded,
-            "external source lineage collision",
-        )?;
+        if changed == 0 {
+            verify_encoded_row(
+                savepoint,
+                "SELECT lineage_json FROM external_source_lineage_v1
+                 WHERE binding_id = ?1 AND lineage_digest = ?2",
+                binding.binding_id.as_str(),
+                edge.lineage_digest().as_str(),
+                &encoded,
+                "external source lineage collision",
+            )?;
+        }
     }
     let sequence = receipt
         .source_frontier()
         .partition(receipt.partition())
         .ok_or_else(|| invalid("external source receipt partition frontier is missing"))?
         .sequence();
-    savepoint.execute(
+    let pending_changed = savepoint.execute(
         "INSERT OR IGNORE INTO external_source_pending_projections_v1 (
             binding_id, predecessor_frontier_digest, successor_frontier_digest,
             successor_sequence, source_receipt_digest
@@ -665,20 +686,22 @@ fn persist_source_commit(
             receipt.receipt_digest().as_str(),
         ],
     )?;
-    let pending: (String, String) = savepoint.query_row(
-        "SELECT successor_frontier_digest, source_receipt_digest
-         FROM external_source_pending_projections_v1
-         WHERE binding_id = ?1 AND predecessor_frontier_digest = ?2",
-        params![binding.binding_id.as_str(), predecessor],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if pending
-        != (
-            successor.to_owned(),
-            receipt.receipt_digest().as_str().to_owned(),
-        )
-    {
-        return Err(invalid("external source pending projection fork collision"));
+    if pending_changed == 0 {
+        let pending: (String, String) = savepoint.query_row(
+            "SELECT successor_frontier_digest, source_receipt_digest
+             FROM external_source_pending_projections_v1
+             WHERE binding_id = ?1 AND predecessor_frontier_digest = ?2",
+            params![binding.binding_id.as_str(), predecessor],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if pending
+            != (
+                successor.to_owned(),
+                receipt.receipt_digest().as_str().to_owned(),
+            )
+        {
+            return Err(invalid("external source pending projection fork collision"));
+        }
     }
     upsert_current_state(savepoint, state)
 }
@@ -867,7 +890,7 @@ fn persist_definition_and_binding(
     let definition_revision = i64::try_from(definition.revision)
         .map_err(|_| invalid("external source definition revision exceeds SQLite INTEGER"))?;
     let definition_json = encode(definition)?;
-    savepoint.execute(
+    let changed = savepoint.execute(
         "INSERT OR IGNORE INTO external_source_definition_revisions_v1 (
             source_id, definition_revision, definition_digest, definition_json
          ) VALUES (?1, ?2, ?3, ?4)",
@@ -878,19 +901,21 @@ fn persist_definition_and_binding(
             definition_json,
         ],
     )?;
-    verify_encoded_row(
-        savepoint,
-        "SELECT definition_json FROM external_source_definition_revisions_v1
-         WHERE source_id = ?1 AND definition_revision = ?2",
-        definition.source_id.as_str(),
-        &definition_revision,
-        &definition_json,
-        "external source definition revision collision",
-    )?;
+    if changed == 0 {
+        verify_encoded_row(
+            savepoint,
+            "SELECT definition_json FROM external_source_definition_revisions_v1
+             WHERE source_id = ?1 AND definition_revision = ?2",
+            definition.source_id.as_str(),
+            &definition_revision,
+            &definition_json,
+            "external source definition revision collision",
+        )?;
+    }
     let binding_revision = i64::try_from(binding.binding_revision)
         .map_err(|_| invalid("external source binding revision exceeds SQLite INTEGER"))?;
     let binding_json = encode(binding)?;
-    savepoint.execute(
+    let changed = savepoint.execute(
         "INSERT OR IGNORE INTO external_source_binding_revisions_v1 (
             binding_id, binding_revision, definition_revision,
             binding_digest, binding_json
@@ -903,15 +928,18 @@ fn persist_definition_and_binding(
             binding_json,
         ],
     )?;
-    verify_encoded_row(
-        savepoint,
-        "SELECT binding_json FROM external_source_binding_revisions_v1
-         WHERE binding_id = ?1 AND binding_revision = ?2",
-        binding.binding_id.as_str(),
-        &binding_revision,
-        &binding_json,
-        "external source binding revision collision",
-    )
+    if changed == 0 {
+        verify_encoded_row(
+            savepoint,
+            "SELECT binding_json FROM external_source_binding_revisions_v1
+             WHERE binding_id = ?1 AND binding_revision = ?2",
+            binding.binding_id.as_str(),
+            &binding_revision,
+            &binding_json,
+            "external source binding revision collision",
+        )?;
+    }
+    Ok(())
 }
 
 fn upsert_current_state(
@@ -968,34 +996,74 @@ fn upsert_current_state(
     Ok(())
 }
 
+const REVISION_COLLISION_PROBE_CHUNK: usize = 100;
+
+/// Proves no stored mutation disagrees with this commit's encoding for the
+/// same `(native object, revision)` identity, probing the unique
+/// `(binding_id, native_object_digest, revision_digest)` index in batched
+/// row-value `IN` chunks. Returns each mutation's encoding keyed by mutation
+/// digest so the persist path reuses it instead of re-serializing.
 fn validate_revision_collisions(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
     commit: &SourceCommitV1,
-) -> rusqlite::Result<()> {
-    for mutation in commit.mutations() {
-        let encoded = encode(mutation)?;
-        let stored = connection
-            .prepare(
-                "SELECT mutation_json FROM external_source_mutations_v1
-                 WHERE binding_id = ?1
-                   AND native_object_digest = ?2
-                   AND revision_digest = ?3",
-            )?
-            .query_row(
-                params![
-                    binding.binding_id.as_str(),
-                    mutation.observation().native_object().digest().as_str(),
-                    mutation.observation().revision().digest().as_str(),
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        if stored.is_some_and(|stored| stored != encoded) {
-            return Err(invalid("external source object revision collision"));
+) -> rusqlite::Result<BTreeMap<String, String>> {
+    let mutations = commit.mutations();
+    let mut encodings = BTreeMap::new();
+    for mutation in mutations {
+        encodings.insert(
+            mutation.mutation_digest().as_str().to_owned(),
+            encode(mutation)?,
+        );
+    }
+    for chunk in mutations.chunks(REVISION_COLLISION_PROBE_CHUNK) {
+        let mut sql = String::from(
+            "SELECT native_object_digest, revision_digest, mutation_json
+             FROM external_source_mutations_v1
+             WHERE binding_id = ?1
+               AND (native_object_digest, revision_digest) IN (VALUES ",
+        );
+        let mut probe_params: Vec<&str> = Vec::with_capacity(1 + chunk.len() * 2);
+        probe_params.push(binding.binding_id.as_str());
+        for (index, mutation) in chunk.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let base = 2 + index * 2;
+            sql.push_str(&format!("(?{base}, ?{})", base + 1));
+            probe_params.push(mutation.observation().native_object().digest().as_str());
+            probe_params.push(mutation.observation().revision().digest().as_str());
+        }
+        sql.push(')');
+        let mut statement = connection.prepare(&sql)?;
+        let mut stored = BTreeMap::new();
+        let mut rows = statement.query(rusqlite::params_from_iter(probe_params))?;
+        while let Some(row) = rows.next()? {
+            stored.insert(
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+            );
+        }
+        for mutation in chunk {
+            let key = (
+                mutation
+                    .observation()
+                    .native_object()
+                    .digest()
+                    .as_str()
+                    .to_owned(),
+                mutation.observation().revision().digest().as_str().to_owned(),
+            );
+            let encoded = encodings.get(mutation.mutation_digest().as_str());
+            if stored
+                .get(&key)
+                .is_some_and(|existing| Some(existing) != encoded)
+            {
+                return Err(invalid("external source object revision collision"));
+            }
         }
     }
-    Ok(())
+    Ok(encodings)
 }
 
 mod reads;

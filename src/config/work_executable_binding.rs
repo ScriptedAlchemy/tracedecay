@@ -190,8 +190,8 @@ fn digest_file(path: &Path) -> std::io::Result<(ManifestDigest, u64)> {
             .checked_add(read as u64)
             .ok_or_else(|| std::io::Error::other("provider executable byte length overflow"))?;
     }
-    let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
-        .map_err(std::io::Error::other)?;
+    let digest =
+        ManifestDigest::from_sha256_bytes(&hasher.finalize()).map_err(std::io::Error::other)?;
     Ok((digest, bytes))
 }
 

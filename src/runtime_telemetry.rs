@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-05-25
 //! Runtime telemetry snapshot for diagnosing CPU/RAM regressions
 //! (issue #80).
 //!

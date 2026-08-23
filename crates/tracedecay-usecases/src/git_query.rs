@@ -611,15 +611,32 @@ fn envelope<T>(value: T, mut coverage: GitCoverageV1, truncated: bool) -> GitQue
     }
 }
 
+/// Count serialized bytes without materializing the JSON copy the caller
+/// already holds for transport.
+struct CountingSink {
+    written: u64,
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Measure the serialized result against the query byte bound.
 fn check_bytes<T: Serialize>(bounds: &GitQueryBounds, value: &T) -> Result<(), GitQueryError> {
-    let actual = serde_json::to_vec(value)
-        .map_err(|error| GitQueryError::Serialization(error.to_string()))?
-        .len() as u64;
-    if actual > bounds.max_bytes {
+    let mut output = CountingSink { written: 0 };
+    serde_json::to_writer(&mut output, value)
+        .map_err(|error| GitQueryError::Serialization(error.to_string()))?;
+    if output.written > bounds.max_bytes {
         return Err(GitQueryError::ByteBoundExceeded {
             bound: bounds.max_bytes,
-            actual,
+            actual: output.written,
         });
     }
     Ok(())

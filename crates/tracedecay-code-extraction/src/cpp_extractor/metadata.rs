@@ -7,7 +7,7 @@ use crate::{
     common::{
         clean_c_doc_comment, docstring_from_preceding_comments, extract_call_expression_sites,
     },
-    traversal::find_direct_child_by_kind,
+    traversal::{find_descendant_by_kind, find_direct_child_by_kind},
     types::{
         Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
         generate_node_id,
@@ -250,7 +250,21 @@ impl CppExtractor {
     }
 
     pub(super) fn is_pure_virtual(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        state.node_text(node).contains("= 0")
+        // The pure-specifier `= 0` is a sibling that follows the
+        // function_declarator — never inside the parameter list (where a
+        // default argument like `int x = 0` lives) and never inside the
+        // body — so scan only that tail slice of the source.
+        let Some(declarator) = find_descendant_by_kind(node, "function_declarator") else {
+            return false;
+        };
+        let tail_start = declarator.end_byte();
+        let tail_end = node
+            .child_by_field_name("body")
+            .map_or_else(|| node.end_byte(), |body| body.start_byte());
+        let Some(tail) = state.source.get(tail_start..tail_end) else {
+            return false;
+        };
+        is_pure_specifier(tail)
     }
 
     pub(super) fn extract_annotations(
@@ -358,4 +372,33 @@ impl CppExtractor {
             duration_ms: start.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// True when `tail` contains a C++ pure-specifier `= 0`.
+///
+/// The `0` must be a lone token — `= 00`, `= 0x`, and `= 0UL` are not
+/// pure-specifiers. `= 0 override` / `= 0;` remain valid.
+fn is_pure_specifier(tail: &[u8]) -> bool {
+    let mut index = 0;
+    while index < tail.len() {
+        if tail[index] != b'=' {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 1;
+        while cursor < tail.len() && tail[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= tail.len() || tail[cursor] != b'0' {
+            index += 1;
+            continue;
+        }
+        let after = cursor + 1;
+        if after < tail.len() && (tail[after].is_ascii_alphanumeric() || tail[after] == b'_') {
+            index += 1;
+            continue;
+        }
+        return true;
+    }
+    false
 }

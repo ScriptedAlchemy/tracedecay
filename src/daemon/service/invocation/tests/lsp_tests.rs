@@ -1,5 +1,4 @@
-//! `lsp` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `lsp` module test coverage.
 
 use super::*;
 

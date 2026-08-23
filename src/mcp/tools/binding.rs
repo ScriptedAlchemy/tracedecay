@@ -419,6 +419,12 @@ fn application_capability_for_tool(
 pub(crate) fn canonical_tool_dispatch_ceiling(
     tool_name: &str,
 ) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
+    let catalog = mcp_dispatch_catalog()?;
+    if let Some(contract) = catalog.contract(tool_name) {
+        return Ok(std::time::Duration::from_millis(
+            contract.deadline().maximum_millis(),
+        ));
+    }
     if let Some(capability) = multi_root_capability_for_tool(tool_name)? {
         return Ok(std::time::Duration::from_millis(
             capability.deadline().maximum_millis(),
@@ -440,7 +446,64 @@ pub(crate) fn canonical_tool_dispatch_ceiling(
     ))
 }
 
+/// Per-tool dispatch predicate answers, resolved once per process.
+///
+/// The three predicates below run several times per dispatched request
+/// (connection loop, routing, dispatch controls), and each uncached
+/// evaluation linearly scans the application catalog
+/// (`application_capability_for_tool`). Their inputs — the static binding
+/// table, the application-surface catalog, and the Work/Workflow executable
+/// registries — are process-stable, so the answers are precomputed for every
+/// cataloged name. The dispatch-contract cancellation/effect metadata is not
+/// a substitute: it folds in workflow bindings and per-capability contracts
+/// that deliberately diverge from these predicates.
+#[derive(Clone, Copy)]
+struct ToolDispatchPredicateFlags {
+    source_edit_effect: bool,
+    live_cancellation: bool,
+    canonical_effect_settlement: bool,
+}
+
+fn compute_tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags {
+    ToolDispatchPredicateFlags {
+        source_edit_effect: compute_tool_dispatches_source_edit_effect(tool_name),
+        live_cancellation: compute_tool_supports_live_cancellation(tool_name),
+        canonical_effect_settlement: compute_tool_requires_canonical_effect_settlement(tool_name),
+    }
+}
+
+fn tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags {
+    static FLAGS: LazyLock<HashMap<String, ToolDispatchPredicateFlags>> = LazyLock::new(|| {
+        let mut flags = HashMap::new();
+        // A catalog enumeration failure leaves the map empty; every lookup
+        // then falls back to the direct computation below, which answers
+        // exactly as the uncached predicates did.
+        if let Ok(bindings) = dispatch_catalog_bindings() {
+            for binding in bindings {
+                let per_tool = compute_tool_dispatch_predicate_flags(&binding.name);
+                flags.insert(binding.name, per_tool);
+            }
+        }
+        // Internal daemon tools are filtered out of the dispatch catalog but
+        // still reach these predicates through ordinary dispatch.
+        for binding in MCP_TOOL_BINDINGS {
+            flags
+                .entry(binding.name.to_owned())
+                .or_insert_with(|| compute_tool_dispatch_predicate_flags(binding.name));
+        }
+        flags
+    });
+    FLAGS
+        .get(tool_name)
+        .copied()
+        .unwrap_or_else(|| compute_tool_dispatch_predicate_flags(tool_name))
+}
+
 pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
+    tool_dispatch_predicate_flags(tool_name).source_edit_effect
+}
+
+fn compute_tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).and_then(|binding| binding.group),
         Some(McpToolDispatchGroup::Edit)
@@ -451,6 +514,10 @@ pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
 }
 
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
+    tool_dispatch_predicate_flags(tool_name).live_cancellation
+}
+
+fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
     work_executable_binding_for_tool(tool_name)
         .ok()
         .flatten()
@@ -470,7 +537,7 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
                 )
             })
         || multi_root_operation_for_tool(tool_name).is_some()
-        || tool_dispatches_source_edit_effect(tool_name)
+        || compute_tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
             "tracedecay_admin_cli"
@@ -488,6 +555,10 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
 }
 
 pub(crate) fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
+    tool_dispatch_predicate_flags(tool_name).canonical_effect_settlement
+}
+
+fn compute_tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
     work_executable_binding_for_tool(tool_name)
         .ok()
         .flatten()

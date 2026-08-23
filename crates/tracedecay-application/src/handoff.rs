@@ -8,6 +8,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::LazyLock;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -17,6 +18,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+use crate::bearer_token::BearerTokenSecret;
 use crate::context::{RequestAdmission, RequestContext, RequestId, ResolvedScope};
 use crate::error::ApplicationContractError;
 use crate::feedback::FeedbackFindingReadV1;
@@ -35,6 +37,48 @@ pub const OPEN_TASK_HANDOFF_USE_CASE_ID_V1: &str = "use-case.handoff.open_task_h
 pub const LIST_TASK_HANDOFFS_CAPABILITY_ID_V1: &str = "capability.handoff.list_task_handoffs";
 pub const LIST_TASK_HANDOFFS_USE_CASE_ID_V1: &str = "use-case.handoff.list_task_handoffs";
 
+/// Parsed capability/use-case identity for one handoff operation, cached so
+/// admission does not re-validate the same static identifier per request.
+/// `None` preserves the typed `AuthorityUnavailable` outcome should a static
+/// identifier ever fail catalog validation.
+struct HandoffOperationIds {
+    capability: CapabilityId,
+    use_case: UseCaseId,
+}
+
+impl HandoffOperationIds {
+    fn parse(capability: &'static str, use_case: &'static str) -> Option<Self> {
+        Some(Self {
+            capability: CapabilityId::new(capability).ok()?,
+            use_case: UseCaseId::new(use_case).ok()?,
+        })
+    }
+}
+
+type HandoffOperationIdsCell = LazyLock<Option<HandoffOperationIds>>;
+
+static HANDOFF_ISSUE_OPERATION_IDS: HandoffOperationIdsCell = LazyLock::new(|| {
+    HandoffOperationIds::parse(HANDOFF_ISSUE_CAPABILITY_ID_V1, HANDOFF_ISSUE_USE_CASE_ID_V1)
+});
+static OPEN_INVESTIGATION_HANDOFF_OPERATION_IDS: HandoffOperationIdsCell = LazyLock::new(|| {
+    HandoffOperationIds::parse(
+        OPEN_INVESTIGATION_HANDOFF_CAPABILITY_ID_V1,
+        OPEN_INVESTIGATION_HANDOFF_USE_CASE_ID_V1,
+    )
+});
+static OPEN_TASK_HANDOFF_OPERATION_IDS: HandoffOperationIdsCell = LazyLock::new(|| {
+    HandoffOperationIds::parse(
+        OPEN_TASK_HANDOFF_CAPABILITY_ID_V1,
+        OPEN_TASK_HANDOFF_USE_CASE_ID_V1,
+    )
+});
+static LIST_TASK_HANDOFFS_OPERATION_IDS: HandoffOperationIdsCell = LazyLock::new(|| {
+    HandoffOperationIds::parse(
+        LIST_TASK_HANDOFFS_CAPABILITY_ID_V1,
+        LIST_TASK_HANDOFFS_USE_CASE_ID_V1,
+    )
+});
+
 /// Ceiling on grants returned by one enumeration.
 ///
 /// A frontier is read, not paged, and an unbounded answer would be neither
@@ -50,23 +94,19 @@ application_identifier!(
 /// Bearer material is accepted only at the daemon boundary and never
 /// serialized into a grant, receipt, diagnostic, or result.
 pub struct HandoffOpenToken {
-    secret: String,
+    secret: BearerTokenSecret,
 }
 
 impl HandoffOpenToken {
     pub fn new(secret: String) -> Result<Self, HandoffOpenError> {
-        let byte_len = secret.len();
-        if !(32..=512).contains(&byte_len)
-            || secret.trim() != secret
-            || secret.chars().any(char::is_control)
-        {
-            return Err(HandoffOpenError::InvalidToken);
-        }
-        Ok(Self { secret })
+        Ok(Self {
+            secret: BearerTokenSecret::new(secret).map_err(|_| HandoffOpenError::InvalidToken)?,
+        })
     }
 
     pub fn digest(&self) -> Result<ManifestDigest, HandoffOpenError> {
-        canonical_sha256(&("tracedecay.application.handoff-open.v1", &self.secret))
+        self.secret
+            .digest("tracedecay.application.handoff-open.v1")
             .map_err(|_| HandoffOpenError::InvalidToken)
     }
 }
@@ -813,7 +853,11 @@ pub struct ListTaskHandoffsResultV1 {
 }
 
 impl ListTaskHandoffsResultV1 {
-    pub fn from_listings(listings: &[HandoffOpenListingV1], observed_at: UtcMicros) -> Self {
+    pub fn from_listings(
+        listings: &[HandoffOpenListingV1],
+        observed_at: UtcMicros,
+        more_existed: bool,
+    ) -> Self {
         let handoffs: Vec<ListedTaskHandoffV1> = listings
             .iter()
             .map(|listing| ListedTaskHandoffV1::from_listing(listing, observed_at))
@@ -831,7 +875,7 @@ impl ListTaskHandoffsResultV1 {
             open_count: count(TaskHandoffTokenStateV1::Open),
             consumed_count: count(TaskHandoffTokenStateV1::Consumed),
             expired_count: count(TaskHandoffTokenStateV1::Expired),
-            truncated: handoffs.len() as u32 >= MAX_HANDOFF_LIST_RESULTS_V1,
+            truncated: more_existed,
             handoffs,
             observed_at,
         }
@@ -1015,12 +1059,7 @@ where
         issued_at: UtcMicros,
         expires_at: UtcMicros,
     ) -> Result<HandoffOpenGrantV1, HandoffOpenError> {
-        admit(
-            context,
-            HANDOFF_ISSUE_CAPABILITY_ID_V1,
-            HANDOFF_ISSUE_USE_CASE_ID_V1,
-            issued_at,
-        )?;
+        admit(context, &HANDOFF_ISSUE_OPERATION_IDS, issued_at)?;
         if binding.context.scope_digest != context.scope().scope_digest
             || binding.context.grant_id != context.grant().grant_id
             || binding.context.grant_revision != context.grant().revision
@@ -1058,20 +1097,20 @@ where
         request: ListTaskHandoffsRequestV1,
         observed_at: UtcMicros,
     ) -> Result<ListTaskHandoffsResultV1, HandoffOpenError> {
-        admit(
-            context,
-            LIST_TASK_HANDOFFS_CAPABILITY_ID_V1,
-            LIST_TASK_HANDOFFS_USE_CASE_ID_V1,
-            observed_at,
-        )?;
+        admit(context, &LIST_TASK_HANDOFFS_OPERATION_IDS, observed_at)?;
         let filter = HandoffOpenListFilterV1::from_request(context, request.session_id)?;
-        let listings = self
+        // Fetch one row past the ceiling so a frontier of exactly the ceiling
+        // is reported complete, not falsely truncated.
+        let mut listings = self
             .authority
-            .list(&filter, MAX_HANDOFF_LIST_RESULTS_V1)
+            .list(&filter, MAX_HANDOFF_LIST_RESULTS_V1.saturating_add(1))
             .map_err(authority_error)?;
+        let more_existed = listings.len() > MAX_HANDOFF_LIST_RESULTS_V1 as usize;
+        listings.truncate(MAX_HANDOFF_LIST_RESULTS_V1 as usize);
         Ok(ListTaskHandoffsResultV1::from_listings(
             &listings,
             observed_at,
+            more_existed,
         ))
     }
 
@@ -1089,8 +1128,7 @@ where
                 request.session_id,
                 authority,
                 HandoffOpenKindV1::Investigation,
-                OPEN_INVESTIGATION_HANDOFF_CAPABILITY_ID_V1,
-                OPEN_INVESTIGATION_HANDOFF_USE_CASE_ID_V1,
+                &OPEN_INVESTIGATION_HANDOFF_OPERATION_IDS,
                 observed_at,
             )
             .await?;
@@ -1124,8 +1162,7 @@ where
                 request.session_id,
                 authority,
                 HandoffOpenKindV1::Task,
-                OPEN_TASK_HANDOFF_CAPABILITY_ID_V1,
-                OPEN_TASK_HANDOFF_USE_CASE_ID_V1,
+                &OPEN_TASK_HANDOFF_OPERATION_IDS,
                 observed_at,
             )
             .await?;
@@ -1149,11 +1186,10 @@ where
         session_id: HandoffSessionId,
         authority: HandoffAuthoritySnapshotV1,
         kind: HandoffOpenKindV1,
-        capability: &str,
-        use_case: &str,
+        operation: &HandoffOperationIdsCell,
         observed_at: UtcMicros,
     ) -> Result<HandoffOpenConsumptionV1, HandoffOpenError> {
-        admit(context, capability, use_case, observed_at)?;
+        admit(context, operation, observed_at)?;
         let token = HandoffOpenToken::new(token)?;
         let token_digest = token.digest()?;
         let expected = HandoffOpenExpectationV1::from_request(context, kind, session_id.clone())?;
@@ -1215,8 +1251,7 @@ where
 
 fn admit(
     context: &RequestContext,
-    capability: &str,
-    use_case: &str,
+    operation: &HandoffOperationIdsCell,
     observed_at: UtcMicros,
 ) -> Result<(), HandoffOpenError> {
     match context.admission_at(observed_at) {
@@ -1224,10 +1259,10 @@ fn admit(
         RequestAdmission::TimedOut => return Err(HandoffOpenError::TimedOut),
         RequestAdmission::Admitted => {}
     }
-    let capability =
-        CapabilityId::new(capability).map_err(|_| HandoffOpenError::AuthorityUnavailable)?;
-    let use_case = UseCaseId::new(use_case).map_err(|_| HandoffOpenError::AuthorityUnavailable)?;
-    if !context.allows(&capability, &use_case) {
+    let operation = operation
+        .as_ref()
+        .ok_or(HandoffOpenError::AuthorityUnavailable)?;
+    if !context.allows(&operation.capability, &operation.use_case) {
         return Err(HandoffOpenError::NotFoundOrNotAuthorized);
     }
     Ok(())

@@ -51,12 +51,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -106,7 +111,6 @@ impl ObjcExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -172,9 +176,8 @@ impl ObjcExtractor {
             "class_implementation" => Self::visit_class_implementation(state, node),
             "function_definition" => Self::visit_function_definition(state, node),
             "declaration" => Self::visit_declaration(state, node),
-            _ => {
-                // For other node types, skip. Comments are picked up as docstrings.
-            }
+            // Comments are picked up as docstrings by the definitions they precede.
+            _ => {}
         }
     }
 
@@ -876,10 +879,11 @@ impl ObjcExtractor {
     // -------------------------------------------------------
 
     /// Extract a method declaration (no body).
+    ///
+    /// Class (`+`) and instance (`-`) methods both map to `NodeKind::Method`.
     fn visit_method_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         let name =
             Self::extract_method_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let _is_class_method = Self::is_class_method(state, node);
 
         let text = state.node_text(node);
         let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
@@ -1306,15 +1310,6 @@ impl ObjcExtractor {
             }
         }
         None
-    }
-
-    /// Check if a method is a class method (+) vs instance method (-).
-    fn is_class_method(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        if let Some(first_child) = node.child(0) {
-            let text = state.node_text(first_child);
-            return text == "+";
-        }
-        false
     }
 
     /// Extract the function name from a `function_definition` or declaration node.

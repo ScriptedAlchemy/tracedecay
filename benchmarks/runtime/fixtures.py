@@ -261,7 +261,10 @@ def clone_prepared_profile(
         prepared_evidence=prepared_evidence,
         runtime_identity=runtime_identity,
         environment={},
-        fixture_digests=_snapshot_digests(destination),
+        # Digest provenance is computed once by prepare_fixture_snapshot;
+        # re-hashing the whole tree (including bin/tracedecay) per clone is
+        # pure per-sample overhead with no consumer.
+        fixture_digests={},
         git_head=prepared.git_head,
     )
     return PreparedFixture(

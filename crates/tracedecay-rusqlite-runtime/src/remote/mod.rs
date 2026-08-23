@@ -672,16 +672,13 @@ impl RemoteSqliteStorageV1 {
         event_id: &str,
         expires_at_micros: i64,
     ) -> Result<RemoteFrameTransferRequestV1, RemoteSqliteStorageErrorV1> {
-        let frame = self
-            .load_replay_frame(event_id)
-            .map_err(RemoteSqliteStorageErrorV1::from)?;
         let rows = query(
             self.handle(),
             "SELECT key_revision, nonce, ciphertext, frame_digest, state
              FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
         )?;
-        let row = one_row(rows)?;
+        let row = one_row(rows).map_err(|_| RemoteSqliteStorageErrorV1::Unavailable)?;
         let key_revision = row_u64(&row, 0).map_err(RemoteSqliteStorageErrorV1::from)?;
         let nonce = row_blob(&row, 1).map_err(RemoteSqliteStorageErrorV1::from)?;
         let nonce: [u8; 12] = nonce
@@ -696,18 +693,28 @@ impl RemoteSqliteStorageV1 {
                 .to_owned(),
         )
         .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let capture = self
+            .decrypt_frame(event_id, key_revision, nonce, ciphertext.clone())
+            .map_err(RemoteSqliteStorageErrorV1::from)?;
+        let actual_digest = canonical_sha256(&capture)
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let canonical_event_id = canonical_remote_event_id_v1(&capture)
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        if actual_digest.as_str() != frame_digest.as_str() || event_id != canonical_event_id {
+            return Err(RemoteSqliteStorageErrorV1::Corruption);
+        }
         if row_text(&row, 4).map_err(RemoteSqliteStorageErrorV1::from)? != "pending" {
             return Err(RemoteSqliteStorageErrorV1::Conflict);
         }
-        let observed_authority_epoch = frame.capture.writer.authority.fence.authority_epoch.0;
+        let observed_authority_epoch = capture.writer.authority.fence.authority_epoch.0;
         Ok(RemoteFrameTransferRequestV1 {
             event_id: event_id.to_owned(),
-            enrollment_id: frame.capture.enrollment_id,
-            enrollment_revision: frame.capture.enrollment_revision,
-            node_id: frame.capture.node_id,
-            writer: frame.capture.writer,
-            policy_revision: frame.capture.policy_revision,
-            sequence: frame.capture.sequence,
+            enrollment_id: capture.enrollment_id,
+            enrollment_revision: capture.enrollment_revision,
+            node_id: capture.node_id,
+            writer: capture.writer,
+            policy_revision: capture.policy_revision,
+            sequence: capture.sequence,
             frame_digest,
             key_revision,
             nonce,

@@ -56,6 +56,14 @@ fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
 }
 
+async fn git_authority_available(repo_root: &Path) -> bool {
+    let repo = repo_root.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::worktree::git_worktree_root(&repo).is_some())
+        .await
+        .ok()
+        .unwrap_or(false)
+}
+
 /// Outcome of a successful manual branch-head activation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualBranchActivation {
@@ -78,25 +86,28 @@ pub(crate) struct ManualBranchArtifactsV1 {
     pub(crate) worktree: PathBuf,
     pub(crate) tracking_ref: String,
     pub(crate) label: String,
+    /// Digest of the raw branch name, computed once at construction; both the
+    /// worktree directory and the lifecycle lock file derive from it.
+    branch_digest: String,
 }
 
 impl ManualBranchArtifactsV1 {
     pub(crate) fn for_branch(data_root: &Path, branch: &str) -> Self {
-        let digest = hex::encode(Sha256::digest(branch.as_bytes()));
+        let branch_digest = hex::encode(Sha256::digest(branch.as_bytes()));
         Self {
             branch: branch.to_owned(),
-            worktree: data_root.join("branch-worktrees").join(digest),
+            worktree: data_root.join("branch-worktrees").join(&branch_digest),
             tracking_ref: format!("refs/tracedecay/branch/{branch}"),
             label: format!("tracedecay/track/{branch}"),
+            branch_digest,
         }
     }
 
     fn lifecycle_lock_path(&self, data_root: &Path) -> PathBuf {
-        let digest = hex::encode(Sha256::digest(self.branch.as_bytes()));
         data_root
             .join("branch-worktrees")
             .join(".lifecycle")
-            .join(format!("{digest}.lock"))
+            .join(format!("{}.lock", self.branch_digest))
     }
 }
 
@@ -866,7 +877,7 @@ async fn activate_manual_branch_with_administration(
             "code-index scheduler authority is unavailable for branch activation",
         ));
     };
-    if crate::worktree::git_worktree_root(repo_root).is_none() {
+    if !git_authority_available(repo_root).await {
         return Err(ManualBranchActivationError::git_unavailable(
             "git authority is unavailable for branch activation",
         ));
@@ -1980,7 +1991,7 @@ async fn track_pr(
             "code-index scheduler authority is unavailable for PR worktree activation",
         ));
     };
-    if crate::worktree::git_worktree_root(repo_root).is_none() {
+    if !git_authority_available(repo_root).await {
         return Err("git authority is unavailable for PR worktree activation".to_string());
     }
 

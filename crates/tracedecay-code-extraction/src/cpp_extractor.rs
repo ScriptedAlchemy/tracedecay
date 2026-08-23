@@ -56,12 +56,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -74,6 +79,13 @@ impl ExtractionState {
         node.utf8_text(&self.source)
             .unwrap_or("<invalid utf8>")
             .to_string()
+    }
+
+    /// Borrowed text of a tree-sitter node, sliced straight from the source.
+    /// Use for signature extraction on nodes with bodies so the (possibly
+    /// huge) body is never materialized into an owned `String`.
+    fn node_str(&self, node: TsNode<'_>) -> &str {
+        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -107,7 +119,6 @@ impl CppExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -192,9 +203,8 @@ impl CppExtractor {
             "preproc_def" => Self::visit_preproc_def(state, node),
             "preproc_include" => Self::visit_preproc_include(state, node),
             "access_specifier" => Self::visit_access_specifier(state, node),
-            _ => {
-                // For other node types, skip. Comments are picked up as docstrings.
-            }
+            // Comments are picked up as docstrings by the definitions they precede.
+            _ => {}
         }
     }
 
@@ -215,7 +225,14 @@ impl CppExtractor {
         }
 
         let docstring = Self::extract_docstring(state, node);
-        Self::create_class_node(state, &name, node, docstring, true);
+        Self::create_record_node(
+            state,
+            &name,
+            node,
+            docstring,
+            NodeKind::Class,
+            Visibility::Private,
+        );
     }
 
     /// Visit a struct specifier (default visibility: Pub).
@@ -231,29 +248,40 @@ impl CppExtractor {
         }
 
         let docstring = Self::extract_docstring(state, node);
-        Self::create_struct_node(state, &name, node, docstring);
+        Self::create_record_node(
+            state,
+            &name,
+            node,
+            docstring,
+            NodeKind::Struct,
+            Visibility::Pub,
+        );
     }
 
-    /// Create a Class node and walk its body.
-    fn create_class_node(
+    /// Create a Class or Struct node and walk its body.
+    ///
+    /// C++ classes default members to private access, structs to public;
+    /// the record bodies are otherwise handled identically.
+    fn create_record_node(
         state: &mut ExtractionState,
         name: &str,
         node: TsNode<'_>,
         docstring: Option<String>,
-        default_private: bool,
+        kind: NodeKind,
+        default_access: Visibility,
     ) {
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, name, start_line);
-        let text = state.node_text(node);
+        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let text = state.node_str(node);
         let signature = text.find('{').map(|pos| text[..pos].trim().to_string());
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Class,
+            kind,
             name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -295,89 +323,9 @@ impl CppExtractor {
         let old_access = state.access_specifier.clone();
         let old_depth = state.class_depth;
 
-        state.access_specifier = if default_private {
-            Visibility::Private
-        } else {
-            Visibility::Pub
-        };
+        state.access_specifier = default_access;
         state.class_depth += 1;
 
-        // Walk the class body
-        state.node_stack.push((name.to_string(), id.clone()));
-        if let Some(body) = find_direct_child_by_kind(node, "field_declaration_list") {
-            Self::visit_class_body(state, body);
-        }
-        state.node_stack.pop();
-
-        // Restore state
-        state.access_specifier = old_access;
-        state.class_depth = old_depth;
-    }
-
-    /// Create a Struct node (C++ struct with default public).
-    fn create_struct_node(
-        state: &mut ExtractionState,
-        name: &str,
-        node: TsNode<'_>,
-        docstring: Option<String>,
-    ) {
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Struct, name, start_line);
-        let text = state.node_text(node);
-        let signature = text.find('{').map(|pos| text[..pos].trim().to_string());
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Struct,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        Self::extract_annotations(state, node, &id);
-        // Extract base classes (inheritance).
-        Self::extract_base_classes(state, node, &id);
-
-        // Save and set access specifier state
-        let old_access = state.access_specifier.clone();
-        let old_depth = state.class_depth;
-
-        state.access_specifier = Visibility::Pub;
-        state.class_depth += 1;
-
-        // Walk the struct body
         state.node_stack.push((name.to_string(), id.clone()));
         if let Some(body) = find_direct_child_by_kind(node, "field_declaration_list") {
             Self::visit_class_body(state, body);
@@ -473,9 +421,6 @@ impl CppExtractor {
         }
     }
 
-    // visit_field_method_declaration was identical to visit_class_method_declaration
-    // and has been removed. Both call sites now use visit_class_method_declaration.
-
     // -------------------------------------------------------
     // access_specifier
     // -------------------------------------------------------
@@ -513,7 +458,7 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Namespace, &name, start_line);
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let signature = text.find('{').map(|pos| text[..pos].trim().to_string());
 
         let graph_node = Node {
@@ -576,7 +521,7 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Template, &name, start_line);
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let signature = text
             .find('{')
             .map(|pos| text[..pos].trim().to_string())

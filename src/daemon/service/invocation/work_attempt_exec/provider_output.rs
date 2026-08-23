@@ -77,7 +77,7 @@ pub(super) fn stream_summary(
 ) -> Option<WorkAttemptStreamSummaryV1> {
     let (retained, total) = captured?;
     let digest =
-        ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&retained)))).ok()?;
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(&retained)).ok()?;
     Some(WorkAttemptStreamSummaryV1 {
         byte_length: total,
         truncated: total > retained.len() as u64,

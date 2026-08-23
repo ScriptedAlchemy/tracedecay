@@ -48,12 +48,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -119,7 +124,6 @@ impl CobolExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -433,13 +437,8 @@ impl CobolExtractor {
                 {
                     para_end += 1;
                 }
-                // Check if the next item after comments is a paragraph_header.
-                // If so, the comments belong to the next paragraph, not this one.
-                if para_end < children.len() && children[para_end].kind() == "comment" {
-                    // Don't include trailing comments; they belong to the next paragraph.
-                } else {
-                    // Include up to para_end.
-                }
+                // Trailing comments before the next paragraph_header are excluded;
+                // they belong to the next paragraph's docstring.
 
                 Self::visit_paragraph(state, &children, para_start, para_end, docstring);
                 idx = para_end;

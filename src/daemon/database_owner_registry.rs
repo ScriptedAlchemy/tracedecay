@@ -7,16 +7,13 @@
 
 use super::*;
 
-/// Scope-specific MCP servers routed through one canonical physical DB owner.
-/// `Database` performs the actual same-process handle sharing; this registry
-/// keeps daemon cache aliases and branch-drift rekeys consistent with it.
-// Fields are `pub(super)`: the entry was private inside the flat `daemon.rs`,
-// which made it visible to every `crate::daemon` descendant — `branch_admin`
-// reads `server` directly, so the split must preserve that reach.
 /// A route-bound server, whether it was newly inserted, and any owners
 /// evicted to stay within the registry's capacity bound.
 pub(super) type BoundRouteInsertionV1<Server> = (Server, bool, Vec<(ProjectServerKey, Server)>);
 
+// Fields are `pub(super)`: the entry was private inside the flat `daemon.rs`,
+// which made it visible to every `crate::daemon` descendant — `branch_admin`
+// reads `server` directly, so the split must preserve that reach.
 pub(super) struct DatabaseOwnerEntry<Server> {
     pub(super) server: Server,
     pub(super) last_used: Instant,

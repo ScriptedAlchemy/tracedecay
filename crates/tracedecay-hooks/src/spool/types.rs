@@ -233,7 +233,34 @@ pub(super) struct AppendIntentV1 {
     pub(super) sequence: u64,
     pub(super) file_offset: u64,
     pub(super) framed_len: u32,
+    /// Raw frame bytes, base64-encoded in the JSON meta. A serde byte array
+    /// renders as one JSON integer per byte (~4x the frame size), and the
+    /// intent is rewritten and fsynced twice per appended event, so the
+    /// encoding directly bounds append write amplification.
+    #[serde(with = "frame_base64")]
     pub(super) frame: Vec<u8>,
+}
+
+mod frame_base64 {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        bytes: &[u8],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

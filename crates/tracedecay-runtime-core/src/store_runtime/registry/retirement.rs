@@ -1,6 +1,5 @@
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1};
 

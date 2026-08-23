@@ -124,8 +124,6 @@ pub use settings_api::{
 };
 mod storage_findings_api;
 mod storage_telemetry_api;
-#[cfg(test)]
-mod test_support;
 mod token_count;
 mod util;
 mod version;
@@ -1507,7 +1505,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/loom/temporal", get(loom_api::temporal))
         // V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
-        // family, plan-38 storage telemetry/findings, code-index freshness, and
+        // family, storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
         // Read-only Doctor/health paths come from the API-owned descriptors in
         // `tracedecay_api::doctor` so the mount cannot drift from them.
@@ -2895,7 +2893,7 @@ mod authority_tests {
         assert_eq!(selected.status(), StatusCode::NOT_FOUND);
     }
 
-    /// Deliverable 4: the V2 read-model routes must be reachable through both
+    /// The V2 read-model routes must be reachable through both
     /// router construction paths — the active-project gateway (`/api/…`) and the
     /// project-scoped gateway (`/api/projects/{id}/…`) — mirroring how the
     /// existing families are exposed.

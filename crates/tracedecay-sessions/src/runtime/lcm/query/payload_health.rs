@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -141,6 +142,11 @@ pub async fn payload_health_detail(
     let mut integrity_mismatch_count = 0_i64;
     let mut integrity_mismatch_refs = Vec::new();
     let root_contained = payload_root_contained(storage_root);
+    let unreferenced_payload_refs = metadata_refs
+        .difference(&referenced_refs)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unreferenced_marks = gc::gc_marks(conn, &unreferenced_payload_refs).await?;
 
     for payload_ref in &metadata_refs {
         let bytes = metadata_bytes.get(payload_ref).copied().unwrap_or_default();
@@ -152,7 +158,7 @@ pub async fn payload_health_detail(
             unreferenced_count += 1;
             reclaimable_bytes_after_grace = reclaimable_bytes_after_grace.saturating_add(bytes);
             let eligible_at =
-                gc_eligible_at_for_unreferenced(conn, payload_ref, grace_seconds_i64).await?;
+                unreferenced_eligible_at(&unreferenced_marks, payload_ref, grace_seconds_i64);
             if let Some(eligible_at) = eligible_at {
                 next_run_eligible_at = Some(
                     next_run_eligible_at.map_or(eligible_at, |current| current.min(eligible_at)),
@@ -250,16 +256,15 @@ pub async fn payload_health_detail(
         0
     };
     let unreferenced_refs = payload_unreferenced_samples(PayloadUnreferencedSamplesRequest {
-        conn,
         metadata_refs: &metadata_refs,
         referenced_refs: &referenced_refs,
         metadata_bytes: &metadata_bytes,
+        unreferenced_marks: &unreferenced_marks,
         last_gc_at,
         grace_seconds: grace_seconds_i64,
         now,
         sample_limit,
-    })
-    .await?;
+    });
 
     Ok(PayloadHealthDetail {
         payload: LcmPayloadStatus {
@@ -492,25 +497,25 @@ fn payload_ref_location(
     }
 }
 
-struct PayloadUnreferencedSamplesRequest<'a, Q: ?Sized> {
-    conn: &'a Q,
+struct PayloadUnreferencedSamplesRequest<'a> {
     metadata_refs: &'a BTreeSet<String>,
     referenced_refs: &'a BTreeSet<String>,
     metadata_bytes: &'a BTreeMap<String, u64>,
+    unreferenced_marks: &'a HashMap<String, (String, i64)>,
     last_gc_at: Option<i64>,
     grace_seconds: i64,
     now: i64,
     sample_limit: usize,
 }
 
-async fn payload_unreferenced_samples<Q: QueryExecutor + ?Sized>(
-    request: PayloadUnreferencedSamplesRequest<'_, Q>,
-) -> Result<Vec<PayloadRefStatusSample>, LcmError> {
+fn payload_unreferenced_samples(
+    request: PayloadUnreferencedSamplesRequest<'_>,
+) -> Vec<PayloadRefStatusSample> {
     let PayloadUnreferencedSamplesRequest {
-        conn,
         metadata_refs,
         referenced_refs,
         metadata_bytes,
+        unreferenced_marks,
         last_gc_at,
         grace_seconds,
         now,
@@ -521,7 +526,8 @@ async fn payload_unreferenced_samples<Q: QueryExecutor + ?Sized>(
         if samples.len() >= sample_limit {
             break;
         }
-        let eligible_at = gc_eligible_at_for_unreferenced(conn, payload_ref, grace_seconds).await?;
+        let eligible_at =
+            unreferenced_eligible_at(unreferenced_marks, payload_ref, grace_seconds);
         let grace_remaining_seconds = eligible_at.map(|ts| ts.saturating_sub(now).max(0));
         samples.push(PayloadRefStatusSample {
             payload_ref: payload_ref.clone(),
@@ -538,27 +544,17 @@ async fn payload_unreferenced_samples<Q: QueryExecutor + ?Sized>(
             },
         });
     }
-    Ok(samples)
+    samples
 }
 
-async fn gc_eligible_at_for_unreferenced(
-    conn: &(impl QueryExecutor + ?Sized),
+fn unreferenced_eligible_at(
+    marks: &HashMap<String, (String, i64)>,
     payload_ref: &str,
     grace_seconds: i64,
-) -> Result<Option<i64>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT first_seen_at
-             FROM lcm_gc_marks
-             WHERE payload_ref = ?1 AND state = 'unreferenced'",
-            params![payload_ref],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Ok(None);
-    };
-    let first_seen_at: i64 = row.get(0)?;
-    Ok(Some(first_seen_at.saturating_add(grace_seconds)))
+) -> Option<i64> {
+    marks.get(payload_ref).and_then(|(state, first_seen_at)| {
+        (state.as_str() == "unreferenced").then_some(first_seen_at.saturating_add(grace_seconds))
+    })
 }
 
 async fn gc_meta_i64(
@@ -575,35 +571,15 @@ async fn tombstoned_count(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)
-               AND (
-                    content LIKE ?3 COLLATE NOCASE
-                 OR content LIKE ?4 COLLATE NOCASE
-                 OR snippet_text LIKE ?3 COLLATE NOCASE
-                 OR snippet_text LIKE ?4 COLLATE NOCASE
-                 OR index_text LIKE ?3 COLLATE NOCASE
-                 OR index_text LIKE ?4 COLLATE NOCASE
-                 OR metadata_json LIKE ?3 COLLATE NOCASE
-                 OR metadata_json LIKE ?4 COLLATE NOCASE
-               )",
-            params![
-                provider,
-                session_id,
-                "%[gc'd externalized payload:%",
-                "%[gc'd externalized tool output:%",
-            ],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("tombstoned count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+    gc::count_placeholder_text_rows(
+        conn,
+        gc::PlaceholderScanScope::ProviderOrAll {
+            provider,
+            session_id,
+        },
+        &gc::gc_prefix_like_patterns(),
+    )
+    .await
 }
 
 async fn placeholder_payload_status(
@@ -662,42 +638,19 @@ async fn placeholder_refs_for_scope(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
-    let placeholder_predicates = PLACEHOLDER_TEXT_COLUMNS
-        .iter()
-        .flat_map(|column| {
-            PLACEHOLDER_PREFIXES
-                .iter()
-                .map(move |_| format!("{column} LIKE ? COLLATE NOCASE"))
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let sql = format!(
-        "SELECT content, snippet_text, index_text, metadata_json
-         FROM lcm_raw_messages
-         WHERE (? = 'all' OR provider = ?)
-           AND (? IS NULL OR session_id = ?)
-           AND ({placeholder_predicates})"
-    );
-    let session_value = session_id.map_or(Value::Null, |value| Value::Text(value.to_string()));
-    let mut values = vec![
-        Value::Text(provider.to_string()),
-        Value::Text(provider.to_string()),
-        session_value.clone(),
-        session_value,
-    ];
-    for _column in PLACEHOLDER_TEXT_COLUMNS {
-        for prefix in PLACEHOLDER_PREFIXES {
-            values.push(Value::Text(format!("%{prefix}%")));
-        }
-    }
+    let rows = gc::scan_placeholder_text_rows(
+        conn,
+        gc::PlaceholderScanScope::ProviderOrAll {
+            provider,
+            session_id,
+        },
+        &gc::all_placeholder_like_patterns(),
+    )
+    .await?;
     let mut refs = BTreeSet::new();
-    let mut rows = conn.query(&sql, values).await?;
-    while let Some(row) = rows.next().await? {
-        for index in 0..4 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            if let Some(value) = value {
-                refs.extend(payload::extract_payload_refs_from_text(&value));
-            }
+    for row in rows {
+        for text in row.texts() {
+            refs.extend(payload::extract_payload_refs_from_text(text));
         }
     }
     Ok(refs)

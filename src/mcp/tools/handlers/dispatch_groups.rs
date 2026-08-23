@@ -238,7 +238,7 @@ pub(super) async fn dispatch_graph_tools(
             )
             .await
         }
-        "tracedecay_retrieve" => handle_retrieve(cg, &args),
+        "tracedecay_retrieve" => handle_retrieve(cg, &args).await,
         "tracedecay_context" => {
             graph::handle_context(
                 cg,

@@ -113,7 +113,7 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
         feedback_notice: None,
         github_stack_signal_available: false,
     };
-    let Ok(wire) = serde_json::from_value::<DaemonAdmissionResponseWireV1>(response.clone()) else {
+    let Ok(wire) = DaemonAdmissionResponseWireV1::deserialize(response) else {
         return unavailable();
     };
     if wire.action != "hook_v2_admit" {

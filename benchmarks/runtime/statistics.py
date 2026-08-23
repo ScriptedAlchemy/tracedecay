@@ -89,6 +89,38 @@ def summarize_distribution(values: Iterable[float | int]) -> dict[str, Any]:
     }
 
 
+def eligible_distribution(values: Sequence[int | float]) -> dict[str, Any]:
+    """Summarize a distribution with minimum-sample gates on percentiles."""
+
+    distribution = summarize_distribution(values)
+
+    def eligible(field: str, minimum_samples: int) -> dict[str, Any]:
+        available = len(values) >= minimum_samples
+        return {
+            "available": available,
+            "value": distribution[field] if available else None,
+            "minimum_samples": minimum_samples,
+        }
+
+    return {
+        "sample_count": distribution["sample_count"],
+        "min": distribution["min"],
+        "p50": eligible("p50", 2),
+        "p95": eligible("p95", 40),
+        "p99": eligible("p99", 100),
+        "max": distribution["max"],
+        "mean": distribution["mean"],
+        "percentile_method": distribution["percentile_method"],
+    }
+
+
+def eligible_latency_percentiles(values: Sequence[int | float]) -> dict[str, Any]:
+    """Return only the gated p50/p95/p99 fields of ``eligible_distribution``."""
+
+    distribution = eligible_distribution(values)
+    return {field: distribution[field] for field in ("p50", "p95", "p99")}
+
+
 def _normalization_identity(sample: Mapping[str, Any]) -> dict[str, Any]:
     identity = sample.get("identity")
     if not isinstance(identity, Mapping):

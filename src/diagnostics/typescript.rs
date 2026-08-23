@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `tsc --pretty false --noEmit` driver.
 //!
 //! tsc emits diagnostics as one-per-line text:

@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use crate::Result;
 use crate::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
@@ -403,7 +404,7 @@ impl ManagedSkill {
             hasher.update(b"\0");
             hasher.update(&support.bytes);
         }
-        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+        Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
     }
 
     pub fn render_materialized_skill_markdown(&self) -> Result<String> {
@@ -472,7 +473,7 @@ impl ManagedSkill {
             hasher.update(b"\0");
             hasher.update(&file.bytes);
         }
-        format!("sha256:{}", hex::encode(hasher.finalize()))
+        encode_tagged_lowercase_hex("sha256:", &hasher.finalize())
     }
 }
 

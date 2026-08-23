@@ -573,9 +573,9 @@ pub fn direct_commit_records(
     messages: &[SessionMessageRecord],
     project_root: &std::path::Path,
 ) -> Vec<CommitSessionRecord> {
-    let Ok(repo) = gix::discover(project_root) else {
-        return Vec::new();
-    };
+    // Most persisted batches carry no commit candidates, so the repository is
+    // only discovered once the first candidates array actually needs resolving.
+    let mut repo: Option<gix::Repository> = None;
     let mut records = BTreeMap::<(String, String), CommitSessionRecord>::new();
     for message in messages {
         let Some(metadata) = message
@@ -602,6 +602,16 @@ pub fn direct_commit_records(
         ] {
             let Some(candidates) = metadata.get(key).and_then(serde_json::Value::as_array) else {
                 continue;
+            };
+            let repo = match &mut repo {
+                Some(repo) => repo,
+                slot => match gix::discover(project_root) {
+                    Ok(discovered) => slot.insert(discovered),
+                    // No records were resolved before the first discovery
+                    // attempt, so an undiscoverable repo still yields the
+                    // empty record set it always did.
+                    Err(_) => return Vec::new(),
+                },
             };
             for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
                 let Ok(spec) = repo.rev_parse_single(candidate) else {

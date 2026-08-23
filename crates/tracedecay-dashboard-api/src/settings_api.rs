@@ -95,7 +95,7 @@ struct ProjectEditableSettingsV1 {
     git_ignore: bool,
     telemetry: TelemetrySettingsV1,
     sync: SyncSettingsV1,
-    /// Rendered from the effective Plan 20 `context_scout.settings.v1` value;
+    /// Rendered from the effective `context_scout.settings.v1` value;
     /// the dashboard holds no Scout state of its own.
     context_scout: bool,
 }

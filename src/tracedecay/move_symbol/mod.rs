@@ -183,7 +183,6 @@ impl TraceDecay {
             ));
         }
 
-        // Build the source with the span removed (with blank-line cleanup).
         let residual = remove_span_with_cleanup(&src_lines, start, end_inclusive);
         let source_modified = splice_lines(&residual, source.ends_with('\n'));
 

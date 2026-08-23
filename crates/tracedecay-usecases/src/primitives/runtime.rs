@@ -1438,6 +1438,36 @@ fn grep_page<T: Serialize>(
     )
 }
 
+/// Byte-counting sink that aborts serialization once the operation output cap
+/// is exceeded, so the cap check never materializes a payload copy that the
+/// transport re-serializes anyway.
+struct CountingSink {
+    written: usize,
+    limit: usize,
+}
+
+impl CountingSink {
+    fn exceeded(&self) -> bool {
+        self.written > self.limit
+    }
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len());
+        if self.exceeded() {
+            return Err(std::io::Error::other(
+                "operation output exceeds its byte cap",
+            ));
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evidence_result(
     access: &ProjectSourceAccessSnapshot,
@@ -1451,9 +1481,15 @@ fn evidence_result(
     budget: OperationBudgetUsage,
     partial: bool,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    let payload_bytes = value_or_problem!(serde_json::to_vec(&payload), context, operation);
-    if payload_bytes.len() > MAX_OPERATION_OUTPUT_BYTES {
-        return unavailable(context, operation);
+    let mut output = CountingSink {
+        written: 0,
+        limit: MAX_OPERATION_OUTPUT_BYTES,
+    };
+    if serde_json::to_writer(&mut output, &payload).is_err() {
+        if output.exceeded() {
+            return unavailable(context, operation);
+        }
+        return contract_problem(context, operation);
     }
     let authority = authority_receipt(access, context, finished_at)?;
     let complete = coverage.completeness == CoverageCompleteness::Complete;

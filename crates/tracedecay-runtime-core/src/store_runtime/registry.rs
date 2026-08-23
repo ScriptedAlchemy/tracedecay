@@ -3,13 +3,9 @@
 //! Entries are keyed only by typed shard identity and incarnation. Locator
 //! resolution starts after an opening entry wins singleflight, and publication
 //! retains exactly one concrete [`ShardRuntime`] for that binding.
-//!
-//! Dead-code allowance lives on the parent `store_runtime` module until every
-//! live open routes through this registry.
 // The typed failure stays by-value at this boundary; `resolver.rs` documents
 // the boxed alternative if the variant set grows further.
 #![allow(clippy::result_large_err)]
-#![allow(unused_imports)] // Re-exports remain the registry's crate-visible API surface.
 
 mod attachment;
 mod capacity;
@@ -27,11 +23,10 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use tracedecay_domain::UtcMicros;
 use tracedecay_store::{
     AdmissionConfigV1, RuntimeMaintenanceStateV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1, StoreShardScopeV1,
@@ -49,6 +44,7 @@ pub use attachment::{
     PublishedShardRuntime,
 };
 pub use capacity::StoreRuntimeRegistryConfig;
+#[cfg(test)]
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
@@ -60,8 +56,9 @@ pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
     StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
+#[cfg(test)]
+pub(crate) use open::StoreRuntimeOpenBegin;
 pub use open::StoreRuntimeOpenResult;
-pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin};
 pub use ports::{
     LifecycleShardRuntimePublisher, ResolvedStoreLocator, RuntimeLocatorRecord,
     ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeRegistryFuture,

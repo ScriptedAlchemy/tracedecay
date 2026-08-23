@@ -10,9 +10,6 @@
 //! the lightweight project enrollment marker and inspect filesystem metadata,
 //! but it never creates an artifact, opens a database, reads database bytes,
 //! migrates, repairs, or otherwise touches a live store.
-//!
-//! Dead-code allowance lives on the parent `store_runtime` module until daemon
-//! construction wires this resolver.
 
 use std::collections::BTreeMap;
 use std::fmt;

@@ -47,6 +47,33 @@ use super::scoring::{
 };
 use crate::memory::encoding::HolographicEncoder;
 
+/// Raw score components retained so the `why` explanation string is only
+/// formatted for hits that survive the zero-score and threshold filters.
+struct ProjectMemorySearchWhy {
+    fts: f64,
+    coverage: f64,
+    jaccard: f64,
+    holographic: f64,
+    trust: f64,
+    temporal_decay: f64,
+    retrieval_count: u64,
+}
+
+impl ProjectMemorySearchWhy {
+    fn render(&self) -> String {
+        format!(
+            "fts={:.3}, coverage={:.3}, jaccard={:.3}, holographic={:.3}, trust={:.3}, temporal_decay={:.3}, retrieval_count={}",
+            self.fts,
+            self.coverage,
+            self.jaccard,
+            self.holographic,
+            self.trust,
+            self.temporal_decay,
+            self.retrieval_count,
+        )
+    }
+}
+
 fn project_memory_search_scores(
     query_tokens: &[String],
     encoder: &HolographicEncoder,
@@ -54,7 +81,7 @@ fn project_memory_search_scores(
     normalized_bm25: f64,
     fact: &ProjectMemoryFactV1,
     now: UtcMicros,
-) -> FactStoreResult<(ProjectMemoryFactSearchScoresV1, String)> {
+) -> FactStoreResult<(ProjectMemoryFactSearchScoresV1, ProjectMemorySearchWhy)> {
     let fact_tokens = project_memory_fact_tokens(fact);
     let coverage = project_memory_term_coverage(query_tokens, &fact_tokens);
     let fts = project_memory_fts_component(normalized_bm25, coverage);
@@ -62,13 +89,14 @@ fn project_memory_search_scores(
     let holographic = project_memory_holographic_score(encoder, query_vector, fact)?;
     let trust = fact.trust().as_f64();
     let temporal_decay = project_memory_temporal_decay(fact.telemetry().updated_at(), now);
+    let retrieval_count = fact.telemetry().retrieval_count();
     let score = project_memory_combined_score(
         fts,
         jaccard,
         holographic,
         trust,
         temporal_decay,
-        fact.telemetry().retrieval_count(),
+        retrieval_count,
     );
     Ok((
         ProjectMemoryFactSearchScoresV1::new(
@@ -78,10 +106,15 @@ fn project_memory_search_scores(
             project_memory_millionths(holographic),
             project_memory_millionths(trust),
         )?,
-        format!(
-            "fts={fts:.3}, coverage={coverage:.3}, jaccard={jaccard:.3}, holographic={holographic:.3}, trust={trust:.3}, temporal_decay={temporal_decay:.3}, retrieval_count={}",
-            fact.telemetry().retrieval_count(),
-        ),
+        ProjectMemorySearchWhy {
+            fts,
+            coverage,
+            jaccard,
+            holographic,
+            trust,
+            temporal_decay,
+            retrieval_count,
+        },
     ))
 }
 
@@ -155,7 +188,7 @@ async fn project_memory_rank_facts_tx(
         projections
             .into_iter()
             .filter_map(|projection| match projection {
-                ProjectMemoryFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
+                ProjectMemoryFactProjectionV1::Available(fact) => Some(*fact),
                 ProjectMemoryFactProjectionV1::Unavailable(_) => None,
             })
             .collect()
@@ -205,9 +238,10 @@ async fn project_memory_rank_facts_tx(
                 {
                     continue;
                 }
+                let updated_at = fact.telemetry().updated_at();
                 ranked.push((
-                    ProjectMemoryFactSearchHitV1::new(fact.clone(), scores, Some(why))?,
-                    fact.telemetry().updated_at(),
+                    ProjectMemoryFactSearchHitV1::new(fact, scores, Some(why.render()))?,
+                    updated_at,
                 ));
             }
         }
@@ -222,13 +256,14 @@ async fn project_memory_rank_facts_tx(
                 }
                 let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+                let updated_at = fact.telemetry().updated_at();
                 ranked.push((
                     ProjectMemoryFactSearchHitV1::new(
-                        fact.clone(),
+                        fact,
                         scores,
                         Some("entity probe".to_owned()),
                     )?,
-                    fact.telemetry().updated_at(),
+                    updated_at,
                 ));
             }
         }
@@ -237,13 +272,14 @@ async fn project_memory_rank_facts_tx(
                 ensure_project_memory_read_active(read_control)?;
                 let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+                let updated_at = fact.telemetry().updated_at();
                 ranked.push((
                     ProjectMemoryFactSearchHitV1::new(
-                        fact.clone(),
+                        fact,
                         scores,
                         Some(format!("entity/relation co-occurrence from {entity}")),
                     )?,
-                    fact.telemetry().updated_at(),
+                    updated_at,
                 ));
             }
         }
@@ -255,13 +291,14 @@ async fn project_memory_rank_facts_tx(
                 }
                 let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+                let updated_at = fact.telemetry().updated_at();
                 ranked.push((
                     ProjectMemoryFactSearchHitV1::new(
-                        fact.clone(),
+                        fact,
                         scores,
                         Some("entity reasoning".to_owned()),
                     )?,
-                    fact.telemetry().updated_at(),
+                    updated_at,
                 ));
             }
         }
@@ -509,26 +546,29 @@ pub(super) async fn find_project_memory_contradictions_tx(
     .await?;
     ensure_project_memory_read_active(read_control)?;
     facts.sort_by(|left, right| left.fact_id().cmp(right.fact_id()));
+    // Each fact's normalized entity set and token vector are pure functions of
+    // the fact, so they are computed once instead of inside the O(n²) pair scan.
+    let mut normalized = Vec::with_capacity(facts.len());
+    for fact in &facts {
+        ensure_project_memory_read_active(read_control)?;
+        normalized.push((
+            fact.entities()
+                .iter()
+                .map(|entity| normalize_entity(entity).to_ascii_lowercase())
+                .collect::<BTreeSet<_>>(),
+            project_memory_fact_tokens(fact),
+        ));
+    }
     let mut contradictions = Vec::new();
     'outer: for (index, left) in facts.iter().enumerate() {
-        for right in facts.iter().skip(index + 1) {
+        let (left_entities, left_tokens) = &normalized[index];
+        for (right_index, right) in facts.iter().enumerate().skip(index + 1) {
             ensure_project_memory_read_active(read_control)?;
-            let left_entities = left
-                .entities()
-                .iter()
-                .map(|entity| normalize_entity(entity).to_ascii_lowercase())
-                .collect::<BTreeSet<_>>();
-            let right_entities = right
-                .entities()
-                .iter()
-                .map(|entity| normalize_entity(entity).to_ascii_lowercase())
-                .collect::<BTreeSet<_>>();
-            if left_entities.is_disjoint(&right_entities) {
+            let (right_entities, right_tokens) = &normalized[right_index];
+            if left_entities.is_disjoint(right_entities) {
                 continue;
             }
-            let left_tokens = project_memory_fact_tokens(left);
-            let right_tokens = project_memory_fact_tokens(right);
-            let similarity = project_memory_jaccard(&left_tokens, &right_tokens);
+            let similarity = project_memory_jaccard(left_tokens, right_tokens);
             let divergence = 1.0 - similarity;
             let left_negative = left_tokens.iter().any(|token| {
                 matches!(

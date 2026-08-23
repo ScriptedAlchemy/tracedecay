@@ -1,4 +1,28 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
+use serde_json::Value;
+
+/// Millisecond/second boundary for numeric provider timestamps: values at or
+/// above this are unix milliseconds, values below are already unix seconds.
+const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
+
+/// Normalizes a numeric provider timestamp that may be unix seconds or unix
+/// milliseconds into unix seconds.
+pub const fn normalize_timestamp_secs(ts: i64) -> i64 {
+    if ts >= UNIX_TIMESTAMP_MILLIS_THRESHOLD {
+        ts / 1000
+    } else {
+        ts
+    }
+}
+
+/// Extracts a unix-seconds timestamp from a JSON number or numeric string,
+/// normalizing millisecond-scale values (see [`normalize_timestamp_secs`]).
+pub fn timestamp_secs(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        .map(normalize_timestamp_secs)
+}
 
 /// Parses RFC3339 timestamps into Unix seconds, rejecting pre-epoch values.
 ///

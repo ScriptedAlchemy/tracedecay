@@ -39,7 +39,7 @@ if os.fspath(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, os.fspath(REPOSITORY_ROOT))
 
 from benchmarks.runtime.schema import write_jsonl
-from benchmarks.runtime.statistics import summarize_distribution
+from benchmarks.runtime.statistics import eligible_distribution
 
 
 SCHEMA_VERSION = 1
@@ -259,29 +259,6 @@ def _availability(
     }
 
 
-def _eligible_distribution(values: Sequence[int | float]) -> dict[str, Any]:
-    distribution = summarize_distribution(values)
-
-    def eligible(field: str, minimum_samples: int) -> dict[str, Any]:
-        available = len(values) >= minimum_samples
-        return {
-            "available": available,
-            "value": distribution[field] if available else None,
-            "minimum_samples": minimum_samples,
-        }
-
-    return {
-        "sample_count": distribution["sample_count"],
-        "min": distribution["min"],
-        "p50": eligible("p50", 2),
-        "p95": eligible("p95", 40),
-        "p99": eligible("p99", 100),
-        "max": distribution["max"],
-        "mean": distribution["mean"],
-        "percentile_method": distribution["percentile_method"],
-    }
-
-
 def summarize_criterion_capture(
     criterion_root: Path,
     *,
@@ -354,7 +331,7 @@ def summarize_criterion_capture(
             )
 
     benchmarks = {
-        benchmark_id: {"latency_ns": _eligible_distribution(values)}
+        benchmark_id: {"latency_ns": eligible_distribution(values)}
         for benchmark_id, values in sorted(benchmark_values.items())
     }
     return samples, benchmarks
@@ -415,7 +392,7 @@ def summarize_fixture_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
         },
         "reopen_time_ns": {
             "available": True,
-            **_eligible_distribution(reopen_values),
+            **eligible_distribution(reopen_values),
             "samples": reopen_values,
             "detail": None,
         },
@@ -1195,7 +1172,7 @@ def _paired_command(args: argparse.Namespace) -> int:
     for variant in ("baseline", "candidate"):
         variant_samples = [sample for sample in samples if sample["variant"] == variant]
         latency_distributions[variant] = {
-            benchmark_id: _eligible_distribution(
+            benchmark_id: eligible_distribution(
                 [
                     sample["elapsed_ns_per_iteration"]
                     for sample in variant_samples

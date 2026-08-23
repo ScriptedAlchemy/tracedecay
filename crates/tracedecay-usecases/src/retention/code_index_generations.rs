@@ -26,6 +26,7 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 #[cfg(test)]
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_code_index::production::sealed_generation_format_revision_is_compatible;
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
 mod generation_scan;
@@ -614,9 +615,7 @@ pub fn code_text_artifact_path(
 /// as stranded.
 #[must_use]
 pub fn code_index_scope_hash(canonical_project_root: &Path) -> String {
-    hex::encode(Sha256::digest(
-        canonical_project_root.to_string_lossy().as_bytes(),
-    ))
+    sha256_hex(canonical_project_root.to_string_lossy().as_bytes())
 }
 
 /// Plan retention with full digest verification. This is the only planner a
@@ -2436,12 +2435,7 @@ fn open_files_match_generation_identity(
         .generation_file
         .strip_prefix("generation-")
         .and_then(|value| value.strip_suffix(".json"))
-        .filter(|value| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .filter(|value| is_lowercase_hex(value, 64))
         .ok_or_else(|| {
             CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "retired generation file '{}' does not name a SHA-256 content digest",
@@ -2473,8 +2467,8 @@ fn open_files_match_generation_identity(
             return Ok(false);
         }
         if left_read == 0 {
-            return Ok(hex::encode(left_hasher.finalize()) == expected_digest
-                && hex::encode(right_hasher.finalize()) == expected_digest);
+            return Ok(encode_lowercase_hex(&left_hasher.finalize()) == expected_digest
+                && encode_lowercase_hex(&right_hasher.finalize()) == expected_digest);
         }
         left_hasher.update(&left_buffer[..left_read]);
         right_hasher.update(&right_buffer[..right_read]);
@@ -2498,7 +2492,7 @@ fn open_file_sha256_hex_cancellable(
         }
         let read = read_full(&mut reader, &mut buffer)?;
         if read == 0 {
-            return Ok(hex::encode(hasher.finalize()));
+            return Ok(encode_lowercase_hex(&hasher.finalize()));
         }
         hasher.update(&buffer[..read]);
     }
@@ -3804,10 +3798,7 @@ fn scope_root_path(
 }
 
 fn is_code_index_scope_hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    is_lowercase_hex(value, 64)
 }
 
 /// Payload bytes and newest mtime for one scope tree.

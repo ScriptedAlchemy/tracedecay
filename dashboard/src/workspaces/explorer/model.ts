@@ -318,15 +318,3 @@ export function facetCounts(hits: readonly Hit[]): FacetCount[] {
     .map(([id, count]) => ({ id, label: id, count }))
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
-
-/** Compact relative age for a unix-seconds stamp. */
-export function relativeTime(epochSeconds: number | undefined): string | undefined {
-  if (epochSeconds == null || !Number.isFinite(epochSeconds)) return undefined;
-  const delta = Date.now() / 1000 - epochSeconds;
-  if (delta < 0) return 'now';
-  if (delta < 90) return 'now';
-  if (delta < 3600) return `${Math.round(delta / 60)}m`;
-  if (delta < 86_400) return `${Math.round(delta / 3600)}h`;
-  if (delta < 30 * 86_400) return `${Math.round(delta / 86_400)}d`;
-  return `${Math.round(delta / (30 * 86_400))}mo`;
-}

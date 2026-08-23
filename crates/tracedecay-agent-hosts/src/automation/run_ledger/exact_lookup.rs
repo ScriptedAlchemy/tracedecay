@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use super::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
@@ -933,12 +934,7 @@ fn ledger_io_error(
 }
 
 fn digest_from_hasher(hasher: Sha256) -> std::result::Result<ManifestDigest, String> {
-    let mut encoded = String::with_capacity(71);
-    encoded.push_str("sha256:");
-    for byte in hasher.finalize() {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").map_err(|error| error.to_string())?;
-    }
+    let encoded = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
     ManifestDigest::new(encoded).map_err(|error| error.to_string())
 }
 

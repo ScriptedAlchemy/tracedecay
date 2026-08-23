@@ -1,5 +1,4 @@
-//! `primitive` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `primitive` module test coverage.
 
 use super::*;
 

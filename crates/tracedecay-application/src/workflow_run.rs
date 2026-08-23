@@ -6,7 +6,7 @@ use thiserror::Error;
 use tracedecay_domain::{
     ManifestDigest, RunId, WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkflowDefinition,
     WorkflowDefinitionId, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
-    WorkflowRunProjection, WorkflowRunStateError, canonical_text::canonical_framed_sha256,
+    WorkflowRunProjection, WorkflowRunStateError, canonical_text::canonical_framed_sha256_bytes,
 };
 
 /// Maximum number of workflow histories rebuilt by one restart-recovery read.
@@ -269,9 +269,9 @@ const WORKFLOW_ARTIFACT_PAYLOAD_DIGEST_DOMAIN: &[u8] =
 pub fn workflow_artifact_payload_digest(
     bytes: &[u8],
 ) -> Result<ManifestDigest, WorkflowArtifactStoreError> {
-    ManifestDigest::new(format!(
-        "sha256:{}",
-        canonical_framed_sha256(WORKFLOW_ARTIFACT_PAYLOAD_DIGEST_DOMAIN, &[bytes])
+    ManifestDigest::from_sha256_bytes(&canonical_framed_sha256_bytes(
+        WORKFLOW_ARTIFACT_PAYLOAD_DIGEST_DOMAIN,
+        &[bytes],
     ))
     .map_err(|_| WorkflowArtifactStoreError::DigestMismatch)
 }

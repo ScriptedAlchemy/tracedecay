@@ -23,9 +23,8 @@ after build" assertion. CI builds the bundle once in the `dashboard-assets`
 job and every Rust job downloads it as an artifact. GitHub Releases ship
 prebuilt binaries; workspace Cargo packages are private.
 
-The full `cargo nextest run --workspace --all-features` suite has not yet had a
-clean end-to-end run in this checkout. Run it and read the failures rather than
-assuming a green baseline; treat new failures in code you touched as yours.
+Do not assume a green baseline for the full suite: run it and read the
+failures; treat new failures in code you touched as yours.
 
 ## Final V2 storage
 
@@ -231,7 +230,8 @@ behavior.
 - Target `beta` for experimental or breaking changes.
 - Keep PRs focused — one logical change per PR.
 - Include test coverage for new behavior.
-- Update `CHANGELOG.md` under an `[Unreleased]` section.
+- Do not hand-edit `CHANGELOG.md`; release automation generates it from
+  conventional commit messages.
 
 ## Reporting Issues
 

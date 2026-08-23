@@ -177,14 +177,14 @@ where
         let mut vectors = session
             .embed_batch(&batch, self.cancellation.as_ref())
             .map_err(map_embed_error)?;
-        if vectors.len() != 1 {
-            return Err(RetrievalPortError::Contract(
-                "query embedding runtime returned a non-unit batch".to_owned(),
-            ));
-        }
-        let vector = vectors
-            .pop()
-            .unwrap_or_else(|| panic!("unit query embedding batch"));
+        let vector = match vectors.pop() {
+            Some(vector) if vectors.is_empty() => vector,
+            _ => {
+                return Err(RetrievalPortError::Contract(
+                    "query embedding runtime returned a non-unit batch".to_owned(),
+                ));
+            }
+        };
         vector.validate().map_err(map_embed_error)?;
         EphemeralQueryEmbeddingV1::new(
             request.query_digest.clone(),

@@ -1,3 +1,5 @@
+use std::str;
+
 use sha2::{Digest, Sha256};
 
 pub(super) trait CanonicalSink {
@@ -136,12 +138,17 @@ pub(super) fn write_u64(value: u64, output: &mut impl CanonicalSink) {
             break;
         }
     }
-    // Each byte is an ASCII digit by construction. Encode one digit at a time
-    // through the stack buffer so this path has no fallible conversion or
-    // allocation fallback.
-    let mut encoded = [0u8; 4];
-    for digit in &buffer[index..] {
-        output.write(char::from(*digit).encode_utf8(&mut encoded));
+    match str::from_utf8(&buffer[index..]) {
+        Ok(digits) => output.write(digits),
+        // Unreachable: every byte is an ASCII digit by construction. The
+        // per-digit path emits the identical bytes, keeping this branch
+        // infallible without a panic.
+        Err(_) => {
+            let mut encoded = [0u8; 4];
+            for digit in &buffer[index..] {
+                output.write(char::from(*digit).encode_utf8(&mut encoded));
+            }
+        }
     }
 }
 

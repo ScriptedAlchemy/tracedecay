@@ -45,15 +45,6 @@ use super::{
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
-const PLACEHOLDER_PREFIXES: [&str; 5] = [
-    "[externalized payload:",
-    "[gc'd externalized payload:",
-    "[externalized lcm ingest payload:",
-    "[externalized tool output:",
-    "[gc'd externalized tool output:",
-];
-const PLACEHOLDER_TEXT_COLUMNS: [&str; 4] =
-    ["content", "snippet_text", "index_text", "metadata_json"];
 const TERM_SEPARATORS: [char; 4] = ['-', ':', '/', '#'];
 const RAW_GREP_RECENCY_EXPR: &str = "COALESCE(r.timestamp, r.store_id)";
 const SUMMARY_GREP_RECENCY_EXPR: &str =

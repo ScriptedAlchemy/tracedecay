@@ -104,7 +104,6 @@ pub(crate) fn check_for_update(
     let now = current_unix_timestamp();
 
     let latest = if !skip_cache && elapsed_since(now, config.last_version_check_at) < 300 {
-        // Use cached value
         if config.cached_latest_version.is_empty() {
             return;
         }

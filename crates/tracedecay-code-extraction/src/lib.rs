@@ -5,6 +5,7 @@
 //! publication remain in `tracedecay-code-index`.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 mod types;
 
@@ -295,6 +296,24 @@ pub trait LanguageExtractor: Send + Sync {
     ) -> ParsedExtractionArtifactV1 {
         ParsedExtractionArtifactV1::from_parsed(self.extract_parsed(file_path, source, tree, scope))
     }
+
+    /// Extract from a retained tree together with the exact text the parser
+    /// consumed (the [`LanguageExtractor::prepare_parse_source`] output the
+    /// retained document already holds).
+    ///
+    /// `parsed_source` is byte-identical to `source` for plain grammars;
+    /// composite adapters receive their own mask back and must not re-mask.
+    /// The default ignores it and preserves each extractor's existing path.
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtractionArtifactV1 {
+        self.extract_parsed_artifact(file_path, source, tree, scope)
+    }
 }
 
 /// Registry of all available language extractors.
@@ -302,6 +321,10 @@ pub trait LanguageExtractor: Send + Sync {
 /// Dispatches to the correct extractor based on file extension.
 pub struct LanguageRegistry {
     extractors: Vec<Box<dyn LanguageExtractor>>,
+    /// Extension → index into `extractors`, built once so per-file lookup is
+    /// one hash probe instead of a linear scan across every extractor.
+    /// First-registered extractor wins, matching the previous scan order.
+    by_extension: HashMap<String, usize>,
 }
 
 impl LanguageRegistry {
@@ -405,22 +428,34 @@ impl LanguageRegistry {
         #[cfg(feature = "lang-toml")]
         extractors.push(Box::new(TomlExtractor));
 
-        Self { extractors }
+        Self::from_extractors(extractors)
+    }
+
+    fn from_extractors(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
+        let mut by_extension = HashMap::new();
+        for (index, extractor) in extractors.iter().enumerate() {
+            for extension in extractor.extensions() {
+                by_extension.entry((*extension).to_owned()).or_insert(index);
+            }
+        }
+        Self {
+            extractors,
+            by_extension,
+        }
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
-        Self { extractors }
+        Self::from_extractors(extractors)
     }
 
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
         let ext = path.rsplit('.').next()?;
-        self.extractors
-            .iter()
-            .find(|e| e.extensions().contains(&ext))
-            .map(std::convert::AsRef::as_ref)
+        self.by_extension
+            .get(ext)
+            .map(|&index| self.extractors[index].as_ref())
     }
 
     /// Returns all supported file extensions across all extractors.

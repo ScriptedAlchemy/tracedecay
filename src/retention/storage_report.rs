@@ -379,13 +379,6 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
             DIRECTORY_CURSOR_PREFIX.to_owned()
         };
         let profile_root = profile_root.to_path_buf();
-        // Graph inventories resolve through async retained runtimes, so pair
-        // each project with its protection set before the blocking census.
-        let mut projects_with_sources = Vec::with_capacity(projects.len());
-        for project in projects {
-            let vector_readable_sources = None;
-            projects_with_sources.push((project, vector_readable_sources));
-        }
         return tokio::task::spawn_blocking(move || {
             let mut report = StorageReport {
                 profile_root: profile_root.display().to_string(),
@@ -393,12 +386,16 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
                 coverage: StorageReportCoverage::partial(next_cursor),
                 ..StorageReport::default()
             };
-            for (project, vector_readable_sources) in projects_with_sources {
+            for project in projects {
+                // This paged surface has no mounted code-graph inventory
+                // authority, so the vector protection set is unresolved and
+                // the retention dry run reports itself unavailable rather
+                // than planning against an unproven protection set.
                 append_project_report(
                     &profile_root,
                     &project.project_id,
                     &project.canonical_root,
-                    vector_readable_sources,
+                    None,
                     &mut report.stores,
                     &mut report.code_generation_retention,
                     &mut report.code_generation_retention_availability,
@@ -415,18 +412,48 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
         });
     };
     let profile_root_buf = profile_root.to_path_buf();
-    let after_directory = after_directory.to_owned();
+    let after_directory_owned = after_directory.to_owned();
     let (directories, has_more) = tokio::task::spawn_blocking(move || {
-        list_project_directories_page(&profile_root_buf, &after_directory, limit)
+        list_project_directories_page(&profile_root_buf, &after_directory_owned, limit)
     })
     .await
     .map_err(|error| report_error("join storage directory page", error))?;
-    let mut unregistered = Vec::new();
-    for (name, path) in &directories {
-        if !global_db.code_project_exists(name).await? {
-            unregistered.push(path.clone());
+    // Every directory name on this page lies in `(after_directory, last]`, so
+    // one ranged registry scan replaces up to 64 point existence probes (each
+    // of which takes its own registry snapshot); membership is then decided by
+    // local set difference.
+    let mut registered = HashSet::new();
+    if let Some((last_name, _)) = directories.last() {
+        let mut after = (!after_directory.is_empty()).then(|| after_directory.to_owned());
+        loop {
+            let page = global_db
+                .list_code_projects_after(after.as_deref(), MAX_STORAGE_REPORT_PAGE_LIMIT)
+                .await?;
+            let full_page = page.len() == MAX_STORAGE_REPORT_PAGE_LIMIT;
+            let mut next_after = None;
+            let mut past_range = false;
+            for project in page {
+                if project.project_id.as_str() > last_name.as_str() {
+                    past_range = true;
+                    break;
+                }
+                next_after = Some(project.project_id.clone());
+                registered.insert(project.project_id);
+            }
+            if past_range || !full_page {
+                break;
+            }
+            let Some(next_after) = next_after else {
+                break;
+            };
+            after = Some(next_after);
         }
     }
+    let unregistered = directories
+        .iter()
+        .filter(|(name, _)| !registered.contains(name))
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
     let (unregistered_dir_count, unregistered_bytes) = tokio::task::spawn_blocking(move || {
         let bytes = unregistered.iter().fold(0u64, |total, path| {
             total.saturating_add(super::orphan_stores::dir_size_bytes(path))

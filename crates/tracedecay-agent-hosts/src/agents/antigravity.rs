@@ -35,7 +35,7 @@ fn mcp_config_path(home: &Path) -> std::path::PathBuf {
 }
 
 /// Per-plugin file used by the Antigravity CLI. Holds the same shape as
-/// the IDE config so a future shared loader can read either location.
+/// the IDE config.
 fn cli_plugin_path(home: &Path) -> std::path::PathBuf {
     home.join(".gemini/antigravity-cli/plugins/tracedecay.json")
 }

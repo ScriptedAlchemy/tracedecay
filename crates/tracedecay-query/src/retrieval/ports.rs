@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, CompactCandidate, CursorPayloadDigest,
     ExactTechnicalTermKindV1, FileOccurrenceId, LanguageDescriptorRevision, RetrievalAnchorId,
@@ -64,8 +65,11 @@ where
     T: Serialize + ?Sized,
 {
     let bytes = serde_json::to_vec(payload).map_err(contract_error)?;
-    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(contract_error)
+    CursorPayloadDigest::new(encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(&bytes),
+    ))
+    .map_err(contract_error)
 }
 
 /// How many candidates one lane may commit: the tighter of its own budget and

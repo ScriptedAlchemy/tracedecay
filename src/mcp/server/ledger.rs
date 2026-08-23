@@ -122,26 +122,61 @@ impl McpServer {
             .sum()
     }
 
-    /// Adds `delta` saved tokens to the running counter and persists it.
+    /// Fire-and-forget persistence for one accounted tool response: the
+    /// tokens-saved counters (project DB, resettable local counter, ledger
+    /// sink) plus the live monitor ring-buffer entry.
     ///
-    /// `delta` must already be the *net* saving for one call
+    /// `net_saved_tokens` must already be the *net* saving for one call
     /// (`before.saturating_sub(after)`), not the gross raw-file estimate:
     /// crediting the full "before" would count a full-file read whose
     /// response contains the entire file as 100% saved.
-    pub(crate) async fn persist_saved_tokens(&self, delta: u64) {
-        if delta == 0 {
-            return;
-        }
-        let new_total = self.tokens_saved.fetch_add(delta, Ordering::Relaxed) + delta;
-        let cg = self.cg_snapshot().await;
-        // Persist to DB (best-effort, don't block on failure)
-        let _ = cg.set_tokens_saved(new_total).await;
-        // Also increment the resettable local counter
-        let _ = cg.add_local_counter(delta).await;
-        // Best-effort update to global DB
-        if let LedgerSink::Mounted(gdb) = self.ledger_sink() {
-            gdb.upsert(cg.project_root(), new_total).await;
-        }
+    ///
+    /// The in-memory counter advances synchronously so concurrent calls
+    /// account exact totals; the `SQLite` and mmap writes ride the observed
+    /// ledger-write path so the response never waits on them and tests can
+    /// still await durability via [`Self::ledger_writes_settled`]. Shutdown
+    /// persists the final counter independently.
+    pub(crate) async fn spawn_token_accounting_persist(
+        &self,
+        monitor_project_root: &Path,
+        tool_name: &str,
+        net_saved_tokens: u64,
+        raw_file_tokens: u64,
+    ) {
+        let persist = if net_saved_tokens == 0 {
+            None
+        } else {
+            let new_total = self
+                .tokens_saved
+                .fetch_add(net_saved_tokens, Ordering::Relaxed)
+                + net_saved_tokens;
+            Some((self.cg_snapshot().await, self.ledger_sink(), new_total))
+        };
+        let monitor_project_root = monitor_project_root.to_path_buf();
+        let tool_name = tool_name.to_owned();
+        self.spawn_observed_ledger_write(async move {
+            if let Some((cg, sink, new_total)) = persist {
+                let _ = cg.set_tokens_saved(new_total).await;
+                let _ = cg.add_local_counter(net_saved_tokens).await;
+                if let LedgerSink::Mounted(gdb) = sink {
+                    gdb.upsert(cg.project_root(), new_total).await;
+                }
+            }
+            // The monitor entry opens, locks, and mmaps a file; keep that
+            // off the async workers.
+            let monitor_write = tokio::task::spawn_blocking(move || {
+                crate::monitor::write_entry(
+                    &monitor_project_root,
+                    "tracedecay",
+                    &tool_name,
+                    net_saved_tokens,
+                    raw_file_tokens,
+                );
+            });
+            if let Err(error) = monitor_write.await {
+                tracing::warn!(error = %error, "live monitor entry write failed");
+            }
+        });
     }
 
     /// Resolves once every savings-ledger write spawned so far has
@@ -373,7 +408,7 @@ impl McpServer {
     /// merge regardless, so a dropped observation only widens a span slightly
     /// less).
     pub(crate) async fn record_hook_span_observation(
-        &self,
+        self: &Arc<Self>,
         event: &hook_events::HookEvent,
         selected: &crate::mcp::project_route::ResolvedProjectRoute,
     ) {
@@ -418,44 +453,56 @@ impl McpServer {
         let Some(db) = self.session_db.clone() else {
             return;
         };
-
-        // Derive the worktree and branch from the freshly authorized cwd.
-        // Route-provided worktree/branch strings are hints, not authority.
-        let worktree_raw =
-            crate::worktree::git_worktree_root(cwd).unwrap_or_else(|| project_root.clone());
-        let Ok(worktree_raw) =
-            hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
-        else {
-            return;
-        };
-        let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
-        let branch = bounded_identifier(crate::branch::current_branch(&worktree_raw).as_deref());
         let thread_id = bounded_identifier(route.thread_id.as_deref())
             .and_then(|value| crate::privacy::protect_sensitive_structural_id(&value).ok());
         let ts = crate::tracedecay::current_timestamp();
-
-        // Hook routes are provider-agnostic: leave provider empty.
-        let key = git_correlation::span_debounce_key("", &session_id, branch.as_deref(), &worktree);
-        let should_record = self
-            .span_observation_debounce
-            .lock()
-            .map_or(true, |mut debounce| {
-                debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
-            });
-        if !should_record {
-            return;
-        }
-
-        let observation = SpanObservation {
-            provider: String::new(),
-            session_id,
-            thread_id,
-            branch,
-            worktree,
-            ts,
-            source: SpanSource::HookRoute,
-        };
+        let cwd = cwd.to_path_buf();
+        let server = Arc::clone(self);
         self.spawn_observed_ledger_write(async move {
+            // Derive the worktree and branch from the freshly authorized cwd.
+            // Route-provided worktree/branch strings are hints, not authority.
+            // The derivation walks the filesystem (gix discovery) and may
+            // spawn git, so it runs on the blocking pool, off the
+            // notification hot path.
+            let derived = tokio::task::spawn_blocking(move || {
+                let worktree_raw =
+                    crate::worktree::git_worktree_root(&cwd).unwrap_or(project_root);
+                let worktree_raw =
+                    hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
+                        .ok()?;
+                let worktree =
+                    git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
+                let branch =
+                    bounded_identifier(crate::branch::current_branch(&worktree_raw).as_deref());
+                Some((worktree, branch))
+            })
+            .await;
+            let Ok(Some((worktree, branch))) = derived else {
+                return;
+            };
+
+            // Hook routes are provider-agnostic: leave provider empty.
+            let key =
+                git_correlation::span_debounce_key("", &session_id, branch.as_deref(), &worktree);
+            let should_record = server
+                .span_observation_debounce
+                .lock()
+                .map_or(true, |mut debounce| {
+                    debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+                });
+            if !should_record {
+                return;
+            }
+
+            let observation = SpanObservation {
+                provider: String::new(),
+                session_id,
+                thread_id,
+                branch,
+                worktree,
+                ts,
+                source: SpanSource::HookRoute,
+            };
             if let Err(e) = crate::store::GlobalDbGitCorrelationStore::new(db)
                 .record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
                 .await

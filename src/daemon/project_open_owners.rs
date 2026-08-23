@@ -703,10 +703,13 @@ pub(super) async fn register_project_open_production_owners(
         })?;
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
-    if let Some(repository_root) = crate::worktree::git_worktree_root(project_root) {
+    // One worktree discovery serves both the Git transaction authority here
+    // and the native-integration mount below.
+    let repository_root = crate::worktree::git_worktree_root(project_root);
+    if let Some(repository_root) = repository_root.as_deref() {
         git_transactions
             .install_authority(
-                &repository_root,
+                repository_root,
                 access.clone(),
                 session_db.clone(),
                 tokio::runtime::Handle::current(),
@@ -785,9 +788,7 @@ pub(super) async fn register_project_open_production_owners(
     // stale/denied predicates and the handler's minted grants agree on one
     // policy identity. Non-Git projects advertise no native mutation
     // authority; the handler keeps answering the typed unavailable result.
-    let native_owner = if let Some(repository_root) =
-        crate::worktree::git_worktree_root(project_root)
-    {
+    let native_owner = if let Some(repository_root) = repository_root {
         let native_owner = native_integration
             .ensure(
                 session_db.clone(),

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Cross-session response cache for `tracedecay_read`.
 //!
 //! Cached entries are keyed by `(project_id, file_path, mode, args_hash)` and

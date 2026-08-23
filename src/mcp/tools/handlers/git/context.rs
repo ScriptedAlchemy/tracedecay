@@ -385,7 +385,6 @@ pub(crate) async fn handle_changelog(
             .push(symbol_value(symbol, true)?);
     }
 
-    // For each changed file, get current symbols from the graph
     let mut symbols_added: Vec<Value> = Vec::new();
     let mut symbols_modified: Vec<Value> = Vec::new();
     let mut modified: Vec<Value> = Vec::new();
@@ -463,10 +462,15 @@ pub(crate) async fn handle_commit_context(
 
     if changed_files.is_empty() {
         let project_root = cg.project_root().to_path_buf();
-        let recent_commits = blocking_git_span("rev-walk", move || {
-            git_recent_commits(&project_root, 5).unwrap_or_default()
-        })
-        .await?;
+        let recent_commits =
+            match blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5))
+                .await?
+            {
+                Ok(commits) => commits,
+                Err(e) => {
+                    return Ok(git_error_result(cg, &args, "log", &e));
+                }
+            };
         let output = json!({
             "changed_files": [],
             "symbols_by_role": {},
@@ -539,10 +543,12 @@ pub(crate) async fn handle_commit_context(
 
     let recent_commits = {
         let project_root = cg.project_root().to_path_buf();
-        blocking_git_span("rev-walk", move || {
-            git_recent_commits(&project_root, 5).unwrap_or_default()
-        })
-        .await?
+        match blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)).await? {
+            Ok(commits) => commits,
+            Err(e) => {
+                return Ok(git_error_result(cg, &args, "log", &e));
+            }
+        }
     };
 
     let total_symbols: usize = symbols_by_role.values().map(std::vec::Vec::len).sum();

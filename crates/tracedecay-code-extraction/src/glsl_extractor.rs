@@ -49,12 +49,18 @@ impl ExtractionState {
         }
     }
 
+    /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -97,7 +103,6 @@ impl GlslExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -332,12 +337,12 @@ impl GlslExtractor {
         let text_trimmed = text.trim();
 
         // Classify GLSL storage-qualified declarations.
-        let (kind, visibility) = if Self::has_qualifier(state, node, "uniform") {
+        let (kind, visibility) = if Self::has_qualifier(node, "uniform") {
             (NodeKind::Const, Visibility::Pub)
-        } else if Self::has_qualifier(state, node, "in")
-            || Self::has_qualifier(state, node, "varying")
-            || Self::has_qualifier(state, node, "attribute")
-            || Self::has_qualifier(state, node, "out")
+        } else if Self::has_qualifier(node, "in")
+            || Self::has_qualifier(node, "varying")
+            || Self::has_qualifier(node, "attribute")
+            || Self::has_qualifier(node, "out")
         {
             (NodeKind::Field, Visibility::Pub)
         } else if text_trimmed.starts_with("const ") || text_trimmed.contains(" const ") {
@@ -672,7 +677,7 @@ impl GlslExtractor {
     /// tree-sitter-glsl emits qualifiers either as direct child nodes whose
     /// `kind()` matches the keyword (e.g. `"uniform"`, `"in"`, `"out"`) or
     /// nested inside a `type_qualifier` wrapper (e.g. `type_qualifier > const`).
-    fn has_qualifier(_state: &ExtractionState, node: TsNode<'_>, qualifier: &str) -> bool {
+    fn has_qualifier(node: TsNode<'_>, qualifier: &str) -> bool {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -684,9 +689,8 @@ impl GlslExtractor {
                 }
                 // Wrapped in type_qualifier: `type_qualifier > const`
                 if kind == "type_qualifier"
-                    && let Some(inner) = find_direct_child_by_kind(child, qualifier)
+                    && find_direct_child_by_kind(child, qualifier).is_some()
                 {
-                    let _ = inner;
                     return true;
                 }
                 if !cursor.goto_next_sibling() {

@@ -88,7 +88,7 @@ pub(crate) async fn write_improvement_artifacts(
             "response": response,
             "record": record,
             "outcomes": outcomes,
-        })),
+        }))?,
     });
     if let Some(artifacts) =
         read_published_artifact_chain(dashboard_root, run_id, Some(&publication_identity)).await?

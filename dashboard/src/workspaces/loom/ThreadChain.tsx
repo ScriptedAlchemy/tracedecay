@@ -5,6 +5,7 @@ import { Fact, Legend, Meter, Panel } from '../../ui/instrument.tsx';
 import { formatCount } from '../../ui/format.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
+import { tokenCountLabel } from '../sessions/tokenLabel.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import { ThreadPlayback } from './ThreadPlayback.tsx';
 import {
@@ -272,10 +273,9 @@ export function ThreadChain({
 function chainStepTokenLabel(
   step: ReturnType<typeof summarizeChain>['steps'][number],
 ): string {
-  if (step.tokenCount == null || step.tokenCountProvenance == null) {
-    return 'tokens unknown';
-  }
-  return `~${step.tokenCount.toLocaleString()} tokens · o200k approximate`;
+  // Unlike the transcript inspector, which omits the line, this rail keeps a
+  // cell per step — so absence is worded rather than left blank.
+  return tokenCountLabel(step.tokenCount, step.tokenCountProvenance) ?? 'tokens unknown';
 }
 
 /** Durable causal rows attached to the selected provider-qualified session.

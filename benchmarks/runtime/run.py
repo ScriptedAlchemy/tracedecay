@@ -65,7 +65,7 @@ from benchmarks.runtime.schema import (
     validate_sample,
     write_jsonl,
 )
-from benchmarks.runtime.statistics import nearest_rank
+from benchmarks.runtime.statistics import eligible_latency_percentiles
 
 
 SCHEMA_VERSION = 1
@@ -806,6 +806,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
     for path in (output, samples_path, policy_path):
         if path.exists():
             fail(f"incident output already exists: {path}")
+    test_binary_sha256 = sha256_file(test_binary)
     captured: list[dict[str, Any]] = []
     with RunWorkspace(
         Path(tempfile.gettempdir()),
@@ -843,7 +844,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
             sample = {
                 "schema_version": SCHEMA_VERSION,
                 "identity": {
-                    "candidate_id": sha256_file(test_binary)[:16],
+                    "candidate_id": test_binary_sha256[:16],
                     "run_id": f"incident-{uuid.uuid4().hex}",
                     "capture_id": f"capture-{uuid.uuid4().hex}",
                     "crate_id": "tracedecay-lsp",
@@ -928,7 +929,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         "workload_id": "diagnostic-dedup-batch-rate",
         "authority": {
             "kind": "prebuilt-integration-test-scenario",
-            "test_binary_sha256": sha256_file(test_binary),
+            "test_binary_sha256": test_binary_sha256,
             "target": "diagnostic_publication_stress",
             "scenario": scenario,
             "anti_vacuity": "scripts/require-exact-test.sh",
@@ -938,35 +939,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         "sample_count": len(captured),
         "attempted_events_per_sample": args.events,
         "samples_sha256": sha256_file(samples_path),
-        "latency_ns": {
-            "p50": {
-                "available": len(captured) >= 2,
-                "value": (
-                    nearest_rank(elapsed_values, 0.50)
-                    if len(captured) >= 2
-                    else None
-                ),
-                "minimum_samples": 2,
-            },
-            "p95": {
-                "available": len(captured) >= 40,
-                "value": (
-                    nearest_rank(elapsed_values, 0.95)
-                    if len(captured) >= 40
-                    else None
-                ),
-                "minimum_samples": 40,
-            },
-            "p99": {
-                "available": len(captured) >= 100,
-                "value": (
-                    nearest_rank(elapsed_values, 0.99)
-                    if len(captured) >= 100
-                    else None
-                ),
-                "minimum_samples": 100,
-            },
-        },
+        "latency_ns": eligible_latency_percentiles(elapsed_values),
         "event_counts": {
             "attempted_total": args.events * len(captured),
             "emitted_total": len(captured),
@@ -1015,6 +988,7 @@ def _capture_diagnostic_flood(args: argparse.Namespace) -> int:
         if path.exists():
             fail(f"incident output already exists: {path}")
 
+    candidate_id = sha256_file(binary)[:16]
     captured: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
     with RunWorkspace(
@@ -1171,7 +1145,7 @@ def _capture_diagnostic_flood(args: argparse.Namespace) -> int:
             sample = {
                 "schema_version": SCHEMA_VERSION,
                 "identity": {
-                    "candidate_id": sha256_file(binary)[:16],
+                    "candidate_id": candidate_id,
                     "run_id": f"incident-{uuid.uuid4().hex}",
                     "capture_id": f"capture-{uuid.uuid4().hex}",
                     "crate_id": "tracedecay-lsp",
@@ -1330,6 +1304,7 @@ def capture_incident(args: argparse.Namespace) -> int:
         if path.exists():
             fail(f"incident output already exists: {path}")
 
+    candidate_id = sha256_file(binary)[:16]
     captured: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
     with RunWorkspace(
@@ -1448,7 +1423,7 @@ def capture_incident(args: argparse.Namespace) -> int:
             sample = {
                 "schema_version": SCHEMA_VERSION,
                 "identity": {
-                    "candidate_id": sha256_file(binary)[:16],
+                    "candidate_id": candidate_id,
                     "run_id": f"incident-{uuid.uuid4().hex}",
                     "capture_id": f"capture-{uuid.uuid4().hex}",
                     "crate_id": "tracedecay-hooks",
@@ -1533,24 +1508,9 @@ def capture_incident(args: argparse.Namespace) -> int:
     elapsed_values = [sample["timing"]["elapsed_ns"] for sample in captured]
 
     def incident_distribution(field: str) -> dict[str, Any]:
-        values = [sample["observations"][field] for sample in captured]
-        return {
-            "p50": {
-                "available": len(values) >= 2,
-                "value": nearest_rank(values, 0.50) if len(values) >= 2 else None,
-                "minimum_samples": 2,
-            },
-            "p95": {
-                "available": len(values) >= 40,
-                "value": nearest_rank(values, 0.95) if len(values) >= 40 else None,
-                "minimum_samples": 40,
-            },
-            "p99": {
-                "available": len(values) >= 100,
-                "value": nearest_rank(values, 0.99) if len(values) >= 100 else None,
-                "minimum_samples": 100,
-            },
-        }
+        return eligible_latency_percentiles(
+            [sample["observations"][field] for sample in captured]
+        )
 
     policy = load_acceptance_policy(
         Path(__file__).resolve().with_name("policies") / "acceptance-v1.json"
@@ -1569,35 +1529,7 @@ def capture_incident(args: argparse.Namespace) -> int:
         },
         "sample_count": len(captured),
         "samples_sha256": sha256_file(samples_path),
-        "latency_ns": {
-            "p50": {
-                "available": len(elapsed_values) >= 2,
-                "value": (
-                    nearest_rank(elapsed_values, 0.50)
-                    if len(elapsed_values) >= 2
-                    else None
-                ),
-                "minimum_samples": 2,
-            },
-            "p95": {
-                "available": len(elapsed_values) >= 40,
-                "value": (
-                    nearest_rank(elapsed_values, 0.95)
-                    if len(elapsed_values) >= 40
-                    else None
-                ),
-                "minimum_samples": 40,
-            },
-            "p99": {
-                "available": len(elapsed_values) >= 100,
-                "value": (
-                    nearest_rank(elapsed_values, 0.99)
-                    if len(elapsed_values) >= 100
-                    else None
-                ),
-                "minimum_samples": 100,
-            },
-        },
+        "latency_ns": eligible_latency_percentiles(elapsed_values),
         "stages_ns": {
             "process_startup_control": incident_distribution(
                 "process_startup_control_ns"
@@ -1762,35 +1694,7 @@ def paired(args: argparse.Namespace) -> int:
         ]
         return {
             "sample_count": len(matching),
-            "latency_ns": {
-                "p50": {
-                    "available": len(latencies) >= 2,
-                    "value": (
-                        nearest_rank(latencies, 0.50)
-                        if len(latencies) >= 2
-                        else None
-                    ),
-                    "minimum_samples": 2,
-                },
-                "p95": {
-                    "available": len(latencies) >= 40,
-                    "value": (
-                        nearest_rank(latencies, 0.95)
-                        if len(latencies) >= 40
-                        else None
-                    ),
-                    "minimum_samples": 40,
-                },
-                "p99": {
-                    "available": len(latencies) >= 100,
-                    "value": (
-                        nearest_rank(latencies, 0.99)
-                        if len(latencies) >= 100
-                        else None
-                    ),
-                    "minimum_samples": 100,
-                },
-            },
+            "latency_ns": eligible_latency_percentiles(latencies),
         }
 
     policy = load_acceptance_policy(

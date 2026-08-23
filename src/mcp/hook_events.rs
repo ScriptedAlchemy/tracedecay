@@ -493,8 +493,7 @@ pub(crate) fn decode_durable_hook_event_plan(
 }
 
 pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
-    let mut event =
-        serde_json::from_value::<crate::daemon::DaemonHookEvent>(params?.clone()).ok()?;
+    let mut event = crate::daemon::DaemonHookEvent::deserialize(params?).ok()?;
     if let Some(route) = &mut event.route {
         protect_hook_route_structural_ids(route).ok()?;
     }

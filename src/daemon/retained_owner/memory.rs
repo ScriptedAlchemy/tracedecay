@@ -774,7 +774,7 @@ async fn contradict_on_db(
     let memory = memory_application(database, owner.clone())?;
     let query = ProjectMemoryFactContradictionQueryV1::new(
         owner,
-        request.category.map(memory_mapping::domain_category),
+        request.category,
         request.threshold_millionths.unwrap_or(300_000),
         memory_mapping::fact_limit(request.limit)?,
     )
@@ -840,10 +840,7 @@ async fn list_on_db(
     let memory = memory_application(database, owner.clone())?;
     let query = ProjectMemoryFactListQueryV1::new(
         owner,
-        request
-            .options
-            .category
-            .map(memory_mapping::domain_category),
+        request.options.category,
         memory_mapping::confidence(request.options.min_trust)?,
         request.after_fact_id.clone(),
         memory_mapping::fact_limit(request.options.limit)?,

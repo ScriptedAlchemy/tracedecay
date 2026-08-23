@@ -12,7 +12,6 @@ pub(crate) async fn handle_files(
     require_object_args(&args, "tracedecay_files")?;
     let mut files = indexed_files(cg, graph)?;
 
-    // Apply directory prefix filter
     if let Some(dir) = effective_path(&args, scope_prefix) {
         let prefix = if dir.ends_with('/') {
             dir.to_string()
@@ -22,7 +21,6 @@ pub(crate) async fn handle_files(
         files.retain(|f| f.path.starts_with(&prefix) || f.path == dir);
     }
 
-    // Apply glob pattern filter
     if let Some(pat) = args.get("pattern").and_then(|v| v.as_str()) {
         let glob = glob::Pattern::new(pat).map_err(|error| TraceDecayError::Config {
             message: format!("invalid file glob '{pat}': {error}"),

@@ -2,33 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_application::IdempotencyKey;
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
-use tracedecay_domain::{
-    GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexTransactionOperationV1, ManifestDigest,
-};
 
 use super::{ApplicationSurfaceAdapterError, ApplicationSurfaceOperation};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitPreviewSurfaceRequest {
-    pub operation: GitIndexTransactionOperationV1,
-    #[serde(default)]
-    pub preview_input_id: Option<GitIndexPreviewId>,
-    #[serde(default)]
-    pub selected_hunk_digests: Vec<ManifestDigest>,
-    #[serde(default)]
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitApplySurfaceRequest {
-    pub preview_id: GitIndexPreviewId,
-    pub preview_digest: ManifestDigest,
-    pub idempotency_key: IdempotencyKey,
-}
+pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

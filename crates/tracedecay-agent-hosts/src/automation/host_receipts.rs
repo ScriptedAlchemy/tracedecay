@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 use crate::storage::PrivateStoreIo;
 use crate::tracedecay::current_timestamp;
 use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
@@ -46,12 +47,6 @@ struct HostReceiptState {
     readiness: BTreeMap<String, HostReceiptReadiness>,
     #[serde(default)]
     recent_dedupe_keys: Vec<String>,
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {

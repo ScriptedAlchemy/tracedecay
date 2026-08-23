@@ -412,30 +412,13 @@ fn remote_operational_finding(
             *coverage,
             "remote HTTPS listener, authority, spool, replay, and backup are ready",
         ),
-        RemoteOperationalReadV1::Observed {
-            coverage,
-            listener,
-            authority,
-            replay_coverage_complete,
-            backup_verified,
-            failover_in_progress,
-            ..
-        } => {
-            let _ = (
-                listener,
-                authority,
-                replay_coverage_complete,
-                backup_verified,
-                failover_in_progress,
-            );
-            source_finding(
-                family,
-                DoctorEvidenceStateV1::Degraded,
-                "remote.operational.partial",
-                *coverage,
-                "remote HTTPS listener, authority, spool, replay, or backup is incomplete",
-            )
-        }
+        RemoteOperationalReadV1::Observed { coverage, .. } => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "remote.operational.partial",
+            *coverage,
+            "remote HTTPS listener, authority, spool, replay, or backup is incomplete",
+        ),
         RemoteOperationalReadV1::Unconfigured => unobservable_finding(
             family,
             DoctorEvidenceStateV1::Absent,

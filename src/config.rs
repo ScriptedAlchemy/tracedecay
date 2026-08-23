@@ -7,6 +7,7 @@ use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
+use tracedecay_application::clock::now_micros;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
@@ -22,7 +23,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
-use tracedecay_domain::{ProjectId, UtcMicros};
+use tracedecay_domain::ProjectId;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::GlobalDbConfigurationControlStore;
@@ -1094,7 +1095,7 @@ async fn open_runtime_configuration_from_store(
             ))
         })?;
         store
-            .initialize_canonical(&initial_revision_id, &resolution, current_utc_micros())
+            .initialize_canonical(&initial_revision_id, &resolution, now_micros())
             .await
             .map_err(map_configuration_error)?;
     }
@@ -1120,7 +1121,7 @@ async fn open_runtime_configuration_from_store(
         .contains_key(&native_graph_activation_key)
     {
         current = match store
-            .converge_native_graph_activation_default(&current.revision_id, current_utc_micros())
+            .converge_native_graph_activation_default(&current.revision_id, now_micros())
             .await
         {
             Ok(state) => state,
@@ -1182,7 +1183,7 @@ async fn open_runtime_configuration_from_store(
                     .rebind_daemon_project_source_binding(
                         &current.revision_id,
                         &daemon_binding,
-                        current_utc_micros(),
+                        now_micros(),
                     )
                     .await
                 {
@@ -1324,16 +1325,6 @@ pub async fn load_runtime_configuration_for_layout_read_only(
 fn registered_configuration_database_required() -> TraceDecayError {
     config_error(
         "configuration authority unavailable: a registered project session runtime is required",
-    )
-}
-
-fn current_utc_micros() -> UtcMicros {
-    UtcMicros(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                duration.as_micros().min(i64::MAX as u128) as i64
-            }),
     )
 }
 

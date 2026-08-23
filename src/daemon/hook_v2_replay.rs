@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{SessionId, UtcMicros};
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
@@ -344,13 +345,7 @@ async fn drain_hook_delivery_receipts(
 
     let mut settled = Vec::new();
     for receipt in receipts {
-        let receipt_hex = receipt
-            .receipt_id
-            .iter()
-            .fold(String::new(), |mut hex, byte| {
-                let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
-                hex
-            });
+        let receipt_hex = encode_lowercase_hex(&receipt.receipt_id);
         let source_receipt_ref = format!("hook:delivery:{receipt_hex}");
         if authority
             .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)

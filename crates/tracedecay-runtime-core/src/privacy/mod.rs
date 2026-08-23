@@ -14,22 +14,24 @@ mod structural_id;
 mod structured;
 mod structured_text;
 
+use tracedecay_domain::canonical_text::{canonical_framed_sha256, sha256_hex};
+
 /// Lowercase-hex SHA-256 over `parts`, each prefixed with its big-endian
 /// `u64` length.
 ///
 /// The length prefix is what makes the concatenation unambiguous, so every
 /// receipt and protected identifier in this module derives its digest through
-/// this one function rather than re-spelling the loop: a copy that dropped or
-/// reordered the prefix would silently mint colliding ids.
+/// this one function: a copy that dropped or reordered the prefix would
+/// silently mint colliding ids. The framing is the domain's
+/// [`canonical_framed_sha256`] with the first part as the domain separator,
+/// so derived ids already on disk are unchanged.
 pub(crate) fn length_prefixed_sha256_hex(parts: &[&[u8]]) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
+    match parts.split_first() {
+        Some((domain, rest)) => canonical_framed_sha256(domain, rest),
+        // No parts means no framed input: the digest of zero bytes, exactly
+        // as the previous inline loop produced.
+        None => sha256_hex(&[]),
     }
-    hex::encode(hasher.finalize())
 }
 
 pub use assessment::{

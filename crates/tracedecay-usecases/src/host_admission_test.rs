@@ -60,23 +60,13 @@ fn replay_statuses_serialize_without_provider_content() {
 
 #[test]
 fn pending_external_source_projection_is_a_typed_durable_success() {
-    let outcome = HostAdmissionOutcome::external_source_projection_pending();
+    let outcome = external_source_projection_pending();
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(
         outcome.reason_code,
         Some("external_source_projection_pending")
     );
     assert!(!outcome.retryable);
-}
-
-#[test]
-fn projection_backlog_survives_the_sessions_adapter() {
-    let outcome = canonical_projection_drain_outcome(HostProjectionDrainOutcome {
-        deferred: true,
-        ..HostProjectionDrainOutcome::default()
-    });
-
-    assert!(outcome.deferred);
 }
 
 #[test]
@@ -100,7 +90,7 @@ fn quarantine_outcomes_serialize_as_static_payload_free_dispositions() {
 fn application_errors_map_to_bounded_static_outcomes() {
     assert_eq!(
         classify_error(&ObservationApplicationError::Cancelled),
-        HostAdmissionOutcome::new(
+        admission_outcome(
             HostAdmissionStatus::Backpressured,
             true,
             Some("admission_cancelled"),
@@ -113,7 +103,7 @@ fn application_errors_map_to_bounded_static_outcomes() {
                 source: Box::new(std::io::Error::other("provider content must not escape",)),
             },
         )),
-        HostAdmissionOutcome::new(
+        admission_outcome(
             HostAdmissionStatus::Unavailable,
             true,
             Some("authority_write_failed"),
@@ -125,7 +115,7 @@ fn application_errors_map_to_bounded_static_outcomes() {
     ] {
         assert_eq!(
             classify_error(&ObservationApplicationError::Privacy(error)),
-            HostAdmissionOutcome::new(
+            admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 true,
                 Some("privacy_authority_unavailable"),

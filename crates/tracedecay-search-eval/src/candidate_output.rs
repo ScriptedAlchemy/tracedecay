@@ -49,6 +49,7 @@ use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
+use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
@@ -1119,8 +1120,6 @@ pub fn validate_workload_for_tuning(
     Ok(())
 }
 
-/// Generate deterministic train/validation outputs using the production
-/// retrieval kernel.
 /// The corpora published for one candidate-generation call, memoized by scale.
 ///
 /// `publish_corpus_with_scale` is a pure function of its four arguments: every
@@ -1166,6 +1165,8 @@ impl PublishedCorpusCache {
     }
 }
 
+/// Generate deterministic train/validation outputs using the production
+/// retrieval kernel.
 pub fn generate_candidate_outputs(
     options: &GenerateCandidateOutputsOptions<'_>,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
@@ -2843,7 +2844,7 @@ fn publish_corpus_with_scale(
         path: after_path,
         source,
     })?;
-    let observed_after_sha256 = hex::encode(Sha256::digest(&after_bytes));
+    let observed_after_sha256 = sha256_hex(&after_bytes);
     if observed_after_sha256 != workload.incremental_fixture.after_sha256 {
         return Err(CandidateOutputError::Contract(
             "incremental fixture bytes do not match the workload digest".to_owned(),
@@ -3430,7 +3431,7 @@ where
 
 fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, CandidateOutputError> {
     let bytes = canonical_json_bytes(value)?;
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    Ok(encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes)))
 }
 
 fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CandidateOutputError> {

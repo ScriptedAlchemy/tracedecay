@@ -26,7 +26,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
-tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
@@ -43,6 +42,7 @@ url = "2"
 [dev-dependencies]
 # `runtime::vibe` and `runtime::workflow_ingest` tests backdate file mtimes.
 filetime = "0.2"
+tempfile = "3"
 # This crate's own test target needs the kernel's `db::engine::TestConnection`.
 # Declaring the same path dependency with the feature keeps it out of the lib
 # build while feature unification supplies it to every test target here.

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -528,9 +528,12 @@ pub(super) async fn insert_payload_manifests(
     conn: &impl Executor,
     manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
+    let created_at_by_ref =
+        payload_authority_created_at_by_ref(conn, &manifest.payloads, &manifest.session_id).await?;
     for payload in &manifest.payloads {
-        let created_at =
-            payload_authority_created_at(conn, &payload.payload_ref, &manifest.session_id).await?;
+        let created_at = *created_at_by_ref
+            .get(&payload.payload_ref)
+            .ok_or(LcmError::PayloadNotOwnedBySession)?;
         conn.execute(
             "INSERT OR IGNORE INTO session_external_payload_manifests (
                 payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
@@ -545,70 +548,123 @@ pub(super) async fn insert_payload_manifests(
             ],
         )
         .await?;
-        verify_payload_binding(conn, payload, &manifest.session_id, created_at).await?;
     }
-    Ok(())
+    verify_payload_bindings(
+        conn,
+        &manifest.payloads,
+        &manifest.session_id,
+        &created_at_by_ref,
+    )
+    .await
 }
 
 pub(super) async fn verify_payload_manifests(
     conn: &impl Executor,
     manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
-    for payload in &manifest.payloads {
-        let created_at =
-            payload_authority_created_at(conn, &payload.payload_ref, &manifest.session_id).await?;
-        verify_payload_binding(conn, payload, &manifest.session_id, created_at).await?;
-    }
-    Ok(())
+    let created_at_by_ref =
+        payload_authority_created_at_by_ref(conn, &manifest.payloads, &manifest.session_id).await?;
+    verify_payload_bindings(
+        conn,
+        &manifest.payloads,
+        &manifest.session_id,
+        &created_at_by_ref,
+    )
+    .await
 }
 
-async fn payload_authority_created_at(
+async fn payload_authority_created_at_by_ref(
     conn: &impl Executor,
-    payload_ref: &str,
+    payloads: &[PreparedPayload],
     session_id: &str,
-) -> Result<i64, LcmError> {
+) -> Result<BTreeMap<String, i64>, LcmError> {
+    if payloads.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_refs = encoded_payload_refs(payloads)?;
     let mut rows = conn
         .query(
-            "SELECT created_at FROM lcm_external_payloads
-             WHERE payload_ref = ?1 AND session_id = ?2",
-            params![payload_ref, session_id],
+            "SELECT payload_ref, created_at FROM lcm_external_payloads
+             WHERE session_id = ?1
+               AND payload_ref IN (SELECT value FROM json_each(?2))",
+            params![session_id, encoded_refs],
         )
         .await?;
-    rows.next()
-        .await?
-        .ok_or(LcmError::PayloadNotOwnedBySession)?
-        .get(0)
-        .map_err(Into::into)
+    let mut created_at = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
+        let at: i64 = row.get(1)?;
+        created_at.entry(payload_ref).or_insert(at);
+    }
+    for payload in payloads {
+        if !created_at.contains_key(&payload.payload_ref) {
+            return Err(LcmError::PayloadNotOwnedBySession);
+        }
+    }
+    Ok(created_at)
 }
 
-async fn verify_payload_binding(
+async fn verify_payload_bindings(
     conn: &impl Executor,
-    payload: &PreparedPayload,
+    payloads: &[PreparedPayload],
     session_id: &str,
-    created_at: i64,
+    created_at_by_ref: &BTreeMap<String, i64>,
 ) -> Result<(), LcmError> {
+    if payloads.is_empty() {
+        return Ok(());
+    }
+    let encoded_refs = encoded_payload_refs(payloads)?;
     let mut rows = conn
         .query(
-            "SELECT session_id, payload_digest, manifest_json, receipt_id, created_at
-             FROM session_external_payload_manifests WHERE payload_ref = ?1",
-            params![payload.payload_ref.as_str()],
+            "SELECT payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
+             FROM session_external_payload_manifests
+             WHERE payload_ref IN (SELECT value FROM json_each(?1))",
+            params![encoded_refs],
         )
         .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::PayloadMissing);
-    };
-    let receipt_id: String = row.get(3)?;
-    if row.get::<String>(0)? != session_id
-        || row.get::<String>(1)? != payload.digest
-        || row.get::<String>(2)? != payload.manifest_json
-        || row.get::<i64>(4)? != created_at
-        || !receipt_binds_payload(conn, payload, session_id, &receipt_id).await?
-    {
-        return Err(LcmError::ImmutablePayloadConflict {
-            payload_ref: payload.payload_ref.clone(),
-        });
+    let mut bindings = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
+        bindings.entry(payload_ref).or_insert((
+            row.get::<String>(1)?,
+            row.get::<String>(2)?,
+            row.get::<String>(3)?,
+            row.get::<String>(4)?,
+            row.get::<i64>(5)?,
+        ));
+    }
+    for payload in payloads {
+        let Some((bound_session, digest, manifest_json, receipt_id, created_at)) =
+            bindings.get(&payload.payload_ref)
+        else {
+            return Err(LcmError::PayloadMissing);
+        };
+        let expected_created_at = created_at_by_ref
+            .get(&payload.payload_ref)
+            .copied()
+            .ok_or(LcmError::PayloadNotOwnedBySession)?;
+        if bound_session != session_id
+            || digest != &payload.digest
+            || manifest_json != &payload.manifest_json
+            || *created_at != expected_created_at
+            || !receipt_binds_payload(conn, payload, session_id, receipt_id).await?
+        {
+            return Err(LcmError::ImmutablePayloadConflict {
+                payload_ref: payload.payload_ref.clone(),
+            });
+        }
     }
     Ok(())
+}
+
+fn encoded_payload_refs(payloads: &[PreparedPayload]) -> Result<String, LcmError> {
+    serde_json::to_string(
+        &payloads
+            .iter()
+            .map(|payload| payload.payload_ref.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| LcmError::Db(error.to_string()))
 }
 
 async fn receipt_binds_payload(

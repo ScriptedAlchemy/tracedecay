@@ -160,7 +160,7 @@ pub(super) fn digest_bytes(
 pub(super) fn digest_from_bytes(
     digest: [u8; 32],
 ) -> Result<ManifestDigest, RemoteRecoveryPhysicalEffectErrorV1> {
-    ManifestDigest::new(format!("sha256:{}", hex::encode(digest)))
+    ManifestDigest::from_sha256_bytes(&digest)
         .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 

@@ -15,11 +15,12 @@ import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/payload.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
-  assertNever,
   LcmOverviewPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
+  type LcmTokenCountProvenanceV1,
 } from '../../contracts/generated.ts';
 import { SessionInspector } from './SessionInspector.tsx';
+import { tokenCountLabel } from './tokenLabel.ts';
 
 const BASE = '/api/plugins/hermes-lcm';
 
@@ -316,7 +317,7 @@ export function SessionsPage() {
 
 function timelineTokenLabel(
   tokenCount: number | null,
-  provenance: 'o200k_approximate' | 'unavailable',
+  provenance: LcmTokenCountProvenanceV1,
   knownMessageCount: number,
   unknownMessageCount: number,
 ): string | undefined {
@@ -325,14 +326,7 @@ function timelineTokenLabel(
       ? `${knownMessageCount.toLocaleString()} known · ${unknownMessageCount.toLocaleString()} unknown token counts`
       : undefined;
   }
-  switch (provenance) {
-    case 'o200k_approximate':
-      return `~${tokenCount.toLocaleString()} tokens · o200k approximate`;
-    case 'unavailable':
-      return undefined;
-    default:
-      return assertNever(provenance);
-  }
+  return tokenCountLabel(tokenCount, provenance) ?? undefined;
 }
 
 /**

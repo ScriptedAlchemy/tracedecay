@@ -9,7 +9,7 @@
 //! and mutable line numbers cannot affect `CodeSearchChunkId`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -1373,24 +1373,30 @@ impl DeterministicCodeChunker {
         });
 
         let mut rows = Vec::with_capacity(raw.len());
+        // Parent = the smallest enclosing span among earlier (outer-or-equal)
+        // rows; equal spans resolve to the earliest row. Rows are sorted
+        // start-ascending/end-descending, so a containment stack of earlier
+        // row indices yields that encloser after popping non-enclosing tops.
+        // A row whose span equals its parent's is not pushed, keeping every
+        // later equal span resolved to the earliest row.
+        let mut enclosing: Vec<usize> = Vec::new();
+        let mut occurrence_counts: HashMap<(&str, &str), u32> = HashMap::with_capacity(raw.len());
         for (index, node) in raw.iter().enumerate() {
-            // Parent = the smallest strictly enclosing span among earlier
-            // (outer-or-equal) rows; equal spans resolve to the earlier row.
-            let parent = raw[..index]
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| {
-                    candidate.span.start_byte <= node.span.start_byte
-                        && candidate.span.end_byte >= node.span.end_byte
-                })
-                .min_by_key(|(_, candidate)| candidate.span.len())
-                .map(|(parent_index, _)| parent_index);
-            let occurrence_index = raw[..index]
-                .iter()
-                .filter(|candidate| {
-                    candidate.qualified_name == node.qualified_name && candidate.kind == node.kind
-                })
-                .count() as u32;
+            while enclosing
+                .last()
+                .is_some_and(|&candidate| raw[candidate].span.end_byte < node.span.end_byte)
+            {
+                enclosing.pop();
+            }
+            let parent = enclosing.last().copied();
+            if parent.is_none_or(|parent_index| raw[parent_index].span != node.span) {
+                enclosing.push(index);
+            }
+            let occurrences = occurrence_counts
+                .entry((node.qualified_name.as_str(), node.kind.as_str()))
+                .or_insert(0);
+            let occurrence_index = *occurrences;
+            *occurrences += 1;
             let identity = canonical_digest(
                 SYMBOL_IDENTITY_SEPARATOR,
                 &(
@@ -1494,6 +1500,14 @@ impl DeterministicCodeChunker {
             signature: Option<SourceSpan>,
         }
 
+        // Child start-bytes grouped by parent index in one pass; every
+        // symbol's members are consumed exactly once in the loop below.
+        let mut member_starts_by_parent: Vec<Vec<u64>> = vec![Vec::new(); symbols.len()];
+        for symbol in symbols {
+            if let Some(parent_index) = symbol.parent {
+                member_starts_by_parent[parent_index].push(symbol.span.start_byte);
+            }
+        }
         let mut emissions = Vec::with_capacity(symbols.len());
         for (index, symbol) in symbols.iter().enumerate() {
             if index % 64 == 0 && cancellation.is_cancelled() {
@@ -1505,11 +1519,7 @@ impl DeterministicCodeChunker {
             } else {
                 CodeSearchChunkGrainV1::SymbolBody
             };
-            let member_starts: Vec<u64> = symbols
-                .iter()
-                .filter(|candidate| candidate.parent == Some(index))
-                .map(|candidate| candidate.span.start_byte)
-                .collect();
+            let member_starts = std::mem::take(&mut member_starts_by_parent[index]);
             let mut pieces = Vec::new();
             if symbol.span.len() > MAX_CHUNK_TEXT_BYTES as u64 {
                 // Oversized bodies split on deterministic structural

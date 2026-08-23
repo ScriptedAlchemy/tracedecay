@@ -3,8 +3,10 @@
 //! Each agent sends its own event schema and expects its own output shape, so
 //! handlers stay agent-specific while shared plumbing lives here.
 
+use std::future::Future;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookRouteMetadata};
@@ -87,9 +89,26 @@ impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookRe
         let distribution = aggregate_hook_completed_readiness(rows);
         match serde_json::to_value(distribution) {
             Ok(value) => value,
-            Err(error) => {
-                panic!("failed to serialize canonical hook readiness distribution: {error}")
-            }
+            // The port contract is a plain `Value`, so a serialization failure
+            // is reported in the port's typed unavailable shape rather than
+            // panicking inside the dashboard readiness projection.
+            Err(error) => serde_json::json!({
+                "schema_version": 1,
+                "source_event": "hook_completed",
+                "collection_status": "unavailable",
+                "input_rows_received": rows.len(),
+                "input_rows_processed": 0,
+                "input_rows_dropped_at_cap": 0,
+                "events_considered": 0,
+                "events_skipped_non_completed": rows.len(),
+                "unavailable_metrics": [{
+                    "metric": "hook_readiness",
+                    "status": "unavailable",
+                    "blocker": format!(
+                        "hook readiness distribution failed to serialize: {error}"
+                    ),
+                }]
+            }),
         }
     }
 }
@@ -160,27 +179,13 @@ pub(crate) async fn write_hook_output(
     let delivery_writer = match project_root {
         None => None,
         Some(project_root) => {
-            let layout =
-                match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
-                    project_root,
-                ) {
-                    Ok(Some(layout)) => layout,
-                    Ok(None) => {
-                        tracing::warn!(
-                            host = host.hook_key(),
-                            "Hook output delivery has no enrolled project layout"
-                        );
-                        return false;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            host = host.hook_key(),
-                            %error,
-                            "Hook output delivery project layout could not be resolved"
-                        );
-                        return false;
-                    }
-                };
+            let Some(layout) = store_layout::enrolled_layout(project_root) else {
+                tracing::warn!(
+                    host = host.hook_key(),
+                    "Hook output delivery has no enrolled project layout"
+                );
+                return false;
+            };
             match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
             ) {
@@ -326,64 +331,42 @@ macro_rules! read_hook_event {
 }
 pub(crate) use read_hook_event;
 
-pub async fn hook_kimi_event() -> i32 {
+/// Shared native-event handler body: read the bounded event, resolve the
+/// project root, dispatch, and deliver any guidance for `host`.
+async fn hook_native_event(
+    host: tracedecay_hooks::HookHostV1,
+    dispatch: impl AsyncFnOnce(&str, &Path) -> Option<String>,
+) -> i32 {
     let event = read_hook_event!();
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch_kimi_event(&event, &root).await
-        && !write_hook_output(
-            Some(&root),
-            tracedecay_hooks::HookHostV1::KimiCode,
-            &event,
-            &guidance,
-            None,
-        )
-        .await
+    if let Some(guidance) = dispatch(&event, &root).await
+        && !write_hook_output(Some(&root), host, &event, &guidance, None).await
     {
         return 1;
     }
     0
+}
+
+pub async fn hook_kimi_event() -> i32 {
+    hook_native_event(tracedecay_hooks::HookHostV1::KimiCode, dispatch_kimi_event).await
 }
 
 pub async fn hook_opencode_event() -> i32 {
-    let event = read_hook_event!();
-    let Some(root) = native_event_project_root(&event).await else {
-        return 0;
-    };
-    if let Some(guidance) = dispatch_opencode_event(&event, &root).await
-        && !write_hook_output(
-            Some(&root),
-            tracedecay_hooks::HookHostV1::OpenCode,
-            &event,
-            &guidance,
-            None,
-        )
-        .await
-    {
-        return 1;
-    }
-    0
+    hook_native_event(
+        tracedecay_hooks::HookHostV1::OpenCode,
+        dispatch_opencode_event,
+    )
+    .await
 }
 
 pub async fn hook_opencode_tool_after() -> i32 {
-    let event = read_hook_event!();
-    let Some(root) = native_event_project_root(&event).await else {
-        return 0;
-    };
-    if let Some(guidance) = dispatch_opencode_tool_after(&event, &root).await
-        && !write_hook_output(
-            Some(&root),
-            tracedecay_hooks::HookHostV1::OpenCode,
-            &event,
-            &guidance,
-            None,
-        )
-        .await
-    {
-        return 1;
-    }
-    0
+    hook_native_event(
+        tracedecay_hooks::HookHostV1::OpenCode,
+        dispatch_opencode_tool_after,
+    )
+    .await
 }
 
 async fn native_event_project_root(event: &str) -> Option<PathBuf> {
@@ -508,6 +491,88 @@ pub(crate) async fn ingest_user_session(
             false
         }
     }
+}
+
+/// Fail-open transcript ingest shared by Cursor and Kiro catch-up hooks.
+#[derive(Default)]
+struct TranscriptIngestOutcome {
+    user_scope: bool,
+    messages_upserted: u64,
+}
+
+async fn await_within_stop_budget<T>(
+    work: impl Future<Output = T>,
+    budget: Duration,
+    telemetry: Option<&analytics::HookTimingSpan>,
+    on_timeout: impl FnOnce() -> T,
+) -> T {
+    if let Some(telemetry) = telemetry {
+        telemetry.note_timeout_budget(budget);
+    }
+    match tokio::time::timeout(budget, work).await {
+        Ok(value) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
+            value
+        }
+        Err(_) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(true);
+            }
+            on_timeout()
+        }
+    }
+}
+
+async fn ingest_transcript_for_event(
+    provider: &str,
+    event_json: &str,
+    project_root: Option<&Path>,
+    max_new_bytes: Option<u64>,
+    budget: Duration,
+    telemetry: Option<&analytics::HookTimingSpan>,
+) -> TranscriptIngestOutcome {
+    let mut args = serde_json::json!({
+        "action": "ingest_transcript",
+        "provider": provider,
+        "user_scope": project_root.is_none(),
+        "event_json": event_json,
+    });
+    if let Some(max_new_bytes) = max_new_bytes {
+        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
+    }
+    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
+    let result = await_within_stop_budget(
+        async {
+            match daemon_hook_action(project_root, args, telemetry).await {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    tracing::warn!(provider, %error, "transcript ingest daemon call failed");
+                    None
+                }
+            }
+        },
+        budget,
+        telemetry,
+        || {
+            tracing::warn!(provider, "transcript ingest daemon call timed out");
+            None
+        },
+    )
+    .await;
+    result
+        .map(|result| TranscriptIngestOutcome {
+            user_scope: result
+                .get("user_scope")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            messages_upserted: result
+                .get("messages_upserted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) async fn reset_counter_for_project(
@@ -671,6 +736,35 @@ fn now_unix_secs() -> i64 {
 }
 
 #[cfg(test)]
+pub(crate) struct EnvGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl EnvGuard {
+    pub(crate) fn set_path(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     crate::config::lock_user_data_dir_test_env()
 }
@@ -796,18 +890,17 @@ fn hook_route_metadata_from_parsed(parsed: &Value, project_root: &Path) -> HookR
     }
 }
 
+const HOOK_SESSION_ID_KEYS: &[&str] = &[
+    "session_id",
+    "sessionId",
+    "conversation_id",
+    "conversationId",
+    "chat_id",
+    "chatId",
+];
+
 fn hook_route_session_id(parsed: &Value) -> Option<String> {
-    text_field(
-        parsed,
-        &[
-            "session_id",
-            "sessionId",
-            "conversation_id",
-            "conversationId",
-            "chat_id",
-            "chatId",
-        ],
-    )
+    text_field(parsed, HOOK_SESSION_ID_KEYS)
 }
 
 fn deduped_project_hint_with_id(
@@ -935,11 +1028,7 @@ fn prompt_like_text(parsed: &Value) -> Option<String> {
 }
 
 fn event_session_id(parsed: &Value) -> Option<String> {
-    ["session_id", "conversation_id", "chat_id"]
-        .iter()
-        .find_map(|key| parsed.get(*key).and_then(Value::as_str))
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
+    hook_route_session_id(parsed)
 }
 
 fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {

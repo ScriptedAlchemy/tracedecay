@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
 use super::*;
+
+const SQLITE_IN_BATCH_SIZE: usize = 500;
 
 pub(super) async fn raw_message_overviews(
     conn: &(impl QueryExecutor + ?Sized),
@@ -105,6 +109,11 @@ pub(super) async fn describe_summary_node(
     })
 }
 
+enum DescribeSource {
+    Raw { store_id: i64 },
+    Summary { node_id: String },
+}
+
 async fn describe_summary_sources(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -120,7 +129,7 @@ async fn describe_summary_sources(
             params![node_id],
         )
         .await?;
-    let mut out = Vec::new();
+    let mut sources = Vec::new();
     while let Some(row) = rows.next().await? {
         let source_kind: String = row.get(0)?;
         let source_id: String = row.get(1)?;
@@ -129,57 +138,133 @@ async fn describe_summary_sources(
                 let store_id = source_id
                     .parse::<i64>()
                     .map_err(|err| LcmError::Db(format!("invalid raw source id: {err}")))?;
-                let mut raw_rows = conn
-                    .query(
-                        "SELECT role, storage_kind
-                         FROM lcm_raw_messages
-                         WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
-                        params![provider, session_id, store_id],
-                    )
-                    .await?;
-                let Some(raw_row) = raw_rows.next().await? else {
+                sources.push(DescribeSource::Raw { store_id });
+            }
+            "summary_node" => sources.push(DescribeSource::Summary { node_id: source_id }),
+            _ => {}
+        }
+    }
+    let raw_store_ids = sources
+        .iter()
+        .filter_map(|source| match source {
+            DescribeSource::Raw { store_id } => Some(*store_id),
+            DescribeSource::Summary { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let summary_node_ids = sources
+        .iter()
+        .filter_map(|source| match source {
+            DescribeSource::Raw { .. } => None,
+            DescribeSource::Summary { node_id } => Some(node_id.clone()),
+        })
+        .collect::<Vec<_>>();
+    let raw_by_store_id =
+        load_describe_raw_messages(conn, provider, session_id, &raw_store_ids).await?;
+    let summary_by_node_id =
+        load_describe_summary_nodes(conn, provider, session_id, &summary_node_ids).await?;
+    let mut out = Vec::new();
+    for source in sources {
+        match source {
+            DescribeSource::Raw { store_id } => {
+                let Some((role, storage_kind_text)) = raw_by_store_id.get(&store_id) else {
                     continue;
                 };
-                let storage_kind_text: String = raw_row.get(1)?;
                 out.push(LcmDescribeSourceOverview {
-                    source_kind,
+                    source_kind: "raw_message".to_string(),
                     source_ref: LcmSourceRef::RawMessage { store_id },
                     store_id: Some(store_id),
                     node_id: None,
-                    role: Some(raw_row.get(0)?),
-                    storage_kind: LcmStorageKind::from_db(&storage_kind_text),
+                    role: Some(role.clone()),
+                    storage_kind: LcmStorageKind::from_db(storage_kind_text),
                     summary_token_count: None,
                     source_token_count: None,
                     expand_hint: None,
                 });
             }
-            "summary_node" => {
-                let mut summary_rows = conn
-                    .query(
-                        "SELECT summary_token_count, source_token_count, expand_hint
-                         FROM lcm_summary_nodes
-                         WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
-                        params![provider, session_id, source_id.as_str()],
-                    )
-                    .await?;
-                let Some(summary_row) = summary_rows.next().await? else {
+            DescribeSource::Summary { node_id } => {
+                let Some((summary_token_count, source_token_count, expand_hint)) =
+                    summary_by_node_id.get(&node_id)
+                else {
                     continue;
                 };
                 out.push(LcmDescribeSourceOverview {
-                    source_kind,
+                    source_kind: "summary_node".to_string(),
                     source_ref: LcmSourceRef::SummaryNode {
-                        node_id: source_id.clone(),
+                        node_id: node_id.clone(),
                     },
                     store_id: None,
-                    node_id: Some(source_id),
+                    node_id: Some(node_id),
                     role: None,
                     storage_kind: None,
-                    summary_token_count: Some(summary_row.get(0)?),
-                    source_token_count: Some(summary_row.get(1)?),
-                    expand_hint: summary_row.get(2)?,
+                    summary_token_count: Some(*summary_token_count),
+                    source_token_count: Some(*source_token_count),
+                    expand_hint: expand_hint.clone(),
                 });
             }
-            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn sql_in_placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
+}
+
+async fn load_describe_raw_messages(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    store_ids: &[i64],
+) -> Result<HashMap<i64, (String, String)>, LcmError> {
+    let mut out = HashMap::new();
+    for chunk in store_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "SELECT store_id, role, storage_kind
+             FROM lcm_raw_messages
+             WHERE provider = ? AND session_id = ? AND store_id IN ({})",
+            sql_in_placeholders(chunk.len())
+        );
+        let mut values = vec![
+            Value::Text(provider.to_string()),
+            Value::Text(session_id.to_string()),
+        ];
+        values.extend(chunk.iter().copied().map(Value::Integer));
+        let mut rows = conn.query(&sql, values).await?;
+        while let Some(row) = rows.next().await? {
+            out.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+        }
+    }
+    Ok(out)
+}
+
+async fn load_describe_summary_nodes(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_ids: &[String],
+) -> Result<HashMap<String, (i64, i64, Option<String>)>, LcmError> {
+    let mut out = HashMap::new();
+    for chunk in node_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "SELECT node_id, summary_token_count, source_token_count, expand_hint
+             FROM lcm_summary_nodes
+             WHERE provider = ? AND session_id = ? AND node_id IN ({})",
+            sql_in_placeholders(chunk.len())
+        );
+        let mut values = vec![
+            Value::Text(provider.to_string()),
+            Value::Text(session_id.to_string()),
+        ];
+        values.extend(chunk.iter().cloned().map(Value::Text));
+        let mut rows = conn.query(&sql, values).await?;
+        while let Some(row) = rows.next().await? {
+            out.insert(row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?));
         }
     }
     Ok(out)

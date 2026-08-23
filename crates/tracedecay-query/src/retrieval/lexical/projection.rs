@@ -210,6 +210,14 @@ impl ProjectedChunkV1 {
             fields,
         )
     }
+
+    fn exact_match_view(&self) -> ExactMatchRowViewV1<'_> {
+        ExactMatchRowViewV1 {
+            sanitized_text: self.sanitized_text.as_str(),
+            logical_path: &self.logical_path,
+            exact_terms: &self.exact_terms,
+        }
+    }
 }
 
 /// Immutable adapter over generation-bound code chunks.
@@ -1079,7 +1087,7 @@ impl CodeLexicalProjectionAdapterV1 {
                             self.term_score(*field, &normalized_query, exact_tf, row),
                         );
                         matched_whole_terms.insert(query_term.clone());
-                        collect_term_kinds(row, &normalized_query, &mut matched_kinds);
+                        collect_term_kinds(&row.exact_terms, &normalized_query, &mut matched_kinds);
                     }
                     if let Some(expansions) = fuzzy.by_query.get(query_term) {
                         for expansion in expansions {
@@ -1095,7 +1103,7 @@ impl CodeLexicalProjectionAdapterV1 {
                             add_score(&mut field_scores, *field, score);
                             matched_whole_terms.insert(query_term.clone());
                             typo_recovery_applied = true;
-                            collect_term_kinds(row, expansion, &mut matched_kinds);
+                            collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
                     }
                 }
@@ -1299,7 +1307,7 @@ where
         let mut excluded = self.projection.rows.len() as u64 - documents.len();
         for document in documents {
             let row = &self.projection.rows[document as usize];
-            let (matched_literals, matched_kinds) = exact_matches(row, request);
+            let (matched_literals, matched_kinds) = exact_matches(row.exact_match_view(), request);
             if matched_literals.is_empty() {
                 excluded += 1;
                 continue;
@@ -1384,8 +1392,16 @@ struct LexicalRowScoreV1 {
     echo_penalty_applied: bool,
 }
 
+/// The borrowed subset of a projected chunk that exact-literal matching
+/// reads, so artifact rows never deep-clone chunk text per visited document.
+struct ExactMatchRowViewV1<'a> {
+    sanitized_text: &'a str,
+    logical_path: &'a str,
+    exact_terms: &'a [ExactTechnicalTermV1],
+}
+
 fn exact_matches(
-    row: &ProjectedChunkV1,
+    row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
 ) -> (
     Vec<crate::retrieval::exact::ExactLiteralV1>,
@@ -1401,10 +1417,7 @@ fn exact_matches(
                 | ExactFieldV1::DiagnosticText
                 | ExactFieldV1::CompilerOrRuntimeError
         ) {
-            matched = contains_bytes(
-                row.sanitized_text.as_str().as_bytes(),
-                &literal.original_bytes,
-            );
+            matched = contains_bytes(row.sanitized_text.as_bytes(), &literal.original_bytes);
         }
         if literal.field == ExactFieldV1::Path
             && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
@@ -1412,7 +1425,7 @@ fn exact_matches(
             matched = true;
             matched_kinds.insert(ExactTechnicalTermKindV1::Path);
         }
-        for term in &row.exact_terms {
+        for term in row.exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field
                 && canonical_projected_exact_term(term).as_ref()
                     == literal.canonical_bytes.as_slice()
@@ -1469,11 +1482,11 @@ fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> 
 }
 
 fn collect_term_kinds(
-    row: &ProjectedChunkV1,
+    exact_terms: &[ExactTechnicalTermV1],
     normalized_term: &str,
     kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
 ) {
-    for term in &row.exact_terms {
+    for term in exact_terms {
         if std::str::from_utf8(term.canonical_bytes())
             .is_ok_and(|value| normalize_lexical(value) == normalized_term)
         {

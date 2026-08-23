@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use tracedecay_store::RuntimeLeaseIdV1;
 use tracedecay_store::{
-    RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
+    RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, StoreShardScopeV1,
 };
 
 use super::{

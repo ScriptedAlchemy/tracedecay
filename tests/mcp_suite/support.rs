@@ -1080,53 +1080,10 @@ pub(crate) async fn seed_lcm_session_message_for_provider(
     text: impl Into<String>,
     ordinal: i64,
 ) {
-    let runtime = open_active_project_session_db(cg).await;
-    assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &SessionRecord {
-                    provider: provider.to_string(),
-                    session_id: session_id.to_string(),
-                    project_key: cg.project_root().to_string_lossy().to_string(),
-                    project_path: cg.project_root().to_string_lossy().to_string(),
-                    title: Some(format!("LCM session {session_id}")),
-                    started_at: Some(ordinal),
-                    ended_at: None,
-                    transcript_path: Some(format!("{session_id}.jsonl")),
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                }
-            )
-            .await
-            .unwrap()
-    );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &SessionMessageRecord {
-                    provider: provider.to_string(),
-                    message_id: message_id.to_string(),
-                    session_id: session_id.to_string(),
-                    role: "assistant".to_string(),
-                    timestamp: Some(ordinal + 1),
-                    ordinal,
-                    text: text.into(),
-                    kind: Some("message".to_string()),
-                    model: Some("test-model".to_string()),
-                    tool_names: None,
-                    source_path: Some(format!("{session_id}.jsonl")),
-                    source_offset: Some(0),
-                    metadata_json: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
+    seed_lcm_message_with_role(
+        cg, provider, session_id, message_id, text, ordinal, "assistant", "message",
+    )
+    .await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -1137,6 +1094,24 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
     message_id: &str,
     text: impl Into<String>,
     ordinal: i64,
+) {
+    seed_lcm_message_with_role(
+        cg, provider, session_id, message_id, text, ordinal, "tool", "tool_result",
+    )
+    .await;
+}
+
+#[cfg(feature = "test-transport")]
+#[allow(clippy::too_many_arguments)]
+async fn seed_lcm_message_with_role(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    role: &str,
+    kind: &str,
 ) {
     let runtime = open_active_project_session_db(cg).await;
     assert!(
@@ -1170,11 +1145,11 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
                     provider: provider.to_string(),
                     message_id: message_id.to_string(),
                     session_id: session_id.to_string(),
-                    role: "tool".to_string(),
+                    role: role.to_string(),
                     timestamp: Some(ordinal + 1),
                     ordinal,
                     text: text.into(),
-                    kind: Some("tool_result".to_string()),
+                    kind: Some(kind.to_string()),
                     model: Some("test-model".to_string()),
                     tool_names: None,
                     source_path: Some(format!("{session_id}.jsonl")),

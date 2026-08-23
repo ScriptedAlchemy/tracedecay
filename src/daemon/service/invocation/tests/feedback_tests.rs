@@ -1,5 +1,4 @@
-//! `feedback` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `feedback` module test coverage.
 
 use super::*;
 

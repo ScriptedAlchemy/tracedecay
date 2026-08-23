@@ -1842,6 +1842,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .symbols
                 .iter()
                 .filter_map(|symbol| {
+                    let name = symbol.simple_name.to_ascii_lowercase();
+                    let qualified = symbol.qualified_name.to_ascii_lowercase();
+                    if !name.contains(&query) && !qualified.contains(&query) {
+                        return None;
+                    }
                     let mut record = symbol_record_by_id(&prepared.latest, &symbol.occurrence)?;
                     if !path_is_in_code_query_scope(&record.file, &request.scope) {
                         return None;

@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_application::clock::now_micros;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, PayloadDigestV1, canonical_sha256,
-    classify_observation_collision, is_canonical_payload_revision_replay,
+    CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ManifestDigest,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, PayloadDigestV1,
+    canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
+    is_canonical_payload_revision_replay,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -460,13 +461,19 @@ impl ObservationStore for GlobalDbObservationStore {
                 existing.commit_receipt().clone(),
             ));
         }
-        let idempotency_key = format!(
-            "observation.{}",
-            canonical_runtime_digest(&runtime_observation_command(&write))?
-        );
+        let (command_bytes, command_digest) =
+            canonical_json_bytes_and_sha256(&runtime_observation_command(&write)).map_err(
+                |error| {
+                    runtime_storage_error("derive observation runtime identity", error.to_string())
+                },
+            )?;
+        let idempotency_key =
+            format!("observation.{}", runtime_digest_suffix(&command_digest)?);
         let outcome = submit_runtime_write(
             runtime,
             RepositoryWritePayloadV1::Observation(Box::new(write)),
+            command_digest,
+            command_bytes.len(),
             idempotency_key,
             "submit anchored observation",
         )
@@ -551,9 +558,16 @@ impl ObservationStore for GlobalDbObservationStore {
             "coverage": advance.coverage(),
         });
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
+        let payload = RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance));
+        let (command_bytes, command_digest) =
+            canonical_json_bytes_and_sha256(&runtime_command_value(&payload)?).map_err(|error| {
+                runtime_storage_error("advance observation source cursor", error.to_string())
+            })?;
         let outcome = submit_runtime_write(
             runtime,
-            RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance)),
+            payload,
+            command_digest,
+            command_bytes.len(),
             key,
             "advance observation source cursor",
         )
@@ -912,12 +926,11 @@ fn read_runtime_stored_observation(
 async fn submit_runtime_write(
     runtime: &DatabaseRuntimeClientV1,
     payload: RepositoryWritePayloadV1,
+    command_digest: ManifestDigest,
+    command_bytes: usize,
     idempotency_key: String,
     operation: &'static str,
 ) -> ObservationStoreResult<RuntimeSubmitOutcomeV1> {
-    let command = runtime_command_value(&payload)?;
-    let command_digest = canonical_sha256(&command)
-        .map_err(|error| runtime_storage_error(operation, error.to_string()))?;
     let digest_suffix = command_digest
         .as_str()
         .strip_prefix("sha256:")
@@ -942,13 +955,7 @@ async fn submit_runtime_write(
         },
         durability: DurabilityClassV1::Full,
         priority: OperationPriorityV1::Foreground,
-        admission_bytes: u64::try_from(
-            serde_json::to_vec(&command)
-                .map_err(|error| runtime_storage_error(operation, error.to_string()))?
-                .len(),
-        )
-        .unwrap_or(u64::MAX)
-        .max(1),
+        admission_bytes: u64::try_from(command_bytes).unwrap_or(u64::MAX).max(1),
         admitted_at,
     };
     let compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
@@ -1036,16 +1043,16 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
     let digest = canonical_sha256(value).map_err(|error| {
         runtime_storage_error("derive observation runtime identity", error.to_string())
     })?;
-    digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            runtime_storage_error(
-                "derive observation runtime identity",
-                "canonical digest prefix is invalid",
-            )
-        })
+    runtime_digest_suffix(&digest).map(str::to_owned)
+}
+
+fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str> {
+    digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+        runtime_storage_error(
+            "derive observation runtime identity",
+            "canonical digest prefix is invalid",
+        )
+    })
 }
 
 fn runtime_storage_error(

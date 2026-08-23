@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::is_canonical_text;
+use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_canonical_text};
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, LocatorDigest, ProjectId, RefId, RepositoryId,
     UserProfileId, WorktreeId,
@@ -484,7 +484,7 @@ pub fn canonical_store_locator_digest(
     hasher.update(LOCATOR_DIGEST_DOMAIN);
     hasher.update((path.len() as u64).to_be_bytes());
     hasher.update(path.as_bytes());
-    LocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize()))).map_err(|_| {
+    LocatorDigest::new(encode_tagged_lowercase_hex("sha256:", &hasher.finalize())).map_err(|_| {
         StorageRuntimeContractErrorV1::NonCanonical {
             field: "store locator digest",
         }

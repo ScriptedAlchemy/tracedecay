@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Claude Code agent integration.
 //!
 //! tracedecay installs into Claude Code as a first-class **plugin bundle**
@@ -467,10 +466,6 @@ fn run_claude_plugin_step(claude: &Path, args: &[&str], home: &Path) -> Result<(
         message: outcome.failure_message(),
     })
 }
-
-// `claude_native_remove_action` and `deferred_user_action_error` were removed
-// with the deferral they served: removal is no longer handed back to the
-// operator as prose, it is performed through `claude plugin uninstall`.
 
 fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Value>, ()> {
     match std::fs::read(path) {
@@ -988,7 +983,6 @@ fn uninstall_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         eprintln!("  CLAUDE.md does not contain tracedecay rules, skipping");
         return Ok(());
     }
-    // Try steady marker first, then display-case marker.
     let Some(range) = claude_md_rules_block_range(&contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
         return Ok(());
     };

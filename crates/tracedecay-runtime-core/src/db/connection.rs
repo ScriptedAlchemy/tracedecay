@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 use std::path::Path;
 use std::sync::{Arc, OnceLock, Weak};
 

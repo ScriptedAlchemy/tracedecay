@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-05-25
 //! `tracedecay_redundancy` — AST-level functional-duplicate detector.
 //!
 //! Wire surface only: argument parsing, the scan call, and rendering. The

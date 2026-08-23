@@ -173,6 +173,10 @@ pub(super) async fn await_session_sync_completion(
     mut outcome: Value,
 ) -> tracedecay::errors::Result<()> {
     let client_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);
+    // Poll with exponential backoff so a long-running sync costs dozens of
+    // daemon round trips instead of one every 50 ms for up to 35 s.
+    let mut poll_interval = std::time::Duration::from_millis(50);
+    const MAX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
     loop {
         match session_sync_poll_state(label, &outcome)? {
             SessionSyncPollState::Completed => return Ok(()),
@@ -187,7 +191,8 @@ pub(super) async fn await_session_sync_completion(
                         ),
                     });
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(poll_interval).await;
+                poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
                 outcome = call_daemon_tool(
                     project_root,
                     "tracedecay_admin_cli",

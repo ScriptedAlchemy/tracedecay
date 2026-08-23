@@ -744,10 +744,13 @@ fn validate_canonical_envelope_limits(
         Ok(()) => {}
     }
 
-    let value =
-        serde_json::to_value(envelope).map_err(|_| ObservationContractError::CanonicalEncoding)?;
     let mut values = 0usize;
-    validate_value_structure(&value, 1, &mut values)
+    envelope
+        .serialize(StructureLimitSerializer {
+            values: &mut values,
+            depth: 1,
+        })
+        .map_err(ObservationContractError::from)
 }
 
 fn validate_value_structure(
@@ -777,6 +780,432 @@ fn validate_value_structure(
         }
     }
     Ok(())
+}
+
+/// Structure-limit violations observed while counting the JSON values a
+/// serialization pass would emit.
+#[derive(Debug, Error)]
+enum StructureLimitError {
+    #[error("canonical observation envelope exceeds the value-count limit")]
+    TooManyValues,
+    #[error("canonical observation envelope exceeds the nesting limit")]
+    TooDeep,
+    /// `serde::ser::Error` requires a custom-message constructor. Encoding
+    /// failures are already rejected by the byte-limit pass that runs first,
+    /// so this variant only preserves the trait contract.
+    #[error("canonical observation encoding failed")]
+    Encoding,
+}
+
+impl serde::ser::Error for StructureLimitError {
+    fn custom<T: fmt::Display>(_message: T) -> Self {
+        Self::Encoding
+    }
+}
+
+impl From<StructureLimitError> for ObservationContractError {
+    fn from(error: StructureLimitError) -> Self {
+        match error {
+            StructureLimitError::TooManyValues => Self::CanonicalEnvelopeTooManyValues,
+            StructureLimitError::TooDeep => Self::CanonicalEnvelopeTooDeep,
+            StructureLimitError::Encoding => Self::CanonicalEncoding,
+        }
+    }
+}
+
+fn visit_structure_value(values: &mut usize, depth: usize) -> Result<(), StructureLimitError> {
+    *values = values.saturating_add(1);
+    if *values > MAX_OBSERVATION_STRUCTURE_VALUES {
+        return Err(StructureLimitError::TooManyValues);
+    }
+    if depth > MAX_OBSERVATION_STRUCTURE_DEPTH {
+        return Err(StructureLimitError::TooDeep);
+    }
+    Ok(())
+}
+
+/// Counts the JSON values `serde_json` serialization would produce — with the
+/// same per-node accounting as [`validate_value_structure`] over the
+/// materialized tree — without building that tree.
+///
+/// Each `serialize_*` case mirrors how `serde_json::value::Serializer`
+/// constructs a `Value`: scalars are one value, sequences and maps are one
+/// value plus their children one level deeper, and variant wrappers add the
+/// object that carries the variant key.
+struct StructureLimitSerializer<'count> {
+    values: &'count mut usize,
+    depth: usize,
+}
+
+impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    type SerializeSeq = StructureLimitCompound<'count>;
+    type SerializeTuple = StructureLimitCompound<'count>;
+    type SerializeTupleStruct = StructureLimitCompound<'count>;
+    type SerializeTupleVariant = StructureLimitCompound<'count>;
+    type SerializeMap = StructureLimitCompound<'count>;
+    type SerializeStruct = StructureLimitCompound<'count>;
+    type SerializeStructVariant = StructureLimitCompound<'count>;
+
+    fn serialize_bool(self, _value: bool) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_i8(self, _value: i8) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_i16(self, _value: i16) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_i32(self, _value: i32) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_i64(self, _value: i64) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_i128(self, _value: i128) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_u8(self, _value: u8) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_u16(self, _value: u16) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_u32(self, _value: u32) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_u64(self, _value: u64) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_u128(self, _value: u128) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_f32(self, _value: f32) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_f64(self, _value: f64) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_char(self, _value: char) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_str(self, _value: &str) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_bytes(self, value: &[u8]) -> Result<(), StructureLimitError> {
+        // `to_value` renders bytes as an array of numbers.
+        visit_structure_value(self.values, self.depth)?;
+        for _byte in value {
+            visit_structure_value(self.values, self.depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn serialize_none(self) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_some<T>(self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+    ) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn serialize_newtype_struct<T>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        value: &T,
+    ) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        visit_structure_value(self.values, self.depth)?;
+        value.serialize(StructureLimitSerializer {
+            values: self.values,
+            depth: self.depth + 1,
+        })
+    }
+
+    fn serialize_seq(
+        self,
+        _len: Option<usize>,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        visit_structure_value(self.values, self.depth)?;
+        Ok(StructureLimitCompound {
+            values: self.values,
+            child_depth: self.depth + 1,
+        })
+    }
+
+    fn serialize_tuple(
+        self,
+        len: usize,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        self.serialize_seq(Some(len))
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        self.serialize_seq(Some(len))
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        visit_structure_value(self.values, self.depth)?;
+        visit_structure_value(self.values, self.depth + 1)?;
+        Ok(StructureLimitCompound {
+            values: self.values,
+            child_depth: self.depth + 2,
+        })
+    }
+
+    fn serialize_map(
+        self,
+        _len: Option<usize>,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        visit_structure_value(self.values, self.depth)?;
+        Ok(StructureLimitCompound {
+            values: self.values,
+            child_depth: self.depth + 1,
+        })
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        visit_structure_value(self.values, self.depth)?;
+        Ok(StructureLimitCompound {
+            values: self.values,
+            child_depth: self.depth + 1,
+        })
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        visit_structure_value(self.values, self.depth)?;
+        visit_structure_value(self.values, self.depth + 1)?;
+        Ok(StructureLimitCompound {
+            values: self.values,
+            child_depth: self.depth + 2,
+        })
+    }
+
+    fn collect_str<T>(self, _value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + fmt::Display,
+    {
+        visit_structure_value(self.values, self.depth)
+    }
+}
+
+/// One compound scope (array, object, or variant payload) of the counting
+/// pass; children are counted one level below the scope's own node.
+struct StructureLimitCompound<'count> {
+    values: &'count mut usize,
+    child_depth: usize,
+}
+
+impl StructureLimitCompound<'_> {
+    fn child<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        value.serialize(StructureLimitSerializer {
+            values: &mut *self.values,
+            depth: self.child_depth,
+        })
+    }
+}
+
+impl serde::ser::SerializeSeq for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTuple for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleStruct for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleVariant for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeMap for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_key<T>(&mut self, _key: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        // Object keys are not `Value` nodes; only entry values count.
+        Ok(())
+    }
+
+    fn serialize_value<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStruct for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_field<T>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for StructureLimitCompound<'_> {
+    type Ok = ();
+    type Error = StructureLimitError;
+
+    fn serialize_field<T>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> Result<(), StructureLimitError>
+    where
+        T: ?Sized + Serialize,
+    {
+        self.child(value)
+    }
+
+    fn end(self) -> Result<(), StructureLimitError> {
+        Ok(())
+    }
 }
 
 struct ByteLimitWriter {

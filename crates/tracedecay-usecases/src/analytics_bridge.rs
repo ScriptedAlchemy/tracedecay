@@ -319,10 +319,3 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
         .map(str::to_string)
 }
-
-// The CLI entry points that used to close this file (`run_analytics_sync`,
-// `run_analytics_diagnostics`, `call_admin_cli`, `analytics_sync_with_db`,
-// `analytics_diagnostics_with_db`) stayed in the root binary: they drive
-// `daemon::DaemonHandshake`, `dashboard::analytics_api` and the observability
-// read models, none of which sit below this crate. Only the durable
-// hook-JSONL importer moved down.

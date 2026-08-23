@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use crate::config::AutomationBackend;
 use crate::{AutomationError, Result, config_error};
@@ -324,7 +325,7 @@ fn request_input_hash(
         "context": context,
     });
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes))
 }
 
 /// Typed failure surface of [`AgentTaskBackend::run_task`].

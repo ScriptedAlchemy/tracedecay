@@ -182,6 +182,11 @@ pub(crate) struct HookProjectRouteCache {
     session_by_thread: HashMap<String, String>,
     session_order: VecDeque<String>,
     thread_order: VecDeque<String>,
+    /// Generation of the [`SharedHookProjectRouteCache`] this copy was last
+    /// refreshed from (`None` before the first refresh), so per-request
+    /// refreshes can skip the full deep clone while the shared cache is
+    /// unchanged.
+    shared_generation: Option<u64>,
 }
 
 impl HookProjectRouteCache {
@@ -363,9 +368,17 @@ impl HookProjectRouteCache {
     }
 }
 
+#[derive(Default)]
+struct SharedHookProjectRouteCacheState {
+    cache: HookProjectRouteCache,
+    /// Bumped on every mutation (`store`, `forget_project`) so refreshers can
+    /// prove the shared cache is unchanged without cloning it.
+    generation: u64,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct SharedHookProjectRouteCache {
-    inner: Arc<Mutex<HookProjectRouteCache>>,
+    inner: Arc<Mutex<SharedHookProjectRouteCacheState>>,
 }
 
 impl SharedHookProjectRouteCache {
@@ -378,28 +391,35 @@ impl SharedHookProjectRouteCache {
     }
 
     pub(crate) fn snapshot(&self) -> crate::errors::Result<HookProjectRouteCache> {
-        self.inner
-            .lock()
-            .map(|cache| cache.clone())
-            .map_err(|_| Self::unavailable("snapshot"))
+        let state = self.inner.lock().map_err(|_| Self::unavailable("snapshot"))?;
+        let mut cache = state.cache.clone();
+        cache.shared_generation = Some(state.generation);
+        Ok(cache)
     }
 
     pub(crate) fn store(&self, cache: &HookProjectRouteCache) -> crate::errors::Result<()> {
-        let mut shared = self.inner.lock().map_err(|_| Self::unavailable("update"))?;
-        let mut cache = cache.clone();
-        cache.connection_route = None;
-        shared.clone_from(&cache);
+        let mut state = self.inner.lock().map_err(|_| Self::unavailable("update"))?;
+        state.cache.clone_from(cache);
+        state.cache.connection_route = None;
+        state.generation += 1;
         Ok(())
     }
 
-    /// Refresh `target` from the shared cache with one clone under the lock.
+    /// Refresh `target` from the shared cache with one clone under the lock,
+    /// skipped entirely while `target` already carries the current shared
+    /// generation (route updates are rare relative to tool calls).
     pub(crate) fn refresh_into(
         &self,
         target: &mut HookProjectRouteCache,
     ) -> crate::errors::Result<()> {
+        let state = self.inner.lock().map_err(|_| Self::unavailable("snapshot"))?;
+        if target.shared_generation == Some(state.generation) {
+            return Ok(());
+        }
         let connection_route = target.connection_route.take();
-        *target = self.snapshot()?;
+        target.clone_from(&state.cache);
         target.connection_route = connection_route;
+        target.shared_generation = Some(state.generation);
         Ok(())
     }
 
@@ -408,11 +428,12 @@ impl SharedHookProjectRouteCache {
         profile_id: &tracedecay_domain::UserProfileId,
         project_id: &str,
     ) -> Result<(), crate::errors::TraceDecayError> {
-        let mut cache = self
+        let mut state = self
             .inner
             .lock()
             .map_err(|_| Self::unavailable("project retirement"))?;
-        cache.forget_project(profile_id, project_id);
+        state.cache.forget_project(profile_id, project_id);
+        state.generation += 1;
         Ok(())
     }
 }

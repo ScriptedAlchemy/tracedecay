@@ -1,7 +1,7 @@
 import { useMemo, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
-import { ActivationField } from '../../viz/graph/activation.ts';
+import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import {
   CenteredState,
   ReadSection,
@@ -15,7 +15,7 @@ import { PROJECT_NOT_FOUND, useProjectEntry } from '../../data/query/projectRegi
 import { type EnvelopeResult } from '../../data/query/envelope.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
-import { relativeTime } from './BrainPage.tsx';
+import { relativeAge } from '../../ui/time.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   GraphOverviewPayloadV1Schema,
@@ -83,7 +83,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     AnalyticsOverviewPayloadV1Schema,
   );
 
-  const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
+  const activation = useActivationField(3200);
   const graph = envelopePayload(subgraph.data);
   const nodes = useMemo(
     () =>
@@ -209,7 +209,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                   edges={edges}
                   fill
                   canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
-                  activation={activationRef.current}
+                  activation={activation}
                   ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The project identity and checkouts listed alongside remain available as context.`}
                   fallbackDescription="the project identity and checkouts beside this field remain available as a text alternative"
                   encoding={{
@@ -222,7 +222,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                   caption={
                     <>
                       {nodes.length} returned symbols · {edges.length} returned relations
-                      {graph?.capped?.nodes || graph?.capped?.edges
+                      {graph?.capped.nodes || graph?.capped.edges
                         ? ` · daemon capped ${[
                             graph.capped.nodes ? 'symbols' : null,
                             graph.capped.edges ? 'relations' : null,
@@ -415,7 +415,7 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
               ) : null}
               <span aria-hidden className="td-rule" />
               <span className="td-legend shrink-0 text-text-muted" data-cell="numeric">
-                seen {relativeTime(project.last_seen_at)}
+                seen {relativeAge(project.last_seen_at, Date.now() / 1000)}
               </span>
             </span>
           </div>
@@ -446,7 +446,7 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
                   className="td-legend shrink-0 text-text-muted"
                   data-cell="numeric"
                 >
-                  {relativeTime(alias.last_seen_at)}
+                  {relativeAge(alias.last_seen_at, Date.now() / 1000)}
                 </span>
               </li>
             ))}

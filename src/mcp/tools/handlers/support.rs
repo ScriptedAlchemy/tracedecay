@@ -495,15 +495,10 @@ pub(super) async fn registered_project_context(
 
 /// Whether a selector names a path rather than a bare project name. This is
 /// pure syntax: it decides whether a selector may fall back to Git identity,
-/// and never consults the registry.
+/// and never consults the registry. Delegates to the canonical
+/// [`RegisteredGlobalDb::is_explicit_project_path_selector`].
 pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
-    let selector = selector.trim();
-    !selector.is_empty()
-        && (Path::new(selector).is_absolute()
-            || selector == "."
-            || selector == ".."
-            || selector.contains('/')
-            || selector.contains('\\'))
+    RegisteredGlobalDb::is_explicit_project_path_selector(selector)
 }
 
 #[cfg(test)]

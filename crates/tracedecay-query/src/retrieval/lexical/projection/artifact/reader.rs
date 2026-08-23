@@ -36,10 +36,10 @@ use crate::retrieval::ports::{
 };
 
 use super::super::{
-    ECHO_SCORE_MILLIS, FUZZY_SCORE_MILLIS, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalRowScoreV1,
-    PHRASE_SCORE_MILLIS, add_score, bm25_score_micros, collect_term_kinds, exact_matches,
-    field_weight_millis, fuzzy_distance_bound, normalize_lexical, retrieval_anchor,
-    substring_count,
+    ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS, FuzzyExpansionsV1,
+    FuzzyQueryGroupV1, LexicalRowScoreV1, PHRASE_SCORE_MILLIS, add_score, bm25_score_micros,
+    collect_term_kinds, exact_matches, field_weight_millis, fuzzy_distance_bound,
+    normalize_lexical, retrieval_anchor, substring_count,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -637,6 +637,7 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
+        let stats = self.lexical_stats(request, &fuzzy)?;
         let phrase_queries = request
             .phrases
             .iter()
@@ -668,7 +669,8 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut ranked = BinaryHeap::new();
         self.visit_documents(&documents, |document| {
             let row = self.row(document)?;
-            let score = self.score_row(document, &row, request, &fuzzy, &phrase_frequencies)?;
+            let score =
+                self.score_row(document, &row, request, &fuzzy, &phrase_frequencies, &stats)?;
             let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
                 return Ok(());
             };
@@ -687,7 +689,8 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (_, _, document)) in selected.into_iter().enumerate() {
             let row = self.row(document)?;
-            let score = self.score_row(document, &row, request, &fuzzy, &phrase_frequencies)?;
+            let score =
+                self.score_row(document, &row, request, &fuzzy, &phrase_frequencies, &stats)?;
             let mut candidate = candidate(
                 self.receipt,
                 &row,
@@ -968,6 +971,66 @@ impl<'a> ArtifactQueryV1<'a> {
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
+    /// Read the document-independent scoring statistics once per request.
+    ///
+    /// Per-field totals and per-(field, term) document frequencies depend
+    /// only on the artifact corpus and the query terms, so one upfront read
+    /// replaces the two SQL probes each scored document would otherwise
+    /// repeat per term.
+    fn lexical_stats(
+        &self,
+        request: &LexicalLaneRequest<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+    ) -> Result<LexicalStatsCacheV1, RetrievalPortError> {
+        let mut field_totals = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT field, total_length FROM field_stats")
+            .map_err(map_query_sql_error)?;
+        let mut rows = statement.query([]).map_err(map_query_sql_error)?;
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            let field: String = row.get(0).map_err(map_query_sql_error)?;
+            let total: i64 = row.get(1).map_err(map_query_sql_error)?;
+            field_totals.insert(
+                decode_field(&field)?,
+                usize::try_from(total).map_err(contract_error)?,
+            );
+        }
+        let mut terms = BTreeSet::new();
+        for term in &request.whole_terms {
+            terms.insert(normalize_lexical(term));
+        }
+        for expansions in fuzzy.by_query.values() {
+            terms.extend(expansions.iter().cloned());
+        }
+        for subtoken in &request.subtokens {
+            terms.insert(normalize_lexical(subtoken));
+        }
+        let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT field, document_frequency FROM term_stats WHERE term = ?1")
+            .map_err(map_query_sql_error)?;
+        for term in &terms {
+            let mut rows = statement.query([term]).map_err(map_query_sql_error)?;
+            while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+                let field: String = row.get(0).map_err(map_query_sql_error)?;
+                let frequency: i64 = row.get(1).map_err(map_query_sql_error)?;
+                document_frequencies
+                    .entry(decode_field(&field)?)
+                    .or_default()
+                    .insert(
+                        term.clone(),
+                        usize::try_from(frequency).map_err(contract_error)?,
+                    );
+            }
+        }
+        Ok(LexicalStatsCacheV1 {
+            field_totals,
+            document_frequencies,
+        })
+    }
+
     fn score_row(
         &self,
         document: u32,
@@ -975,6 +1038,7 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_frequencies: &BTreeMap<String, usize>,
+        stats: &LexicalStatsCacheV1,
     ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
         let mut field_scores = BTreeMap::new();
         let mut matched_whole_terms = BTreeSet::new();
@@ -991,10 +1055,10 @@ impl<'a> ArtifactQueryV1<'a> {
                         add_score(
                             &mut field_scores,
                             *field,
-                            self.term_score(*field, &normalized, exact_tf, row)?,
+                            self.term_score(*field, &normalized, exact_tf, row, stats),
                         );
                         matched_whole_terms.insert(query_term.clone());
-                        collect_term_kinds_artifact(row, &normalized, &mut matched_kinds);
+                        collect_term_kinds(&row.exact_terms, &normalized, &mut matched_kinds);
                     }
                     if let Some(expansions) = fuzzy.by_query.get(query_term) {
                         for expansion in expansions {
@@ -1003,13 +1067,13 @@ impl<'a> ArtifactQueryV1<'a> {
                                 continue;
                             }
                             let score = self
-                                .term_score(*field, expansion, tf, row)?
+                                .term_score(*field, expansion, tf, row, stats)
                                 .saturating_mul(FUZZY_SCORE_MILLIS)
                                 / 1_000;
                             add_score(&mut field_scores, *field, score);
                             matched_whole_terms.insert(query_term.clone());
                             typo_recovery_applied = true;
-                            collect_term_kinds_artifact(row, expansion, &mut matched_kinds);
+                            collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
                     }
                 }
@@ -1021,7 +1085,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         add_score(
                             &mut field_scores,
                             *field,
-                            self.term_score(*field, &normalized, tf, row)?,
+                            self.term_score(*field, &normalized, tf, row, stats),
                         );
                         matched_subtokens.insert(subtoken.clone());
                     }
@@ -1048,7 +1112,8 @@ impl<'a> ArtifactQueryV1<'a> {
                         .get(&normalized)
                         .copied()
                         .unwrap_or_default(),
-                )?
+                    stats,
+                )
                 .saturating_mul(PHRASE_SCORE_MILLIS)
                 / 1_000;
             add_score(&mut field_scores, field, score);
@@ -1099,23 +1164,14 @@ impl<'a> ArtifactQueryV1<'a> {
         term: &str,
         term_frequency: usize,
         row: &ArtifactRowV1,
-    ) -> Result<u64, RetrievalPortError> {
-        let encoded = encode_field(field).map_err(map_query_artifact_error)?;
-        let document_frequency: i64 = self
-            .connection
-            .query_row(
-                "SELECT document_frequency FROM term_stats WHERE field = ?1 AND term = ?2",
-                params![encoded, term],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(map_query_sql_error)?
-            .unwrap_or_default();
+        stats: &LexicalStatsCacheV1,
+    ) -> u64 {
         self.term_score_with_df(
             field,
             term_frequency,
             row,
-            usize::try_from(document_frequency).map_err(contract_error)?,
+            stats.document_frequency(field, term),
+            stats,
         )
     }
 
@@ -1125,29 +1181,41 @@ impl<'a> ArtifactQueryV1<'a> {
         term_frequency: usize,
         row: &ArtifactRowV1,
         document_frequency: usize,
-    ) -> Result<u64, RetrievalPortError> {
-        let encoded = encode_field(field).map_err(map_query_artifact_error)?;
-        let total: i64 = self
-            .connection
-            .query_row(
-                "SELECT total_length FROM field_stats WHERE field = ?1",
-                [encoded],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(map_query_sql_error)?
-            .unwrap_or_default();
-        let total = usize::try_from(total).map_err(contract_error)?;
+        stats: &LexicalStatsCacheV1,
+    ) -> u64 {
+        let total = stats.field_total(field);
         let average = total.div_ceil(self.document_count.max(1)).max(1);
         let document_length = row.field_lengths.get(&field).copied().unwrap_or(0).max(1);
-        Ok(bm25_score_micros(
+        bm25_score_micros(
             self.document_count,
             document_frequency,
             term_frequency,
             document_length,
             average,
             field_weight_millis(field),
-        ))
+        )
+    }
+}
+
+/// Request-local corpus statistics for BM25 scoring. Absent entries mean the
+/// artifact holds no posting for that key and score as zero, exactly like the
+/// SQL probes they replace.
+struct LexicalStatsCacheV1 {
+    field_totals: BTreeMap<LexicalFieldV1, usize>,
+    document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
+}
+
+impl LexicalStatsCacheV1 {
+    fn field_total(&self, field: LexicalFieldV1) -> usize {
+        self.field_totals.get(&field).copied().unwrap_or_default()
+    }
+
+    fn document_frequency(&self, field: LexicalFieldV1, term: &str) -> usize {
+        self.document_frequencies
+            .get(&field)
+            .and_then(|frequencies| frequencies.get(term))
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -1303,35 +1371,14 @@ fn exact_matches_artifact(
     Vec<crate::retrieval::exact::ExactLiteralV1>,
     Vec<ExactTechnicalTermKindV1>,
 ) {
-    let projected = super::super::ProjectedChunkV1 {
-        id: row.id.clone(),
-        anchor: row.anchor.clone(),
-        language_descriptor_revision: row.language_descriptor_revision.clone(),
-        exact_terms: row.exact_terms.clone(),
-        sanitized_text: row.sanitized_text.clone(),
-        logical_path: row.logical_path.clone(),
-        field_lengths: row.field_lengths.clone(),
-        normalized_text: row.normalized_text.clone(),
-    };
-    exact_matches(&projected, request)
-}
-
-fn collect_term_kinds_artifact(
-    row: &ArtifactRowV1,
-    term: &str,
-    matched: &mut BTreeSet<ExactTechnicalTermKindV1>,
-) {
-    let projected = super::super::ProjectedChunkV1 {
-        id: row.id.clone(),
-        anchor: row.anchor.clone(),
-        language_descriptor_revision: row.language_descriptor_revision.clone(),
-        exact_terms: row.exact_terms.clone(),
-        sanitized_text: row.sanitized_text.clone(),
-        logical_path: row.logical_path.clone(),
-        field_lengths: row.field_lengths.clone(),
-        normalized_text: row.normalized_text.clone(),
-    };
-    collect_term_kinds(&projected, term, matched);
+    exact_matches(
+        ExactMatchRowViewV1 {
+            sanitized_text: row.sanitized_text.as_str(),
+            logical_path: &row.logical_path,
+            exact_terms: &row.exact_terms,
+        },
+        request,
+    )
 }
 
 fn bounded_edit_distance(left: &str, right: &str, limit: usize) -> Option<usize> {
@@ -1357,6 +1404,10 @@ fn bounded_edit_distance(left: &str, right: &str, limit: usize) -> Option<usize>
 fn decode_row(bytes: &[u8]) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
     serde_json::from_slice(bytes)
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+}
+
+fn decode_field(encoded: &str) -> Result<LexicalFieldV1, RetrievalPortError> {
+    serde_json::from_str(encoded).map_err(contract_error)
 }
 
 fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -1386,7 +1437,7 @@ fn digest_artifact_file(
         }
         hasher.update(&buffer[..read]);
     }
-    ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 

@@ -1,5 +1,4 @@
-//! `types` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `types` module test coverage.
 
 use super::*;
 

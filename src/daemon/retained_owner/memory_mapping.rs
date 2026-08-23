@@ -18,8 +18,7 @@ use tracedecay_application::retained_surfaces::{
     TrustHistoryEntryV1,
 };
 use tracedecay_domain::{
-    ActorId, Confidence, FactCategoryV1 as DomainFactCategoryV1, FactIdentitySourceV1, FactOwnerV1,
-    PayloadAccessState, ProvenanceId,
+    ActorId, Confidence, FactIdentitySourceV1, FactOwnerV1, PayloadAccessState, ProvenanceId,
 };
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, ProjectMemoryFactAddDispositionV1,
@@ -72,7 +71,7 @@ pub(super) fn add_request(
 ) -> Result<ProjectMemoryFactAddRequest, RetainedSurfaceExecutionErrorV1> {
     Ok(ProjectMemoryFactAddRequest {
         content: request.content.clone(),
-        category: domain_category(request.category.unwrap_or(FactCategoryV1::General)),
+        category: request.category.unwrap_or(FactCategoryV1::General),
         source_label: request.source_label.clone(),
         tags: request.tags.clone(),
         entities: request.entities.clone(),
@@ -97,7 +96,7 @@ pub(super) fn update_patch(
     });
     ProjectMemoryFactUpdatePatchV1::new(
         request.content.clone(),
-        request.category.map(domain_category),
+        request.category,
         source_label,
         request.tags.clone(),
         request.entities.clone(),
@@ -123,7 +122,7 @@ pub(super) fn update_logical_effect(
         target.fact_id(),
         &request.expected_last_event_id,
         &request.content,
-        request.category.map(domain_category),
+        request.category,
         &request.source_label,
         &request.tags,
         &request.entities,
@@ -174,7 +173,7 @@ pub(super) fn search_logical_effect(
         "project-memory-fact-search.v1",
         owner,
         &request.query,
-        request.options.category.map(domain_category),
+        request.options.category,
         confidence(Some(request.options.min_trust.unwrap_or(0.3)))?,
         fact_limit(request.options.limit)?,
         &request.after,
@@ -245,7 +244,7 @@ pub(super) fn search_query(
     after: Option<&FactSearchCursorV1>,
 ) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
     let filter = ProjectMemoryFactSearchFilterV1::new(
-        options.category.map(domain_category),
+        options.category,
         confidence(options.min_trust)?,
         None,
     )
@@ -290,28 +289,6 @@ pub(super) fn confidence(
         .map(Confidence::new)
         .transpose()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
-}
-
-pub(super) const fn domain_category(category: FactCategoryV1) -> DomainFactCategoryV1 {
-    match category {
-        FactCategoryV1::General => DomainFactCategoryV1::General,
-        FactCategoryV1::UserPref => DomainFactCategoryV1::UserPref,
-        FactCategoryV1::Project => DomainFactCategoryV1::Project,
-        FactCategoryV1::Tool => DomainFactCategoryV1::Tool,
-        FactCategoryV1::Decision => DomainFactCategoryV1::Decision,
-        FactCategoryV1::CodeArea => DomainFactCategoryV1::CodeArea,
-    }
-}
-
-const fn public_category(category: DomainFactCategoryV1) -> FactCategoryV1 {
-    match category {
-        DomainFactCategoryV1::General => FactCategoryV1::General,
-        DomainFactCategoryV1::UserPref => FactCategoryV1::UserPref,
-        DomainFactCategoryV1::Project => FactCategoryV1::Project,
-        DomainFactCategoryV1::Tool => FactCategoryV1::Tool,
-        DomainFactCategoryV1::Decision => FactCategoryV1::Decision,
-        DomainFactCategoryV1::CodeArea => FactCategoryV1::CodeArea,
-    }
 }
 
 pub(super) const fn feedback_action(
@@ -393,7 +370,7 @@ pub(super) fn available_fact(
         owner: public_owner(fact.owner()),
         fact_id: fact.fact_id().clone(),
         content: fact.content().to_owned(),
-        category: public_category(fact.category()),
+        category: fact.category(),
         tags: fact.tags().to_vec(),
         entities: fact.entities().to_vec(),
         trust_score_millionths: confidence_millionths(fact.trust()),

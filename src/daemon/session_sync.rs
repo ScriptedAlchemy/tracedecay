@@ -441,9 +441,11 @@ impl DaemonSessionSyncService {
         key: String,
         request: SessionSyncRequestV1,
     ) {
+        let acquire = Arc::clone(&self.scan_slots).acquire_owned();
+        tokio::pin!(acquire);
         let permit = loop {
             tokio::select! {
-                permit = Arc::clone(&self.scan_slots).acquire_owned() => {
+                permit = &mut acquire => {
                     match permit {
                         Ok(permit) => break permit,
                         Err(_) => return,

@@ -22,7 +22,7 @@
 //!   hash; combined with `mtime` it detects rewrites. On change the whole
 //!   document is re-parsed and re-upserted — idempotent `ON CONFLICT` upserts
 //!   make re-adding unchanged messages a no-op.
-//! * [`read_new_rows`] — **`RowCursor`**: SQLite-backed stores (Zed, Copilot CLI
+//! * [`read_new_rows`](crate::runtime::shared::read_new_rows) — **`RowCursor`**: SQLite-backed stores (Zed, Copilot CLI
 //!   `session-store.db`). `position` is the last-seen `rowid`; we select rows
 //!   with a greater `rowid`.
 //!
@@ -50,12 +50,6 @@ pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
 use crate::admission::{HostAdmission, WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
-#[allow(unused_imports)]
-pub use crate::runtime::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
-    usage_counters_from,
-};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{SessionMessageRecord, SessionRecord};
 

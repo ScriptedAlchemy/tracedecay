@@ -6,6 +6,7 @@ use std::pin::Pin;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1,
@@ -128,7 +129,7 @@ fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -
         "goals": goals,
     })
     .to_string();
-    format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())))
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(encoded.as_bytes()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

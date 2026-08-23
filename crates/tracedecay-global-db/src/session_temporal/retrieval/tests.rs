@@ -1665,15 +1665,12 @@ async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() 
     let dir = tempdir().expect("temporary directory");
     let conn = TestConnection::open(&dir.path().join("exact-range.db"));
     conn.execute_batch(
-        "CREATE TABLE observations (
-             observation_id TEXT PRIMARY KEY,
-             observation_json TEXT NOT NULL
-         );
-         CREATE TABLE session_occurrences (
+        "CREATE TABLE session_occurrences (
              session_id TEXT NOT NULL,
              generation INTEGER NOT NULL,
              occurrence_id TEXT NOT NULL,
              source_observation_id TEXT NOT NULL,
+             source_provider TEXT NOT NULL,
              retrieval_anchor_id TEXT NOT NULL,
              message_id TEXT,
              turn_id TEXT,
@@ -1682,18 +1679,14 @@ async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() 
              snippet_text TEXT NOT NULL,
              PRIMARY KEY(session_id, generation, occurrence_id)
          );
-         INSERT INTO observations VALUES (
-             'observation-1',
-             '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}'
-         );
          INSERT INTO session_occurrences VALUES
              (
-                 'session-snapshot', 1, 'occurrence-exact', 'observation-1',
+                 'session-snapshot', 1, 'occurrence-exact', 'observation-1', 'claude',
                  'anchor-exact', 'message-1', 'turn-1', 'user', 2,
                  'prefix 日本語 🚨 middle 日本語 🚨 suffix'
              ),
              (
-                 'session-snapshot', 1, 'occurrence-neighbor', 'observation-1',
+                 'session-snapshot', 1, 'occurrence-neighbor', 'observation-1', 'claude',
                  'anchor-neighbor', 'message-2', 'turn-2', 'user', 1,
                  'generic semantic neighbor'
              );",
@@ -1781,15 +1774,12 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
              state TEXT NOT NULL,
              PRIMARY KEY(session_id, generation)
          );
-         CREATE TABLE observations (
-             observation_id TEXT PRIMARY KEY,
-             observation_json TEXT NOT NULL
-         );
          CREATE TABLE session_occurrences (
              session_id TEXT NOT NULL,
              generation INTEGER NOT NULL,
              occurrence_id TEXT NOT NULL,
              source_observation_id TEXT NOT NULL,
+             source_provider TEXT NOT NULL,
              retrieval_anchor_id TEXT NOT NULL,
              message_id TEXT,
              turn_id TEXT,
@@ -1805,10 +1795,6 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
          );
          INSERT INTO session_temporal_generations VALUES (
              'session-large', 1, 'active'
-         );
-         INSERT INTO observations VALUES (
-             'observation-large',
-             '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}'
          );",
     )
     .await
@@ -1819,7 +1805,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     assert!(snippet.len() < MAX_OBSERVATION_RECORD_BYTES);
     conn.execute(
         "INSERT INTO session_occurrences VALUES (
-             'session-large', 1, 'occurrence-large', 'observation-large',
+             'session-large', 1, 'occurrence-large', 'observation-large', 'claude',
              'anchor-large', 'message-large', 'turn-large', 'user', 1, ?1
          )",
         vec![SqlValue::Text(snippet)],
@@ -1832,7 +1818,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     );
     conn.execute(
         "INSERT INTO session_occurrences VALUES (
-             'session-large', 1, 'occurrence-oversized', 'observation-large',
+             'session-large', 1, 'occurrence-oversized', 'observation-large', 'claude',
              'anchor-large', 'message-oversized', 'turn-oversized', 'user', 2, ?1
          )",
         vec![SqlValue::Text(oversized_snippet)],
@@ -1927,15 +1913,12 @@ async fn root_record_authority_binds_the_candidate_source_provider() {
                 state TEXT NOT NULL,
                 PRIMARY KEY(session_id, generation)
              );
-             CREATE TABLE observations (
-                observation_id TEXT PRIMARY KEY,
-                observation_json TEXT NOT NULL
-             );
              CREATE TABLE session_occurrences (
                 session_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
                 occurrence_id TEXT NOT NULL,
                 source_observation_id TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
                 retrieval_anchor_id TEXT NOT NULL
              );
              INSERT INTO sessions VALUES
@@ -1945,12 +1928,9 @@ async fn root_record_authority_binds_the_candidate_source_provider() {
                 ('anchor-1', '{\"kind\":\"profile\"}');
              INSERT INTO session_temporal_generations VALUES
                 ('shared-session', 1, 'active');
-             INSERT INTO observations VALUES (
-                'observation-bad',
-                '{\"identity\":{\"source\":{\"provider\":\"provider-bad\"}}}'
-             );
              INSERT INTO session_occurrences VALUES (
-                'shared-session', 1, 'occurrence-1', 'observation-bad', 'anchor-1'
+                'shared-session', 1, 'occurrence-1', 'observation-bad',
+                'provider-bad', 'anchor-1'
              );",
     )
     .await
@@ -1991,15 +1971,12 @@ async fn profile_root_authorizes_legacy_claude_anchor_without_project_scope() {
                 state TEXT NOT NULL,
                 PRIMARY KEY(session_id, generation)
              );
-             CREATE TABLE observations (
-                observation_id TEXT PRIMARY KEY,
-                observation_json TEXT NOT NULL
-             );
              CREATE TABLE session_occurrences (
                 session_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
                 occurrence_id TEXT NOT NULL,
                 source_observation_id TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
                 retrieval_anchor_id TEXT NOT NULL
              );
              INSERT INTO sessions VALUES
@@ -2008,13 +1985,9 @@ async fn profile_root_authorizes_legacy_claude_anchor_without_project_scope() {
                 ('profile-anchor', '{\"kind\":\"profile\"}');
              INSERT INTO session_temporal_generations VALUES
                 ('profile-session', 1, 'active');
-             INSERT INTO observations VALUES (
-                'profile-observation',
-                '{\"identity\":{\"source\":{}}}'
-             );
              INSERT INTO session_occurrences VALUES (
                 'profile-session', 1, 'profile-occurrence',
-                'profile-observation', 'profile-anchor'
+                'profile-observation', 'claude', 'profile-anchor'
              );",
     )
     .await
@@ -2041,15 +2014,12 @@ async fn provider_filter_separates_same_session_and_none_reads_all_providers() {
     let dir = tempdir().unwrap();
     let conn = TestConnection::open(&dir.path().join("provider-scope.db"));
     conn.execute_batch(
-        "CREATE TABLE observations (
-                observation_id TEXT PRIMARY KEY,
-                observation_json TEXT NOT NULL
-             );
-             CREATE TABLE session_occurrences (
+        "CREATE TABLE session_occurrences (
                 session_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
                 occurrence_id TEXT NOT NULL,
                 source_observation_id TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
                 retrieval_anchor_id TEXT NOT NULL,
                 message_id TEXT,
                 turn_id TEXT,
@@ -2061,14 +2031,11 @@ async fn provider_filter_separates_same_session_and_none_reads_all_providers() {
                 ON session_occurrences(
                     session_id, generation, knowledge_at, occurrence_id
                 );
-             INSERT INTO observations VALUES
-                ('observation-claude', '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}'),
-                ('observation-codex', '{\"identity\":{\"source\":{\"provider\":\"codex\"}}}');
              INSERT INTO session_occurrences VALUES
                 ('shared-session', 1, 'occurrence-claude', 'observation-claude',
-                 'anchor-claude', 'message-claude', NULL, 'user', 2),
+                 'claude', 'anchor-claude', 'message-claude', NULL, 'user', 2),
                 ('shared-session', 1, 'occurrence-codex', 'observation-codex',
-                 'anchor-codex', 'message-codex', NULL, 'user', 1);",
+                 'codex', 'anchor-codex', 'message-codex', NULL, 'user', 1);",
     )
     .await
     .unwrap();
@@ -2126,10 +2093,6 @@ async fn root_pagination_restart_provider_filter_and_session_parity_are_stable()
                 state TEXT NOT NULL,
                 PRIMARY KEY(session_id, generation)
              );
-             CREATE TABLE observations (
-                observation_id TEXT PRIMARY KEY,
-                observation_json TEXT NOT NULL
-             );
              CREATE TABLE retrieval_anchors (
                 anchor_id TEXT PRIMARY KEY,
                 owner_json TEXT NOT NULL
@@ -2145,6 +2108,7 @@ async fn root_pagination_restart_provider_filter_and_session_parity_are_stable()
                 generation INTEGER NOT NULL,
                 occurrence_id TEXT NOT NULL,
                 source_observation_id TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
                 retrieval_anchor_id TEXT NOT NULL,
                 message_id TEXT,
                 turn_id TEXT,
@@ -2164,9 +2128,6 @@ async fn root_pagination_restart_provider_filter_and_session_parity_are_stable()
                 ('session-a', 1, 'active'),
                 ('session-b', 1, 'active'),
                 ('session-c', 1, 'active');
-             INSERT INTO observations VALUES
-                ('observation-claude', '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}'),
-                ('observation-codex', '{\"identity\":{\"source\":{\"provider\":\"codex\"}}}');
              INSERT INTO retrieval_anchors VALUES
                 ('same-anchor', '{\"kind\":\"profile\"}');
              INSERT INTO sessions VALUES
@@ -2174,11 +2135,11 @@ async fn root_pagination_restart_provider_filter_and_session_parity_are_stable()
                 ('claude', 'session-b', 'user'),
                 ('codex', 'session-c', 'user');
              INSERT INTO session_occurrences VALUES
-                ('session-a', 1, 'same-id', 'observation-claude',
+                ('session-a', 1, 'same-id', 'observation-claude', 'claude',
                  'same-anchor', 'same-message', NULL, 'user', 5),
-                ('session-b', 1, 'same-id', 'observation-claude',
+                ('session-b', 1, 'same-id', 'observation-claude', 'claude',
                  'same-anchor', 'same-message', NULL, 'user', 5),
-                ('session-c', 1, 'same-id', 'observation-codex',
+                ('session-c', 1, 'same-id', 'observation-codex', 'codex',
                  'same-anchor', 'same-message', NULL, 'user', 5);",
     )
     .await

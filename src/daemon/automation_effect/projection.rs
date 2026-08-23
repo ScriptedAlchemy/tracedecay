@@ -15,7 +15,7 @@ use tracedecay_application::retained_surfaces::{
     MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
     MemoryAutomationFactTargetV1,
 };
-use tracedecay_domain::{FactCategoryV1, FactOwnerV1, FactRelationKindV1, RunId, canonical_sha256};
+use tracedecay_domain::{FactOwnerV1, FactRelationKindV1, RunId, canonical_sha256};
 use tracedecay_store::{
     ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryAutomaticFactStateV1, ProjectMemoryAutomationRunReceiptsV1,
@@ -507,7 +507,7 @@ fn project_automatic_fact_receipt(
             actor: request.actor().cloned(),
             sanitization_receipt: request.sanitization_receipt().clone(),
             content: request.content().to_owned(),
-            category: public_category(request.category()),
+            category: request.category(),
             source_label: request.source_label().map(ToOwned::to_owned),
             tags: request.tags().to_vec(),
             entities: request.entities().to_vec(),
@@ -562,19 +562,6 @@ fn public_commit_receipt(
         committed_event_ids: receipt.committed_event_ids().to_vec(),
         last_event_id: receipt.last_event_id().clone(),
         active_assertion_id: receipt.active_assertion_id().cloned(),
-    }
-}
-
-const fn public_category(
-    category: FactCategoryV1,
-) -> tracedecay_application::memory::FactCategoryV1 {
-    match category {
-        FactCategoryV1::General => tracedecay_application::memory::FactCategoryV1::General,
-        FactCategoryV1::UserPref => tracedecay_application::memory::FactCategoryV1::UserPref,
-        FactCategoryV1::Project => tracedecay_application::memory::FactCategoryV1::Project,
-        FactCategoryV1::Tool => tracedecay_application::memory::FactCategoryV1::Tool,
-        FactCategoryV1::Decision => tracedecay_application::memory::FactCategoryV1::Decision,
-        FactCategoryV1::CodeArea => tracedecay_application::memory::FactCategoryV1::CodeArea,
     }
 }
 

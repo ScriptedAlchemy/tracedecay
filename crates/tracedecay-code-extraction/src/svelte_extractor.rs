@@ -40,13 +40,18 @@ impl SvelteExtractor {
         let ranges = Self::script_content_line_ranges(source);
         let mut masked = String::with_capacity(source.len());
         let mut line = 0;
+        // `keep` only changes at line boundaries, so resolve it per line
+        // instead of scanning the range list once per character.
+        let mut keep = ranges
+            .iter()
+            .any(|&(start, end)| line >= start && line < end);
         for character in source.chars() {
-            let keep = ranges
-                .iter()
-                .any(|&(start, end)| line >= start && line < end);
             if character == '\n' {
                 masked.push(character);
                 line += 1;
+                keep = ranges
+                    .iter()
+                    .any(|&(start, end)| line >= start && line < end);
             } else if character == '\r' || keep {
                 masked.push(character);
             } else {
@@ -144,6 +149,19 @@ impl LanguageExtractor for SvelteExtractor {
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let masked = Self::mask_non_script(source);
         TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
+    }
+
+    /// The retained document already holds this extractor's mask as its parse
+    /// text, so reuse it instead of re-masking the whole source per pass.
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        _source: &str,
+        parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
     }
 }
 

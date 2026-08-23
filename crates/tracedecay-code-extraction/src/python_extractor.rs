@@ -53,12 +53,17 @@ impl<'s> ExtractionState<'s> {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -109,7 +114,6 @@ impl PythonExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -344,7 +348,6 @@ impl PythonExtractor {
 
     /// Extract a decorated definition (decorator + function or class).
     fn visit_decorated_definition(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        // First, find the inner definition (function_definition or class_definition).
         let inner_def = find_direct_child_by_kind(node, "function_definition")
             .or_else(|| find_direct_child_by_kind(node, "class_definition"));
 
@@ -381,7 +384,6 @@ impl PythonExtractor {
                 let child = cursor.node();
                 if child.kind() == "decorator" {
                     let text = state.node_text(child);
-                    // Get the decorator name (strip @ and potential arguments).
                     let raw = text.trim_start_matches('@');
                     let name = raw.split('(').next().unwrap_or(raw).trim().to_string();
                     let start_line = child.start_position().row as u32;
@@ -437,7 +439,6 @@ impl PythonExtractor {
             }
         }
 
-        // Now visit the inner definition itself.
         if let Some(inner) = inner_def {
             match inner.kind() {
                 "function_definition" => Self::visit_function(state, inner, is_async),
@@ -473,7 +474,6 @@ impl PythonExtractor {
 
     /// Extract a from-import statement (e.g., `from os.path import join, exists`).
     fn visit_import_from(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        // Get the module being imported from.
         let module_name = find_direct_child_by_kind(node, "dotted_name")
             .or_else(|| find_direct_child_by_kind(node, "relative_import"))
             .map(|n| state.node_text(n))
@@ -632,7 +632,6 @@ impl PythonExtractor {
 
     /// Visit an assignment at module level and check if it's a constant (`UPPER_CASE`).
     fn visit_assignment(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        // Get the left side of the assignment.
         let left = node.child_by_field_name("left");
         if let Some(left_node) = left {
             let name = state.node_text(left_node);
@@ -846,7 +845,6 @@ impl PythonExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "call" => {
-                        // Get the callee: the first named child (function being called).
                         let callee = child.named_child(0);
                         if let Some(callee) = callee {
                             let callee_name = state.node_text(callee).to_string();

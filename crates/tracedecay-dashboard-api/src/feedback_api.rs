@@ -1,4 +1,4 @@
-//! dashboard projection over the canonical feedback and Plan-26 owners.
+//! Dashboard projection over the canonical feedback and observability owners.
 
 use std::future::Future;
 use std::path::PathBuf;

@@ -90,8 +90,6 @@ mod host_admission_test;
 pub mod lifecycle_lease;
 pub mod mcp;
 pub mod monitor;
-#[cfg(test)]
-mod os_str_bytes;
 mod path_scope;
 mod path_tree;
 pub mod privacy;

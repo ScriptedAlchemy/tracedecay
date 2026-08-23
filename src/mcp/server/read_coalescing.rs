@@ -119,18 +119,25 @@ impl ReadFlight {
 }
 
 impl ReadFlightLeader {
-    pub(super) fn complete(mut self, result: ToolResult) -> Arc<ToolResult> {
-        let result = Arc::new(result);
+    pub(super) fn complete(mut self, result: ToolResult) -> ToolResult {
+        self.finished = true;
+        self.remove_registration();
+        // Deregistration closes this flight to new followers (a later
+        // identical claim starts its own flight), so a lone strong reference
+        // proves nobody is waiting and the result can be handed back without
+        // the shared-state round trip and clone.
+        if Arc::strong_count(&self.flight) == 1 {
+            return result;
+        }
+        let shared = Arc::new(result);
         *self
             .flight
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ReadFlightState::Complete(Arc::clone(&result));
-        self.finished = true;
-        self.remove_registration();
+            ReadFlightState::Complete(Arc::clone(&shared));
         self.flight.completed.notify_waiters();
-        result
+        (*shared).clone()
     }
 
     fn remove_registration(&self) {

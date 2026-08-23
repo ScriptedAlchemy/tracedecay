@@ -651,16 +651,11 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                  JOIN session_occurrences occurrence
                    ON occurrence.session_id = frozen.session_id
                   AND occurrence.generation = frozen.generation
-                 JOIN observations provider_observation
-                   ON provider_observation.observation_id = occurrence.source_observation_id
                  JOIN retrieval_anchors authority_anchor
                    ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
                  JOIN sessions authority_session
                    ON authority_session.session_id = occurrence.session_id
-                  AND authority_session.provider = COALESCE(json_extract(
-                      provider_observation.observation_json,
-                      '$.identity.source.provider'
-                  ), 'claude')
+                  AND authority_session.provider = occurrence.source_provider
                   AND authority_session.project_key = ?1
                  WHERE frozen.state = 'active'
                    AND (?2 IS NULL OR authority_session.provider = ?2)

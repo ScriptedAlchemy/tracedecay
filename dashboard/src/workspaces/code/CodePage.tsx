@@ -17,10 +17,10 @@ import { elideStart, splitCount } from '../../ui/format.ts';
 import { ambiguityNote, annotateHubs, describeSubgraph, displayName } from './hubs.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
-import { ActivationField } from '../../viz/graph/activation.ts';
+import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import { CodeDiagnostics } from './CodeDiagnostics.tsx';
 import { CortexRelief } from './CortexRelief.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
@@ -140,14 +140,14 @@ export function CodePage() {
       kind: edge.kind,
     }));
   }, [subgraph.data]);
-  const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
+  const activation = useActivationField(3200);
   // Search results strike their nodes: querying the graph makes it fire.
   useEffect(() => {
     const payload = envelopePayload(search.data);
     if (!payload) return;
     const hits = (payload.results ?? []).map((node) => node.id);
-    if (hits.length) activationRef.current.strike(hits, 0.9);
-  }, [search.data]);
+    if (hits.length) activation.strike(hits, 0.9);
+  }, [search.data, activation]);
   const selectFromCanvas = useCallback(
     (id: string | null) => {
       if (id == null) {
@@ -348,7 +348,7 @@ export function CodePage() {
                 edges={canvasEdges}
                 selectedId={selected?.id ?? null}
                 onSelect={selectFromCanvas}
-                activation={activationRef.current}
+                activation={activation}
                 totalNodes={envelopePayload(overview.data)?.totals.nodes ?? null}
                 seedLabel={selected ? displayName(selected) : null}
               />

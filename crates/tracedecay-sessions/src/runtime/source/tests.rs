@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use crate::runtime::shared::read_new_rows;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

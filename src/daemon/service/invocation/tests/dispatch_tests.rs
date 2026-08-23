@@ -1,5 +1,4 @@
-//! `dispatch` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! `dispatch` module test coverage.
 
 use super::*;
 

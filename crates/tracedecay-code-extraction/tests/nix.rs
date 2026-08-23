@@ -270,7 +270,7 @@ fn extract_flake() -> ExtractionResult {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 2: Import path resolution
+// Import path resolution
 // -------------------------------------------------------------------
 
 #[test]
@@ -312,7 +312,7 @@ fn test_nix_import_path_resolution() {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 1: Derivation field extraction
+// Derivation field extraction
 // -------------------------------------------------------------------
 
 #[test]
@@ -369,7 +369,7 @@ fn test_nix_derivation_fields() {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 3: Flake output schema awareness
+// Flake output schema awareness
 // -------------------------------------------------------------------
 
 #[test]
@@ -416,7 +416,7 @@ fn test_nix_flake_output_modules() {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 1+3: mkShell field extraction
+// mkShell field extraction
 // -------------------------------------------------------------------
 
 #[test]

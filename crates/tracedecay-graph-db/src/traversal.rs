@@ -606,6 +606,11 @@ fn directional_traversal(
     let mut discovered = HashSet::from([start]);
     let mut visits = Vec::new();
     let mut admitted = 0_usize;
+    // Identity decoding costs a property fetch plus a validated allocation,
+    // and a BFS touches each node once per incident edge (and each edge once
+    // per endpoint under `Both`), so memoize decoded identities per run.
+    let mut entity_ids: HashMap<NodeId, GraphEntityId> = HashMap::new();
+    let mut relation_ids: HashMap<EdgeId, GraphRelationId> = HashMap::new();
 
     while let Some((node, depth, via_relation)) = queue.pop_front() {
         if request.cancellation.is_cancelled() {
@@ -618,7 +623,7 @@ fn directional_traversal(
             return Err(read_budget(request.max_visits));
         }
         visits.push(TraversalVisit {
-            entity: entity_identity(store, node, &request.namespace)?,
+            entity: cached_entity_identity(store, node, &request.namespace, &mut entity_ids)?,
             depth,
             via_relation,
         });
@@ -640,9 +645,15 @@ fn directional_traversal(
                 if request.cancellation.is_cancelled() {
                     return Err(GraphDbError::Cancelled);
                 }
-                let relation =
-                    relation_identity(store, edge, &request.namespace, ensure_projection_readable)?;
-                let entity = entity_identity(store, neighbor, &request.namespace)?;
+                let relation = cached_relation_identity(
+                    store,
+                    edge,
+                    &request.namespace,
+                    ensure_projection_readable,
+                    &mut relation_ids,
+                )?;
+                let entity =
+                    cached_entity_identity(store, neighbor, &request.namespace, &mut entity_ids)?;
                 adjacent.push((relation, entity, neighbor));
             }
         }
@@ -801,6 +812,42 @@ fn optional_node_for_entity(
     }
 }
 
+/// [`entity_identity`] memoized over one traversal: the first decode verifies
+/// the stored node, repeat visits within the same read snapshot reuse it.
+fn cached_entity_identity(
+    store: &dyn GraphStore,
+    node: NodeId,
+    namespace: &GraphNamespace,
+    cache: &mut HashMap<NodeId, GraphEntityId>,
+) -> Result<GraphEntityId, GraphDbError> {
+    if let Some(identity) = cache.get(&node) {
+        return Ok(identity.clone());
+    }
+    let identity = entity_identity(store, node, namespace)?;
+    cache.insert(node, identity.clone());
+    Ok(identity)
+}
+
+/// [`relation_identity`] memoized over one traversal, mirroring
+/// [`cached_entity_identity`].
+fn cached_relation_identity(
+    store: &dyn GraphStore,
+    edge: EdgeId,
+    namespace: &GraphNamespace,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+    cache: &mut HashMap<EdgeId, GraphRelationId>,
+) -> Result<GraphRelationId, GraphDbError> {
+    if let Some(identity) = cache.get(&edge) {
+        return Ok(identity.clone());
+    }
+    let identity = relation_identity(store, edge, namespace, ensure_projection_readable)?;
+    cache.insert(edge, identity.clone());
+    Ok(identity)
+}
+
 fn entity_identity(
     store: &dyn GraphStore,
     node: NodeId,
@@ -898,7 +945,30 @@ fn relation_for_edge(
         message: format!("outgoing relation has an invalid projection: {error}"),
     })?;
     ensure_projection_readable(namespace, &projection)?;
-    let identity = relation_identity(store, edge, namespace, ensure_projection_readable)?;
+    // Extract the identity from the edge record already loaded above; the
+    // namespace and projection readability were just verified, so refetching
+    // through `relation_identity` would redo the same work per edge.
+    let kind = relation_kind_from_type(stored.edge_type.as_str())?;
+    let scalar_kind = stored
+        .get_property(RELATION_KIND_PROPERTY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| GraphDbError::Corrupt {
+            message: "traversal relation has no native kind".to_owned(),
+        })?;
+    if kind.as_str() != scalar_kind {
+        return Err(GraphDbError::Corrupt {
+            message: "traversal relation native type and kind disagree".to_owned(),
+        });
+    }
+    let identity = stored
+        .get_property(RELATION_ID_PROPERTY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| GraphDbError::Corrupt {
+            message: "traversal relation has no native identity".to_owned(),
+        })?;
+    let identity = GraphRelationId::new(identity).map_err(|error| GraphDbError::Corrupt {
+        message: format!("traversal relation has an invalid native identity: {error}"),
+    })?;
     let from = required_entity_property(
         stored.get_property(RELATION_FROM_PROPERTY),
         "outgoing relation source",
@@ -914,7 +984,6 @@ fn relation_for_edge(
             message: "outgoing relation endpoints disagree with native adjacency".to_owned(),
         });
     }
-    let kind = relation_kind_from_type(stored.edge_type.as_str())?;
     let properties = decode_graph_properties(
         stored
             .properties

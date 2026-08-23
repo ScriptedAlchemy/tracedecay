@@ -117,6 +117,19 @@ impl LanguageExtractor for AstroExtractor {
         let masked = Self::mask_non_frontmatter(source);
         TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
     }
+
+    /// The retained document already holds this extractor's mask as its parse
+    /// text, so reuse it instead of re-masking the whole source per pass.
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        _source: &str,
+        parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
+    }
 }
 
 #[cfg(test)]

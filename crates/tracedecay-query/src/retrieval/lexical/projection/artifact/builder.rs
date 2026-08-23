@@ -1813,7 +1813,7 @@ fn finish_section(
     hasher.update(name.as_bytes());
     hasher.update(row_count.to_le_bytes());
     hasher.update(accumulator);
-    let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     Ok(CodeLexicalArtifactSectionDigestV1 {
         name: name.to_owned(),
@@ -2000,13 +2000,31 @@ fn insert_fields(
     document: i64,
     fields: &BTreeMap<LexicalFieldV1, Vec<String>>,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut field_stats = transaction
+        .prepare_cached(
+            "INSERT INTO field_stats(field, total_length) VALUES (?1, ?2) ON CONFLICT(field) DO UPDATE SET total_length = total_length + excluded.total_length",
+        )
+        .map_err(sqlite_error)?;
+    let mut term_postings = transaction
+        .prepare_cached(
+            "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(sqlite_error)?;
+    let mut term_stats = transaction
+        .prepare_cached(
+            "INSERT INTO term_stats(field, term, document_frequency) VALUES (?1, ?2, 1) ON CONFLICT(field, term) DO UPDATE SET document_frequency = document_frequency + 1",
+        )
+        .map_err(sqlite_error)?;
+    let mut vocabulary = transaction
+        .prepare_cached("INSERT OR IGNORE INTO vocabulary(term) VALUES (?1)")
+        .map_err(sqlite_error)?;
     for (field, terms) in fields {
-        let field = encode_field(*field)?;
-        transaction
-            .execute(
-                "INSERT INTO field_stats(field, total_length) VALUES (?1, ?2) ON CONFLICT(field) DO UPDATE SET total_length = total_length + excluded.total_length",
-                params![field, i64::try_from(terms.len()).map_err(contract_number)?],
-            )
+        let encoded_field = encode_field(*field)?;
+        field_stats
+            .execute(params![
+                encoded_field,
+                i64::try_from(terms.len()).map_err(contract_number)?
+            ])
             .map_err(sqlite_error)?;
         let mut frequencies = BTreeMap::<&str, u32>::new();
         for term in terms {
@@ -2016,22 +2034,14 @@ fn insert_fields(
                 .or_insert(1);
         }
         for (term, frequency) in frequencies {
-            transaction
-                .execute(
-                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
-                    params![field, term, document, i64::from(frequency)],
-                )
+            term_postings
+                .execute(params![encoded_field, term, document, i64::from(frequency)])
                 .map_err(sqlite_error)?;
-            transaction
-                .execute(
-                    "INSERT INTO term_stats(field, term, document_frequency) VALUES (?1, ?2, 1) ON CONFLICT(field, term) DO UPDATE SET document_frequency = document_frequency + 1",
-                    params![field, term],
-                )
+            term_stats
+                .execute(params![encoded_field, term])
                 .map_err(sqlite_error)?;
-            if field != encode_field(LexicalFieldV1::Subtoken)? {
-                transaction
-                    .execute("INSERT OR IGNORE INTO vocabulary(term) VALUES (?1)", [term])
-                    .map_err(sqlite_error)?;
+            if *field != LexicalFieldV1::Subtoken {
+                vocabulary.execute([term]).map_err(sqlite_error)?;
             }
         }
     }
@@ -2045,14 +2055,19 @@ fn insert_exact(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     insert_exact_posting(
         transaction,
-        ExactFieldV1::Path,
+        &encode_exact_field(ExactFieldV1::Path)?,
         Cow::Borrowed(row.logical_path.as_bytes()),
         document,
     )?;
+    let mut encoded_fields = BTreeMap::new();
     for term in &row.exact_terms {
+        let field = exact_field_for_kind(term.kind());
+        if !encoded_fields.contains_key(&field) {
+            encoded_fields.insert(field, encode_exact_field(field)?);
+        }
         insert_exact_posting(
             transaction,
-            exact_field_for_kind(term.kind()),
+            &encoded_fields[&field],
             canonical_projected_exact_term(term),
             document,
         )?;
@@ -2060,19 +2075,23 @@ fn insert_exact(
     Ok(())
 }
 
+fn encode_exact_field(field: ExactFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
+    serde_json::to_string(&field)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
 fn insert_exact_posting(
     transaction: &Transaction<'_>,
-    field: ExactFieldV1,
+    field: &str,
     term: Cow<'_, [u8]>,
     document: i64,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let field = serde_json::to_string(&field)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     transaction
-        .execute(
+        .prepare_cached(
             "INSERT OR IGNORE INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)",
-            params![field, term.as_ref(), document],
         )
+        .map_err(sqlite_error)?
+        .execute(params![field, term.as_ref(), document])
         .map_err(sqlite_error)?;
     Ok(())
 }
@@ -2174,7 +2193,7 @@ fn import_integrity_digest(
 }
 
 fn integrity_digest(hasher: Sha256) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 

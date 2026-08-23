@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::is_lowercase_hex;
 pub use tracedecay_domain::{
     EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
@@ -29,11 +30,7 @@ pub struct Sha256DigestHex(String);
 impl Sha256DigestHex {
     pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
         let value = value.into();
-        if value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
+        if is_lowercase_hex(&value, 64) {
             Ok(Self(value))
         } else {
             Err(ManifestValidationErrorV1::MalformedHexDigest {

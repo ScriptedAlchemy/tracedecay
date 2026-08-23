@@ -99,43 +99,25 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         }
         let transaction = self.begin_write().await?;
         let outcome = async {
-            let mut rows = transaction
-                .query(
-                    "SELECT preview_id
-                     FROM git_index_preview_inputs
-                     WHERE input_json IS NOT NULL AND expires_at <= ?1
-                     ORDER BY expires_at, preview_id
-                     LIMIT ?2",
+            let purged = transaction
+                .execute(
+                    "UPDATE git_index_preview_inputs
+                     SET input_json = NULL, purged_at = ?1
+                     WHERE input_json IS NOT NULL
+                       AND expires_at <= ?1
+                       AND preview_id IN (
+                           SELECT preview_id
+                           FROM git_index_preview_inputs
+                           WHERE input_json IS NOT NULL AND expires_at <= ?1
+                           ORDER BY expires_at, preview_id
+                           LIMIT ?2
+                       )",
                     params![observed_at.0, limit as i64],
                 )
                 .await
                 .map_err(unavailable)?;
-            let mut preview_ids = Vec::new();
-            while let Some(row) = rows.next().await.map_err(unavailable)? {
-                preview_ids.push(
-                    GitIndexPreviewId::new(text(&row, 0, "expired preview input id")?)
-                        .map_err(invalid_domain)?,
-                );
-            }
-            drop(rows);
-
-            let mut purged = 0usize;
-            for preview_id in preview_ids {
-                let changed = transaction
-                    .execute(
-                        "UPDATE git_index_preview_inputs
-                         SET input_json = NULL, purged_at = ?1
-                         WHERE preview_id = ?2
-                           AND input_json IS NOT NULL
-                           AND expires_at <= ?1",
-                        params![observed_at.0, preview_id.as_str()],
-                    )
-                    .await
-                    .map_err(unavailable)?;
-                purged = purged.saturating_add(changed as usize);
-            }
             Ok(GitIndexPreviewInputGcResult {
-                purged,
+                purged: purged as usize,
                 next_expiry: next_live_preview_input_expiry(&transaction).await?,
             })
         }

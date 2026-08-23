@@ -2,6 +2,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     RetrievalGrainV1, SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1,
     SessionRefreshSourceTargetV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageV1,
@@ -285,7 +286,7 @@ where
                 Err(_) => return SessionRefreshOutcome::Unavailable,
             }],
             self.configuration.projector_version(),
-            format!("sha256:{}", hex::encode(digests.projection.as_bytes())),
+            encode_tagged_lowercase_hex("sha256:", digests.projection.as_bytes()),
         ) else {
             return SessionRefreshOutcome::Unavailable;
         };

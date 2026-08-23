@@ -3674,14 +3674,14 @@ mod tests {
         }
     }
 
-    /// Forwards the whole lifecycle to the real authority but always fails
-    /// `verify`, which interrupts the transaction after its artifacts are on
-    /// disk — the state that leaves a recovery journal behind.
     /// Pinned binary path for the Kiro fixtures. Resolving it from `PATH`
     /// would let a sibling test that swaps `PATH` change these artifacts
     /// mid-test.
     const KIRO_FIXTURE_BIN: &str = "/usr/local/bin/tracedecay";
 
+    /// Forwards the whole lifecycle to the real authority but always fails
+    /// `verify`, which interrupts the transaction after its artifacts are on
+    /// disk — the state that leaves a recovery journal behind.
     struct AlwaysFailVerifyRegistration {
         inner: CatalogHostComponentRegistrationAuthority,
     }

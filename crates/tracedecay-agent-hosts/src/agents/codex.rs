@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `OpenAI` Codex CLI agent integration.
 //!
 //! Stages the TraceDecay plugin source for Codex, then drives Codex's own
@@ -885,8 +884,6 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
     },
 ];
 
-/// Subcommands from older bundles that uninstall must also strip even though
-/// the current bundle no longer registers them.
 const CODEX_DEFAULT_MARKETPLACE_NAME: &str = "personal";
 const CODEX_GLOBAL_PLUGIN_SOURCE_PATH: &str = "./.codex/plugins/tracedecay";
 const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
@@ -1035,13 +1032,6 @@ fn codex_command_hook_hash_with(
     })
 }
 
-/// Derive the ordered trust records for a rendered Codex `hooks.json` value.
-///
-/// Iterates events -> groups -> handlers exactly as Codex indexes them, so the
-/// group/handler positions in each `trust_key` match what Codex records. The
-/// per-handler `timeout` is normalized the way Codex does (default 600, clamped
-/// to a minimum of 1) and `async` defaults to false, so the hash matches the
-/// TUI's `/hooks` approval regardless of whether those keys are present on disk.
 fn codex_plugin_hook_trust_prefix(marketplace_name: &str) -> String {
     format!("tracedecay@{marketplace_name}:hooks/hooks.json:")
 }
@@ -1051,6 +1041,13 @@ fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Result<Vec<CodexHookTr
     codex_hook_trust_entries_for_marketplace(hooks, CODEX_DEFAULT_MARKETPLACE_NAME)
 }
 
+/// Derive the ordered trust records for a rendered Codex `hooks.json` value.
+///
+/// Iterates events -> groups -> handlers exactly as Codex indexes them, so the
+/// group/handler positions in each `trust_key` match what Codex records. The
+/// per-handler `timeout` is normalized the way Codex does (default 600, clamped
+/// to a minimum of 1) and `async` defaults to false, so the hash matches the
+/// TUI's `/hooks` approval regardless of whether those keys are present on disk.
 fn codex_hook_trust_entries_for_marketplace(
     hooks: &serde_json::Value,
     marketplace_name: &str,

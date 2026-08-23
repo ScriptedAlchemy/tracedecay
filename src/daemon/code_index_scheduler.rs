@@ -20,6 +20,9 @@ use same_file::Handle;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::now_micros;
+use tracedecay_domain::canonical_text::{
+    encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
+};
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -161,6 +164,11 @@ pub(super) struct SharedCodeIndexBytePoolV1 {
     physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     inserted: AtomicU64,
     reused: AtomicU64,
+    /// Map length recorded after the last dead-entry prune. Weak entries whose
+    /// `Arc` dropped are never removed by lookups, so `intern` prunes them once
+    /// the map doubles past this baseline, bounding growth over the daemon
+    /// lifetime at amortized O(1) per insert.
+    last_prune_len: AtomicUsize,
 }
 
 impl SharedCodeIndexBytePoolV1 {
@@ -183,6 +191,15 @@ impl SharedCodeIndexBytePoolV1 {
         let shared: Arc<[u8]> = Arc::from(bytes);
         pool.insert(digest.clone(), Arc::downgrade(&shared));
         self.inserted.fetch_add(1, Ordering::Relaxed);
+        if pool.len()
+            > self
+                .last_prune_len
+                .load(Ordering::Relaxed)
+                .saturating_mul(2)
+        {
+            pool.retain(|_, entry| entry.strong_count() > 0);
+            self.last_prune_len.store(pool.len().max(1), Ordering::Relaxed);
+        }
         (digest, shared)
     }
 
@@ -484,7 +501,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn state_digest(bytes: &[u8]) -> String {
-        format!("sha256:{}", sha256_hex(bytes))
+        encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
     }
 
     fn generation_index_digest(
@@ -651,13 +668,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(None);
         };
-        if !pointer
+        let Some(entry) = pointer
             .generation_index
             .iter()
-            .any(|entry| entry.generation_id == generation_id.as_str())
-        {
+            .find(|entry| entry.generation_id == generation_id.as_str())
+            .cloned()
+        else {
             return Ok(None);
-        }
+        };
         if let Some(active) = self.load_active_shared()?
             && active.manifest().generation_id == *generation_id
         {
@@ -690,7 +708,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         };
         // Decoded with NO cache lock held: unrelated readers and publishers keep
         // making progress while this runs.
-        let matched = self.load_indexed_generation(generation_id);
+        let matched = self.load_indexed_generation(generation_id, &entry);
         if let Ok(Some(generation)) = matched.as_ref() {
             self.cache.remember(Arc::clone(generation))?;
         }
@@ -703,17 +721,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn load_indexed_generation(
         &self,
         generation_id: &CodeGenerationId,
+        entry: &DurableGenerationIndexEntryV1,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        let Some(pointer) = self.read_publication_pointer()? else {
-            return Ok(None);
-        };
-        let Some(entry) = pointer
-            .generation_index
-            .iter()
-            .find(|entry| entry.generation_id == generation_id.as_str())
-        else {
-            return Ok(None);
-        };
         let expected_file = format!(
             "generation-{}.json",
             entry
@@ -1011,6 +1020,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 "retained history generation aliases the active generation identity",
             ));
         }
+        // Encode and fsync without the decoded-generation cache lock so
+        // readers are not parked across the durable write.
+        drop(state);
         let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
         let generation_size = u64::try_from(generation_bytes.len()).map_err(Self::unavailable)?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
@@ -1143,6 +1155,15 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .parent()
                 .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
         )?;
+        let mut state = self.cache.lock_state()?;
+        if state
+            .active
+            .as_ref()
+            .map(|current| &current.manifest().generation_id)
+            != expected_active_generation
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
         let generation_id = generation.manifest().generation_id.clone();
         state.forget(&generation_id);
         match self.disposition {
@@ -1733,8 +1754,10 @@ impl DaemonCodeTextArtifactStoreV1 {
         let descriptor = DurableCodeTextArtifactDescriptorV1 {
             generation_id: generation.manifest().generation_id.clone(),
             artifact_file: format!("text-artifact-{artifact_hex}.bin"),
-            artifact_digest: ManifestDigest::new(format!("sha256:{artifact_hex}"))
-                .map_err(text_artifact_unavailable)?,
+            artifact_digest: ManifestDigest::from_sha256_bytes(
+                &hex::decode(&artifact_hex).map_err(text_artifact_unavailable)?,
+            )
+            .map_err(text_artifact_unavailable)?,
             artifact_size_bytes,
         };
         let final_path = artifacts_root.join(&descriptor.artifact_file);
@@ -2907,12 +2930,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Arc::clone(&self.epoch),
                 Arc::clone(&self.shutting_down),
             );
-            let changed_files = captured.changed_paths.clone();
+            // Only the content identity and changed-path count are needed after
+            // the build request takes ownership of the captured snapshot, so
+            // keep those instead of cloning every file record and changed path.
+            let snapshot_content_identity = captured.snapshot.content_identity.clone();
+            let reextracted_files = captured.changed_paths.len();
             let generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
-                    snapshot: captured.snapshot.clone(),
+                    snapshot: captured.snapshot,
                     captured_files: captured.captured_files,
-                    changed_files,
+                    changed_files: captured.changed_paths,
                     invalidations: BTreeSet::new(),
                     repository_parse_identity: captured.repository_parse_identity,
                     ignored_source_admissions: self.ignored_source_admissions.clone(),
@@ -2934,16 +2961,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
-                    self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
+                    self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(sampled_metadata, sampled_signature);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
-                        snapshot_content_identity: captured.snapshot.content_identity,
+                        snapshot_content_identity,
                         overflow_reconciled,
                     }));
                 }
                 Err(error) => return Err(error.into()),
             };
-            self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
+            self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
 
             let changes = &generation.projection().request().changes;
@@ -2970,7 +2997,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .iter()
                         .map(|file| file.file_occurrence_id.clone())
                         .collect(),
-                    reextracted_files: captured.changed_paths.len(),
+                    reextracted_files,
                     changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                     reused_chunks: changes.reused.len(),
                     overflow_reconciled,
@@ -3683,10 +3710,6 @@ fn snapshot_content_identity(
     content_digest(&bytes)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
 /// Streaming SHA-256 of one file's bytes, as 64 lowercase hex characters.
 /// Cancellation is checked before opening and after every bounded read, so a
 /// shutdown or superseding generation cannot strand publication in a
@@ -3749,7 +3772,7 @@ fn sha256_private_file_hex_and_size(
             "code text artifact named file changed while hashing".to_owned(),
         ));
     }
-    Ok((hex::encode(hasher.finalize()), file_metadata.len()))
+    Ok((encode_lowercase_hex(&hasher.finalize()), file_metadata.len()))
 }
 
 fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {

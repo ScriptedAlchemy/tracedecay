@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -72,7 +73,10 @@ export function WorkTimelineView({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workWeaveReading(snapshot.projections, attempts, graph);
+  const reading = useMemo(
+    () => workWeaveReading(snapshot.projections, attempts, graph),
+    [snapshot.projections, attempts, graph],
+  );
   const coverage = coverageReading(snapshot.coverage);
 
   const landings = reading.threads.reduce((total, thread) => total + thread.landings.length, 0);

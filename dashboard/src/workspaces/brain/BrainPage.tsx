@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
-import { ActivationField } from '../../viz/graph/activation.ts';
+import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
+import { relativeAge } from '../../ui/time.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -215,7 +216,7 @@ function RegistryFieldView({
   activeProjectId: string | null;
 }) {
   const selectProject = useScope((s) => s.selectProject);
-  const activationRef = useRef(new ActivationField({ halfLifeMs: 4200 }));
+  const activation = useActivationField(4200);
   const { state: sseState, lastEventAt } = useEventStreamState();
   const { pulses, revision } = useLiveActivity();
   // null until the first pass adopts the connection's current revision: the
@@ -270,7 +271,6 @@ function RegistryFieldView({
     }
     const unseen = Math.min(revision - drawnRevision.current, pulses.length);
     drawnRevision.current = revision;
-    const activation = activationRef.current;
     for (const pulse of pulses.slice(pulses.length - unseen)) {
       const projectId = pulse.projectId ?? activeProjectId;
       // A scope naming something this field does not draw fires nothing: heat
@@ -286,7 +286,7 @@ function RegistryFieldView({
       const hop = neighborsOf(adjacency, projectId);
       if (hop.length > 0) activation.strike(hop, energy / 3);
     }
-  }, [pulses, revision, sseState, activeProjectId, adjacency, drawnIds]);
+  }, [pulses, revision, sseState, activeProjectId, adjacency, drawnIds, activation]);
 
   // Stable across renders so the canvas effect never re-runs for a new handler
   // identity; the current registry is read through the ref at click time.
@@ -354,7 +354,7 @@ function RegistryFieldView({
         // enough width that a generous height is the right trade again.
         canvasClassName="min-h-[64vw] max-h-[84vw] md:max-h-none md:min-h-[55vh] lg:min-h-0"
         extent={extent}
-        activation={activationRef.current}
+        activation={activation}
         selectedId={null}
         onSelect={handleSelect}
         ariaLabel={fieldDescription(field)}
@@ -564,7 +564,7 @@ function ProjectRow({
           className="td-value shrink-0 text-2xs text-text-muted"
           data-cell="numeric"
         >
-          {relativeTime(project.last_seen_at)}
+          {relativeAge(project.last_seen_at, Date.now() / 1000)}
         </span>
       </span>
       <span
@@ -646,13 +646,4 @@ function holdingsLabel(
 
 function latestSeen(group: ProjectRepoGroup): number {
   return group.projects.reduce((max, p) => Math.max(max, p.last_seen_at), 0);
-}
-
-export function relativeTime(epochSeconds: number): string {
-  const delta = Date.now() / 1000 - epochSeconds;
-  if (delta < 90) return 'now';
-  if (delta < 3600) return `${Math.round(delta / 60)}m ago`;
-  if (delta < 86_400) return `${Math.round(delta / 3600)}h ago`;
-  if (delta < 30 * 86_400) return `${Math.round(delta / 86_400)}d ago`;
-  return `${Math.round(delta / (30 * 86_400))}mo ago`;
 }

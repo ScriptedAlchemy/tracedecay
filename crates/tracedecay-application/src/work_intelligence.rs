@@ -5,15 +5,15 @@
 //! graph revision the caller names. Proposal comparison reads two exact
 //! verified revisions and returns both sides plus their structural delta.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProposalId, ProviderId,
-    TaskEvidenceLinkV1, TaskId, UtcMicros, WorkGraphVersionV1, WorkItemV1, WorkProductRelationV1,
-    WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1,
-    WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
+    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkGraphVersionV1, WorkItemV1,
+    WorkProductRelationV1, WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRouteDecisionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
     WorkShapeAssessmentV1, WorkSizingV1, canonical_sha256,
     configuration::{
         ConfigurationSnapshotV1, ConfigurationValueV1, PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
@@ -584,6 +584,19 @@ where
             });
         }
 
+        // The in-window evidence links are grouped by task once so the item
+        // loop below does not rescan the full link set for every item.
+        let mut evidence_by_task: BTreeMap<&TaskId, Vec<&TaskEvidenceLinkV1>> = BTreeMap::new();
+        for link in graph.evidence() {
+            if link.observed_at() >= request.evidence_not_before
+                && link.observed_at() <= request.observed_at
+            {
+                evidence_by_task
+                    .entry(link.task_id())
+                    .or_default()
+                    .push(link);
+            }
+        }
         let mut candidates = Vec::new();
         let mut stale_excluded = 0u32;
         for item in graph.items() {
@@ -605,16 +618,10 @@ where
             if applicability.is_empty() {
                 continue;
             }
-            let evidence = graph
-                .evidence()
-                .iter()
-                .filter(|link| {
-                    link.task_id() == item.task_id()
-                        && link.observed_at() >= request.evidence_not_before
-                        && link.observed_at() <= request.observed_at
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let evidence = evidence_by_task
+                .get(item.task_id())
+                .map(|links| links.iter().map(|&link| link.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
             if evidence.is_empty() {
                 stale_excluded = stale_excluded.saturating_add(1);
                 continue;
@@ -815,8 +822,23 @@ fn evidence_difference(
     left: &[TaskEvidenceLinkV1],
     right: &[TaskEvidenceLinkV1],
 ) -> Vec<TaskEvidenceLinkV1> {
+    // `TaskEvidenceLinkV1` derives no `Ord`, so instead of a `BTreeSet`
+    // difference the membership probe is keyed by link id and confirmed with
+    // full equality inside each (near-singleton) bucket.
+    let mut right_by_link: BTreeMap<&TaskEvidenceLinkId, Vec<&TaskEvidenceLinkV1>> =
+        BTreeMap::new();
+    for existing in right {
+        right_by_link
+            .entry(existing.link_id())
+            .or_default()
+            .push(existing);
+    }
     left.iter()
-        .filter(|candidate| !right.iter().any(|existing| existing == *candidate))
+        .filter(|candidate| {
+            right_by_link
+                .get(candidate.link_id())
+                .is_none_or(|bucket| !bucket.iter().any(|existing| *existing == *candidate))
+        })
         .cloned()
         .collect()
 }

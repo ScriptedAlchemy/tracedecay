@@ -61,12 +61,17 @@ impl<'s> ExtractionState<'s> {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -131,7 +136,6 @@ impl TypeScriptExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -412,7 +416,6 @@ impl TypeScriptExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "variable_declarator" {
-                    // Check if this is an arrow function assignment.
                     if let Some(arrow) = find_direct_child_by_kind(child, "arrow_function") {
                         Self::visit_arrow_function(state, child, arrow);
                     } else if is_const {
@@ -1169,7 +1172,6 @@ impl TypeScriptExtractor {
                 let child = cursor.node();
                 if child.kind() == "decorator" {
                     let text = state.node_text(child);
-                    // Get the decorator name (strip @ and potential arguments).
                     let name = Self::clean_name(
                         text.trim_start_matches('@')
                             .split('(')
@@ -1292,7 +1294,6 @@ impl TypeScriptExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "call_expression" => {
-                        // Get the callee name.
                         let callee = child.named_child(0);
                         if let Some(callee) = callee {
                             let callee_name = state.node_text(callee).to_string();
