@@ -468,7 +468,6 @@ impl ObservationStore for GlobalDbObservationStore {
                 HashMap::<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>::new(
                 );
             let mut prepared = Vec::with_capacity(writes.len());
-            let mut prepare_error = None;
             for write in writes {
                 let key = (
                     write.observation().source().clone(),
@@ -476,16 +475,11 @@ impl ObservationStore for GlobalDbObservationStore {
                 );
                 let known_cursor = published_cursors.get(&key).cloned().map(Some);
                 let next_cursor = write.next_cursor().clone();
-                match self.prepare_observation_persist(write, known_cursor).await {
-                    Ok(item) => {
-                        published_cursors.insert(key, next_cursor);
-                        prepared.push(item);
-                    }
-                    Err(error) => {
-                        prepare_error = Some(error);
-                        break;
-                    }
-                }
+                let item = self
+                    .prepare_observation_persist(write, known_cursor)
+                    .await?;
+                published_cursors.insert(key, next_cursor);
+                prepared.push(item);
             }
             let mut outcomes: Vec<Option<ObservationPersistOutcome>> =
                 Vec::with_capacity(prepared.len());
@@ -504,9 +498,6 @@ impl ObservationStore for GlobalDbObservationStore {
                 for (slot, outcome) in submitted {
                     outcomes[slot] = Some(outcome);
                 }
-            }
-            if let Some(error) = prepare_error {
-                return Err(error);
             }
             outcomes
                 .into_iter()

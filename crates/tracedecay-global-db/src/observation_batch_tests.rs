@@ -272,6 +272,50 @@ async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
 }
 
 #[tokio::test]
+async fn failed_batch_preflight_commits_no_valid_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.observation-batch.atomic-preflight").unwrap();
+    let writes = sequential_writes(&session_id, 2);
+    let first = writes[0].clone();
+    let second = writes[1].clone();
+    let invalid_second = anchored_write(
+        second.observation().clone(),
+        Some(second.next_cursor().clone()),
+    );
+
+    let error = store
+        .persist_observations(vec![first.clone(), invalid_second])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ObservationStoreError::CursorConflict { .. }
+    ));
+    assert!(
+        store
+            .get_observation(first.observation().observation_id())
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected batch must not commit its valid prefix"
+    );
+    assert!(
+        store
+            .get_source_cursor(first.observation().source(), first.observation().scope())
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected batch must not advance its source cursor"
+    );
+}
+
+#[tokio::test]
 async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
