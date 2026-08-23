@@ -42,7 +42,6 @@ pub struct CodexJsonlAdmissionProgress {
     pub frames_skipped: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
-    pub writer_txns: u64,
 }
 
 /// Admit a Codex rollout for one exact project identity.
@@ -329,6 +328,5 @@ async fn try_admit_codex_jsonl_observations(
         frames_skipped: progress.frames_skipped,
         frames_refused: progress.frames_refused,
         frames_persisted: progress.frames_persisted,
-        writer_txns: progress.writer_txns,
     })
 }

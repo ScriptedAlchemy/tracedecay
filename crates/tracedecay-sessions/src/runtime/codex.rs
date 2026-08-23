@@ -202,6 +202,7 @@ impl CodexSource {
         let intra_offset = history_rotation & HISTORY_INTRA_MASK;
         let mut next_history_rotation = history_rotation;
         let older = &buckets[first_unfinished_bucket..];
+        #[cfg(feature = "hotpath")]
         let recent_selected = u64::try_from(pass.paths.len()).unwrap_or(u64::MAX);
         if !older.is_empty() && history_units > 0 && pass.truncated_by_recent_budget() {
             pass.enter_history_phase();
@@ -252,10 +253,13 @@ impl CodexSource {
         }
 
         let report = pass.into_report();
-        let history_selected = u64::try_from(report.paths.len())
-            .unwrap_or(u64::MAX)
-            .saturating_sub(recent_selected);
-        crate::runtime::hotpath::record_discovery_slice(recent_selected, history_selected);
+        #[cfg(feature = "hotpath")]
+        {
+            let history_selected = u64::try_from(report.paths.len())
+                .unwrap_or(u64::MAX)
+                .saturating_sub(recent_selected);
+            crate::runtime::hotpath::record_discovery_slice(recent_selected, history_selected);
+        }
         crate::runtime::hotpath::record_sweep_outcome(!report.is_truncated());
         CodexDiscoveryPass {
             report,

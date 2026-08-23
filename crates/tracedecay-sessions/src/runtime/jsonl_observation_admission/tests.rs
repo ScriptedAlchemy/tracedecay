@@ -273,6 +273,8 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
             .expect("deterministic content refusals must not block the source");
 
     assert_eq!(progress.bytes_consumed, len);
+    assert_eq!(progress.frames_refused, 2);
+    assert_eq!(progress.frames_persisted, 0);
     assert_eq!(
         spy.capture_count(),
         2,
@@ -319,11 +321,8 @@ async fn exact_duplicates_are_idempotent_no_op_receipts() {
             .expect("initial admission must persist both records");
     assert_eq!(spy.inner.observations().len(), 2);
     assert_eq!(first.frames_decoded, 2);
-    assert_eq!(
-        first.writer_txns, first.frames_decoded,
-        "HEAD observation catch-up still issues one writer op per decoded frame"
-    );
     assert_eq!(first.frames_persisted, first.frames_decoded);
+    assert_eq!(first.frames_refused, 0);
     assert!(spy.cover_past_advances().is_empty());
     let committed = stored_cursor(&spy)
         .await

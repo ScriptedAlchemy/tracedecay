@@ -148,8 +148,12 @@ pub fn bound_path_list(
     let files_considered = u64::try_from(out.len())
         .unwrap_or(u64::MAX)
         .saturating_add(skipped_oversized_entries);
-    let selected = u64::try_from(out.len()).unwrap_or(u64::MAX);
-    crate::runtime::hotpath::record_discovery_files(files_considered, selected, bytes_charged);
+    #[cfg(feature = "hotpath")]
+    crate::runtime::hotpath::record_discovery_files(
+        files_considered,
+        u64::try_from(out.len()).unwrap_or(u64::MAX),
+        bytes_charged,
+    );
     FileDiscoveryReport {
         paths: out,
         truncated,
@@ -179,10 +183,10 @@ pub fn collect_files_with_ext_bounded(
         files_considered: 0,
     };
     state.walk(dir, 0);
-    let selected = u64::try_from(state.paths.len()).unwrap_or(u64::MAX);
+    #[cfg(feature = "hotpath")]
     crate::runtime::hotpath::record_discovery_files(
         state.files_considered,
-        selected,
+        u64::try_from(state.paths.len()).unwrap_or(u64::MAX),
         state.bytes_charged,
     );
     crate::runtime::hotpath::record_sweep_outcome(state.truncated.is_none());

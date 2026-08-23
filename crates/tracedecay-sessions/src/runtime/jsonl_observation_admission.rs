@@ -114,7 +114,6 @@ pub(super) struct JsonlObservationAdmissionProgress {
     pub frames_skipped: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
-    pub writer_txns: u64,
     pub io: crate::runtime::source::JsonlIoAccounting,
 }
 
@@ -128,7 +127,6 @@ impl Default for JsonlObservationAdmissionProgress {
             frames_skipped: 0,
             frames_refused: 0,
             frames_persisted: 0,
-            writer_txns: 0,
             io: crate::runtime::source::JsonlIoAccounting::default(),
         }
     }
@@ -167,6 +165,12 @@ struct DurableJsonlFrame {
     range: tracedecay_domain::ObservationSourceRangeV1,
     parsed_record: ParsedObservationRecordV1,
     native_record_id: ObservationId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurableFrameDisposition {
+    Persisted,
+    Refused,
 }
 
 struct ActiveAdmission<'request> {
@@ -268,7 +272,7 @@ impl ActiveAdmission<'_> {
         frame: DurableJsonlFrame,
         retention_class: &RetentionClass,
         persisted_cursor_update: PersistedCursorUpdate,
-    ) -> TranscriptIngestResult<()> {
+    ) -> TranscriptIngestResult<DurableFrameDisposition> {
         let identity = ObservationIdentityMaterialV1::for_native_record(
             self.source.clone(),
             self.scope.clone(),
@@ -311,7 +315,7 @@ impl ActiveAdmission<'_> {
                         frame.checkpoint.resume_fingerprint,
                     )?);
                 }
-                Ok(())
+                Ok(DurableFrameDisposition::Persisted)
             }
             Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                 self.advance_coverage(
@@ -320,7 +324,8 @@ impl ActiveAdmission<'_> {
                     ObservationCoverageReason::SanitizerRejected,
                     Some(receipt),
                 )
-                .await
+                .await?;
+                Ok(DurableFrameDisposition::Refused)
             }
             Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
                 self.advance_coverage(
@@ -329,7 +334,8 @@ impl ActiveAdmission<'_> {
                     ObservationCoverageReason::SanitizerQuarantined,
                     Some(receipt),
                 )
-                .await
+                .await?;
+                Ok(DurableFrameDisposition::Refused)
             }
             // Deterministic content refusals re-fail identically forever;
             // advance coverage with a durable typed reason so the stream
@@ -350,7 +356,8 @@ impl ActiveAdmission<'_> {
                     ObservationCoverageReason::AdmissionRefused,
                     None,
                 )
-                .await
+                .await?;
+                Ok(DurableFrameDisposition::Refused)
             }
             Err(outcome) => {
                 if is_admission_cancellation(&outcome, &self.cancellation) {
@@ -523,7 +530,6 @@ pub(super) async fn admit_jsonl_observations<State>(
                 )
                 .await?;
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
-            progress.writer_txns = progress.writer_txns.saturating_add(1);
         }
         if active.cancellation.is_cancelled() {
             return Err(TranscriptIngestError::Cancelled { provider });
@@ -544,11 +550,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                         .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                         .await?;
                     progress.frames_skipped = progress.frames_skipped.saturating_add(1);
-                    progress.writer_txns = progress.writer_txns.saturating_add(1);
                     continue;
                 }
             };
-        active
+        let disposition = active
             .capture(
                 &mut expected_cursor,
                 DurableJsonlFrame {
@@ -561,9 +566,15 @@ pub(super) async fn admit_jsonl_observations<State>(
                 persisted_cursor_update,
             )
             .await?;
-        progress.frames_accepted = progress.frames_accepted.saturating_add(1);
-        progress.frames_persisted = progress.frames_persisted.saturating_add(1);
-        progress.writer_txns = progress.writer_txns.saturating_add(1);
+        match disposition {
+            DurableFrameDisposition::Persisted => {
+                progress.frames_accepted = progress.frames_accepted.saturating_add(1);
+                progress.frames_persisted = progress.frames_persisted.saturating_add(1);
+            }
+            DurableFrameDisposition::Refused => {
+                progress.frames_refused = progress.frames_refused.saturating_add(1);
+            }
+        }
     }
 
     if !active.cancellation.is_cancelled() {
@@ -581,7 +592,6 @@ pub(super) async fn admit_jsonl_observations<State>(
                 )
                 .await?;
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
-            progress.writer_txns = progress.writer_txns.saturating_add(1);
         }
     } else {
         return Err(TranscriptIngestError::Cancelled { provider });
@@ -603,7 +613,6 @@ pub(super) async fn admit_jsonl_observations<State>(
         progress.frames_skipped,
         progress.frames_refused,
         progress.frames_persisted,
-        progress.writer_txns,
     );
     Ok(progress)
 }
