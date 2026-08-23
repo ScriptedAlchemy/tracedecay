@@ -25,10 +25,11 @@ use super::apply::{
     derive_projection_with_alias, stage_provider_usage_effects, verify_effect,
 };
 use super::state::{
-    consume_projection_queue_item, decode_observation_row, decode_sequence,
-    ensure_projection_output_state_cache, projection_retry_state, queued_sequence, read_checkpoint,
-    read_message, read_observation, read_session, reaggregate_output_state_for_output,
-    schedule_projection_retry, storage, storage_message, write_checkpoint,
+    canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
+    decode_sequence, ensure_projection_output_state_cache, projection_retry_state, queued_sequence,
+    read_checkpoint, read_message, read_observation, read_session,
+    reaggregate_output_state_for_output, reconcile_session_rows, schedule_projection_retry,
+    storage, storage_message, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -40,6 +41,63 @@ const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
 const PROJECTION_RETRY_BASE_MICROS: i64 = 5_000_000;
 const PROJECTION_RETRY_MAX_MICROS: i64 = 300_000_000;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+const SESSION_JSON_COLUMN: &str = "session_json";
+const MESSAGE_JSON_COLUMN: &str = "message_json";
+const STAGED_MESSAGE_JSON_COLUMN: &str = "staged.message_json";
+
+const SESSION_JSON_FIELDS: &[&str] = &[
+    "project_key",
+    "project_path",
+    "title",
+    "started_at",
+    "ended_at",
+    "transcript_path",
+    "metadata_json",
+    "parent_session_id",
+    "is_subagent",
+    "agent_id",
+    "parent_tool_use_id",
+];
+
+const MESSAGE_JSON_FIELDS: &[&str] = &[
+    "session_id",
+    "role",
+    "timestamp",
+    "ordinal",
+    "text",
+    "kind",
+    "model",
+    "tool_names",
+    "source_path",
+    "source_offset",
+    "metadata_json",
+];
+
+fn json_extract_expr(column: &str, field: &str) -> String {
+    format!("json_extract({column}, '$.{field}')")
+}
+
+fn json_extract_select_list(column: &str, fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|field| json_extract_expr(column, field))
+        .collect::<Vec<_>>()
+        .join(",\n                ")
+}
+
+fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|field| {
+            format!(
+                "{left_alias}.{field} IS NOT {}",
+                json_extract_expr(json_column, field)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n                     OR ")
+}
 
 /// Projects one queued observation through the guarded registered database
 /// client. The transaction remains bound to that client for its whole life;
@@ -1343,7 +1401,7 @@ async fn stage_rebuild_session(
 ) -> ProjectionStoreResult<()> {
     // Match apply_session / verify_rows: normalize host spellings before pure
     // string reconcile so macOS /var firmlinks and user symlink families converge.
-    let expected = super::state::canonicalize_session_project_paths(expected);
+    let expected = canonicalize_session_project_paths(expected);
     let actual =
         match read_staged_session(conn, generation, &expected.provider, &expected.session_id)
             .await?
@@ -1353,7 +1411,7 @@ async fn stage_rebuild_session(
         };
     let session = match actual {
         Some(actual) => {
-            super::state::reconcile_session_rows(&actual, &expected).ok_or_else(|| {
+            reconcile_session_rows(&actual, &expected).ok_or_else(|| {
                 ProjectionStoreError::OutputCollision {
                     provider: expected.provider.clone(),
                     message_id: format!("session:{}", expected.session_id),
@@ -2030,24 +2088,16 @@ async fn activate_rebuild_sessions(
         });
     }
     drop(conflicts);
+    let session_extracts = json_extract_select_list(SESSION_JSON_COLUMN, SESSION_JSON_FIELDS);
     conn.execute(
-        "INSERT INTO sessions (
+        &format!(
+            "INSERT INTO sessions (
             provider, session_id, project_key, project_path, title, started_at, ended_at,
             transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
             parent_tool_use_id
          )
          SELECT provider, session_id,
-                json_extract(session_json, '$.project_key'),
-                json_extract(session_json, '$.project_path'),
-                json_extract(session_json, '$.title'),
-                json_extract(session_json, '$.started_at'),
-                json_extract(session_json, '$.ended_at'),
-                json_extract(session_json, '$.transcript_path'),
-                json_extract(session_json, '$.metadata_json'),
-                json_extract(session_json, '$.parent_session_id'),
-                json_extract(session_json, '$.is_subagent'),
-                json_extract(session_json, '$.agent_id'),
-                json_extract(session_json, '$.parent_tool_use_id')
+                {session_extracts}
          FROM observation_projection_rebuild_sessions
          WHERE projector_version = ?1 AND generation = ?2
          ON CONFLICT(provider, session_id) DO UPDATE SET
@@ -2076,7 +2126,8 @@ async fn activate_rebuild_sessions(
             agent_id = COALESCE(sessions.agent_id, excluded.agent_id),
             parent_tool_use_id = COALESCE(
               sessions.parent_tool_use_id, excluded.parent_tool_use_id
-            )",
+            )"
+        ),
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
@@ -2139,9 +2190,12 @@ async fn prepare_rebuild_output_activation(
     .await
     .map_err(|error| storage("materialize preexisting projection outputs", error))?;
 
+    let message_conflicts =
+        json_extract_neq_predicates("active", STAGED_MESSAGE_JSON_COLUMN, MESSAGE_JSON_FIELDS);
     let mut conflicts = conn
         .query(
-            "SELECT staged.output_provider, staged.output_message_id
+            &format!(
+                "SELECT staged.output_provider, staged.output_message_id
              FROM observation_projection_rebuild_messages AS staged
              JOIN temp.observation_projection_rebuild_preexisting_outputs AS ownership
                ON ownership.output_provider = staged.output_provider
@@ -2156,21 +2210,12 @@ async fn prepare_rebuild_output_activation(
                    ownership.active_exists = 1
                    AND NOT (ownership.current_owned = 1 AND ownership.cross_owned = 0)
                    AND (
-                     active.session_id IS NOT json_extract(staged.message_json, '$.session_id')
-                     OR active.role IS NOT json_extract(staged.message_json, '$.role')
-                     OR active.timestamp IS NOT json_extract(staged.message_json, '$.timestamp')
-                     OR active.ordinal IS NOT json_extract(staged.message_json, '$.ordinal')
-                     OR active.text IS NOT json_extract(staged.message_json, '$.text')
-                     OR active.kind IS NOT json_extract(staged.message_json, '$.kind')
-                     OR active.model IS NOT json_extract(staged.message_json, '$.model')
-                     OR active.tool_names IS NOT json_extract(staged.message_json, '$.tool_names')
-                     OR active.source_path IS NOT json_extract(staged.message_json, '$.source_path')
-                     OR active.source_offset IS NOT json_extract(staged.message_json, '$.source_offset')
-                     OR active.metadata_json IS NOT json_extract(staged.message_json, '$.metadata_json')
+                     {message_conflicts}
                    )
                  )
                )
-             LIMIT 1",
+             LIMIT 1"
+            ),
             params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
         )
         .await
@@ -2196,23 +2241,15 @@ async fn activate_rebuild_messages(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
+    let message_extracts = json_extract_select_list(MESSAGE_JSON_COLUMN, MESSAGE_JSON_FIELDS);
     conn.execute(
-        "INSERT INTO session_messages (
+        &format!(
+            "INSERT INTO session_messages (
             provider, message_id, session_id, role, timestamp, ordinal, text, kind,
             model, tool_names, source_path, source_offset, metadata_json
          )
          SELECT output_provider, output_message_id,
-                json_extract(message_json, '$.session_id'),
-                json_extract(message_json, '$.role'),
-                json_extract(message_json, '$.timestamp'),
-                json_extract(message_json, '$.ordinal'),
-                json_extract(message_json, '$.text'),
-                json_extract(message_json, '$.kind'),
-                json_extract(message_json, '$.model'),
-                json_extract(message_json, '$.tool_names'),
-                json_extract(message_json, '$.source_path'),
-                json_extract(message_json, '$.source_offset'),
-                json_extract(message_json, '$.metadata_json')
+                {message_extracts}
          FROM observation_projection_rebuild_messages
          WHERE projector_version = ?1 AND generation = ?2
          ON CONFLICT(provider, message_id) DO UPDATE SET
@@ -2237,25 +2274,33 @@ async fn activate_rebuild_messages(
             OR session_messages.tool_names IS NOT excluded.tool_names
             OR session_messages.source_path IS NOT excluded.source_path
             OR session_messages.source_offset IS NOT excluded.source_offset
-            OR session_messages.metadata_json IS NOT excluded.metadata_json",
+            OR session_messages.metadata_json IS NOT excluded.metadata_json"
+        ),
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
     .map_err(|error| storage("activate rebuilt projection messages", error))?;
+    let lcm_session_id = json_extract_expr(MESSAGE_JSON_COLUMN, "session_id");
+    let lcm_role = json_extract_expr(MESSAGE_JSON_COLUMN, "role");
+    let lcm_ordinal = json_extract_expr(MESSAGE_JSON_COLUMN, "ordinal");
+    let lcm_timestamp = json_extract_expr(MESSAGE_JSON_COLUMN, "timestamp");
+    let lcm_text = json_extract_expr(MESSAGE_JSON_COLUMN, "text");
+    let lcm_metadata = json_extract_expr(MESSAGE_JSON_COLUMN, "metadata_json");
     conn.execute(
-        "INSERT INTO lcm_raw_messages (
+        &format!(
+            "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp, content,
             content_hash, storage_kind, payload_ref, snippet_text, index_text,
             legacy_source, legacy_truncated, metadata_json
          )
          SELECT output_provider, output_message_id,
-                json_extract(message_json, '$.session_id'),
-                json_extract(message_json, '$.role'),
-                json_extract(message_json, '$.ordinal'),
-                json_extract(message_json, '$.timestamp'),
-                json_extract(message_json, '$.text'), content_hash, 'inline', NULL,
+                {lcm_session_id},
+                {lcm_role},
+                {lcm_ordinal},
+                {lcm_timestamp},
+                {lcm_text}, content_hash, 'inline', NULL,
                 snippet_text, index_text, 0, 0,
-                json_extract(message_json, '$.metadata_json')
+                {lcm_metadata}
          FROM observation_projection_rebuild_messages
          WHERE projector_version = ?1 AND generation = ?2 AND output_provider <> 'hermes'
          ON CONFLICT(provider, message_id) DO UPDATE SET
@@ -2271,7 +2316,8 @@ async fn activate_rebuild_messages(
             index_text = excluded.index_text,
             legacy_source = 0,
             legacy_truncated = 0,
-            metadata_json = excluded.metadata_json",
+            metadata_json = excluded.metadata_json"
+        ),
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await

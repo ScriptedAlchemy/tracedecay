@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
@@ -272,47 +275,30 @@ pub(super) async fn read_session(
     else {
         return Ok(None);
     };
+    macro_rules! cell {
+        ($index:literal) => {
+            row.get($index)
+                .map_err(|error| storage("decode projected session", error))?
+        };
+        ($index:literal, $ty:ty) => {
+            row.get::<$ty>($index)
+                .map_err(|error| storage("decode projected session", error))?
+        };
+    }
     Ok(Some(SessionRecord {
-        provider: row
-            .get(0)
-            .map_err(|error| storage("decode projected session", error))?,
-        session_id: row
-            .get(1)
-            .map_err(|error| storage("decode projected session", error))?,
-        project_key: row
-            .get(2)
-            .map_err(|error| storage("decode projected session", error))?,
-        project_path: row
-            .get(3)
-            .map_err(|error| storage("decode projected session", error))?,
-        title: row
-            .get(4)
-            .map_err(|error| storage("decode projected session", error))?,
-        started_at: row
-            .get(5)
-            .map_err(|error| storage("decode projected session", error))?,
-        ended_at: row
-            .get(6)
-            .map_err(|error| storage("decode projected session", error))?,
-        transcript_path: row
-            .get(7)
-            .map_err(|error| storage("decode projected session", error))?,
-        metadata_json: row
-            .get(8)
-            .map_err(|error| storage("decode projected session", error))?,
-        parent_session_id: row
-            .get(9)
-            .map_err(|error| storage("decode projected session", error))?,
-        is_subagent: row
-            .get::<i64>(10)
-            .map_err(|error| storage("decode projected session", error))?
-            != 0,
-        agent_id: row
-            .get(11)
-            .map_err(|error| storage("decode projected session", error))?,
-        parent_tool_use_id: row
-            .get(12)
-            .map_err(|error| storage("decode projected session", error))?,
+        provider: cell!(0),
+        session_id: cell!(1),
+        project_key: cell!(2),
+        project_path: cell!(3),
+        title: cell!(4),
+        started_at: cell!(5),
+        ended_at: cell!(6),
+        transcript_path: cell!(7),
+        metadata_json: cell!(8),
+        parent_session_id: cell!(9),
+        is_subagent: cell!(10, i64) != 0,
+        agent_id: cell!(11),
+        parent_tool_use_id: cell!(12),
     }))
 }
 
@@ -360,6 +346,22 @@ pub(super) async fn read_message(
     }))
 }
 
+fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
+    format!(
+        "(
+                    SELECT {select_expr}
+                    FROM observation_projection_provenance AS provenance
+                    JOIN observations AS observation
+                      ON observation.observation_id = provenance.observation_id
+                    WHERE provenance.projector_version = groups.projector_version
+                      AND provenance.output_provider = groups.output_provider
+                      AND provenance.output_message_id = groups.output_message_id
+                    ORDER BY observation.sequence {ordering}, provenance.observation_id {ordering}
+                    LIMIT 1
+                )"
+    )
+}
+
 /// The one definition of the projected-output ownership aggregation that
 /// populates `temp.observation_projection_output_state`: for every
 /// `(projector_version, output_provider, output_message_id)` group in the
@@ -371,6 +373,9 @@ pub(super) async fn read_message(
 /// drift; `provenance_filter` scopes only the grouped rows (the correlated
 /// owner lookups constrain themselves to each group's exact key).
 fn output_state_aggregation_sql(provenance_filter: &str) -> String {
+    let newest_id = output_owner_lookup_sql("provenance.observation_id", "DESC");
+    let oldest_id = output_owner_lookup_sql("provenance.observation_id", "ASC");
+    let newest_sequence = output_owner_lookup_sql("observation.sequence", "DESC");
     format!(
         "INSERT INTO temp.observation_projection_output_state (
             projector_version, output_provider, output_message_id,
@@ -378,49 +383,9 @@ fn output_state_aggregation_sql(provenance_filter: &str) -> String {
             projector_owned, owner_count
          )
          SELECT groups.projector_version, groups.output_provider, groups.output_message_id,
-                CASE WHEN groups.projector_owned = 1 THEN (
-                    SELECT provenance.observation_id
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                    LIMIT 1
-                ) ELSE (
-                    SELECT provenance.observation_id
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence ASC, provenance.observation_id ASC
-                    LIMIT 1
-                ) END,
-                (
-                    SELECT provenance.observation_id
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                    LIMIT 1
-                ),
-                (
-                    SELECT observation.sequence
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                    LIMIT 1
-                ),
+                CASE WHEN groups.projector_owned = 1 THEN {newest_id} ELSE {oldest_id} END,
+                {newest_id},
+                {newest_sequence},
                 groups.projector_owned, groups.owner_count
          FROM (
             SELECT projector_version, output_provider, output_message_id,
@@ -591,7 +556,8 @@ pub(super) async fn read_output_state(
     let mut rows = conn
         .query(
             "SELECT state.latest_sequence, latest.observation_json,
-                    canonical.observation_json, state.projector_owned, state.owner_count
+                    canonical.observation_json, state.projector_owned, state.owner_count,
+                    state.latest_observation_id, state.canonical_observation_id
              FROM temp.observation_projection_output_state AS state
              JOIN observations AS latest
                ON latest.observation_id = state.latest_observation_id
@@ -620,16 +586,26 @@ pub(super) async fn read_output_state(
             .map_err(|error| storage("read projection output state", error))?,
         "read projection output state",
     )?;
-    let latest = serde_json::from_str(
-        &row.get::<String>(1)
-            .map_err(|error| storage("read projection output state", error))?,
-    )
-    .map_err(|error| storage("decode latest projection output owner", error))?;
-    let canonical = serde_json::from_str(
-        &row.get::<String>(2)
-            .map_err(|error| storage("read projection output state", error))?,
-    )
-    .map_err(|error| storage("decode canonical projection output owner", error))?;
+    let latest_json = row
+        .get::<String>(1)
+        .map_err(|error| storage("read projection output state", error))?;
+    let latest: DurableObservationV1 = serde_json::from_str(&latest_json)
+        .map_err(|error| storage("decode latest projection output owner", error))?;
+    let latest_observation_id: String = row
+        .get(5)
+        .map_err(|error| storage("read projection output state", error))?;
+    let canonical_observation_id: String = row
+        .get(6)
+        .map_err(|error| storage("read projection output state", error))?;
+    let canonical = if latest_observation_id == canonical_observation_id {
+        latest.clone()
+    } else {
+        serde_json::from_str(
+            &row.get::<String>(2)
+                .map_err(|error| storage("read projection output state", error))?,
+        )
+        .map_err(|error| storage("decode canonical projection output owner", error))?
+    };
     let projector_owned = row
         .get::<i64>(3)
         .map_err(|error| storage("read projection output state", error))?
@@ -868,10 +844,19 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
     normalized
 }
 
+thread_local! {
+    static CANONICAL_PROJECT_PATH_CACHE: RefCell<HashMap<String, Option<String>>> =
+        const { RefCell::new(HashMap::new()) };
+}
+
 /// Resolve a project-path string to its canonical on-disk form, returning
 /// `Some` only when the path exists and its canonical spelling differs. Non
 /// paths and vanished paths yield `None`, so identity is only widened by
 /// verifiable filesystem evidence.
+///
+/// `Path::canonicalize` is memoized per distinct `project_path` for the
+/// current thread so a drain or rebuild transaction does not re-walk the
+/// filesystem for the same family root on every session write.
 ///
 /// On macOS, `Path::canonicalize` expands firmlinks such as `/var` ->
 /// `/private/var`. Prefer the stable public `/var/...` spelling (same policy as
@@ -879,6 +864,17 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
 /// temp/project roots are not rewritten into a form that breaks search keys and
 /// authority verify against the original observation path.
 fn canonical_project_path(path: &str) -> Option<String> {
+    CANONICAL_PROJECT_PATH_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(path) {
+            return cached.clone();
+        }
+        let computed = compute_canonical_project_path(path);
+        cache.borrow_mut().insert(path.to_owned(), computed.clone());
+        computed
+    })
+}
+
+fn compute_canonical_project_path(path: &str) -> Option<String> {
     let canonical = std::path::Path::new(path).canonicalize().ok()?;
     let mut canonical = canonical.to_string_lossy().into_owned();
     if let Some(stripped) = canonical.strip_prefix("/private/var/") {

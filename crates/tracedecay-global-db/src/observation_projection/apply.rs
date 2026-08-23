@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use serde::Deserialize;
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
     CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
@@ -27,16 +28,17 @@ use super::transition::{
     message_transition, write_workflow_fact_transition,
 };
 
+fn decode_canonical_envelope(
+    payload: &serde_json::Value,
+) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
+    CanonicalObservationEnvelopeV1::deserialize(payload)
+}
+
 pub(in super::super) fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
     match observation.source().provider().as_str() {
-        "claude"
-            if serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                observation.payload().clone(),
-            )
-            .is_ok() =>
-        {
+        "claude" if decode_canonical_envelope(observation.payload()).is_ok() => {
             derive_canonical_projection(observation)
         }
         "claude" => derive_claude_projection(observation),
@@ -242,14 +244,20 @@ async fn derive_projection_with_alias_from_generation(
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
-fn goal_dedupe_objective(fact: &WorkflowFactRecord) -> String {
-    fact.content
-        .as_ref()
+fn goal_objective_from_content(
+    content: Option<&serde_json::Value>,
+    content_text: &str,
+) -> String {
+    content
         .and_then(|content| content.get("objective"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|objective| !objective.is_empty())
-        .map_or_else(|| fact.content_text.clone(), str::to_owned)
+        .map_or_else(|| content_text.to_owned(), str::to_owned)
+}
+
+fn goal_dedupe_objective(fact: &WorkflowFactRecord) -> String {
+    goal_objective_from_content(fact.content.as_ref(), &fact.content_text)
 }
 
 fn goal_dedupe_key(fact: &WorkflowFactRecord) -> (String, Option<String>) {
@@ -335,16 +343,13 @@ async fn read_latest_goal_dedupe_key(
     let content_text: String = row
         .get(2)
         .map_err(|error| storage("read latest projected goal state", error))?;
-    let objective = content_json
+    let content = content_json
         .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .as_ref()
-        .and_then(|content| content.get("objective"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|objective| !objective.is_empty())
-        .map_or(content_text, str::to_owned);
-    Ok(Some((objective, status)))
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    Ok(Some((
+        goal_objective_from_content(content.as_ref(), &content_text),
+        status,
+    )))
 }
 
 /// Drop Codex Goal rows that only advance tokens/time while retaining the raw
@@ -622,14 +627,17 @@ async fn apply_rows(
         }
         MessageTransition::Retain => {}
     }
-    let projected_message = read_message(conn, &message.provider, &message.message_id)
-        .await?
-        .ok_or_else(|| ProjectionStoreError::OutputCollision {
-            provider: message.provider.clone(),
-            message_id: message.message_id.clone(),
-        })?;
+    let projected_message = match transition {
+        MessageTransition::Insert | MessageTransition::Supersede => message,
+        MessageTransition::Retain => existing
+            .as_ref()
+            .ok_or_else(|| ProjectionStoreError::OutputCollision {
+                provider: message.provider.clone(),
+                message_id: message.message_id.clone(),
+            })?,
+    };
     if projected_message.provider != "hermes" && !preserve_protected_payload {
-        upsert_projected_raw_message(conn, &projected_message).await?;
+        upsert_projected_raw_message(conn, projected_message).await?;
     }
     Ok(transition == MessageTransition::Insert)
 }
@@ -796,7 +804,7 @@ async fn apply_workflow_fact(
     apply_session(conn, projection.session()).await?;
     let transition = WorkflowFactTransition::new(sequence, projection)?;
     let content_json = workflow_content_json(transition.projection())?;
-    write_workflow_fact_transition(
+    let inserted = write_workflow_fact_transition(
         conn,
         WorkflowFactTarget::Live,
         &transition,
@@ -804,7 +812,13 @@ async fn apply_workflow_fact(
         content_json.as_deref(),
     )
     .await?;
-    verify_workflow_fact(conn, projection).await
+    // A fresh insert wrote this exact tuple inside the transaction. Only a
+    // conflict can hide a durable row that disagrees with this derivation.
+    if inserted == 1 {
+        Ok(())
+    } else {
+        verify_workflow_fact(conn, projection).await
+    }
 }
 
 pub(super) async fn verify_provenance(
@@ -1135,14 +1149,19 @@ struct ProviderUsageRow {
     native_field: String,
 }
 
-fn provider_usage_rows(
+fn provider_usage_from_observation(
     observation: &DurableObservationV1,
-) -> ProjectionStoreResult<Vec<ProviderUsageRow>> {
-    let Ok(envelope) =
-        serde_json::from_value::<CanonicalObservationEnvelopeV1>(observation.payload().clone())
-    else {
-        return Ok(Vec::new());
+) -> ProjectionStoreResult<Option<(CanonicalObservationEnvelopeV1, Vec<ProviderUsageRow>)>> {
+    let Ok(envelope) = decode_canonical_envelope(observation.payload()) else {
+        return Ok(None);
     };
+    let rows = provider_usage_rows_from_envelope(&envelope)?;
+    Ok((!rows.is_empty()).then_some((envelope, rows)))
+}
+
+fn provider_usage_rows_from_envelope(
+    envelope: &CanonicalObservationEnvelopeV1,
+) -> ProjectionStoreResult<Vec<ProviderUsageRow>> {
     envelope
         .facts()
         .iter()
@@ -1213,16 +1232,12 @@ pub(crate) async fn apply_provider_usage_effects(
     sequence: u64,
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<()> {
-    let expected = provider_usage_rows(observation)?;
-    if expected.is_empty() {
+    let Some((envelope, expected)) = provider_usage_from_observation(observation)? else {
         return Ok(());
-    }
+    };
     let sequence =
         i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
-    // A non-empty row set already proves the canonical payload decodes, so the
-    // strict decode inside the context cannot reject an observation the old
-    // lenient `Err(_) => return Ok(())` arm would have accepted.
-    let context = ProviderUsageContext::new(sequence, observation)?;
+    let context = ProviderUsageContext::from_decoded(sequence, observation, envelope)?;
     let mut conflicted = Vec::new();
     for row in &expected {
         let inserted = conn
@@ -1291,24 +1306,12 @@ pub(super) async fn stage_provider_usage_effects(
     sequence: u64,
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<()> {
-    let expected = provider_usage_rows(observation)?;
-    if expected.is_empty() {
+    let Some((envelope, expected)) = provider_usage_from_observation(observation)? else {
         return Ok(());
-    }
-    let envelope: CanonicalObservationEnvelopeV1 =
-        match serde_json::from_value(observation.payload().clone()) {
-            Ok(envelope) => envelope,
-            Err(_) => return Ok(()),
-        };
+    };
     let sequence =
         i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
-    let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
-        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-    })?;
-    let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
-        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-    })?;
-    let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+    let context = ProviderUsageContext::from_decoded(sequence, observation, envelope)?;
     for row in expected {
         conn.execute(
             "INSERT INTO observation_projection_rebuild_provider_usage (
@@ -1328,23 +1331,27 @@ pub(super) async fn stage_provider_usage_effects(
                 row.usage_ordinal,
                 observation.receipt().receipt().receipt_id().as_str(),
                 sequence,
-                scope_kind,
-                project_id,
-                envelope.provider().as_str(),
+                context.scope_kind,
+                context.project_id,
+                context.envelope.provider().as_str(),
                 row.model_json.as_str(),
                 row.native_scope,
                 row.counter_semantics,
                 row.counters_json.as_str(),
-                envelope.relations().session_id().as_str(),
-                envelope.relations().turn_id().map(|id| id.as_str()),
-                envelope.relations().message_id().map(|id| id.as_str()),
+                context.envelope.relations().session_id().as_str(),
+                context.envelope.relations().turn_id().map(|id| id.as_str()),
+                context
+                    .envelope
+                    .relations()
+                    .message_id()
+                    .map(|id| id.as_str()),
                 row.request_id.as_deref(),
                 row.native_kind.as_str(),
                 row.native_field.as_str(),
-                envelope.evidence().ordering_domain().as_str(),
-                source_start,
-                source_end,
-                envelope.evidence().native_timestamp(),
+                context.envelope.evidence().ordering_domain().as_str(),
+                context.source_start,
+                context.source_end,
+                context.envelope.evidence().native_timestamp(),
             ],
         )
         .await
@@ -1368,11 +1375,11 @@ struct ProviderUsageContext<'a> {
 }
 
 impl<'a> ProviderUsageContext<'a> {
-    fn new(sequence: i64, observation: &'a DurableObservationV1) -> ProjectionStoreResult<Self> {
-        let envelope: CanonicalObservationEnvelopeV1 =
-            serde_json::from_value(observation.payload().clone()).map_err(|_| {
-                ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-            })?;
+    fn from_decoded(
+        sequence: i64,
+        observation: &'a DurableObservationV1,
+        envelope: CanonicalObservationEnvelopeV1,
+    ) -> ProjectionStoreResult<Self> {
         let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
             ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
         })?;
@@ -1401,11 +1408,10 @@ async fn verify_provider_usage_effects(
     sequence: i64,
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<()> {
-    let expected = provider_usage_rows(observation)?;
-    if expected.is_empty() {
+    let Some((envelope, expected)) = provider_usage_from_observation(observation)? else {
         return Ok(());
-    }
-    let context = ProviderUsageContext::new(sequence, observation)?;
+    };
+    let context = ProviderUsageContext::from_decoded(sequence, observation, envelope)?;
     for row in &expected {
         verify_provider_usage_row(conn, &context, observation, row).await?;
     }
