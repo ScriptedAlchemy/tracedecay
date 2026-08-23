@@ -497,6 +497,106 @@ fn canonical_projected_message(
         .map(|output| output.message().clone())
 }
 
+impl GlobalDbHydrationBackend<'_> {
+    #[hotpath::measure]
+    async fn resolve_current(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+    ) -> Result<HydrationResolution, HydrationError> {
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        let control = snapshot.request().execution_control();
+        control.checkpoint()?;
+        let resolution = resolve_current(
+            &self.read,
+            self.relation_authority.as_ref(),
+            snapshot,
+            anchor_id,
+        )
+        .await?;
+        control.checkpoint()?;
+        Ok(resolution)
+    }
+
+    #[hotpath::measure]
+    async fn read_bounded(
+        &self,
+        descriptor: &PayloadDescriptor,
+        max_bytes: usize,
+        control: &ExecutionControl,
+    ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        control.checkpoint()?;
+        match &descriptor.source {
+            PayloadSource::Occurrence {
+                provider,
+                session_id,
+                message_id,
+                source_observation_id,
+                projection_output_ordinal,
+            } => {
+                read_occurrence_content(
+                    &self.read,
+                    self.storage_root,
+                    descriptor,
+                    provider,
+                    session_id,
+                    message_id,
+                    source_observation_id,
+                    *projection_output_ordinal,
+                    max_bytes,
+                    control,
+                )
+                .await
+            }
+            PayloadSource::Summary {
+                session_id,
+                summary_id,
+            } => {
+                let mut rows = self
+                    .read
+                    .query(
+                        "SELECT summary_text
+                             FROM session_summary_nodes
+                             WHERE session_id = ?1 AND summary_id = ?2
+                               AND length(CAST(summary_text AS BLOB)) <= ?3",
+                        params![
+                            session_id.as_str(),
+                            summary_id.as_str(),
+                            i64::try_from(max_bytes).unwrap_or(i64::MAX)
+                        ],
+                    )
+                    .await
+                    .map_err(hydration_failure)?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(hydration_failure)?
+                    .ok_or(HydrationError::Unavailable)?;
+                let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
+                bounded_copy(content.as_bytes(), max_bytes, control)
+            }
+            PayloadSource::External {
+                provider,
+                session_id,
+                payload_ref,
+                char_count,
+            } => {
+                let content = read_verified_payload_content(
+                    self.storage_root,
+                    payload_ref,
+                    &descriptor.content_hash,
+                    descriptor.byte_count,
+                    *char_count,
+                )
+                .map_err(hydration_failure)?;
+                let _ = (provider, session_id);
+                bounded_copy(content.as_bytes(), max_bytes, control)
+            }
+        }
+    }
+}
+
 impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
     fn snapshot_is_stable(&self) -> bool {
         true
@@ -507,20 +607,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         snapshot: &'a TemporalExecutionSnapshot,
         anchor_id: &'a RetrievalAnchorId,
     ) -> BackendFuture<'a, HydrationResolution> {
-        Box::pin(async move {
-            hotpath::gauge!("session_temporal.hydration").inc(1u32);
-            let control = snapshot.request().execution_control();
-            control.checkpoint()?;
-            let resolution = resolve_current(
-                &self.read,
-                self.relation_authority.as_ref(),
-                snapshot,
-                anchor_id,
-            )
-            .await?;
-            control.checkpoint()?;
-            Ok(resolution)
-        })
+        Box::pin(self.resolve_current(snapshot, anchor_id))
     }
 
     fn read_bounded<'a>(
@@ -529,77 +616,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         max_bytes: usize,
         control: &'a ExecutionControl,
     ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
-        Box::pin(async move {
-            hotpath::gauge!("session_temporal.hydration").inc(1u32);
-            control.checkpoint()?;
-            match &descriptor.source {
-                PayloadSource::Occurrence {
-                    provider,
-                    session_id,
-                    message_id,
-                    source_observation_id,
-                    projection_output_ordinal,
-                } => {
-                    read_occurrence_content(
-                        &self.read,
-                        self.storage_root,
-                        descriptor,
-                        provider,
-                        session_id,
-                        message_id,
-                        source_observation_id,
-                        *projection_output_ordinal,
-                        max_bytes,
-                        control,
-                    )
-                    .await
-                }
-                PayloadSource::Summary {
-                    session_id,
-                    summary_id,
-                } => {
-                    let mut rows = self
-                        .read
-                        .query(
-                            "SELECT summary_text
-                             FROM session_summary_nodes
-                             WHERE session_id = ?1 AND summary_id = ?2
-                               AND length(CAST(summary_text AS BLOB)) <= ?3",
-                            params![
-                                session_id.as_str(),
-                                summary_id.as_str(),
-                                i64::try_from(max_bytes).unwrap_or(i64::MAX)
-                            ],
-                        )
-                        .await
-                        .map_err(hydration_failure)?;
-                    let row = rows
-                        .next()
-                        .await
-                        .map_err(hydration_failure)?
-                        .ok_or(HydrationError::Unavailable)?;
-                    let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
-                    bounded_copy(content.as_bytes(), max_bytes, control)
-                }
-                PayloadSource::External {
-                    provider,
-                    session_id,
-                    payload_ref,
-                    char_count,
-                } => {
-                    let content = read_verified_payload_content(
-                        self.storage_root,
-                        payload_ref,
-                        &descriptor.content_hash,
-                        descriptor.byte_count,
-                        *char_count,
-                    )
-                    .map_err(hydration_failure)?;
-                    let _ = (provider, session_id);
-                    bounded_copy(content.as_bytes(), max_bytes, control)
-                }
-            }
-        })
+        Box::pin(self.read_bounded(descriptor, max_bytes, control))
     }
 }
 

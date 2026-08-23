@@ -810,6 +810,61 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         .map_err(map_control_error)?;
         Ok((read, snapshot))
     }
+
+    #[hotpath::measure]
+    async fn execute<E>(
+        &self,
+        request: AuthorizedTemporalExecutionRequest,
+        estimator: &E,
+    ) -> Result<SessionTemporalExecutionReport, SessionTemporalExecutionError>
+    where
+        E: VersionedTokenEstimator + Sync,
+    {
+        hotpath::gauge!("session_temporal.execution").inc(1u32);
+        let (read_snapshot, snapshot) = self.freeze(&request).await?;
+        let authenticator =
+            GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
+                .await
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let storage_root = self
+            .db
+            .db_path()
+            .parent()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let (relation_scope, relation_store) = self
+            .db
+            .session_relation_store()
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let kernel_request = request.into_kernel_request(snapshot);
+        let read = GlobalDbTemporalReadPort::new_registered_with_relations(
+            &read_snapshot,
+            relation_scope,
+            relation_store.clone(),
+        );
+        let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
+            &read_snapshot,
+            storage_root,
+            relation_scope,
+            relation_store,
+        );
+        let result = execute_temporal_kernel(
+            &kernel_request,
+            &read,
+            &hydration,
+            &authenticator,
+            estimator,
+        )
+        .await
+        .map_err(map_kernel_execution_error)?;
+        let source_coverage = result
+            .snapshot
+            .source_coverage()
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        Ok(SessionTemporalExecutionReport::from_source_coverage(
+            result,
+            source_coverage,
+        ))
+    }
 }
 
 impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution<'_> {
@@ -821,52 +876,7 @@ impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution
     where
         E: VersionedTokenEstimator + Sync + 'a,
     {
-        Box::pin(async move {
-            hotpath::gauge!("session_temporal.execution").inc(1u32);
-            let (read_snapshot, snapshot) = self.freeze(&request).await?;
-            let authenticator =
-                GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
-                    .await
-                    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let storage_root = self
-                .db
-                .db_path()
-                .parent()
-                .ok_or(SessionTemporalExecutionError::Unavailable)?;
-            let (relation_scope, relation_store) = self
-                .db
-                .session_relation_store()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let kernel_request = request.into_kernel_request(snapshot);
-            let read = GlobalDbTemporalReadPort::new_registered_with_relations(
-                &read_snapshot,
-                relation_scope,
-                relation_store.clone(),
-            );
-            let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
-                &read_snapshot,
-                storage_root,
-                relation_scope,
-                relation_store,
-            );
-            let result = execute_temporal_kernel(
-                &kernel_request,
-                &read,
-                &hydration,
-                &authenticator,
-                estimator,
-            )
-            .await
-            .map_err(map_kernel_execution_error)?;
-            let source_coverage = result
-                .snapshot
-                .source_coverage()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            Ok(SessionTemporalExecutionReport::from_source_coverage(
-                result,
-                source_coverage,
-            ))
-        })
+        Box::pin(self.execute(request, estimator))
     }
 }
 
