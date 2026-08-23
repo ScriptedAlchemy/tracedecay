@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 
 use super::super::token_count::{
-    TokenCountCache, content_fingerprint, count_text_tokens, counting_available,
+    ContentFingerprint, TokenCountCache, content_fingerprint, count_text_tokens,
+    counting_available,
 };
 use super::{
     DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
@@ -20,6 +21,7 @@ pub(super) fn render_canonical_payload<T>(
 where
     T: serde::de::DeserializeOwned,
 {
+    warm_displayed_content_token_counts(&page, token_counts);
     let value = match request {
         DashboardLcmReadRequestV1::Overview { query, limit } => {
             overview_json(page, query, limit, storage_scope, token_counts)?
@@ -233,6 +235,79 @@ fn overview_json(
 struct DisplayedContentTokenCount {
     token_count: Option<i64>,
     provenance: Option<LcmTokenCountProvenanceV1>,
+}
+
+/// Counts uncached displayed-content tokens off the async worker in one batch
+/// so later per-message lookups hit [`TokenCountCache`].
+fn warm_displayed_content_token_counts(
+    page: &DashboardLcmCanonicalPageV1,
+    token_counts: &TokenCountCache,
+) {
+    if !counting_available() {
+        return;
+    }
+    let extra = page
+        .overview_matches
+        .as_ref()
+        .map_or(0, |matches| matches.messages.len());
+    let mut misses = Vec::with_capacity(page.messages.len().saturating_add(extra));
+    collect_displayed_token_misses(&page.messages, token_counts, &mut misses);
+    if let Some(matches) = &page.overview_matches {
+        collect_displayed_token_misses(&matches.messages, token_counts, &mut misses);
+    }
+    if misses.is_empty() {
+        return;
+    }
+    for (provider, message_id, fingerprint, tokens) in count_displayed_token_batch(misses) {
+        token_counts.store_displayed_tokens(&provider, &message_id, fingerprint, tokens);
+    }
+}
+
+fn collect_displayed_token_misses(
+    messages: &[DashboardLcmCanonicalMessageV1],
+    token_counts: &TokenCountCache,
+    misses: &mut Vec<(String, String, ContentFingerprint, String)>,
+) {
+    for message in messages {
+        let fingerprint = content_fingerprint(&message.content);
+        if token_counts
+            .displayed_tokens(&message.provider, &message.message_id, fingerprint)
+            .is_none()
+        {
+            misses.push((
+                message.provider.clone(),
+                message.message_id.clone(),
+                fingerprint,
+                message.content.clone(),
+            ));
+        }
+    }
+}
+
+fn count_displayed_token_batch(
+    misses: Vec<(String, String, ContentFingerprint, String)>,
+) -> Vec<(String, String, ContentFingerprint, i64)> {
+    let count = move || {
+        misses
+            .into_iter()
+            .filter_map(|(provider, message_id, fingerprint, text)| {
+                count_text_tokens(&text, "")
+                    .map(|tokens| (provider, message_id, fingerprint, tokens))
+            })
+            .collect::<Vec<_>>()
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            tokio::task::block_in_place(|| {
+                handle
+                    .block_on(tokio::task::spawn_blocking(count))
+                    .unwrap_or_default()
+            })
+        }
+        _ => count(),
+    }
 }
 
 /// Token count of the displayed message content, served from the shared

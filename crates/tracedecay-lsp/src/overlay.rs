@@ -462,8 +462,7 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             document_uri: document_uri.to_owned(),
             overlay: overlay.cloned(),
             source_generation,
-            expected_content_digest: overlay
-                .map(|overlay| ContentDigest::of_bytes(overlay.text.as_bytes())),
+            expected_content_digest: overlay.map(|overlay| overlay.content_digest.clone()),
             expected_code_generation_id: None,
             expected_snapshot_digest: None,
         };

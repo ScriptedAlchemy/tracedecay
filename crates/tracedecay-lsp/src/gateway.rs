@@ -88,36 +88,7 @@ impl AdmittedRoot {
     /// forms, then compares decoded filesystem path components rather than raw
     /// URI prefixes.
     pub fn contains_document(&self, document_uri: &str) -> bool {
-        let Some((root_url, root_path)) = strict_file_uri_path(&self.uri) else {
-            return false;
-        };
-        let Some((document_url, document_path)) = strict_file_uri_path(document_uri) else {
-            return false;
-        };
-        if root_url.host_str() != document_url.host_str() {
-            return false;
-        }
-        let lexical_match = document_path
-            .strip_prefix(&root_path)
-            .is_ok_and(|relative| {
-                !relative.as_os_str().is_empty()
-                    && relative
-                        .components()
-                        .all(|component| matches!(component, Component::Normal(_)))
-            });
-        if !lexical_match {
-            return false;
-        }
-        let Ok(canonical_root) = root_path.canonicalize() else {
-            return true;
-        };
-        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
-        else {
-            return false;
-        };
-        existing_ancestor
-            .canonicalize()
-            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+        DocumentConfinement::for_root(self).is_some_and(|root| root.contains(document_uri))
     }
 
     pub(crate) fn document_root_depth(&self, document_uri: &str) -> Option<usize> {
@@ -1153,49 +1124,101 @@ pub fn project_semantic_outcome(
     }
 }
 
+/// Cached root identity for one confinement pass. `contains_document` would
+/// otherwise re-parse the admitted URI and re-canonicalize the root for every
+/// location in a semantic response.
+struct DocumentConfinement {
+    root_host: Option<String>,
+    root_path: PathBuf,
+    canonical_root: Option<PathBuf>,
+}
+
+impl DocumentConfinement {
+    fn for_root(root: &AdmittedRoot) -> Option<Self> {
+        let (root_url, root_path) = strict_file_uri_path(&root.uri)?;
+        Some(Self {
+            root_host: root_url.host_str().map(str::to_owned),
+            canonical_root: root_path.canonicalize().ok(),
+            root_path,
+        })
+    }
+
+    fn contains(&self, document_uri: &str) -> bool {
+        let Some((document_url, document_path)) = strict_file_uri_path(document_uri) else {
+            return false;
+        };
+        if self.root_host.as_deref() != document_url.host_str() {
+            return false;
+        }
+        let lexical_match = document_path
+            .strip_prefix(&self.root_path)
+            .is_ok_and(|relative| {
+                !relative.as_os_str().is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+            });
+        if !lexical_match {
+            return false;
+        }
+        let Some(canonical_root) = self.canonical_root.as_ref() else {
+            return true;
+        };
+        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
+        else {
+            return false;
+        };
+        existing_ancestor
+            .canonicalize()
+            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+    }
+}
+
 fn confine_semantic_response(
     root: &AdmittedRoot,
     response: SemanticResponse,
 ) -> (SemanticResponse, bool) {
+    let confinement = DocumentConfinement::for_root(root);
+    let contains = |uri: &str| confinement.as_ref().is_some_and(|root| root.contains(uri));
     match response {
         SemanticResponse::Locations(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.uri));
+            values.retain(|value| contains(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::Locations(values), omitted)
         }
         SemanticResponse::WorkspaceSymbols(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.location.uri));
+            values.retain(|value| contains(&value.location.uri));
             let omitted = before != values.len();
             (SemanticResponse::WorkspaceSymbols(values), omitted)
         }
         SemanticResponse::CallHierarchyItems(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.uri));
+            values.retain(|value| contains(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::CallHierarchyItems(values), omitted)
         }
         SemanticResponse::IncomingCalls(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.from.uri));
+            values.retain(|value| contains(&value.from.uri));
             let omitted = before != values.len();
             (SemanticResponse::IncomingCalls(values), omitted)
         }
         SemanticResponse::OutgoingCalls(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.to.uri));
+            values.retain(|value| contains(&value.to.uri));
             let omitted = before != values.len();
             (SemanticResponse::OutgoingCalls(values), omitted)
         }
         SemanticResponse::TypeHierarchyItems(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.uri));
+            values.retain(|value| contains(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::TypeHierarchyItems(values), omitted)
         }
         SemanticResponse::RenameCandidate(RenameCandidateResult::Available(candidate))
-            if !root.contains_document(&candidate.document_uri) =>
+            if !contains(&candidate.document_uri) =>
         {
             (
                 SemanticResponse::RenameCandidate(RenameCandidateResult::Unavailable {
