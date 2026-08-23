@@ -62,6 +62,48 @@ lang-dart = []
 lang-markdown = []
 """
 
+EXTRACTION_BUILD_MANIFEST = """[package]
+name = "tracedecay-code-extraction"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+lang-dart = ["dep:dart-grammar"]
+lang-markdown = ["dep:markdown-grammar"]
+
+[dependencies]
+dart-grammar = { path = "dart-grammar", optional = true }
+markdown-grammar = { path = "markdown-grammar", optional = true }
+"""
+
+EXTRACTION_BUILD_LIB = """#[cfg(feature = "lang-dart")]
+pub fn dart() -> dart_grammar::Language {
+    dart_grammar::language()
+}
+
+#[cfg(feature = "lang-markdown")]
+pub fn markdown() -> markdown_grammar::Language {
+    markdown_grammar::language()
+}
+"""
+
+GRAMMAR_MANIFEST = """[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+"""
+
+GRAMMAR_LIB = """pub struct Language;
+
+pub fn language() -> Language {
+    Language
+}
+"""
+
 SEMANTIC_MANIFEST = """[package]
 name = "tracedecay-semantic"
 version = "0.1.0"
@@ -96,6 +138,7 @@ def run_fixture(
     extraction_packaged: str = EXTRACTION_MANIFEST,
     semantic_source: str = SEMANTIC_MANIFEST,
     semantic_packaged: str = SEMANTIC_MANIFEST,
+    extraction_build_manifest: str | None = None,
 ) -> FixtureResult:
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
@@ -111,27 +154,49 @@ def run_fixture(
         }
         for name, contents in manifests.items():
             root.joinpath(name).write_text(contents, encoding="utf-8")
+        command = [
+            sys.executable,
+            str(VALIDATOR),
+            "--root-source",
+            str(root / "root-source.toml"),
+            "--root-packaged",
+            str(root / "root-packaged.toml"),
+            "--code-index-source",
+            str(root / "code-index-source.toml"),
+            "--code-index-packaged",
+            str(root / "code-index-packaged.toml"),
+            "--extraction-source",
+            str(root / "extraction-source.toml"),
+            "--extraction-packaged",
+            str(root / "extraction-packaged.toml"),
+            "--semantic-source",
+            str(root / "semantic-source.toml"),
+            "--semantic-packaged",
+            str(root / "semantic-packaged.toml"),
+        ]
+        if extraction_build_manifest is not None:
+            extraction = root / "extraction-build"
+            extraction.joinpath("src").mkdir(parents=True)
+            extraction.joinpath("Cargo.toml").write_text(
+                extraction_build_manifest, encoding="utf-8"
+            )
+            extraction.joinpath("src/lib.rs").write_text(
+                EXTRACTION_BUILD_LIB, encoding="utf-8"
+            )
+            for grammar in ("dart-grammar", "markdown-grammar"):
+                dependency = extraction / grammar
+                dependency.mkdir()
+                dependency.joinpath("Cargo.toml").write_text(
+                    GRAMMAR_MANIFEST.format(name=grammar), encoding="utf-8"
+                )
+                dependency.joinpath("lib.rs").write_text(
+                    GRAMMAR_LIB, encoding="utf-8"
+                )
+            command.extend(
+                ["--check-extraction-manifest", str(extraction / "Cargo.toml")]
+            )
         completed = subprocess.run(
-            [
-                sys.executable,
-                str(VALIDATOR),
-                "--root-source",
-                str(root / "root-source.toml"),
-                "--root-packaged",
-                str(root / "root-packaged.toml"),
-                "--code-index-source",
-                str(root / "code-index-source.toml"),
-                "--code-index-packaged",
-                str(root / "code-index-packaged.toml"),
-                "--extraction-source",
-                str(root / "extraction-source.toml"),
-                "--extraction-packaged",
-                str(root / "extraction-packaged.toml"),
-                "--semantic-source",
-                str(root / "semantic-source.toml"),
-                "--semantic-packaged",
-                str(root / "semantic-packaged.toml"),
-            ],
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -236,6 +301,24 @@ def main() -> int:
         raise SystemExit("renamed root FastEmbed dependency was accepted")
     if "root package must not own fastembed" not in root_aliased_shadow_owner.stderr:
         raise SystemExit("renamed root ownership failed for an unexpected reason")
+
+    isolated_languages = run_fixture(
+        extraction_build_manifest=EXTRACTION_BUILD_MANIFEST
+    )
+    if isolated_languages.returncode != 0:
+        raise SystemExit(isolated_languages.stderr)
+
+    extraction_with_miswired_language = EXTRACTION_BUILD_MANIFEST.replace(
+        'lang-dart = ["dep:dart-grammar"]',
+        'lang-dart = ["dep:markdown-grammar"]',
+    )
+    miswired_language = run_fixture(
+        extraction_build_manifest=extraction_with_miswired_language
+    )
+    if miswired_language.returncode == 0:
+        raise SystemExit("miswired isolated extraction language was accepted")
+    if "lang-dart does not compile in isolation" not in miswired_language.stderr:
+        raise SystemExit("miswired extraction language failed for an unexpected reason")
 
     print("distribution feature wiring fixtures passed")
     return 0

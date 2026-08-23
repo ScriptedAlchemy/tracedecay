@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import subprocess
 import tomllib
 
 
@@ -153,6 +154,54 @@ def require_tier_forwarding(
             )
 
 
+def require_isolated_language_features_compile(
+    manifest_path: Path,
+    authority_features: set[str],
+    cargo_config: Path | None,
+    offline: bool,
+) -> None:
+    manifest = load(manifest_path)
+    package_name = manifest.get("package", {}).get("name")
+    if not isinstance(package_name, str):
+        raise SystemExit(
+            "distribution acceptance: extraction build manifest has no package name"
+        )
+
+    build_features = language_feature_names(manifest.get("features", {}))
+    if build_features != authority_features:
+        raise SystemExit(
+            "distribution acceptance: extraction build manifest language features "
+            "differ from the packaged authority"
+        )
+
+    for feature in sorted(authority_features):
+        command = [
+            "cargo",
+            "check",
+            "--manifest-path",
+            str(manifest_path),
+            "--package",
+            package_name,
+            "--lib",
+            "--no-default-features",
+            "--features",
+            feature,
+        ]
+        if cargo_config is not None:
+            command.extend(["--config", str(cargo_config)])
+        if offline:
+            command.append("--offline")
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True
+        )
+        if completed.returncode != 0:
+            details = completed.stderr.strip() or completed.stdout.strip()
+            raise SystemExit(
+                f"distribution acceptance: {feature} does not compile in isolation"
+                + (f"\n{details}" if details else "")
+            )
+
+
 def validate(
     root_source: dict,
     root_packaged: dict,
@@ -250,17 +299,28 @@ def main() -> int:
     parser.add_argument("--extraction-packaged", type=Path, required=True)
     parser.add_argument("--semantic-source", type=Path, required=True)
     parser.add_argument("--semantic-packaged", type=Path, required=True)
+    parser.add_argument("--check-extraction-manifest", type=Path)
+    parser.add_argument("--cargo-config", type=Path)
+    parser.add_argument("--offline", action="store_true")
     arguments = parser.parse_args()
+    extraction_packaged = load(arguments.extraction_packaged)
     validate(
         load(arguments.root_source),
         load(arguments.root_packaged),
         load(arguments.code_index_source),
         load(arguments.code_index_packaged),
         load(arguments.extraction_source),
-        load(arguments.extraction_packaged),
+        extraction_packaged,
         load(arguments.semantic_source),
         load(arguments.semantic_packaged),
     )
+    if arguments.check_extraction_manifest is not None:
+        require_isolated_language_features_compile(
+            arguments.check_extraction_manifest,
+            language_feature_names(extraction_packaged.get("features", {})),
+            arguments.cargo_config,
+            arguments.offline,
+        )
     print("distribution feature wiring is valid")
     return 0
 
