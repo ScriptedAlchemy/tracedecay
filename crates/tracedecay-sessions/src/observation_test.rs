@@ -32,6 +32,7 @@ struct FakeStore {
     /// One read-your-writes miss: the next point read reports the committed
     /// row as absent, the way a trailing reader snapshot does under load.
     read_none_once: Mutex<bool>,
+    persist_batch_calls: Mutex<usize>,
 }
 
 impl ObservationStore for FakeStore {
@@ -80,6 +81,24 @@ impl ObservationStore for FakeStore {
             cancellation.cancel();
         }
         Ok(ObservationPersistOutcome::Committed(receipt))
+    }
+
+    async fn persist_observations(
+        &self,
+        writes: Vec<AnchoredObservationWrite>,
+    ) -> ObservationStoreResult<Vec<ObservationPersistOutcome>> {
+        // Named batch contract for the in-memory fake: empty is empty, and
+        // each write uses the same cursor/collision/identity rules as
+        // persist_observation. This is not a production writer transaction.
+        *self.persist_batch_calls.lock().unwrap() += 1;
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut outcomes = Vec::with_capacity(writes.len());
+        for write in writes {
+            outcomes.push(self.persist_observation(write).await?);
+        }
+        Ok(outcomes)
     }
 
     async fn get_source_cursor(
@@ -860,4 +879,39 @@ async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() 
         replay,
         Err(ObservationApplicationError::Cancelled)
     ));
+}
+
+#[tokio::test]
+async fn capture_observations_empty_skips_persist_authority() {
+    let application = application();
+    let outcomes = application.capture_observations(Vec::new()).await.unwrap();
+    assert!(outcomes.is_empty());
+    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 0);
+    assert!(application.store.observations.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn capture_observations_sanitizes_then_persists_once() {
+    let application = application();
+    let first = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "batch-one" }
+    });
+    let second = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "batch-two" }
+    });
+    let start_two = u64::try_from(serde_json::to_vec(&first).unwrap().len()).unwrap();
+    let outcomes = application
+        .capture_observations(vec![request(&first), request_at(&second, start_two)])
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| { matches!(outcome, CaptureObservationOutcome::Persisted { .. }) })
+    );
+    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 1);
+    assert_eq!(application.store.observations.lock().unwrap().len(), 2);
 }

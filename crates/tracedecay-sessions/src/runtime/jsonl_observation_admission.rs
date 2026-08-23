@@ -105,7 +105,7 @@ impl JsonlFrameAdmission {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct JsonlObservationAdmissionProgress {
     pub bytes_consumed: u64,
     pub source_deferred: bool,
@@ -115,21 +115,6 @@ pub(super) struct JsonlObservationAdmissionProgress {
     pub frames_refused: u64,
     pub frames_persisted: u64,
     pub io: crate::runtime::source::JsonlIoAccounting,
-}
-
-impl Default for JsonlObservationAdmissionProgress {
-    fn default() -> Self {
-        Self {
-            bytes_consumed: 0,
-            source_deferred: false,
-            frames_decoded: 0,
-            frames_accepted: 0,
-            frames_skipped: 0,
-            frames_refused: 0,
-            frames_persisted: 0,
-            io: crate::runtime::source::JsonlIoAccounting::default(),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -160,11 +145,16 @@ impl JsonlCheckpoint {
     }
 }
 
+/// Bounded persist window: flush consecutive durables before this many
+/// frames so one `persist_observations` call stays a scan-sized batch.
+const MAX_CAPTURE_WINDOW: usize = 256;
+
 struct DurableJsonlFrame {
     checkpoint: JsonlCheckpoint,
     range: tracedecay_domain::ObservationSourceRangeV1,
     parsed_record: ParsedObservationRecordV1,
     native_record_id: ObservationId,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,13 +256,12 @@ impl ActiveAdmission<'_> {
         Ok(())
     }
 
-    async fn capture(
+    fn capture_request(
         &self,
-        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        expected_cursor: Option<ObservationSourceCursorV1>,
         frame: DurableJsonlFrame,
         retention_class: &RetentionClass,
-        persisted_cursor_update: PersistedCursorUpdate,
-    ) -> TranscriptIngestResult<DurableFrameDisposition> {
+    ) -> TranscriptIngestResult<CaptureObservationRequest> {
         let identity = ObservationIdentityMaterialV1::for_native_record(
             self.source.clone(),
             self.scope.clone(),
@@ -281,23 +270,29 @@ impl ActiveAdmission<'_> {
             ObservationOrderingDomainV1::FileBytes,
             frame.native_record_id,
         )?;
-        let capture = CaptureObservationRequest::new(
+        CaptureObservationRequest::new(
             frame.parsed_record,
             identity,
-            expected_cursor.clone(),
+            expected_cursor,
             retention_class.clone(),
             self.cancellation.clone(),
         )
         .map_err(|_| TranscriptIngestError::InvalidFrameState {
             provider: self.provider,
-        })?
-        .with_resume_checkpoint(self.file_identity, frame.checkpoint.resume_fingerprint);
+        })
+        .map(|request| {
+            request.with_resume_checkpoint(self.file_identity, frame.checkpoint.resume_fingerprint)
+        })
+    }
 
-        // The admission future is boxed inside
-        // `ObservationApplication::capture_observation`, so this per-frame
-        // hot loop awaits it directly with a bounded debug poll frame and no
-        // per-frame heap allocation at the call site.
-        match self.admission.capture_observation(capture).await {
+    async fn apply_capture_result(
+        &self,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        checkpoint: JsonlCheckpoint,
+        result: Result<CaptureObservationOutcome, HostAdmissionOutcome>,
+        persisted_cursor_update: PersistedCursorUpdate,
+    ) -> TranscriptIngestResult<DurableFrameDisposition> {
+        match result {
             Ok(CaptureObservationOutcome::Persisted { .. })
             | Ok(CaptureObservationOutcome::AcceptedForReplay { .. }) => {
                 let should_update = match persisted_cursor_update {
@@ -305,22 +300,20 @@ impl ActiveAdmission<'_> {
                     PersistedCursorUpdate::Monotonic => {
                         expected_cursor.as_ref().is_none_or(|cursor| {
                             cursor.generation() != self.generation
-                                || cursor.position() < frame.checkpoint.end_offset
+                                || cursor.position() < checkpoint.end_offset
                         })
                     }
                 };
                 if should_update {
-                    *expected_cursor = Some(self.cursor_at(
-                        frame.checkpoint.end_offset,
-                        frame.checkpoint.resume_fingerprint,
-                    )?);
+                    *expected_cursor =
+                        Some(self.cursor_at(checkpoint.end_offset, checkpoint.resume_fingerprint)?);
                 }
                 Ok(DurableFrameDisposition::Persisted)
             }
             Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                 self.advance_coverage(
                     expected_cursor,
-                    frame.checkpoint,
+                    checkpoint,
                     ObservationCoverageReason::SanitizerRejected,
                     Some(receipt),
                 )
@@ -330,7 +323,7 @@ impl ActiveAdmission<'_> {
             Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
                 self.advance_coverage(
                     expected_cursor,
-                    frame.checkpoint,
+                    checkpoint,
                     ObservationCoverageReason::SanitizerQuarantined,
                     Some(receipt),
                 )
@@ -346,13 +339,13 @@ impl ActiveAdmission<'_> {
             {
                 tracing::warn!(
                     provider = self.provider,
-                    offset = frame.checkpoint.offset,
+                    offset = checkpoint.offset,
                     reason = outcome.reason_code.unwrap_or("host_admission_refused"),
                     "admission refused a record; covering past it"
                 );
                 self.advance_coverage(
                     expected_cursor,
-                    frame.checkpoint,
+                    checkpoint,
                     ObservationCoverageReason::AdmissionRefused,
                     None,
                 )
@@ -377,6 +370,83 @@ impl ActiveAdmission<'_> {
                     // advanced the source cursor, so a cover-past write here
                     // would stack a second, conflicting cursor advance on
                     // every frame.
+                    Err(host_admission_error(self.provider, outcome))
+                }
+            }
+        }
+    }
+
+    async fn capture(
+        &self,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        frame: DurableJsonlFrame,
+        retention_class: &RetentionClass,
+        persisted_cursor_update: PersistedCursorUpdate,
+    ) -> TranscriptIngestResult<DurableFrameDisposition> {
+        let checkpoint = frame.checkpoint;
+        let request = self.capture_request(expected_cursor.clone(), frame, retention_class)?;
+        let result = self.admission.capture_observation(request).await;
+        self.apply_capture_result(expected_cursor, checkpoint, result, persisted_cursor_update)
+            .await
+    }
+
+    async fn capture_window(
+        &self,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        frames: Vec<DurableJsonlFrame>,
+        retention_class: &RetentionClass,
+        persisted_cursor_update: PersistedCursorUpdate,
+        progress: &mut JsonlObservationAdmissionProgress,
+    ) -> TranscriptIngestResult<()> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let mut batch_expected = expected_cursor.clone();
+        let mut requests = Vec::with_capacity(frames.len());
+        let mut checkpoints = Vec::with_capacity(frames.len());
+        for frame in frames {
+            checkpoints.push(frame.checkpoint);
+            let next_expected = Some(self.cursor_at(
+                frame.checkpoint.end_offset,
+                frame.checkpoint.resume_fingerprint,
+            )?);
+            requests.push(self.capture_request(batch_expected, frame, retention_class)?);
+            batch_expected = next_expected;
+        }
+        match self.admission.capture_observations(requests).await {
+            Ok(outcomes) => {
+                if outcomes.len() != checkpoints.len() {
+                    return Err(TranscriptIngestError::InvalidFrameState {
+                        provider: self.provider,
+                    });
+                }
+                for (checkpoint, outcome) in checkpoints.into_iter().zip(outcomes) {
+                    match self
+                        .apply_capture_result(
+                            expected_cursor,
+                            checkpoint,
+                            Ok(outcome),
+                            persisted_cursor_update,
+                        )
+                        .await?
+                    {
+                        DurableFrameDisposition::Persisted => {
+                            progress.frames_accepted = progress.frames_accepted.saturating_add(1);
+                            progress.frames_persisted = progress.frames_persisted.saturating_add(1);
+                        }
+                        DurableFrameDisposition::Refused => {
+                            progress.frames_refused = progress.frames_refused.saturating_add(1);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(outcome) => {
+                if is_admission_cancellation(&outcome, &self.cancellation) {
+                    Err(TranscriptIngestError::Cancelled {
+                        provider: self.provider,
+                    })
+                } else {
                     Err(host_admission_error(self.provider, outcome))
                 }
             }
@@ -490,6 +560,94 @@ pub(super) async fn admit_jsonl_observations<State>(
         cancellation,
     };
     let mut skipped = raw.skipped.into_iter().peekable();
+    let mut pending: Vec<DurableJsonlFrame> = Vec::new();
+
+    async fn flush_pending<State>(
+        active: &ActiveAdmission<'_>,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        pending: &mut Vec<DurableJsonlFrame>,
+        retention_class: &RetentionClass,
+        persisted_cursor_update: PersistedCursorUpdate,
+        progress: &mut JsonlObservationAdmissionProgress,
+        state: &mut State,
+        mut normalize: impl FnMut(
+            &mut State,
+            &[u8],
+            tracedecay_domain::ObservationSourceRangeV1,
+            u64,
+        ) -> TranscriptIngestResult<JsonlFrameAdmission>,
+    ) -> TranscriptIngestResult<()> {
+        let frames = std::mem::take(pending);
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let mut backups = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            backups.push((frame.checkpoint, frame.range, frame.bytes.clone()));
+        }
+        match active
+            .capture_window(
+                expected_cursor,
+                frames,
+                retention_class,
+                persisted_cursor_update,
+                progress,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) if is_content_refusal_ingest_error(&error) => {
+                for (checkpoint, range, bytes) in backups {
+                    if active.cancellation.is_cancelled() {
+                        return Err(TranscriptIngestError::Cancelled {
+                            provider: active.provider,
+                        });
+                    }
+                    match normalize(state, &bytes, range, checkpoint.offset)? {
+                        JsonlFrameAdmission::Durable {
+                            parsed_record,
+                            native_record_id,
+                        } => {
+                            match active
+                                .capture(
+                                    expected_cursor,
+                                    DurableJsonlFrame {
+                                        checkpoint,
+                                        range,
+                                        parsed_record,
+                                        native_record_id,
+                                        bytes,
+                                    },
+                                    retention_class,
+                                    persisted_cursor_update,
+                                )
+                                .await?
+                            {
+                                DurableFrameDisposition::Persisted => {
+                                    progress.frames_accepted =
+                                        progress.frames_accepted.saturating_add(1);
+                                    progress.frames_persisted =
+                                        progress.frames_persisted.saturating_add(1);
+                                }
+                                DurableFrameDisposition::Refused => {
+                                    progress.frames_refused =
+                                        progress.frames_refused.saturating_add(1);
+                                }
+                            }
+                        }
+                        JsonlFrameAdmission::NonDurable(reason) => {
+                            active
+                                .advance_coverage(expected_cursor, checkpoint, reason, None)
+                                .await?;
+                            progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
 
     for (frame_index, frame) in raw.frames.into_iter().enumerate() {
         if active.cancellation.is_cancelled() {
@@ -514,6 +672,17 @@ pub(super) async fn admit_jsonl_observations<State>(
             if active.cancellation.is_cancelled() {
                 return Err(TranscriptIngestError::Cancelled { provider });
             }
+            flush_pending(
+                &active,
+                &mut expected_cursor,
+                &mut pending,
+                &retention_class,
+                persisted_cursor_update,
+                &mut progress,
+                &mut state,
+                &mut normalize,
+            )
+            .await?;
             let skipped = skipped
                 .next()
                 .ok_or(TranscriptIngestError::InvalidFrameState { provider })?;
@@ -546,6 +715,17 @@ pub(super) async fn admit_jsonl_observations<State>(
                     native_record_id,
                 } => (parsed_record, native_record_id),
                 JsonlFrameAdmission::NonDurable(reason) => {
+                    flush_pending(
+                        &active,
+                        &mut expected_cursor,
+                        &mut pending,
+                        &retention_class,
+                        persisted_cursor_update,
+                        &mut progress,
+                        &mut state,
+                        &mut normalize,
+                    )
+                    .await?;
                     active
                         .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                         .await?;
@@ -553,29 +733,39 @@ pub(super) async fn admit_jsonl_observations<State>(
                     continue;
                 }
             };
-        let disposition = active
-            .capture(
+        pending.push(DurableJsonlFrame {
+            checkpoint,
+            range,
+            parsed_record,
+            native_record_id,
+            bytes: frame.bytes,
+        });
+        if pending.len() >= MAX_CAPTURE_WINDOW {
+            flush_pending(
+                &active,
                 &mut expected_cursor,
-                DurableJsonlFrame {
-                    checkpoint,
-                    range,
-                    parsed_record,
-                    native_record_id,
-                },
+                &mut pending,
                 &retention_class,
                 persisted_cursor_update,
+                &mut progress,
+                &mut state,
+                &mut normalize,
             )
             .await?;
-        match disposition {
-            DurableFrameDisposition::Persisted => {
-                progress.frames_accepted = progress.frames_accepted.saturating_add(1);
-                progress.frames_persisted = progress.frames_persisted.saturating_add(1);
-            }
-            DurableFrameDisposition::Refused => {
-                progress.frames_refused = progress.frames_refused.saturating_add(1);
-            }
         }
     }
+
+    flush_pending(
+        &active,
+        &mut expected_cursor,
+        &mut pending,
+        &retention_class,
+        persisted_cursor_update,
+        &mut progress,
+        &mut state,
+        &mut normalize,
+    )
+    .await?;
 
     if !active.cancellation.is_cancelled() {
         for skipped in skipped {
@@ -630,6 +820,17 @@ fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
             outcome.reason_code,
             Some("invalid_observation_contract" | "privacy_boundary_failed")
         )
+}
+
+fn is_content_refusal_ingest_error(error: &TranscriptIngestError) -> bool {
+    matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "invalid_observation_contract" | "privacy_boundary_failed",
+            retryable: false,
+            ..
+        }
+    )
 }
 
 /// Log identity for a transcript file. Transcript paths sit under the

@@ -75,6 +75,20 @@ impl HostAdmission for SeamSpyAdmission {
         })
     }
 
+    fn capture_observations<'a>(
+        &'a self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
+        Box::pin(async move {
+            if let Some(outcome) = *self.scripted_capture_error.lock().unwrap() {
+                // Fail the window without counting here so sequential
+                // fallback still visits each frame exactly once.
+                return Err(outcome);
+            }
+            self.inner.capture_observations(requests).await
+        })
+    }
+
     fn advance_non_durable_source_cursor<'a>(
         &'a self,
         advance: ObservationCursorAdvance,

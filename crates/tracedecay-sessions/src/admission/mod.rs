@@ -274,6 +274,25 @@ pub trait HostAdmission: Send + Sync {
         request: CaptureObservationRequest,
     ) -> AdmissionFuture<'a, CaptureObservationOutcome>;
 
+    /// Sanitizes then persists a bounded window through one store-owned
+    /// `persist_observations` call when the implementor owns that authority.
+    ///
+    /// The default walks [`Self::capture_observation`] so composition-root
+    /// façades keep compiling until they override. An empty window returns
+    /// empty without minting a skipped-authority success.
+    fn capture_observations<'a>(
+        &'a self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
+        Box::pin(async move {
+            let mut outcomes = Vec::with_capacity(requests.len());
+            for request in requests {
+                outcomes.push(self.capture_observation(request).await?);
+            }
+            Ok(outcomes)
+        })
+    }
+
     /// Advances a non-durable frame cursor without persisting a record.
     fn advance_non_durable_source_cursor<'a>(
         &'a self,
@@ -363,12 +382,11 @@ pub(crate) mod test_support {
     use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationIdV1};
     use tracedecay_runtime_core::privacy::RecordSanitizerV1;
     use tracedecay_store::observation::{
-        ObservationAdmissionPort, ObservationCaptureSink, ObservationCursorPort,
         ObservationPersistOutcome, ObservationStoreError, ObservationStoreResult,
     };
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationProjectionStatus, ObservationReplayRequest,
-        StoredObservation,
+        ObservationStore, StoredObservation,
     };
 
     use crate::observation::{
@@ -490,12 +508,11 @@ pub(crate) mod test_support {
         }
     }
 
-    impl ObservationCaptureSink for MemoryObservationStore {
-        async fn persist_admitted_observation(
-            &self,
+    impl MemoryObservationStore {
+        fn persist_one(
+            state: &mut MemoryObservationState,
             write: AnchoredObservationWrite,
         ) -> ObservationStoreResult<ObservationPersistOutcome> {
-            let mut state = self.state();
             if let Some(stored) = state.observations.iter().find(|stored| {
                 stored.observation().observation_id() == write.observation().observation_id()
             }) {
@@ -504,7 +521,7 @@ pub(crate) mod test_support {
                 ));
             }
             let actual = Self::current_cursor(
-                &state,
+                state,
                 write.next_cursor().source(),
                 write.next_cursor().scope(),
             );
@@ -534,13 +551,35 @@ pub(crate) mod test_support {
                     receipt.clone(),
                     ObservationProjectionStatus::Queued,
                 ));
-            Self::replace_cursor(&mut state, next_cursor);
+            Self::replace_cursor(state, next_cursor);
             Ok(ObservationPersistOutcome::Committed(receipt))
         }
     }
 
-    impl ObservationCursorPort for MemoryObservationStore {
-        async fn read_source_cursor(
+    impl ObservationStore for MemoryObservationStore {
+        async fn persist_observation(
+            &self,
+            write: AnchoredObservationWrite,
+        ) -> ObservationStoreResult<ObservationPersistOutcome> {
+            Self::persist_one(&mut self.state(), write)
+        }
+
+        async fn persist_observations(
+            &self,
+            writes: Vec<AnchoredObservationWrite>,
+        ) -> ObservationStoreResult<Vec<ObservationPersistOutcome>> {
+            if writes.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut state = self.state();
+            let mut outcomes = Vec::with_capacity(writes.len());
+            for write in writes {
+                outcomes.push(Self::persist_one(&mut state, write)?);
+            }
+            Ok(outcomes)
+        }
+
+        async fn get_source_cursor(
             &self,
             source: &ObservationSourceIdentityV1,
             scope: &ObservationScopeV1,
@@ -548,7 +587,7 @@ pub(crate) mod test_support {
             Ok(Self::current_cursor(&self.state(), source, scope))
         }
 
-        async fn advance_admitted_source_cursor(
+        async fn advance_source_cursor(
             &self,
             advance: ObservationCursorAdvance,
         ) -> ObservationStoreResult<CursorAdvanceOutcome> {
@@ -567,10 +606,8 @@ pub(crate) mod test_support {
             Self::replace_cursor(&mut state, next_cursor.clone());
             Ok(CursorAdvanceOutcome::Committed)
         }
-    }
 
-    impl ObservationAdmissionPort for MemoryObservationStore {
-        async fn read_admitted_observation(
+        async fn get_observation(
             &self,
             observation_id: &CanonicalObservationIdV1,
         ) -> ObservationStoreResult<Option<StoredObservation>> {
@@ -582,7 +619,7 @@ pub(crate) mod test_support {
                 .cloned())
         }
 
-        async fn replay_admitted_observations(
+        async fn replay_observations(
             &self,
             request: ObservationReplayRequest,
         ) -> ObservationStoreResult<Vec<StoredObservation>> {
@@ -701,6 +738,25 @@ pub(crate) mod test_support {
             })
         }
 
+        fn capture_observations<'a>(
+            &'a self,
+            requests: Vec<CaptureObservationRequest>,
+        ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
+            Box::pin(async move {
+                {
+                    let mut state = self.store.state();
+                    if state.capture_failures_remaining > 0 {
+                        state.capture_failures_remaining -= 1;
+                        return Err(HostAdmissionOutcome::registered_authority_unavailable());
+                    }
+                }
+                self.application()?
+                    .capture_observations(requests)
+                    .await
+                    .map_err(Self::application_error)
+            })
+        }
+
         fn advance_non_durable_source_cursor<'a>(
             &'a self,
             advance: ObservationCursorAdvance,
@@ -732,7 +788,7 @@ pub(crate) mod test_support {
                     cancellation.cancel();
                 }
                 self.store
-                    .read_source_cursor(source, scope)
+                    .get_source_cursor(source, scope)
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
             })
