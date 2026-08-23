@@ -95,16 +95,12 @@ pub(crate) fn record_files(count: usize) {
     }
 }
 
+/// Every call site computes its byte total inside a `hotpath`-gated block, so
+/// this carries the same gate instead of a body that can never run.
+#[cfg(feature = "hotpath")]
 #[inline(always)]
 pub(crate) fn record_source_bytes(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_source_bytes").set(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = bytes;
-    }
+    hotpath::gauge!("code_index_source_bytes").set(bytes);
 }
 
 #[inline(always)]
@@ -131,28 +127,20 @@ pub(crate) fn add_reused_parses(count: u64) {
     }
 }
 
+/// Gated with its call site, which reads generation statistics only when
+/// profiling is on.
+#[cfg(feature = "hotpath")]
 #[inline(always)]
 pub(crate) fn record_symbols(count: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_symbols").set(count);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = count;
-    }
+    hotpath::gauge!("code_index_symbols").set(count);
 }
 
+/// Gated with its call site, which reads generation statistics only when
+/// profiling is on.
+#[cfg(feature = "hotpath")]
 #[inline(always)]
 pub(crate) fn record_relations(count: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_relations").set(count);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = count;
-    }
+    hotpath::gauge!("code_index_relations").set(count);
 }
 
 #[inline(always)]

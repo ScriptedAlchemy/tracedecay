@@ -198,10 +198,7 @@ fn examine_grep_file<C: Fn() -> bool>(
     let mut pending = VecDeque::new();
     let mut source = content.lines().enumerate();
     let mut file_hits = 0;
-    loop {
-        let Some((index, line)) = next_grep_line(&mut source, &mut pending, result) else {
-            break;
-        };
+    while let Some((index, line)) = next_grep_line(&mut source, &mut pending, result) {
         if is_cancelled() {
             result.cancelled = true;
             return true;
