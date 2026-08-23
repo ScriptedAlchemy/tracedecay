@@ -195,8 +195,13 @@ impl SessionTemporalRefreshWakeState {
             target.requeue_request(request);
         }
         self.observe_queued_backlog(0);
-        if self.take_dirty() || target.has_requests() {
+        let projection_dirty = self.take_dirty();
+        let historical_dirty = self.take_historical_dirty();
+        if projection_dirty || target.has_requests() {
             target.wake();
+        }
+        if historical_dirty {
+            target.wake_history();
         }
     }
 
@@ -229,7 +234,11 @@ impl SessionTemporalRefreshWakeState {
 
     pub(super) fn wake_history(&self) {
         self.historical_dirty.store(true, Ordering::Release);
-        self.wake();
+        self.wake.notify_one();
+    }
+
+    pub(super) fn has_pending_work(&self) -> bool {
+        self.dirty.load(Ordering::Acquire) || self.historical_dirty.load(Ordering::Acquire)
     }
 
     pub(super) fn mark_running(&self) {
@@ -475,7 +484,7 @@ impl SessionTemporalRefreshWakeState {
 
     #[cfg(test)]
     pub(super) fn is_idle(&self) -> bool {
-        !self.busy.load(Ordering::Acquire) && !self.dirty.load(Ordering::Acquire)
+        !self.busy.load(Ordering::Acquire) && !self.has_pending_work()
     }
 }
 

@@ -212,6 +212,73 @@ async fn retained_history_worker_wakes_again_after_idle() {
 }
 
 #[tokio::test]
+async fn history_only_retry_does_not_admit_projection_snapshots() {
+    let temp = TempDir::new().unwrap();
+    let authority = profile_authority(&temp, "history-only-retry").await;
+    let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
+        SessionHistoricalIngestOutcome::Complete,
+        SessionHistoricalIngestOutcome::Pending {
+            made_progress: false,
+        },
+        SessionHistoricalIngestOutcome::Blocked {
+            reason_code: "fixture_complete",
+        },
+    ]));
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+
+    registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await
+    );
+    let baseline_admissions = authority
+        .database()
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("registered reader pool")
+        .snapshot_admissions;
+
+    registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) == 3,
+            Duration::from_secs(2),
+        )
+        .await
+    );
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await
+    );
+    assert_eq!(
+        authority
+            .database()
+            .read_connection()
+            .reader_pool_occupancy()
+            .expect("registered reader pool")
+            .snapshot_admissions,
+        baseline_admissions,
+        "history-only no-progress retries must not rediscover temporal projections",
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn profile_history_has_one_retained_owner() {
     let temp = TempDir::new().unwrap();
     let authority = profile_authority(&temp, "history-single-owner").await;

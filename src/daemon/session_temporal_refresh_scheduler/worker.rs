@@ -39,11 +39,16 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         if state.cancelled.load(Ordering::Acquire) {
             return;
         }
-        while state.take_dirty() {
+        loop {
+            let mut projection_requested = state.take_dirty();
+            let history_requested = state.take_historical_dirty();
+            if !projection_requested && !history_requested {
+                break;
+            }
             state.begin_pass();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
-            let history_outcome = if state.take_historical_dirty() {
+            let history_outcome = if history_requested {
                 let history = history
                     .read()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -55,6 +60,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else {
                 None
             };
+            projection_requested |= state.take_dirty();
             if let Some(outcome) = history_outcome {
                 state.record_history_outcome(outcome);
             }
@@ -82,14 +88,35 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 )
                 | None => {}
             }
-            let pass =
-                run_session_temporal_refresh_pass(&database, &state, projector.as_ref(), policy);
-            tokio::pin!(pass);
-            let report = tokio::select! {
-                biased;
-                () = state.wait_for_cancellation() => return,
-                report = &mut pass => report,
+            let history_requires_projection = match history_outcome {
+                Some(SessionHistoricalIngestOutcome::Complete) => true,
+                Some(
+                    SessionHistoricalIngestOutcome::Pending { made_progress }
+                    | SessionHistoricalIngestOutcome::Retryable { made_progress, .. },
+                ) => made_progress,
+                Some(
+                    SessionHistoricalIngestOutcome::Blocked { .. }
+                    | SessionHistoricalIngestOutcome::Cancelled,
+                )
+                | None => false,
             };
+            let report =
+                if projection_requested || state.has_requests() || history_requires_projection {
+                    let pass = run_session_temporal_refresh_pass(
+                        &database,
+                        &state,
+                        projector.as_ref(),
+                        policy,
+                    );
+                    tokio::pin!(pass);
+                    tokio::select! {
+                        biased;
+                        () = state.wait_for_cancellation() => return,
+                        report = &mut pass => report,
+                    }
+                } else {
+                    SessionTemporalRefreshPassReport::default()
+                };
             if state.cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -139,7 +166,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         state.busy.store(false, Ordering::Release);
         state.idle.notify_waiters();
         let wake = state.wake.notified();
-        if state.dirty.load(Ordering::Acquire) {
+        if state.has_pending_work() {
             continue;
         }
         if history_retry_pending {
