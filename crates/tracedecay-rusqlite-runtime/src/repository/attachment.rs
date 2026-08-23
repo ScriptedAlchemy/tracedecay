@@ -398,16 +398,18 @@ impl RepositoryRuntimePhysicalAttachment {
         let state = self.lock_state();
         let writer = state.writer.as_ref();
         let writer_telemetry = writer.map(|writer| writer.telemetry_snapshot());
-        let readers = state.readers.as_ref().map(ReaderPool::snapshot);
-        let reader_handles = readers.map_or(0, |snapshot| {
+        let readers = state.readers.as_ref();
+        let occupancy = readers.map(ReaderPool::snapshot);
+        let admission = readers.map(ReaderPool::telemetry_snapshot);
+        let reader_handles = occupancy.map_or(0, |snapshot| {
             u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
         });
         RepositoryRuntimePhysicalSnapshot {
             healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
             writer_present: writer.is_some(),
             reader_handles,
-            general_reader_waiters: readers.map_or(0, |snapshot| snapshot.waiting_general),
-            health_reader_waiters: readers.map_or(0, |snapshot| snapshot.waiting_health),
+            general_reader_waiters: occupancy.map_or(0, |snapshot| snapshot.waiting_general),
+            health_reader_waiters: occupancy.map_or(0, |snapshot| snapshot.waiting_health),
             queued_operations: writer_telemetry
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.queue.queued_operations),
@@ -425,8 +427,20 @@ impl RepositoryRuntimePhysicalAttachment {
                     error_events: snapshot.error_events,
                     health_lane_services: snapshot.health_lane_services,
                     commit_sequence: snapshot.commit_sequence,
+                    transactions: snapshot.transactions,
+                    sqlite_vm: snapshot.sqlite_vm,
+                    wal: snapshot.wal,
+                    lock_work: snapshot.lock_work,
                 }),
             wal_bytes: wal_bytes(&state.database_path),
+            snapshot_admissions: occupancy.map_or(0, |snapshot| snapshot.snapshot_admissions),
+            active_readers: occupancy.map_or(0, |snapshot| {
+                snapshot
+                    .leased_general
+                    .saturating_add(snapshot.leased_health)
+            }),
+            reader_wait_micros: admission.map_or(0, |snapshot| snapshot.wait_micros),
+            reader_execution_micros: admission.map_or(0, |snapshot| snapshot.execution_micros),
         }
     }
 

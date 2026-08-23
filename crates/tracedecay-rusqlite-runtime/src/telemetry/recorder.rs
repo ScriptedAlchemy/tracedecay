@@ -6,8 +6,9 @@ use std::{
 use tracedecay_store::{CommitSequenceV1, OperationPriorityV1, StoreClientIdV1};
 
 use super::{
-    MAX_TRACKED_WRITER_CLIENTS, WriterBatchMetrics, WriterClientServiceSnapshot,
-    WriterCommitSnapshot, WriterServiceCounts, WriterTelemetrySnapshot,
+    MAX_TRACKED_WRITER_CLIENTS, WalCheckpointSample, WriterBatchMetrics,
+    WriterClientServiceSnapshot, WriterCommitSnapshot, WriterServiceCounts,
+    WriterTelemetrySnapshot, WriterTransactionMetrics, WriterTransactionOutcome,
 };
 
 #[derive(Default)]
@@ -165,6 +166,9 @@ impl WriterTelemetry {
             totals.transaction_micros = totals
                 .transaction_micros
                 .saturating_add(batch.transaction_micros);
+            totals.lock_held_micros = totals
+                .lock_held_micros
+                .saturating_add(batch.lock_held_micros);
             totals.total_latency_micros = totals
                 .total_latency_micros
                 .saturating_add(batch.queue_wait_micros)
@@ -187,6 +191,97 @@ impl WriterTelemetry {
             for (client, priority) in clients {
                 record_client(state, client, priority);
             }
+        });
+    }
+
+    pub(crate) fn transaction_closed(&self, metrics: WriterTransactionMetrics) {
+        self.update(|state| {
+            let transactions = &mut state.snapshot.transactions;
+            match metrics.outcome {
+                WriterTransactionOutcome::Committed => {
+                    transactions.committed_transactions =
+                        transactions.committed_transactions.saturating_add(1);
+                }
+                WriterTransactionOutcome::RolledBack => {
+                    transactions.rolled_back_transactions =
+                        transactions.rolled_back_transactions.saturating_add(1);
+                }
+                WriterTransactionOutcome::Busy | WriterTransactionOutcome::Error => {
+                    transactions.rolled_back_transactions =
+                        transactions.rolled_back_transactions.saturating_add(1);
+                }
+            }
+            transactions.commands = transactions.commands.saturating_add(metrics.commands);
+            transactions.rows = transactions.rows.saturating_add(metrics.rows);
+            transactions.lock_held_micros = transactions
+                .lock_held_micros
+                .saturating_add(metrics.lock_held_micros);
+            transactions.transaction_micros = transactions
+                .transaction_micros
+                .saturating_add(metrics.transaction_micros);
+            state.snapshot.sqlite_vm = state.snapshot.sqlite_vm.saturating_add(metrics.sqlite_vm);
+            state.snapshot.lock_work.bytes_hashed = state
+                .snapshot
+                .lock_work
+                .bytes_hashed
+                .saturating_add(metrics.lock_work.bytes_hashed);
+            state.snapshot.lock_work.bytes_decoded = state
+                .snapshot
+                .lock_work
+                .bytes_decoded
+                .saturating_add(metrics.lock_work.bytes_decoded);
+        });
+    }
+
+    pub(crate) fn checkpoint(&self, sample: WalCheckpointSample) {
+        self.update(|state| {
+            let wal = &mut state.snapshot.wal;
+            wal.wal_frames = sample.wal_frames;
+            wal.wal_bytes = sample.wal_bytes;
+            wal.checkpointed_frames = wal
+                .checkpointed_frames
+                .saturating_add(sample.checkpointed_frames);
+            if sample.completed {
+                wal.reclaimed_frames = wal.reclaimed_frames.saturating_add(sample.reclaimed_frames);
+            }
+            if sample.busy {
+                wal.busy_events = wal.busy_events.saturating_add(1);
+            }
+            wal.blocker_count = wal.blocker_count.saturating_add(sample.blocker_count);
+            if sample.hard_pressure {
+                wal.hard_pressure_events = wal.hard_pressure_events.saturating_add(1);
+            }
+        });
+    }
+
+    pub(crate) fn exact_sql_command(
+        &self,
+        commands: u64,
+        rows: u64,
+        elapsed_micros: u64,
+        sqlite_vm: super::SqliteVmSnapshot,
+        lock_work: super::WriterLockWorkSnapshot,
+    ) {
+        self.update(|state| {
+            let transactions = &mut state.snapshot.transactions;
+            transactions.commands = transactions.commands.saturating_add(commands);
+            transactions.rows = transactions.rows.saturating_add(rows);
+            transactions.lock_held_micros =
+                transactions.lock_held_micros.saturating_add(elapsed_micros);
+            transactions.transaction_micros = transactions
+                .transaction_micros
+                .saturating_add(elapsed_micros);
+            state.snapshot.sqlite_vm = state.snapshot.sqlite_vm.saturating_add(sqlite_vm);
+            state.snapshot.lock_work.bytes_hashed = state
+                .snapshot
+                .lock_work
+                .bytes_hashed
+                .saturating_add(lock_work.bytes_hashed);
+            state.snapshot.lock_work.bytes_decoded = state
+                .snapshot
+                .lock_work
+                .bytes_decoded
+                .saturating_add(lock_work.bytes_decoded);
         });
     }
 

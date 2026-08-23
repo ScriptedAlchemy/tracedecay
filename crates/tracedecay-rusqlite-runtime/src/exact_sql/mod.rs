@@ -776,6 +776,7 @@ fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     }
 }
 
+#[hotpath::measure]
 fn execute_statement(
     connection: &Connection,
     statement: ExactSqlStatement,
@@ -790,6 +791,7 @@ fn execute_statement(
     let changed_rows = prepared
         .execute(params_from_iter(values))
         .map_err(|error| sqlite_error("execute", error))?;
+    crate::telemetry::observe_statement(&prepared);
     Ok(ExactSqlExecuteResult {
         changed_rows,
         last_insert_rowid: connection.last_insert_rowid(),
@@ -862,6 +864,7 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
     })
 }
 
+#[hotpath::measure]
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
@@ -943,6 +946,8 @@ fn execute_query_unchecked(
         }
         rows.push(ExactSqlRow { values });
     }
+    drop(query);
+    crate::telemetry::observe_statement(&statement);
     Ok(ExactSqlRows { columns, rows })
 }
 

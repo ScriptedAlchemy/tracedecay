@@ -147,6 +147,7 @@ pub(crate) enum TransactionCommand {
     },
 }
 
+#[hotpath::measure]
 pub(crate) fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,

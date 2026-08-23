@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::{WriterBatchTotals, WriterOperationCounters};
+use crate::{
+    SqliteVmSnapshot, WalCheckpointSnapshot, WriterBatchTotals, WriterLockWorkSnapshot,
+    WriterOperationCounters, WriterTransactionTotals,
+};
 use tracedecay_store::CommitSequenceV1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -10,6 +13,10 @@ pub struct RepositoryWriterRuntimeSnapshot {
     pub error_events: u64,
     pub health_lane_services: u64,
     pub commit_sequence: CommitSequenceV1,
+    pub transactions: WriterTransactionTotals,
+    pub sqlite_vm: SqliteVmSnapshot,
+    pub wal: WalCheckpointSnapshot,
+    pub lock_work: WriterLockWorkSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,6 +31,10 @@ pub struct RepositoryRuntimePhysicalSnapshot {
     pub writer_busy_events: u64,
     pub writer: Option<RepositoryWriterRuntimeSnapshot>,
     pub wal_bytes: Option<u64>,
+    pub snapshot_admissions: u64,
+    pub active_readers: u16,
+    pub reader_wait_micros: u64,
+    pub reader_execution_micros: u64,
 }
 
 impl RepositoryRuntimePhysicalSnapshot {

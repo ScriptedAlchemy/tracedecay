@@ -74,9 +74,11 @@ pub(super) fn encode_json<T: CanonicalJson>(
     value: &T,
     field: &'static str,
 ) -> Result<String, LedgerError> {
-    value
+    let encoded = value
         .encode()
-        .map_err(|_| LedgerError::Encoding { value: field })
+        .map_err(|_| LedgerError::Encoding { value: field })?;
+    crate::telemetry::record_hashed_bytes(u64::try_from(encoded.len()).unwrap_or(u64::MAX));
+    Ok(encoded)
 }
 
 pub(super) fn decode_json<T: CanonicalJson>(
@@ -84,6 +86,7 @@ pub(super) fn decode_json<T: CanonicalJson>(
     table: &'static str,
     field: &'static str,
 ) -> Result<T, LedgerError> {
+    crate::telemetry::record_decoded_bytes(u64::try_from(raw.len()).unwrap_or(u64::MAX));
     let value = T::decode(raw).map_err(|_| LedgerError::Corrupt { table, field })?;
     if encode_json(&value, field)? != raw {
         return Err(LedgerError::Corrupt { table, field });

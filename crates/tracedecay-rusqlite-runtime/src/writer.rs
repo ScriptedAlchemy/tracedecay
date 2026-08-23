@@ -706,6 +706,7 @@ impl PersistentWriter {
             .await
     }
 
+    #[hotpath::measure]
     pub async fn submit_authorized(
         &self,
         request: RuntimeSubmitRequestV1,

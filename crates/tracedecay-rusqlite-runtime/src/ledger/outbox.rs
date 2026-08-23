@@ -43,6 +43,7 @@ WHERE source_shard_json = ?1 AND source_incarnation = ?2
   AND state = ?8 AND entry_json = ?9
 "#;
 
+#[hotpath::measure]
 pub(super) fn insert(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,

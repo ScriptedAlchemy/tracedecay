@@ -227,6 +227,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         Ok(disposition)
     }
 
+    #[hotpath::measure]
     fn transition(
         &self,
         command: &WorkflowDefinitionLifecycleCommand,
@@ -494,6 +495,7 @@ fn execute_tx_changed(
 }
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
+    #[hotpath::measure]
     fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
         let frontier_payload =
@@ -536,6 +538,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             .map_err(handoff_unavailable)
     }
 
+    #[hotpath::measure]
     fn consume(
         &self,
         token_digest: &ManifestDigest,
@@ -600,6 +603,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         effect_holder::has_pending_effects(self.handle(), worktree_id)
     }
 
+    #[hotpath::measure]
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,

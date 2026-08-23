@@ -91,6 +91,7 @@ pub struct ConcreteRepositoryWriteExecutor {
 }
 
 impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
+    #[hotpath::measure]
     fn execute(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -159,6 +160,7 @@ pub struct ConcreteRepositoryReadExecutor {
 }
 
 impl ConcreteRepositoryReadExecutor {
+    #[hotpath::measure]
     pub fn execute(
         &mut self,
         snapshot: &Transaction<'_>,

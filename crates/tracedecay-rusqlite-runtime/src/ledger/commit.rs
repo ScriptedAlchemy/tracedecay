@@ -50,6 +50,7 @@ pub(crate) fn record_runtime_commit(
     record_with_bookkeeping(transaction, metadata, transaction_scope, bookkeeping)
 }
 
+#[hotpath::measure]
 fn record_with_bookkeeping(
     transaction: &impl LedgerTransaction,
     metadata: &StoreOperationMetadataV1,

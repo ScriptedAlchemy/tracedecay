@@ -1,13 +1,23 @@
-//! Bounded snapshots recorded by one shared writer telemetry authority.
+//! Canonical DB timing and queue instrumentation for this crate.
+//!
+//! Callers must use these snapshots — they must not invent parallel counters.
 
+mod lock_work;
+mod reader;
 mod recorder;
+mod sqlite_vm;
 mod store_size;
 #[cfg(test)]
 mod tests;
 
+use std::time::Duration;
+
 use tracedecay_store::{CommitSequenceV1, DurabilityClassV1, OperationPriorityV1, StoreClientIdV1};
 
+pub(crate) use lock_work::{LockWorkScope, record_decoded_bytes, record_hashed_bytes};
+pub(crate) use reader::ReaderAdmissionRecorder;
 pub(crate) use recorder::WriterTelemetry;
+pub(crate) use sqlite_vm::{observe_statement, take_observed_vm};
 pub use store_size::SqliteStoreSizeTelemetryPort;
 
 pub(crate) const MAX_TRACKED_WRITER_CLIENTS: usize = 64;
@@ -68,6 +78,7 @@ pub struct WriterBatchMetrics {
     pub batch_bytes: u64,
     pub queue_wait_micros: u64,
     pub transaction_micros: u64,
+    pub lock_held_micros: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -77,7 +88,95 @@ pub struct WriterBatchTotals {
     pub batch_bytes: u64,
     pub queue_wait_micros: u64,
     pub transaction_micros: u64,
+    pub lock_held_micros: u64,
     pub total_latency_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WriterTransactionTotals {
+    pub committed_transactions: u64,
+    pub rolled_back_transactions: u64,
+    pub commands: u64,
+    pub rows: u64,
+    pub lock_held_micros: u64,
+    pub transaction_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterTransactionOutcome {
+    Committed,
+    RolledBack,
+    Busy,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriterTransactionMetrics {
+    pub outcome: WriterTransactionOutcome,
+    pub commands: u64,
+    pub rows: u64,
+    pub lock_held_micros: u64,
+    pub transaction_micros: u64,
+    pub sqlite_vm: SqliteVmSnapshot,
+    pub lock_work: WriterLockWorkSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SqliteVmSnapshot {
+    pub fullscan_steps: u64,
+    pub sort_steps: u64,
+    pub vm_steps: u64,
+}
+
+impl SqliteVmSnapshot {
+    pub(crate) fn saturating_add(self, other: Self) -> Self {
+        Self {
+            fullscan_steps: self.fullscan_steps.saturating_add(other.fullscan_steps),
+            sort_steps: self.sort_steps.saturating_add(other.sort_steps),
+            vm_steps: self.vm_steps.saturating_add(other.vm_steps),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WalCheckpointSnapshot {
+    pub wal_frames: u64,
+    pub wal_bytes: u64,
+    pub checkpointed_frames: u64,
+    pub reclaimed_frames: u64,
+    pub busy_events: u64,
+    pub blocker_count: u64,
+    pub hard_pressure_events: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WalCheckpointSample {
+    pub wal_frames: u64,
+    pub wal_bytes: u64,
+    pub checkpointed_frames: u64,
+    pub reclaimed_frames: u64,
+    pub busy: bool,
+    pub blocker_count: u64,
+    pub hard_pressure: bool,
+    pub completed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WriterLockWorkSnapshot {
+    pub bytes_hashed: u64,
+    pub bytes_decoded: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReaderAdmissionSnapshot {
+    pub acquire_events: u64,
+    pub wait_events: u64,
+    pub saturated_events: u64,
+    pub interrupted_events: u64,
+    pub release_events: u64,
+    pub wait_micros: u64,
+    pub execution_micros: u64,
+    pub sqlite_vm: SqliteVmSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,4 +198,12 @@ pub struct WriterTelemetrySnapshot {
     pub error_events: u64,
     pub health_lane_services: u64,
     pub latest_commit: Option<WriterCommitSnapshot>,
+    pub transactions: WriterTransactionTotals,
+    pub sqlite_vm: SqliteVmSnapshot,
+    pub wal: WalCheckpointSnapshot,
+    pub lock_work: WriterLockWorkSnapshot,
+}
+
+pub(crate) fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

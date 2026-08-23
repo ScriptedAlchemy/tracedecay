@@ -6,7 +6,7 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, InterruptHandle, Transaction, TransactionBehavior};
@@ -17,6 +17,7 @@ use tracedecay_store::{
 
 use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
 use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement, execute_query};
+use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 
 use super::{ExistingReaderLocator, ReaderStartError};
 
@@ -367,6 +368,7 @@ impl WorkerClient {
 pub(crate) fn spawn<E: ReaderQueryExecutor>(
     locator: ExistingReaderLocator,
     mut executor: E,
+    admission: Arc<ReaderAdmissionRecorder>,
 ) -> Result<SpawnedWorker, ReaderStartError> {
     let worker_open_path = locator.worker_open_path()?;
     let (sender, receiver) = mpsc::channel();
@@ -406,7 +408,13 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             {
                 return;
             }
-            run(connection, receiver, worker_snapshot_sender, &mut executor);
+            run(
+                connection,
+                receiver,
+                worker_snapshot_sender,
+                &mut executor,
+                admission,
+            );
         })
         .map_err(ReaderStartError::ThreadSpawn)?;
     let (interrupt, opened_file_identity) = startup
@@ -428,6 +436,7 @@ fn run<E: ReaderQueryExecutor>(
     receiver: Receiver<WorkerCommand>,
     published: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
     executor: &mut E,
+    admission: Arc<ReaderAdmissionRecorder>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
@@ -452,7 +461,7 @@ fn run<E: ReaderQueryExecutor>(
                         if reply.send(Ok(())).is_err() {
                             return;
                         }
-                        if run_snapshot(transaction, commands, executor) {
+                        if run_snapshot(transaction, commands, executor, &admission) {
                             return;
                         }
                     }
@@ -472,6 +481,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     transaction: Transaction<'_>,
     commands: Receiver<SnapshotCommand>,
     executor: &mut E,
+    admission: &ReaderAdmissionRecorder,
 ) -> bool {
     while let Ok(command) = commands.recv() {
         match command {
@@ -489,13 +499,22 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::Execute { request, reply } => {
-                let result = executor
-                    .execute_read(&transaction, &request)
-                    .map_err(ReaderWorkerError::Storage);
+                let started = Instant::now();
+                let result = hotpath::measure_block!("rusqlite.reader.execute", {
+                    executor
+                        .execute_read(&transaction, &request)
+                        .map_err(ReaderWorkerError::Storage)
+                });
+                admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
             }
             SnapshotCommand::ExactSqlQuery { request, reply } => {
-                let _ = reply.send(execute_query(&transaction, request));
+                let started = Instant::now();
+                let result = hotpath::measure_block!("rusqlite.reader.exact_sql", {
+                    execute_query(&transaction, request)
+                });
+                admission.executed(started.elapsed(), take_observed_vm());
+                let _ = reply.send(result);
             }
             SnapshotCommand::StoreSize { reply } => {
                 let read = || -> Result<StoreSizeTelemetrySample, rusqlite::Error> {

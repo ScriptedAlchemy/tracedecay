@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::SyncSender,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rusqlite::TransactionBehavior;
@@ -41,7 +41,9 @@ use crate::{
         WriterCommand as ExactSqlWriterCommand, reject_writer_command, run_writer_command,
     },
     read_consistency::CommittedWatermarkPublisher,
-    telemetry::WriterTelemetry,
+    telemetry::{
+        LockWorkScope, WalCheckpointSample, WriterTelemetry, duration_micros, take_observed_vm,
+    },
 };
 
 use super::{
@@ -239,32 +241,34 @@ impl Worker {
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
         let mut latest_blockers = CheckpointBlockers::default();
         loop {
-            drain_ingress(
-                &mut self.receiver,
-                &mut queue,
-                &self.telemetry,
-                &mut input_closed,
-            );
-            drain_command_ingress(
-                &mut self.checkpoint_receiver,
-                &mut checkpoint_queue,
-                &mut checkpoint_closed,
-            );
-            drain_command_ingress(
-                &mut self.exact_sql_receiver,
-                &mut exact_sql_queue,
-                &mut exact_sql_closed,
-            );
-            drain_command_ingress(
-                &mut self.incremental_vacuum_receiver,
-                &mut incremental_vacuum_queue,
-                &mut incremental_vacuum_closed,
-            );
-            drain_command_ingress(
-                &mut self.online_backup_receiver,
-                &mut online_backup_queue,
-                &mut online_backup_closed,
-            );
+            hotpath::measure_block!("rusqlite.writer.drain_ingress", {
+                drain_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &self.telemetry,
+                    &mut input_closed,
+                );
+                drain_command_ingress(
+                    &mut self.checkpoint_receiver,
+                    &mut checkpoint_queue,
+                    &mut checkpoint_closed,
+                );
+                drain_command_ingress(
+                    &mut self.exact_sql_receiver,
+                    &mut exact_sql_queue,
+                    &mut exact_sql_closed,
+                );
+                drain_command_ingress(
+                    &mut self.incremental_vacuum_receiver,
+                    &mut incremental_vacuum_queue,
+                    &mut incremental_vacuum_closed,
+                );
+                drain_command_ingress(
+                    &mut self.online_backup_receiver,
+                    &mut online_backup_queue,
+                    &mut online_backup_closed,
+                );
+            });
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && exact_sql_queue.is_empty()
@@ -340,10 +344,19 @@ impl Worker {
                             .pop_front()
                             .expect("exact SQL queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            run_writer_command(
-                                checkpoint.connection_mut(),
-                                command,
-                                &self.shutdown_requested,
+                            let started = Instant::now();
+                            let connection = checkpoint.connection_mut();
+                            let rows_before = connection.total_changes();
+                            let lock_work = LockWorkScope::enter();
+                            hotpath::measure_block!("rusqlite.writer.exact_sql", {
+                                run_writer_command(connection, command, &self.shutdown_requested);
+                            });
+                            self.telemetry.exact_sql_command(
+                                1,
+                                connection.total_changes().saturating_sub(rows_before),
+                                duration_micros(started.elapsed()),
+                                take_observed_vm(),
+                                lock_work.take(),
                             );
                         } else {
                             reject_writer_command(command);
@@ -466,7 +479,9 @@ impl Worker {
         checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
         snapshot_blockers: CheckpointBlockers,
     ) {
-        match checkpoint.evaluate_scheduled(snapshot_blockers) {
+        match hotpath::measure_block!("rusqlite.writer.checkpoint", {
+            checkpoint.evaluate_scheduled(snapshot_blockers)
+        }) {
             Ok(result) => self.publish_checkpoint_result(result),
             Err(_) => {
                 self.state
@@ -537,6 +552,7 @@ impl Worker {
     }
 
     fn publish_checkpoint_result(&self, result: CheckpointResult) {
+        self.telemetry.checkpoint(checkpoint_sample(&result));
         if let Some(pressure) = checkpoint_pressure_signal(&result) {
             self.checkpoint_pressure.send_replace(pressure);
         }
@@ -565,6 +581,52 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
     }
 }
 
+fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
+    match result {
+        CheckpointResult::Decision { sample, decision } => match decision {
+            CheckpointDecision::BelowSoftLimit { .. } => WalCheckpointSample {
+                wal_frames: sample.frames,
+                wal_bytes: sample.bytes,
+                ..WalCheckpointSample::default()
+            },
+            CheckpointDecision::Complete { report, .. } => WalCheckpointSample {
+                wal_frames: sample.frames,
+                wal_bytes: sample.bytes,
+                checkpointed_frames: report.checkpointed_frames,
+                reclaimed_frames: report.checkpointed_frames,
+                busy: report.busy,
+                completed: true,
+                ..WalCheckpointSample::default()
+            },
+            CheckpointDecision::Pending {
+                report,
+                snapshot_blockers,
+                hard_drain_required,
+                ..
+            } => WalCheckpointSample {
+                wal_frames: sample.frames,
+                wal_bytes: sample.bytes,
+                checkpointed_frames: report.checkpointed_frames,
+                busy: report.busy,
+                blocker_count: u64::try_from(snapshot_blockers.count()).unwrap_or(u64::MAX),
+                hard_pressure: *hard_drain_required,
+                ..WalCheckpointSample::default()
+            },
+        },
+        CheckpointResult::Interrupted {
+            sample,
+            snapshot_blockers,
+            ..
+        } => WalCheckpointSample {
+            wal_frames: sample.map(|sample| sample.frames).unwrap_or(0),
+            wal_bytes: sample.map(|sample| sample.bytes).unwrap_or(0),
+            blocker_count: u64::try_from(snapshot_blockers.count()).unwrap_or(u64::MAX),
+            ..WalCheckpointSample::default()
+        },
+    }
+}
+
+#[hotpath::measure]
 pub(super) fn process_execution_batch(
     connection: &mut rusqlite::Connection,
     binding: &StoreRuntimeBindingV1,
