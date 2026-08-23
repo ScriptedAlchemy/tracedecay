@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_application::ResolvedScope;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
 use crate::candidate_output::compute_corpus_digest_from_embedded_bytes;
@@ -167,7 +167,7 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
 }
 
 pub(crate) fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
-    let observed_workload_digest = hex::encode(Sha256::digest(FILES[0].1));
+    let observed_workload_digest = sha256_hex(FILES[0].1);
     if observed_workload_digest != WORKLOAD_SHA256 {
         return Err(SearchEvalError::Contract(format!(
             "packaged evaluator workload digest mismatch: expected {WORKLOAD_SHA256}, observed {observed_workload_digest}"

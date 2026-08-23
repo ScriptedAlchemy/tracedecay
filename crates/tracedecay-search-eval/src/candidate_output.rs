@@ -85,7 +85,6 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 
-#[path = "candidate_output/control.rs"]
 mod control;
 use control::ActiveControl;
 
@@ -1904,14 +1903,19 @@ fn generate_partition_output(
             "partition {partition} has no queries"
         )));
     }
-    let mut rows = Vec::new();
-    let mut latencies_us = Vec::new();
+    let mut rows = Vec::with_capacity(queries.len());
+    let mut latencies_us = Vec::with_capacity(queries.len());
+    let mut fallback_digests = Vec::with_capacity(queries.len());
     let peak_before = peak_rss_bytes();
     for query in &queries {
         let started = Instant::now();
-        let row = retrieve_one_query(published, profile, query)?;
+        // prepare_production_query already fuses the query-fallback profile, so
+        // the row and both partition fallback digests share one composition.
+        let composed = compose_production_query(published, profile, query)?;
+        let fallback = query_fallback_from_composition(&composed)?;
+        fallback_digests.push((query.query_id.as_str(), fallback.digest.as_str().to_owned()));
+        rows.push(query_row_from_composition(published, query, &composed)?);
         latencies_us.push(started.elapsed().as_micros() as u64);
-        rows.push(row);
     }
     let peak_after = peak_rss_bytes().max(peak_before);
     let current = completed_resource_sample(
@@ -1921,26 +1925,11 @@ fn generate_partition_output(
         rows.len() as u64,
     );
 
-    let mut fallback_digests = Vec::with_capacity(queries.len());
-    let mut query_digests = Vec::with_capacity(queries.len());
-    for query in &queries {
-        fallback_digests.push((
-            query.query_id.as_str(),
-            fallback_digest_for_query(published, profile, query)?,
-        ));
-        query_digests.push((
-            query.query_id.as_str(),
-            query_fallback_digest_for_query(published, profile, query)?,
-        ));
-    }
     let fallback_digest = canonical_sha256(&(
         "tracedecay.search-eval.partition-fallbacks.v1",
         &fallback_digests,
     ))?;
-    let query_digest = canonical_sha256(&(
-        "tracedecay.search-eval.partition-fallbacks.v1",
-        &query_digests,
-    ))?;
+    let query_digest = fallback_digest.clone();
     let expected_query_fallback_digest = workload
         .expected_query_fallback_digests
         .get(partition)
@@ -2032,7 +2021,15 @@ fn retrieve_one_query(
     query: &WorkloadQueryV1,
 ) -> Result<QueryCandidateRowV1, CandidateOutputError> {
     let composed = compose_production_query(published, profile, query)?;
-    let ranked = map_ranked_candidates(published, &composed)?;
+    query_row_from_composition(published, query, &composed)
+}
+
+fn query_row_from_composition(
+    published: &PublishedCorpus,
+    query: &WorkloadQueryV1,
+    composed: &CompositionOutputV1,
+) -> Result<QueryCandidateRowV1, CandidateOutputError> {
+    let ranked = map_ranked_candidates(published, composed)?;
     let (historical, historical_ranked) = historical_candidates(published, query)?;
     let ranked = merge_candidate_timelines(query, ranked, historical_ranked);
     let abstained = ranked.is_empty();
@@ -2254,32 +2251,12 @@ fn prepare_production_query(
     })
 }
 
-fn query_fallback_digest_for_query(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    query: &WorkloadQueryV1,
-) -> Result<String, CandidateOutputError> {
-    // query-only profile compose for digest stability measurement.
-    let query_profile = query_fallback_profile(profile);
-    fallback_digest_for_query(published, &query_profile, query)
-}
-
 fn query_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
     let mut fallback = profile.clone();
     "query-fallback".clone_into(&mut fallback.profile_id);
     fallback.semantic_weight_ppm = 0;
     fallback.rerank_weight_ppm = 0;
     fallback
-}
-
-fn fallback_digest_for_query(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    query: &WorkloadQueryV1,
-) -> Result<String, CandidateOutputError> {
-    let composed = compose_production_query(published, profile, query)?;
-    let fallback = query_fallback_from_composition(&composed)?;
-    Ok(fallback.digest.as_str().to_owned())
 }
 
 fn query_fallback_from_composition(
@@ -3501,36 +3478,6 @@ mod fallback_baseline_tests;
 mod tests {
     use super::*;
     use crate::semantic_native::SemanticNativePendingReasonV1;
-
-    /// Diagnostic probe: price one `publish_corpus_with_scale` build at each
-    /// evaluation scale, against the real packaged workload.
-    ///
-    /// `generate_candidate_outputs_with_native` published the 1x and 10x
-    /// corpora twice per evaluation — once for the fallback phase, once for
-    /// the native phase — so this probe prices exactly what the shared corpus
-    /// cache now saves: one build at each scale.
-    #[test]
-    #[ignore = "diagnostic probe, run explicitly"]
-    fn published_corpus_build_cost_probe() {
-        let assets = crate::packaged_assets::materialize().expect("packaged evaluator assets");
-        for copies in [1usize, 10] {
-            let started = std::time::Instant::now();
-            let published = publish_corpus_with_scale(
-                assets.root(),
-                assets.workload(),
-                copies,
-                crate::packaged_assets::admitted_scope,
-            )
-            .expect("publish corpus at scale");
-            let build_ms = started.elapsed().as_millis();
-            let chunks = published.eligible_chunks;
-            let per_chunk_us = (build_ms as f64) * 1000.0 / (chunks as f64);
-            eprintln!(
-                "[corpus-probe] copies={copies} eligible_chunks={chunks} \
-                 build_ms={build_ms} per_chunk_us={per_chunk_us:.1}"
-            );
-        }
-    }
 
     struct TestRepositoryFixture {
         _temp: tempfile::TempDir,

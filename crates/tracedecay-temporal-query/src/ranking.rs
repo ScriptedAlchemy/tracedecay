@@ -98,18 +98,18 @@ const TIER_SPAN: u64 = 1_000_000;
 
 /// Partition key for raw-score normalization. Absent sources stay singleton
 /// partitions without colliding with a concrete `source` string value.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum SourcePartitionKey {
-    Absent { stable_id: String },
-    Present(String),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SourcePartitionKey<'a> {
+    Absent { stable_id: &'a str },
+    Present(&'a str),
 }
 
-impl SourcePartitionKey {
-    fn from_candidate(candidate: &RankingCandidate) -> Self {
-        match &candidate.source {
-            Some(source) => Self::Present(source.clone()),
+impl<'a> SourcePartitionKey<'a> {
+    fn from_candidate(candidate: &'a RankingCandidate) -> Self {
+        match candidate.source.as_deref() {
+            Some(source) => Self::Present(source),
             None => Self::Absent {
-                stable_id: candidate.stable_id.clone(),
+                stable_id: candidate.stable_id.as_str(),
             },
         }
     }
@@ -118,7 +118,7 @@ impl SourcePartitionKey {
 pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits) -> RankedResult {
     let candidates = prepare_candidates(candidates)?;
     let mut by_channel_and_source: BTreeMap<
-        (CandidateChannel, SourcePartitionKey),
+        (CandidateChannel, SourcePartitionKey<'_>),
         Vec<&RankingCandidate>,
     > = BTreeMap::new();
     for candidate in &candidates {
@@ -210,81 +210,138 @@ pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits)
     Ok(apply_diversity(ranked, limits))
 }
 
+struct MergedMetadata<'a> {
+    first: &'a RankingCandidate,
+    logical_message: Option<&'a str>,
+    turn: Option<&'a str>,
+    session: Option<&'a str>,
+    evidence_role: Option<&'a str>,
+}
+
 fn prepare_candidates(
     candidates: &[RankingCandidate],
 ) -> Result<Vec<RankingCandidate>, RankingError> {
-    let mut metadata_by_id = BTreeMap::<String, RankingCandidate>::new();
-
+    let mut metadata_by_id = BTreeMap::<&str, MergedMetadata<'_>>::new();
     for candidate in candidates {
-        match metadata_by_id.get_mut(&candidate.stable_id) {
+        match metadata_by_id.get_mut(candidate.stable_id.as_str()) {
             Some(existing) => {
-                if metadata_conflicts(existing, candidate) {
+                if merged_metadata_conflicts(existing, candidate) {
                     return Err(RankingError::ConflictingDuplicateMetadata {
                         stable_id: candidate.stable_id.clone(),
                     });
                 }
-                fill_missing_metadata(existing, candidate);
+                if existing.logical_message.is_none() {
+                    existing.logical_message = candidate.logical_message.as_deref();
+                }
+                if existing.turn.is_none() {
+                    existing.turn = candidate.turn.as_deref();
+                }
+                if existing.session.is_none() {
+                    existing.session = candidate.session.as_deref();
+                }
+                if existing.evidence_role.is_none() {
+                    existing.evidence_role = candidate.evidence_role.as_deref();
+                }
             }
             None => {
-                metadata_by_id.insert(candidate.stable_id.clone(), candidate.clone());
+                metadata_by_id.insert(
+                    candidate.stable_id.as_str(),
+                    MergedMetadata {
+                        first: candidate,
+                        logical_message: candidate.logical_message.as_deref(),
+                        turn: candidate.turn.as_deref(),
+                        session: candidate.session.as_deref(),
+                        evidence_role: candidate.evidence_role.as_deref(),
+                    },
+                );
             }
         }
     }
 
     // An idempotent max-evidence collapse prevents duplicate row count from
     // changing any channel partition's ordinal denominator.
+    struct UniqueEntry {
+        best_index: usize,
+        exact_ranges: Vec<ByteRangeV1>,
+    }
     let mut unique_by_id_channel_and_record =
-        BTreeMap::<(String, CandidateChannel, String), RankingCandidate>::new();
-    for candidate in candidates {
+        BTreeMap::<(&str, CandidateChannel, &str), UniqueEntry>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
         let key = (
-            candidate.stable_id.clone(),
+            candidate.stable_id.as_str(),
             candidate.channel,
-            candidate.retriever_record_id.clone(),
+            candidate.retriever_record_id.as_str(),
         );
         match unique_by_id_channel_and_record.get_mut(&key) {
             Some(existing) => {
-                if existing.source != candidate.source {
+                if candidates[existing.best_index].source != candidate.source {
                     return Err(RankingError::ConflictingDuplicateMetadata {
                         stable_id: candidate.stable_id.clone(),
                     });
                 }
-                let mut exact_ranges = existing.exact_ranges.clone();
-                exact_ranges.extend(candidate.exact_ranges.iter().copied());
-                if candidate.raw_score > existing.raw_score {
-                    *existing = candidate.clone();
+                existing
+                    .exact_ranges
+                    .extend(candidate.exact_ranges.iter().copied());
+                if candidate.raw_score > candidates[existing.best_index].raw_score {
+                    existing.best_index = index;
                 }
-                exact_ranges.sort_by_key(|range| (range.start(), range.end()));
-                exact_ranges.dedup();
-                existing.exact_ranges = exact_ranges;
             }
             None => {
-                unique_by_id_channel_and_record.insert(key, candidate.clone());
+                unique_by_id_channel_and_record.insert(
+                    key,
+                    UniqueEntry {
+                        best_index: index,
+                        exact_ranges: candidate.exact_ranges.clone(),
+                    },
+                );
             }
         }
     }
 
-    for candidate in unique_by_id_channel_and_record.values_mut() {
-        let Some(metadata) = metadata_by_id.get(&candidate.stable_id) else {
+    let mut prepared = Vec::with_capacity(unique_by_id_channel_and_record.len());
+    for entry in unique_by_id_channel_and_record.into_values() {
+        let mut candidate = candidates[entry.best_index].clone();
+        let mut exact_ranges = entry.exact_ranges;
+        exact_ranges.sort_by_key(|range| (range.start(), range.end()));
+        exact_ranges.dedup();
+        candidate.exact_ranges = exact_ranges;
+        let Some(metadata) = metadata_by_id.get(candidate.stable_id.as_str()) else {
             return Err(RankingError::ConflictingDuplicateMetadata {
                 stable_id: candidate.stable_id.clone(),
             });
         };
-        copy_metadata(candidate, metadata);
+        apply_merged_metadata(&mut candidate, metadata);
+        prepared.push(candidate);
     }
-
-    Ok(unique_by_id_channel_and_record.into_values().collect())
+    Ok(prepared)
 }
 
-fn copy_metadata(candidate: &mut RankingCandidate, metadata: &RankingCandidate) {
-    candidate.anchor_id = metadata.anchor_id.clone();
-    candidate.knowledge_at_micros = metadata.knowledge_at_micros;
-    candidate
-        .logical_message
-        .clone_from(&metadata.logical_message);
-    candidate.turn.clone_from(&metadata.turn);
-    candidate.session.clone_from(&metadata.session);
-    candidate.source.clone_from(&metadata.source);
-    candidate.evidence_role.clone_from(&metadata.evidence_role);
+fn merged_metadata_conflicts(existing: &MergedMetadata<'_>, candidate: &RankingCandidate) -> bool {
+    existing.first.anchor_id != candidate.anchor_id
+        || existing.first.knowledge_at_micros != candidate.knowledge_at_micros
+        // Source domains are never partially filled: Absent vs Present would
+        // reclassify raw scores into another calibration partition.
+        || existing.first.source != candidate.source
+        || option_conflicts(
+            existing.logical_message,
+            candidate.logical_message.as_deref(),
+        )
+        || option_conflicts(existing.turn, candidate.turn.as_deref())
+        || option_conflicts(existing.session, candidate.session.as_deref())
+        || option_conflicts(
+            existing.evidence_role,
+            candidate.evidence_role.as_deref(),
+        )
+}
+
+fn apply_merged_metadata(candidate: &mut RankingCandidate, metadata: &MergedMetadata<'_>) {
+    candidate.anchor_id = metadata.first.anchor_id.clone();
+    candidate.knowledge_at_micros = metadata.first.knowledge_at_micros;
+    candidate.logical_message = metadata.logical_message.map(str::to_owned);
+    candidate.turn = metadata.turn.map(str::to_owned);
+    candidate.session = metadata.session.map(str::to_owned);
+    candidate.source.clone_from(&metadata.first.source);
+    candidate.evidence_role = metadata.evidence_role.map(str::to_owned);
 }
 
 struct ScoredFusion {
@@ -308,43 +365,8 @@ fn merge_contribution(
     }
 }
 
-fn metadata_conflicts(existing: &RankingCandidate, candidate: &RankingCandidate) -> bool {
-    existing.anchor_id != candidate.anchor_id
-        || existing.knowledge_at_micros != candidate.knowledge_at_micros
-        // Source domains are never partially filled: Absent vs Present would
-        // reclassify raw scores into another calibration partition.
-        || existing.source != candidate.source
-        || option_conflicts(
-            existing.logical_message.as_deref(),
-            candidate.logical_message.as_deref(),
-        )
-        || option_conflicts(existing.turn.as_deref(), candidate.turn.as_deref())
-        || option_conflicts(existing.session.as_deref(), candidate.session.as_deref())
-        || option_conflicts(
-            existing.evidence_role.as_deref(),
-            candidate.evidence_role.as_deref(),
-        )
-}
-
 fn option_conflicts(left: Option<&str>, right: Option<&str>) -> bool {
     matches!((left, right), (Some(left), Some(right)) if left != right)
-}
-
-fn fill_missing_metadata(existing: &mut RankingCandidate, candidate: &RankingCandidate) {
-    if existing.logical_message.is_none() {
-        existing
-            .logical_message
-            .clone_from(&candidate.logical_message);
-    }
-    if existing.turn.is_none() {
-        existing.turn.clone_from(&candidate.turn);
-    }
-    if existing.session.is_none() {
-        existing.session.clone_from(&candidate.session);
-    }
-    if existing.evidence_role.is_none() {
-        existing.evidence_role.clone_from(&candidate.evidence_role);
-    }
 }
 
 const fn rank_tier(channel: CandidateChannel) -> RankTier {
