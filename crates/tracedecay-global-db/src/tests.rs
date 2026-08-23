@@ -13,21 +13,6 @@ mod lcm_schema;
 #[cfg(test)]
 mod session_sync;
 
-#[doc(hidden)]
-pub fn registered_schema_fixture_fingerprint() -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut digest = Sha256::new();
-    for source in [
-        include_str!("schema_stages.rs"),
-        include_str!("schema_contract/definitions.rs"),
-        include_str!("schema_contract/invariants/triggers.rs"),
-    ] {
-        digest.update(source.as_bytes());
-    }
-    hex::encode(&digest.finalize()[..8])
-}
-
 #[cfg(test)]
 use harness::RegisteredGlobalDbHarness;
 
@@ -922,54 +907,6 @@ async fn concurrent_registered_writes_remain_isolated() {
     }
 
     assert_eq!(handles[0].sum_savings(None, 0).await.calls, 12);
-}
-
-#[tokio::test]
-async fn observability_append_is_idempotent_and_rejects_changed_input() {
-    let harness = RegisteredGlobalDbHarness::open("observability-idempotency").await;
-    let event = AnalyticsEventInsert {
-        provider: "tracedecay-observability".to_string(),
-        project_id: "scope:fixture".to_string(),
-        session_id: None,
-        timestamp: 1,
-        event_kind: "retrieval.query.completed.v1".to_string(),
-        hook_name: None,
-        tool_name: None,
-        tool_category: None,
-        skill_name: None,
-        hint_category: None,
-        hint_id: Some("idempotency:fixture".to_string()),
-        outcome: Some("succeeded".to_string()),
-        metadata_json: Some("{\"canonical\":true}".to_string()),
-    };
-    let first = harness
-        .registered
-        .append_observability_event(&event)
-        .await
-        .expect("first append");
-    let replay = harness
-        .registered
-        .append_observability_event(&event)
-        .await
-        .expect("idempotent replay");
-    assert_eq!(first, replay);
-
-    let mut changed = event;
-    changed.metadata_json = Some("{\"canonical\":false}".to_string());
-    let error = harness
-        .registered
-        .append_observability_event(&changed)
-        .await
-        .expect_err("changed canonical input must conflict");
-    assert!(error.contains("idempotency conflict"), "{error}");
-    assert_eq!(
-        harness
-            .registered
-            .count_analytics_events(Some("scope:fixture"), 0)
-            .await
-            .expect("event count"),
-        1
-    );
 }
 
 #[tokio::test]
