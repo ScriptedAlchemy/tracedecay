@@ -1178,44 +1178,8 @@ impl VectorGenerationStateMachineV1 {
         expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
         prepared: &PreparedVectorGenerationV1,
     ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
-        let current = self
-            .staged
-            .get(build_id)
-            .cloned()
-            .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
         let prepared_digest = canonical_sha256(&(VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN, prepared))
             .map_err(storage_error)?;
-        if let Some(existing) = current
-            .batches
-            .iter()
-            .find(|batch| batch.request_digest == prepared.request.request_digest)
-        {
-            if existing.prepared_digest == prepared_digest {
-                return Ok(current.checkpoint);
-            }
-            return Err(VectorGenerationStoreErrorV1::ConflictingBatchReplay);
-        }
-        if current.checkpoint.completed_batches == 0 {
-            if expected_checkpoint.is_some() {
-                return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
-            }
-        } else if expected_checkpoint != Some(&current.checkpoint) {
-            return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
-        }
-
-        validate_batch_identity(&current.plan, prepared)?;
-        validate_base_generation_for_batch(&self.published, &current.plan, prepared)?;
-        verify_batch_receipt(&prepared.request, &prepared.receipt)
-            .map_err(SemanticProjectionErrorV1::from)?;
-        let mut next = current;
-        if let Some(key) = &next.embedding_key {
-            if key != &prepared.embedding_key {
-                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-            }
-        } else {
-            next.embedding_key = Some(prepared.embedding_key.clone());
-        }
-
         let vector_by_chunk = prepared
             .vectors
             .iter()
@@ -1226,32 +1190,128 @@ impl VectorGenerationStateMachineV1 {
             .iter()
             .map(|tombstone| (tombstone.chunk_id.clone(), tombstone))
             .collect::<BTreeMap<_, _>>();
-        if vector_by_chunk.len() != prepared.vectors.len()
-            || tombstone_by_chunk.len() != prepared.tombstones.len()
         {
-            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+            let current = self
+                .staged
+                .get(build_id)
+                .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+            if let Some(existing) = current
+                .batches
+                .iter()
+                .find(|batch| batch.request_digest == prepared.request.request_digest)
+            {
+                if existing.prepared_digest == prepared_digest {
+                    return Ok(current.checkpoint.clone());
+                }
+                return Err(VectorGenerationStoreErrorV1::ConflictingBatchReplay);
+            }
+            if current.checkpoint.completed_batches == 0 {
+                if expected_checkpoint.is_some() {
+                    return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
+                }
+            } else if expected_checkpoint != Some(&current.checkpoint) {
+                return Err(VectorGenerationStoreErrorV1::StaleCheckpoint);
+            }
+
+            validate_batch_identity(&current.plan, prepared)?;
+            validate_base_generation_for_batch(&self.published, &current.plan, prepared)?;
+            verify_batch_receipt(&prepared.request, &prepared.receipt)
+                .map_err(SemanticProjectionErrorV1::from)?;
+            if let Some(key) = &current.embedding_key
+                && key != &prepared.embedding_key
+            {
+                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+            }
+            if vector_by_chunk.len() != prepared.vectors.len()
+                || tombstone_by_chunk.len() != prepared.tombstones.len()
+            {
+                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+            }
+
+            let mut batch_chunks = BTreeSet::new();
+            for receipt in &prepared.receipt.receipts {
+                if current.committed_chunk_effects.contains(&receipt.chunk_id)
+                    || !batch_chunks.insert(receipt.chunk_id.clone())
+                {
+                    return Err(VectorGenerationStoreErrorV1::DuplicateChunkEffect(
+                        receipt.chunk_id.clone(),
+                    ));
+                }
+                match receipt.operation {
+                    ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
+                        let vector = vector_by_chunk.get(&receipt.chunk_id).ok_or_else(|| {
+                            VectorGenerationStoreErrorV1::MissingAppliedVector(
+                                receipt.chunk_id.clone(),
+                            )
+                        })?;
+                        validate_prepared_vector_row(prepared, vector)?;
+                        if receipt.outcome != ProjectionOutcomeV1::Applied
+                            || receipt.output_digest.as_ref() != Some(&vector.output_digest)
+                        {
+                            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+                        }
+                    }
+                    ProjectionOperationV1::Deleted => {
+                        let tombstone = tombstone_by_chunk
+                            .get(&receipt.chunk_id)
+                            .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
+                        if receipt.prior_chunk_digest.as_ref() != Some(&tombstone.prior_chunk_digest)
+                        {
+                            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+                        }
+                        validate_base_digest(&self.published, &current.plan, receipt)?;
+                    }
+                    ProjectionOperationV1::Reused => {
+                        let base = base_vector(&self.published, &current.plan, &receipt.chunk_id)?;
+                        if current.plan.target_projection_key != base.projection_key
+                            || receipt.prior_chunk_digest.as_ref() != Some(&base.chunk_digest)
+                            || receipt.current_chunk_digest.as_ref() != Some(&base.chunk_digest)
+                        {
+                            return Err(VectorGenerationStoreErrorV1::MissingBaseVector(
+                                receipt.chunk_id.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+            if vector_by_chunk.len()
+                != prepared
+                    .receipt
+                    .receipts
+                    .iter()
+                    .filter(|receipt| {
+                        matches!(
+                            receipt.operation,
+                            ProjectionOperationV1::Added | ProjectionOperationV1::Updated
+                        )
+                    })
+                    .count()
+                || tombstone_by_chunk.len()
+                    != prepared
+                        .receipt
+                        .receipts
+                        .iter()
+                        .filter(|receipt| receipt.operation == ProjectionOperationV1::Deleted)
+                        .count()
+            {
+                return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+            }
         }
 
+        let next = self
+            .staged
+            .get_mut(build_id)
+            .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+        if next.embedding_key.is_none() {
+            next.embedding_key = Some(prepared.embedding_key.clone());
+        }
         for receipt in &prepared.receipt.receipts {
-            if !next
-                .committed_chunk_effects
-                .insert(receipt.chunk_id.clone())
-            {
-                return Err(VectorGenerationStoreErrorV1::DuplicateChunkEffect(
-                    receipt.chunk_id.clone(),
-                ));
-            }
+            next.committed_chunk_effects.insert(receipt.chunk_id.clone());
             match receipt.operation {
                 ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
                     let vector = vector_by_chunk.get(&receipt.chunk_id).ok_or_else(|| {
                         VectorGenerationStoreErrorV1::MissingAppliedVector(receipt.chunk_id.clone())
                     })?;
-                    validate_prepared_vector_row(prepared, vector)?;
-                    if receipt.outcome != ProjectionOutcomeV1::Applied
-                        || receipt.output_digest.as_ref() != Some(&vector.output_digest)
-                    {
-                        return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-                    }
                     next.tombstones.remove(&receipt.chunk_id);
                     let mut rebound = (*vector).clone();
                     rebound.source_manifest_digest = next.plan.source_manifest_digest.clone();
@@ -1261,10 +1321,6 @@ impl VectorGenerationStateMachineV1 {
                     let tombstone = tombstone_by_chunk
                         .get(&receipt.chunk_id)
                         .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
-                    if receipt.prior_chunk_digest.as_ref() != Some(&tombstone.prior_chunk_digest) {
-                        return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-                    }
-                    validate_base_digest(&self.published, &next.plan, receipt)?;
                     next.vectors.remove(&receipt.chunk_id);
                     next.tombstones.insert(
                         receipt.chunk_id.clone(),
@@ -1273,14 +1329,6 @@ impl VectorGenerationStateMachineV1 {
                 }
                 ProjectionOperationV1::Reused => {
                     let base = base_vector(&self.published, &next.plan, &receipt.chunk_id)?;
-                    if next.plan.target_projection_key != base.projection_key
-                        || receipt.prior_chunk_digest.as_ref() != Some(&base.chunk_digest)
-                        || receipt.current_chunk_digest.as_ref() != Some(&base.chunk_digest)
-                    {
-                        return Err(VectorGenerationStoreErrorV1::MissingBaseVector(
-                            receipt.chunk_id.clone(),
-                        ));
-                    }
                     let mut rebound = base.clone();
                     rebound.source_generation = next.plan.source_generation.clone();
                     rebound.source_manifest_digest = next.plan.source_manifest_digest.clone();
@@ -1288,29 +1336,6 @@ impl VectorGenerationStateMachineV1 {
                 }
             }
         }
-        if vector_by_chunk.len()
-            != prepared
-                .receipt
-                .receipts
-                .iter()
-                .filter(|receipt| {
-                    matches!(
-                        receipt.operation,
-                        ProjectionOperationV1::Added | ProjectionOperationV1::Updated
-                    )
-                })
-                .count()
-            || tombstone_by_chunk.len()
-                != prepared
-                    .receipt
-                    .receipts
-                    .iter()
-                    .filter(|receipt| receipt.operation == ProjectionOperationV1::Deleted)
-                    .count()
-        {
-            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-        }
-
         next.checkpoint.completed_batches += 1;
         next.checkpoint.last_request_digest = Some(prepared.request.request_digest.clone());
         next.checkpoint.last_publication_digest = Some(prepared.receipt.publication_digest.clone());
@@ -1319,9 +1344,7 @@ impl VectorGenerationStateMachineV1 {
             prepared_digest,
             receipt: prepared.receipt.clone(),
         });
-        let checkpoint = next.checkpoint.clone();
-        self.staged.insert(build_id.clone(), next);
-        Ok(checkpoint)
+        Ok(next.checkpoint.clone())
     }
 
     /// Validate and atomically publish a fully staged immutable generation.

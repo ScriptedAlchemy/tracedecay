@@ -16,31 +16,7 @@ use super::tool_hints::HintAgent;
 use super::{TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
 use crate::config::USER_DATA_DIR_ENV;
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set_path(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+use super::EnvGuard;
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
     crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
