@@ -11,10 +11,10 @@ use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
-use super::steering::{
-    HookWorkspaceStatus, build_codex_session_context_for_workspace, cursor_index_signals_for_root,
-    index_status_line,
-};
+use super::steering::{HookWorkspaceStatus, index_status_line};
+// Only `codex_session_context_with_root` consumes these, and it is test-gated.
+#[cfg(test)]
+use super::steering::{build_codex_session_context_for_workspace, cursor_index_signals_for_root};
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
     additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
@@ -171,6 +171,9 @@ async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorks
 }
 
 /// Builds Codex session/prompt context from an already-resolved root.
+///
+/// Gated with `codex_session_context_for_event`, its only caller.
+#[cfg(test)]
 async fn codex_session_context_with_root(
     parsed: &Value,
     root: Option<&Path>,

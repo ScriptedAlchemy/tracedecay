@@ -948,9 +948,9 @@ mod tests {
             end_ticks > start_ticks,
             "tick authority must observe work during the sample window ({start_ticks} -> {end_ticks})"
         );
-        assert_eq!(
-            sysinfo_cpu, 0.0,
-            "sysinfo 0.32 Linux leaves cpu_usage at 0 after Some(&[pid]); that field is not CPU authority"
+        assert!(
+            sysinfo_cpu.abs() < f32::EPSILON,
+            "sysinfo 0.32 Linux leaves cpu_usage at 0 after Some(&[pid]); that field is not CPU authority (observed {sysinfo_cpu})"
         );
         assert!(
             snap.cpu_percent > 0.0,
