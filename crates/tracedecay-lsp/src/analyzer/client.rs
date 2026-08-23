@@ -450,10 +450,16 @@ impl StdioLspClient {
             }
             LspSemanticRequest::Hover(params) => self.hover(params, cancellation, timeouts).await,
             LspSemanticRequest::DocumentSymbols(params) => {
-                self.document_symbols(params, cancellation, timeouts).await
+                // Boxed: with profiling enabled this arm's future is the
+                // largest in the dispatch and inflates every sibling arm,
+                // since a match future is as large as its widest branch.
+                Box::pin(self.document_symbols(params, cancellation, timeouts)).await
             }
             LspSemanticRequest::WorkspaceSymbols(params) => {
-                self.workspace_symbols(params, cancellation, timeouts).await
+                // Boxed: with profiling enabled this arm's future is the
+                // largest in the dispatch and inflates every sibling arm,
+                // since a match future is as large as its widest branch.
+                Box::pin(self.workspace_symbols(params, cancellation, timeouts)).await
             }
             LspSemanticRequest::PrepareCallHierarchy(params) => {
                 self.prepare_call_hierarchy(params, cancellation, timeouts)
