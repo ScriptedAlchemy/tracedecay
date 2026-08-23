@@ -25,10 +25,13 @@ use super::{
     REPLAY_READER_ACQUIRE_SLICE, TOMBSTONE_COLUMNS,
 };
 
+const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
+
 pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactSqlTransaction> {
+    let mut busy_attempts = 0_u32;
     loop {
         ensure_not_interrupted(context)?;
         match handle.begin_immediate() {
@@ -37,6 +40,10 @@ pub(super) fn begin(
                 return Ok(transaction);
             }
             Err(ExactSqlError::Busy) => {
+                busy_attempts = busy_attempts.saturating_add(1);
+                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
+                    return Err(GraphPublicationStoreErrorV1::Infrastructure);
+                }
                 std::thread::sleep(Duration::from_millis(1));
                 ensure_not_interrupted(context)?;
             }
@@ -525,13 +532,14 @@ pub(super) fn read_by_sequence(
     )
 }
 
-pub(super) fn next_replay_metadata(
+pub(super) fn replay_metadata_page(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
     after: u64,
-) -> GraphPublicationStoreResultV1<Option<(tracedecay_store::GraphPublicationSequenceV1, usize)>> {
+    limit: u16,
+) -> GraphPublicationStoreResultV1<Vec<(tracedecay_store::GraphPublicationSequenceV1, usize)>> {
     let after = sqlite_sequence_from_u64(after)?;
-    let mut rows = query(
+    let rows = query(
         transaction,
         "SELECT sequence,
                 length(canonical_replay_source) + direct_dependency_bytes
@@ -543,30 +551,65 @@ pub(super) fn next_replay_metadata(
                WHERE retired.replay_sequence = replay.sequence
            )
          ORDER BY sequence ASC
-         LIMIT 1"
+         LIMIT ?5"
             .to_owned(),
         vec![
             text(&encoded.shard_id),
             text(&encoded.namespace),
             text(&encoded.projection),
             ExactSqlValue::Integer(after),
+            ExactSqlValue::Integer(i64::from(limit)),
         ],
     )?;
-    if rows.len() > 1 {
+    rows.into_iter()
+        .map(|row| {
+            let sequence = sequence_from_i64(integer_at(&row, 0)?)?;
+            let payload_bytes = usize::try_from(integer_at(&row, 1)?).map_err(|_| {
+                GraphPublicationStoreErrorV1::Corrupt(
+                    "graph replay payload length is negative or exceeds usize".to_owned(),
+                )
+            })?;
+            Ok((sequence, payload_bytes))
+        })
+        .collect()
+}
+
+pub(super) fn read_replays_by_sequences(
+    transaction: &impl ExactQueryAuthority,
+    sequences: &[i64],
+) -> GraphPublicationStoreResultV1<Vec<GraphPublicationReplayRecordV1>> {
+    if sequences.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=sequences.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = query(
+        transaction,
+        format!(
+            "SELECT {REPLAY_COLUMNS} FROM graph_publication_replay_v1 AS replay
+             WHERE sequence IN ({placeholders})
+               AND NOT EXISTS (
+                   SELECT 1 FROM graph_publication_replay_tombstones_v1 AS retired
+                   WHERE retired.replay_sequence = replay.sequence
+               )
+             ORDER BY sequence ASC"
+        ),
+        sequences
+            .iter()
+            .copied()
+            .map(ExactSqlValue::Integer)
+            .collect(),
+    )?;
+    if rows.len() != sequences.len() {
         return Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph replay page metadata returned duplicate rows".to_owned(),
+            "enumerated graph replay disappeared in its read transaction".to_owned(),
         ));
     }
-    let Some(row) = rows.pop() else {
-        return Ok(None);
-    };
-    let sequence = sequence_from_i64(integer_at(&row, 0)?)?;
-    let payload_bytes = usize::try_from(integer_at(&row, 1)?).map_err(|_| {
-        GraphPublicationStoreErrorV1::Corrupt(
-            "graph replay payload length is negative or exceeds usize".to_owned(),
-        )
-    })?;
-    Ok(Some((sequence, payload_bytes)))
+    rows.into_iter()
+        .map(|row| decode_row(transaction, row))
+        .collect()
 }
 
 pub(super) fn insert_verified_dependencies(
@@ -813,7 +856,9 @@ fn read_retained_source(
             "retired graph replay source identity is not unique".to_owned(),
         ));
     }
-    rows.pop().map(|row| blob_at(&row, 0)).transpose()
+    rows.pop()
+        .map(|mut row| blob_at(&mut row, 0))
+        .transpose()
 }
 
 pub(super) fn one_replay(
@@ -846,7 +891,7 @@ pub(super) fn one_tombstone(
 
 pub(super) fn decode_row(
     transaction: &impl ExactQueryAuthority,
-    row: ExactSqlRow,
+    mut row: ExactSqlRow,
 ) -> GraphPublicationStoreResultV1<GraphPublicationReplayRecordV1> {
     let sequence = integer_at(&row, 0)?;
     decode_replay(
@@ -863,7 +908,7 @@ pub(super) fn decode_row(
             expected_prior_head: optional_text_at(&row, 9)?,
             expected_recovered_digest: text_at(&row, 10)?,
             canonical_replay_source_digest: text_at(&row, 11)?,
-            canonical_replay_source: blob_at(&row, 12)?,
+            canonical_replay_source: blob_at(&mut row, 12)?,
         },
         read_dependencies(transaction, sequence, false)?,
     )
@@ -978,11 +1023,17 @@ pub(super) fn optional_text_at(
     }
 }
 
-pub(super) fn blob_at(row: &ExactSqlRow, index: usize) -> GraphPublicationStoreResultV1<Vec<u8>> {
-    match value_at(row, index)? {
-        ExactSqlValue::Blob(value) => Ok(value.clone()),
-        _ => Err(GraphPublicationStoreErrorV1::Corrupt(
+pub(super) fn blob_at(
+    row: &mut ExactSqlRow,
+    index: usize,
+) -> GraphPublicationStoreResultV1<Vec<u8>> {
+    match row.values.get_mut(index) {
+        Some(ExactSqlValue::Blob(value)) => Ok(std::mem::take(value)),
+        Some(_) => Err(GraphPublicationStoreErrorV1::Corrupt(
             "graph publication blob column has the wrong type".to_owned(),
+        )),
+        None => Err(GraphPublicationStoreErrorV1::Corrupt(
+            "graph publication row is truncated".to_owned(),
         )),
     }
 }

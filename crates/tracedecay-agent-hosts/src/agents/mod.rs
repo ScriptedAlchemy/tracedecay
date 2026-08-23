@@ -1310,6 +1310,22 @@ pub fn install_mcp_server_entry(
             return Err(error);
         }
     };
+    if !settings.is_object() {
+        return Err(TraceDecayError::Config {
+            message: format!("{} must contain a JSON object", config_path.display()),
+        });
+    }
+    if settings
+        .get(root_key)
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{}.{root_key} must be a JSON object",
+                config_path.display()
+            ),
+        });
+    }
     settings[root_key]["tracedecay"] = entry;
 
     safe_write_json_file(config_path, &settings, backup.as_deref())?;
@@ -1327,24 +1343,30 @@ pub struct McpUninstallPolicy {
     pub prune_empty_root: bool,
     /// Delete the config file when an empty MCP root is all that is left.
     pub remove_empty_file: bool,
+    /// Backup, atomically remove, and sync the parent directory when deleting
+    /// an emptied config. Kiro's workspace `mcp.json` uses this so a crash
+    /// mid-remove cannot leave a half-deleted host file.
+    pub durable_remove: bool,
 }
 
 /// Remove the tracedecay MCP entry under `root_key` from a host config.
 ///
-/// Best effort by design: uninstall must keep going across the remaining
+/// Best effort by default: uninstall must keep going across the remaining
 /// hosts when one config is unreadable or unwritable, so `load` is the host's
-/// lenient loader ([`load_json_file`] or [`load_jsonc_file`]). Every rewrite
-/// goes through [`backup_and_write_json`], so a `.bak` is always left behind
-/// (issue #63).
+/// lenient loader ([`load_json_file`] or [`load_jsonc_file`]). Ordinary
+/// rewrites go through [`backup_and_write_json`], so a `.bak` is always left
+/// behind (issue #63). [`McpUninstallPolicy::durable_remove`] is the fail-closed
+/// exception (Kiro workspace `mcp.json`): backup, atomic remove/rewrite, and
+/// parent-directory sync errors propagate.
 pub fn uninstall_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
     load: fn(&Path) -> serde_json::Value,
     policy: McpUninstallPolicy,
-) {
+) -> Result<()> {
     if !config_path.exists() {
         eprintln!("  {} not found, skipping", config_path.display());
-        return;
+        return Ok(());
     }
 
     let mut settings = load(config_path);
@@ -1353,14 +1375,14 @@ pub fn uninstall_mcp_server_entry(
             "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
-        return;
+        return Ok(());
     };
     if servers.remove("tracedecay").is_none() {
         eprintln!(
             "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
-        return;
+        return Ok(());
     }
     let root_is_empty = servers.is_empty();
 
@@ -1372,12 +1394,26 @@ pub fn uninstall_mcp_server_entry(
     }
 
     if policy.remove_empty_file && config_holds_only_empty_root(&settings, root_key) {
-        std::fs::remove_file(config_path).ok();
+        if policy.durable_remove {
+            remove_emptied_mcp_config_durably(config_path)?;
+        } else {
+            std::fs::remove_file(config_path).ok();
+        }
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed {} (was empty)",
             config_path.display()
         );
-        return;
+        return Ok(());
+    }
+
+    if policy.durable_remove {
+        let backup = backup_config_file(config_path)?;
+        safe_write_json_file(config_path, &settings, backup.as_deref())?;
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
+            config_path.display()
+        );
+        return Ok(());
     }
 
     if backup_and_write_json(config_path, &settings) {
@@ -1386,6 +1422,25 @@ pub fn uninstall_mcp_server_entry(
             config_path.display()
         );
     }
+    Ok(())
+}
+
+/// Kiro's workspace uninstall: backup, atomically remove, then sync the parent.
+fn remove_emptied_mcp_config_durably(config_path: &Path) -> Result<()> {
+    backup_config_file(config_path)?;
+    safe_remove_host_file(config_path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to remove {}: {error}", config_path.display()),
+    })?;
+    tracedecay_private_fs::framed_log::sync_parent_directory(
+        config_path,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to durably remove {}: {error}",
+            config_path.display()
+        ),
+    })
 }
 
 /// True when nothing survives in `settings` except an empty MCP root.
@@ -1455,6 +1510,34 @@ pub fn mcp_registration_entry(
         .get(root_key)
         .and_then(|servers| servers.get("tracedecay"))
         .cloned()
+}
+
+/// True when `config_path` already names a tracedecay entry under `root_key`.
+///
+/// Missing or unreadable files are `false` because `load` is the host's
+/// lenient loader. Shared by project-local Claude/Kimi checks and the
+/// host `has_tracedecay` implementations that only need a yes/no.
+pub fn mcp_config_has_tracedecay(
+    config_path: &Path,
+    root_key: &str,
+    load: fn(&Path) -> serde_json::Value,
+) -> bool {
+    mcp_registration_entry(config_path, root_key, load).is_some()
+}
+
+/// Resolve a host home directory from an optional environment override.
+///
+/// The override is honored only when it is non-empty and falls under `home`.
+/// That keeps isolated-HOME tests from picking up the operator's real
+/// `KIMI_CODE_HOME` / `VIBE_HOME`, and refuses a host directory that escapes
+/// the admitted profile home. Anything else — unset, empty, or outside
+/// `home` — uses `home.join(default_relative)`.
+pub(crate) fn host_home_override(home: &Path, env_key: &str, default_relative: &str) -> PathBuf {
+    std::env::var_os(env_key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|override_home| override_home.starts_with(home))
+        .unwrap_or_else(|| home.join(default_relative))
 }
 
 /// Emit the standard doctor pass/fail line for a host MCP registration.
@@ -1791,31 +1874,6 @@ fn quote_posix_command_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
-    let mut existing = path.to_path_buf();
-    let mut missing = Vec::new();
-
-    loop {
-        match existing.canonicalize() {
-            Ok(mut canonical) => {
-                for component in missing.iter().rev() {
-                    canonical.push(component);
-                }
-                return Ok(canonical);
-            }
-            Err(err) => {
-                let Some(name) = existing.file_name().map(std::borrow::ToOwned::to_owned) else {
-                    return Err(err);
-                };
-                missing.push(name);
-                if !existing.pop() {
-                    return Err(err);
-                }
-            }
-        }
-    }
-}
-
 fn relative_project_path(
     project_root: &Path,
     canonical_root: &Path,
@@ -1888,13 +1946,15 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
         }
     }
 
-    let canonical_candidate =
-        canonicalize_existing_prefix(&absolute).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to resolve project-local config path {}: {e}",
-                absolute.display()
-            ),
-        })?;
+    let canonical_candidate = tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(
+        &absolute,
+    )
+    .ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "failed to resolve project-local config path {}",
+            absolute.display()
+        ),
+    })?;
     if !canonical_candidate.starts_with(&root) {
         return Err(TraceDecayError::Config {
             message: format!(

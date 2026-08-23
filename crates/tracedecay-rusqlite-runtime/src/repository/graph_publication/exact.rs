@@ -31,11 +31,12 @@ use super::{
 mod support;
 use support::{
     begin, begin_read, commit, ensure_owner, ensure_shard_owner, execute,
-    has_active_inbound_dependencies, insert_verified_dependencies, next_replay_metadata,
-    next_retired_cleanup_metadata, optional_text, read_by_sequence, read_conflicts, read_exact,
-    read_exact_metadata, read_exact_tombstone, read_first_conflict_sequence, read_head,
-    read_pending, read_pending_sequence, read_projection_page, read_tombstone_by_sequence,
-    read_tombstone_conflicts, rollback, rollback_error, text,
+    has_active_inbound_dependencies, insert_verified_dependencies, next_retired_cleanup_metadata,
+    optional_text, read_by_sequence, read_conflicts, read_exact, read_exact_metadata,
+    read_exact_tombstone, read_first_conflict_sequence, read_head, read_pending,
+    read_pending_sequence, read_projection_page, read_replays_by_sequences,
+    read_tombstone_by_sequence, read_tombstone_conflicts, replay_metadata_page, rollback,
+    rollback_error, text,
 };
 
 const REPLAY_COLUMNS: &str = "sequence, shard_id, namespace, projection, generation,
@@ -456,26 +457,29 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         ensure_owner(&self.handle, &request.projection)?;
         let encoded = EncodedProjection::new(&request.projection)?;
         let snapshot = begin_read(&self.handle, context)?;
-        let mut after = request
+        let after = request
             .after
             .as_ref()
             .map_or(0, |cursor| cursor.sequence.get());
-        let mut records: Vec<GraphPublicationReplayRecordV1> =
-            Vec::with_capacity(usize::from(request.max_records));
+        let metadata = replay_metadata_page(
+            &snapshot,
+            &encoded,
+            after,
+            request.max_records.saturating_add(1),
+        )?;
+        let mut selected = Vec::with_capacity(usize::from(request.max_records));
         let mut payload_bytes = 0_usize;
-        let mut continuation = None;
-
-        while records.len() < usize::from(request.max_records) {
+        let mut has_more = false;
+        for (sequence, next_payload_bytes) in metadata {
             ensure_not_interrupted(context)?;
-            let Some((sequence, next_payload_bytes)) =
-                next_replay_metadata(&snapshot, &encoded, after)?
-            else {
-                break;
-            };
             if next_payload_bytes > MAX_GRAPH_REPLAY_SOURCE_BYTES_V1 {
                 return Err(GraphPublicationStoreErrorV1::Corrupt(
                     "graph replay payload exceeds its canonical storage bound".to_owned(),
                 ));
+            }
+            if selected.len() >= usize::from(request.max_records) {
+                has_more = true;
+                break;
             }
             let next_page_bytes =
                 payload_bytes
@@ -485,24 +489,19 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
                             "graph replay page payload size overflowed".to_owned(),
                         )
                     })?;
-            if !records.is_empty() && next_page_bytes > MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1 {
-                continuation = records
-                    .last()
-                    .map(|record| {
-                        GraphPublicationReplayCursorV1::new(
-                            request.projection.clone(),
-                            record.sequence,
-                        )
-                    })
-                    .transpose()?;
+            if !selected.is_empty() && next_page_bytes > MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1 {
+                has_more = true;
                 break;
             }
-            let replay =
-                read_by_sequence(&snapshot, sequence_to_i64(sequence)?)?.ok_or_else(|| {
-                    GraphPublicationStoreErrorV1::Corrupt(
-                        "enumerated graph replay disappeared in its read transaction".to_owned(),
-                    )
-                })?;
+            payload_bytes = next_page_bytes;
+            selected.push(sequence);
+        }
+        let sequences = selected
+            .iter()
+            .map(|sequence| sequence_to_i64(*sequence))
+            .collect::<GraphPublicationStoreResultV1<Vec<_>>>()?;
+        let records = read_replays_by_sequences(&snapshot, &sequences)?;
+        for replay in &records {
             let actual = EncodedProjection::new(&replay.publication.key.projection)?;
             if actual.shard_id != encoded.shard_id
                 || actual.namespace != encoded.namespace
@@ -512,22 +511,17 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
                     "enumerated graph replay escaped its projection".to_owned(),
                 ));
             }
-            payload_bytes = next_page_bytes;
-            after = sequence.get();
-            records.push(replay);
         }
-
-        if continuation.is_none()
-            && !records.is_empty()
-            && next_replay_metadata(&snapshot, &encoded, after)?.is_some()
-        {
-            continuation = records
+        let continuation = if has_more {
+            records
                 .last()
                 .map(|record| {
                     GraphPublicationReplayCursorV1::new(request.projection.clone(), record.sequence)
                 })
-                .transpose()?;
-        }
+                .transpose()?
+        } else {
+            None
+        };
         ensure_not_interrupted(context)?;
         let page = GraphPublicationReplayPageV1::new(records, continuation)?;
         Ok(page)
@@ -562,150 +556,23 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         request.validate()?;
         ensure_not_interrupted(context)?;
         ensure_owner(&self.handle, &request.key.projection)?;
-        let encoded = EncodedProjection::new(&request.key.projection)?;
         let transaction = begin(&self.handle, context)?;
-        let retired_conflicts = read_tombstone_conflicts(&transaction, &encoded, &request.key)?;
-        if let Some(retired) = retired_conflicts
-            .iter()
-            .find(|retired| retired.key == request.key)
-        {
-            let outcome = if retired.retirement() == *request {
-                GraphReplayRetirementOutcomeV1::ExactReplay(retired.clone())
-            } else {
-                GraphReplayRetirementOutcomeV1::Conflict
-            };
-            ensure_not_interrupted(context)?;
-            return rollback(transaction, outcome);
-        }
-        if !retired_conflicts.is_empty() {
-            ensure_not_interrupted(context)?;
-            return rollback(transaction, GraphReplayRetirementOutcomeV1::Conflict);
-        }
-        let conflicts = read_conflicts(&transaction, &encoded, &request.key)?;
-        let Some(replay) = conflicts
-            .iter()
-            .find(|replay| replay.publication.key == request.key)
-            .cloned()
-        else {
-            let outcome = if conflicts.is_empty() {
-                GraphReplayRetirementOutcomeV1::Missing
-            } else {
-                GraphReplayRetirementOutcomeV1::Conflict
-            };
-            ensure_not_interrupted(context)?;
-            return rollback(transaction, outcome);
+        let outcome = match retire_replay_in_transaction(&transaction, request) {
+            Ok(outcome) => outcome,
+            Err(error) => return rollback_error(transaction, error),
         };
-        if replay.publication.input_digest != request.input_digest
-            || replay.publication.dependency_generation_closure_digest
-                != request.dependency_generation_closure_digest
-            || replay.publication.direct_dependency_generations
-                != request.direct_dependency_generations
-            || replay.publication.expected_prior_head != request.expected_prior_head
-            || replay.publication.expected_recovered_digest != request.expected_recovered_digest
-            || replay.publication.canonical_replay_source_digest
-                != request.canonical_replay_source_digest
-        {
-            ensure_not_interrupted(context)?;
-            return rollback(transaction, GraphReplayRetirementOutcomeV1::Conflict);
-        }
-        let head = read_head(&transaction, &encoded)?;
-        if let Some(head) = head
-            .as_ref()
-            .filter(|head| head.sequence == replay.sequence)
-        {
-            ensure_not_interrupted(context)?;
-            return rollback(
-                transaction,
-                GraphReplayRetirementOutcomeV1::CurrentVerifiedHead { head: head.clone() },
-            );
-        }
-        if let Some(pending) = read_pending(&transaction, &encoded, head.as_ref())?
-            .filter(|pending| pending.sequence == replay.sequence)
-        {
-            ensure_not_interrupted(context)?;
-            return rollback(
-                transaction,
-                GraphReplayRetirementOutcomeV1::PendingReplay { pending },
-            );
-        }
-        if head
-            .as_ref()
-            .is_none_or(|head| replay.sequence >= head.sequence)
-        {
-            return rollback_error(
-                transaction,
-                GraphPublicationStoreErrorV1::Corrupt(
-                    "graph replay retirement target is neither historical nor pending".to_owned(),
-                ),
-            );
-        }
-        if has_active_inbound_dependencies(&transaction, replay.sequence)? {
-            ensure_not_interrupted(context)?;
-            return rollback(transaction, GraphReplayRetirementOutcomeV1::Conflict);
-        }
-        let tombstone = GraphPublicationReplayTombstoneV1::new(
-            replay.sequence,
-            request.clone(),
-            Some(replay.publication.canonical_replay_source.clone()),
-        )?;
-        execute(
-            &transaction,
-            "INSERT INTO graph_publication_replay_tombstones_v1 (
-                replay_sequence, shard_id, namespace, projection, generation,
-                idempotency_key, input_digest,
-                dependency_generation_closure_digest,
-                direct_dependency_bytes, expected_prior_head,
-                expected_recovered_digest, canonical_replay_source_digest
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            vec![
-                ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?),
-                text(encoded.shard_id),
-                text(encoded.namespace),
-                text(encoded.projection),
-                text(request.key.generation.as_str()),
-                text(request.key.idempotency_key.as_str()),
-                text(request.input_digest.as_str()),
-                text(request.dependency_generation_closure_digest.as_str()),
-                ExactSqlValue::Integer(
-                    i64::try_from(
-                        encode_direct_dependency_generations(
-                            &request.direct_dependency_generations,
-                        )?
-                        .len(),
-                    )
-                    .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
-                ),
-                optional_text(encode_optional_head(request.expected_prior_head.as_ref())?),
-                text(request.expected_recovered_digest.as_str()),
-                text(request.canonical_replay_source_digest.as_str()),
-            ],
-        )?;
-        execute(
-            &transaction,
-            "INSERT INTO graph_publication_replay_tombstone_dependencies_v1 (
-                tombstone_replay_sequence, ordinal, shard_id, namespace,
-                projection, generation
-             )
-             SELECT owner_replay_sequence, ordinal, shard_id, namespace,
-                    projection, generation
-             FROM graph_publication_replay_dependencies_v1
-             WHERE owner_replay_sequence = ?1",
-            vec![ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?)],
-        )?;
-        execute(
-            &transaction,
-            "DELETE FROM graph_publication_replay_dependencies_v1
-             WHERE owner_replay_sequence = ?1",
-            vec![ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?)],
-        )?;
         if let Err(error) = ensure_not_interrupted(context) {
             return rollback_error(transaction, error);
         }
-        if let Err(error) = begin_replay_retirement_commit(context) {
-            return rollback_error(transaction, error);
+        if matches!(outcome, GraphReplayRetirementOutcomeV1::Retired(_)) {
+            if let Err(error) = begin_replay_retirement_commit(context) {
+                return rollback_error(transaction, error);
+            }
+            commit(transaction)?;
+            Ok(outcome)
+        } else {
+            rollback(transaction, outcome)
         }
-        commit(transaction)?;
-        Ok(GraphReplayRetirementOutcomeV1::Retired(tombstone))
     }
 
     fn retired_cleanup_page(
