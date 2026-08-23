@@ -10,7 +10,7 @@
 //! Instrument at the construction site rather than through a helper — the
 //! macros capture `file!()`/`line!()`, so wrapping them in a function would
 //! collapse every lock in the crate onto one source location. Pass a `label`
-//! as well, since that is what the `mutexes` / `rw_locks` reports key on.
+//! as well, since that is what the `mutexes` report keys on.
 
 #[cfg(feature = "hotpath")]
 pub(crate) type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
