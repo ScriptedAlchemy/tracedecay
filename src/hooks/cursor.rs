@@ -152,7 +152,8 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     } else {
         None
     };
-    let outcome = ingest_cursor_transcript_for_event_inner(
+    let outcome = super::ingest_transcript_for_event(
+        "cursor",
         &event,
         root.as_deref(),
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -280,7 +281,9 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         }
         return 0;
     }
-    notify_cursor_after_file_edit(&parsed, &hook_telemetry).await;
+    if let Some(root) = root.as_deref() {
+        notify_cursor_after_file_edit(&parsed, root, &hook_telemetry).await;
+    }
     if let Some(decision) = cursor_after_file_edit_decision(&event)
         && !super::write_hook_output(
             root.as_deref(),
@@ -339,14 +342,16 @@ async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String)
 /// not forwarded and cannot become Git or synchronization authority.
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry = record_hook_invoked(
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Cursor,
         "afterShellExecution",
         &event,
+        &parsed,
     );
-    notify_cursor_after_shell_event(&event, &hook_telemetry).await;
+    notify_cursor_after_shell_event(&event, &parsed, root.as_deref(), &hook_telemetry).await;
     0
 }
 
@@ -358,7 +363,7 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
-    notify_cursor_workspace_open(&event, &hook_telemetry).await;
+    notify_cursor_workspace_open(&event, root.as_deref(), &hook_telemetry).await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,

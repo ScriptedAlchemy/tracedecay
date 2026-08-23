@@ -927,6 +927,7 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         groups.sort_by_key(|group| group.first_ordinal);
         let maximum_distance = groups.iter().map(|group| group.bound).max().unwrap_or(0);
+        let vocabulary = self.load_vocabulary()?;
         let mut selected = Vec::with_capacity(limit);
         'distance: for distance in 1..=maximum_distance {
             for (group_index, group) in groups.iter_mut().enumerate() {
@@ -937,23 +938,17 @@ impl<'a> ArtifactQueryV1<'a> {
                 if distance > group.bound {
                     continue;
                 }
-                let mut statement = self
-                    .connection
-                    .prepare("SELECT term FROM vocabulary ORDER BY term")
-                    .map_err(map_query_sql_error)?;
-                let mut rows = statement.query([]).map_err(map_query_sql_error)?;
                 let mut added = 0usize;
-                while added < remaining {
-                    let Some(row) = rows.next().map_err(map_query_sql_error)? else {
+                for term in &vocabulary {
+                    if added >= remaining {
                         break;
-                    };
-                    let term: String = row.get(0).map_err(map_query_sql_error)?;
-                    if term != group.normalized_query
-                        && bounded_edit_distance(&group.normalized_query, &term, distance)
+                    }
+                    if term != &group.normalized_query
+                        && bounded_edit_distance(&group.normalized_query, term, distance)
                             == Some(distance)
                         && group.seen.insert(term.clone())
                     {
-                        selected.push((group_index, term));
+                        selected.push((group_index, term.clone()));
                         added += 1;
                     }
                 }
@@ -969,6 +964,19 @@ impl<'a> ArtifactQueryV1<'a> {
             }
         }
         Ok(FuzzyExpansionsV1 { by_query })
+    }
+
+    fn load_vocabulary(&self) -> Result<Vec<String>, RetrievalPortError> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT term FROM vocabulary ORDER BY term")
+            .map_err(map_query_sql_error)?;
+        let mut rows = statement.query([]).map_err(map_query_sql_error)?;
+        let mut vocabulary = Vec::new();
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            vocabulary.push(row.get(0).map_err(map_query_sql_error)?);
+        }
+        Ok(vocabulary)
     }
 
     /// Read the document-independent scoring statistics once per request.

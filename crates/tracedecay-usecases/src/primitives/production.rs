@@ -537,7 +537,20 @@ fn symbol_at_line(
 fn test_annotation_evidence(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    cache: &Mutex<
+        Option<(
+            CodeGenerationId,
+            std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+        )>,
+    >,
 ) -> Result<std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>, ()> {
+    let generation = graph.generation().clone();
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_generation, cached)) = &*guard
+        && cached_generation == &generation
+    {
+        return Ok(cached.clone());
+    }
     let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation))?;
     let occurrences = symbols
         .iter()
@@ -564,11 +577,15 @@ fn test_annotation_evidence(
             cancellation,
         )
         .map_err(|_| ())?;
-    Ok(edges
+    let evidence = edges
         .into_iter()
         .filter(|edge| markers.contains(&edge.edge.from_occurrence))
         .map(|edge| edge.edge.to_occurrence)
-        .collect())
+        .collect::<std::collections::HashSet<_>>();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((generation, evidence.clone()));
+    }
+    Ok(evidence)
 }
 
 fn files_for_occurrences(
