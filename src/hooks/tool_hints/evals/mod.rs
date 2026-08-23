@@ -132,7 +132,7 @@ fn session_stream_eval_rotates_repeated_hints() {
             HintDeliveryDecisionV1::SuppressDuplicate,
             HintDeliveryDecisionV1::Deliver,
             HintDeliveryDecisionV1::SuppressBudget,
-            HintDeliveryDecisionV1::DeliverEscalation,
+            HintDeliveryDecisionV1::SuppressBudget,
             HintDeliveryDecisionV1::SuppressDuplicate,
         ]
     );

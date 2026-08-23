@@ -491,6 +491,7 @@ impl ToolHintDedupe {
                 state.hinted = true;
             }
             HintDeliveryDecisionV1::DeliverEscalation => {
+                *self.emitted.entry(session_id).or_default() += 1;
                 state.triggers_after_hint = state.triggers_after_hint.saturating_add(1);
                 state.escalated = true;
             }

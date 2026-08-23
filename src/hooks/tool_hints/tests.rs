@@ -482,10 +482,18 @@ fn escalation_fires_exactly_once_after_repeated_triggers() {
         dedupe.decide("s1", HintCategory::Search),
         HintDeliveryDecisionV1::SuppressDuplicate
     );
+    assert_eq!(
+        dedupe.decide("s1", HintCategory::FileRead),
+        HintDeliveryDecisionV1::Deliver
+    );
+    assert_eq!(
+        dedupe.decide("s1", HintCategory::Impact),
+        HintDeliveryDecisionV1::SuppressBudget
+    );
 }
 
 #[test]
-fn escalation_does_not_count_against_the_budget() {
+fn escalation_respects_the_total_session_budget() {
     let mut dedupe = ToolHintDedupe::default();
     // Exhaust the budget with three categories, then escalate the first.
     assert_eq!(
@@ -506,10 +514,10 @@ fn escalation_does_not_count_against_the_budget() {
             HintDeliveryDecisionV1::SuppressDuplicate
         );
     }
-    // Escalation is allowed even though the budget is spent.
+    // Escalation is another emitted hint, so the spent budget suppresses it.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDeliveryDecisionV1::DeliverEscalation
+        HintDeliveryDecisionV1::SuppressBudget
     );
 }
 
