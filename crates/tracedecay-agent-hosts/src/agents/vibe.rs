@@ -31,13 +31,7 @@ pub struct VibeIntegration;
 /// Respects `VIBE_HOME` only when it falls under `home` (so tests with
 /// temp-dir homes are not polluted by the real user's environment).
 fn vibe_home(home: &Path) -> std::path::PathBuf {
-    if let Ok(vibe) = std::env::var("VIBE_HOME") {
-        let vibe_path = std::path::PathBuf::from(&vibe);
-        if vibe_path.starts_with(home) {
-            return vibe_path;
-        }
-    }
-    home.join(".vibe")
+    super::host_home_override(home, "VIBE_HOME", ".vibe")
 }
 
 fn vibe_config_path(home: &Path) -> std::path::PathBuf {

@@ -19,7 +19,6 @@ use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext
 
 mod templates;
 
-/// Hermes agent.
 pub struct HermesIntegration;
 
 impl AgentIntegration for HermesIntegration {

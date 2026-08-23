@@ -31,8 +31,9 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_config_file, config_backup_path, load_json_file, load_json_file_strict,
-    safe_write_json_file,
+    McpUninstallPolicy, backup_config_file, config_backup_path, install_mcp_server_entry,
+    load_json_file, load_json_file_strict, mcp_config_has_tracedecay, safe_write_json_file,
+    uninstall_mcp_server_entry,
 };
 
 /// Kiro agent.
@@ -518,13 +519,7 @@ fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
 }
 
 fn mcp_registry_has_tracedecay(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-    load_json_file(path)
-        .get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some()
+    mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,12 +566,12 @@ fn kiro_mcp_add_with(kiro_cli: &Path, home: &Path, tracedecay_bin: &str) -> Resu
         args.extend(["--args", server_arg]);
     }
     args.extend(["--scope", "global", "--force"]);
-    run_kiro_mcp_step(kiro_cli, &args, home)
+    run_mcp_registry_step(kiro_cli, &args, home)
 }
 
 /// Drive Kiro's own registry to drop the tracedecay MCP server globally.
 fn kiro_mcp_remove_with(kiro_cli: &Path, home: &Path) -> Result<()> {
-    run_kiro_mcp_step(
+    run_mcp_registry_step(
         kiro_cli,
         &[
             "mcp",
@@ -590,80 +585,15 @@ fn kiro_mcp_remove_with(kiro_cli: &Path, home: &Path) -> Result<()> {
     )
 }
 
-/// Run one `kiro-cli mcp ...` step, converting a failed invocation into the
-/// host's own diagnosis. The peer-server snapshot is a preservation guard:
-/// Kiro owns the registry merge, but a buggy/changed host command must not be
-/// allowed to silently discard an operator's other MCP servers. The exact
-/// post-command bytes are also recorded through the active host transaction so
-/// its existing rollback authority can restore the pre-command document when
-/// the command fails or a later verification step rejects the effect.
-fn run_kiro_mcp_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
-    let mcp_path = mcp_config_path(home);
-    let (_, peers_before) = read_mcp_config_observation(&mcp_path)?;
-    let outcome = super::host_cli::run_host_cli(kiro_cli, args, home)?;
-    // Snapshot once after the child exits. The bytes that pass the peer guard
-    // are the bytes recorded for rollback; reading again after recording
-    // would create a race in which a foreign writer could be absorbed into the
-    // transaction's intended state and later overwritten during recovery.
-    let (observed_bytes, peers_after) = read_mcp_config_observation(&mcp_path)?;
-    if peers_before != peers_after {
-        let invocation = if args.is_empty() {
-            kiro_cli.display().to_string()
-        } else {
-            format!("{} {}", kiro_cli.display(), args.join(" "))
-        };
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "`{invocation}` changed peer MCP servers in {}; TraceDecay left the host state unaccepted",
-                mcp_path.display()
-            ),
-        });
-    }
-    crate::agents::record_host_config_observation_bytes(&mcp_path, observed_bytes.as_deref())?;
-    if outcome.succeeded() {
-        return Ok(());
-    }
-    Err(TraceDecayError::Config {
-        message: outcome.failure_message(),
-    })
-}
-
-/// Exact registry-document bytes (absent when nothing is registered yet) and
-/// the operator-owned peer MCP server entries read from that document.
-type McpConfigObservation = (Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>);
-
-fn read_mcp_config_observation(path: &Path) -> Result<McpConfigObservation> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to read {} before Kiro CLI: {error}", path.display()),
-            });
-        }
-    };
-    let Some(bytes) = bytes.as_deref() else {
-        return Ok((None, serde_json::Map::new()));
-    };
-    let config = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("failed to parse {} as JSON: {error}", path.display()),
-        }
-    })?;
-    let Some(servers) = config.get("mcpServers") else {
-        return Ok((Some(bytes.to_vec()), serde_json::Map::new()));
-    };
-    let Some(servers) = servers.as_object() else {
-        return Err(TraceDecayError::Config {
-            message: format!("{}.mcpServers must be a JSON object", path.display()),
-        });
-    };
-    let peers = servers
-        .iter()
-        .filter(|(name, _)| name.as_str() != KIRO_MCP_SERVER_NAME)
-        .map(|(name, server)| (name.clone(), server.clone()))
-        .collect();
-    Ok((Some(bytes.to_vec()), peers))
+fn run_mcp_registry_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
+    super::host_cli::run_mcp_registry_step(
+        kiro_cli,
+        args,
+        home,
+        &mcp_config_path(home),
+        KIRO_MCP_SERVER_NAME,
+        "Kiro CLI",
+    )
 }
 
 /// Render a path as a `file://` resource URI for Kiro's agent config. Reuses
@@ -695,27 +625,13 @@ fn managed_agent_config(
 
 /// Register MCP server in a workspace-local `.kiro/settings/mcp.json`.
 fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let backup = backup_config_file(path)?;
-    let mut config = match load_json_file_strict(path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    ensure_json_object(&config, path)?;
-    ensure_child_object(&mut config, "mcpServers", path)?;
-    config["mcpServers"]["tracedecay"] = mcp_server_entry(tracedecay_bin);
-
-    safe_write_json_file(path, &config, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        path.display()
-    );
-    Ok(())
+    install_mcp_server_entry(
+        path,
+        "mcpServers",
+        mcp_server_entry(tracedecay_bin),
+        "Kiro",
+        load_json_file_strict,
+    )
 }
 
 /// Create or refresh the tracedecay-owned Kiro agent.
@@ -769,30 +685,6 @@ fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) -> Result<()>
 
 fn is_builtin_default_agent(agent: &str) -> bool {
     matches!(agent, "kiro_default" | "default")
-}
-
-fn ensure_json_object(config: &serde_json::Value, path: &Path) -> Result<()> {
-    if config.is_object() {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("{} must contain a JSON object", path.display()),
-        })
-    }
-}
-
-fn ensure_child_object(config: &mut serde_json::Value, key: &str, path: &Path) -> Result<()> {
-    if config.get(key).is_none() {
-        config[key] = json!({});
-        return Ok(());
-    }
-    if config.get(key).is_some_and(serde_json::Value::is_object) {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("{}.{} must be a JSON object", path.display(), key),
-        })
-    }
 }
 
 /// Add or refresh tracedecay's global steering resource for default Kiro
@@ -923,53 +815,16 @@ or proprietary code from the bug description before submitting.",
 // ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(path: &Path) -> Result<()> {
-    if !path.exists() {
-        eprintln!("  {} not found, skipping", path.display());
-        return Ok(());
-    }
-    let contents = std::fs::read_to_string(path).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to read {}: {error}", path.display()),
-    })?;
-    let mut config = serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("failed to parse {} as JSON: {error}", path.display()),
-        }
-    })?;
-    let Some(servers) = config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
-        eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
-        return Ok(());
-    };
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
-        return Ok(());
-    }
-    if servers.is_empty() {
-        config.as_object_mut().map(|o| o.remove("mcpServers"));
-    }
-    let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        backup_config_file(path)?;
-        super::safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", path.display()),
-        })?;
-        tracedecay_private_fs::framed_log::sync_parent_directory(
-            path,
-            tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to durably remove {}: {error}", path.display()),
-        })?;
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else {
-        let backup = backup_config_file(path)?;
-        safe_write_json_file(path, &config, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            path.display()
-        );
-    }
-    Ok(())
+    uninstall_mcp_server_entry(
+        path,
+        "mcpServers",
+        load_json_file,
+        McpUninstallPolicy {
+            prune_empty_root: true,
+            remove_empty_file: true,
+            durable_remove: true,
+        },
+    )
 }
 
 fn remove_steering_rules(path: &Path) {

@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, config_backup_path,
@@ -102,7 +102,7 @@ impl AgentIntegration for CopilotIntegration {
     /// is `copilot mcp`, not TraceDecay. Naming that file (and its staged
     /// backup) here is what gives the component-set transaction rollback
     /// authority over the host command's effect; without it the observation
-    /// recorded in [`run_copilot_mcp_step`] would have nothing to restore.
+    /// recorded in [`run_mcp_registry_step`] would have nothing to restore.
     /// Any other component set keeps the default inventory, which is the
     /// TraceDecay-written VS Code settings file.
     fn host_component_registration_paths(
@@ -151,35 +151,13 @@ impl AgentIntegration for CopilotIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let stable_settings_path = vscode_settings_path(home);
-        let insiders_settings_path = vscode_insiders_settings_path(home);
-        let cli_settings_path = copilot_cli_mcp_config_path(home);
-
-        let vscode_has_tracedecay = if stable_settings_path.exists() {
-            let json = load_jsonc_file(&stable_settings_path);
-            let servers = json.get("mcp").and_then(|v| v.get("servers"));
-            servers.and_then(|v| v.get("tracedecay")).is_some()
-        } else {
-            false
-        };
-
-        let insiders_has_tracedecay = if insiders_settings_path.exists() {
-            let json = load_jsonc_file(&insiders_settings_path);
-            let servers = json.get("mcp").and_then(|v| v.get("servers"));
-            servers.and_then(|v| v.get("tracedecay")).is_some()
-        } else {
-            false
-        };
-
-        let cli_has_tracedecay = if cli_settings_path.exists() {
-            let json = load_json_file(&cli_settings_path);
-            let servers = json.get("mcpServers");
-            servers.and_then(|v| v.get("tracedecay")).is_some()
-        } else {
-            false
-        };
-
-        vscode_has_tracedecay || insiders_has_tracedecay || cli_has_tracedecay
+        vscode_mcp_servers_has_tracedecay(&vscode_settings_path(home))
+            || vscode_mcp_servers_has_tracedecay(&vscode_insiders_settings_path(home))
+            || super::mcp_config_has_tracedecay(
+                &copilot_cli_mcp_config_path(home),
+                "mcpServers",
+                load_json_file,
+            )
     }
 
     fn export_managed_skills(
@@ -228,12 +206,20 @@ impl AgentIntegration for CopilotIntegration {
 }
 
 fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let settings_path = project_root.join(".vscode/mcp.json");
+    super::mcp_config_has_tracedecay(
+        &project_root.join(".vscode/mcp.json"),
+        "servers",
+        load_jsonc_file,
+    )
+}
+
+fn vscode_mcp_servers_has_tracedecay(settings_path: &Path) -> bool {
     if !settings_path.exists() {
         return false;
     }
-    let json = load_jsonc_file(&settings_path);
-    json.get("servers")
+    load_jsonc_file(settings_path)
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
         .and_then(|servers| servers.get("tracedecay"))
         .is_some()
 }
@@ -293,7 +279,7 @@ fn require_copilot_cli() -> Result<PathBuf> {
 fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
     args.extend(MCP_SERVER_ARGS.iter().copied());
-    run_copilot_mcp_step(copilot_cli, &args, home)
+    run_mcp_registry_step(copilot_cli, &args, home)
 }
 
 /// Drive Copilot's own registry to drop the tracedecay MCP server.
@@ -303,110 +289,26 @@ fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -
 /// mcp` command family. TraceDecay has no captured transcript of the removal
 /// command, so this spelling is unverified. It is safe to be wrong here in
 /// exactly one direction: an unknown subcommand exits non-zero and
-/// [`run_copilot_mcp_step`] surfaces Copilot's own diagnosis instead of
+/// [`run_mcp_registry_step`] surfaces Copilot's own diagnosis instead of
 /// falling back to editing the host-owned registry. Should a capture show a
 /// different verb, change this one call site.
 fn copilot_mcp_remove_with(copilot_cli: &Path, home: &Path) -> Result<()> {
-    run_copilot_mcp_step(
+    run_mcp_registry_step(
         copilot_cli,
         &["mcp", "remove", COPILOT_MCP_SERVER_NAME],
         home,
     )
 }
 
-/// Run one `copilot mcp …` step, converting a failed invocation into the
-/// host's own diagnosis.
-///
-/// The peer-server snapshot is a preservation guard: Copilot owns the registry
-/// merge, but a buggy or changed host command must not be allowed to silently
-/// discard an operator's other MCP servers. The exact post-command bytes are
-/// also recorded through the active host transaction so its existing rollback
-/// authority can restore the pre-command document when the command fails or a
-/// later verification step rejects the effect.
-fn run_copilot_mcp_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
-    let mcp_path = copilot_cli_mcp_config_path(home);
-    let (_, peers_before) = read_mcp_config_observation(&mcp_path)?;
-    let outcome = super::host_cli::run_host_cli(copilot_cli, args, home)?;
-    // Snapshot once after the child exits. The bytes that pass the peer guard
-    // are the bytes recorded for rollback; reading again after recording would
-    // create a race in which a foreign writer could be absorbed into the
-    // transaction's intended state and later overwritten during recovery.
-    let (observed_bytes, peers_after) = read_mcp_config_observation(&mcp_path)?;
-    if peers_before != peers_after {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "`{}` changed peer MCP servers in {}; TraceDecay left the host state unaccepted",
-                rendered_invocation(copilot_cli, args),
-                mcp_path.display()
-            ),
-        });
-    }
-    crate::agents::record_host_config_observation_bytes(&mcp_path, observed_bytes.as_deref())?;
-    if outcome.succeeded() {
-        return Ok(());
-    }
-    Err(TraceDecayError::Config {
-        message: outcome.failure_message(),
-    })
-}
-
-/// Render an invocation the way the operator would have typed it, for the
-/// preservation refusal above.
-fn rendered_invocation(copilot_cli: &Path, args: &[&str]) -> String {
-    if args.is_empty() {
-        copilot_cli.display().to_string()
-    } else {
-        format!("{} {}", copilot_cli.display(), args.join(" "))
-    }
-}
-
-/// Exact registry-document bytes (absent when nothing is registered yet) and
-/// the operator-owned peer MCP server entries read from that document.
-type McpConfigObservation = (Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>);
-
-/// Return the operator-owned MCP servers in Copilot's registry document,
-/// excluding TraceDecay's own entry. The host CLI remains the only writer;
-/// this read-only snapshot lets the lifecycle reject a command that drops or
-/// rewrites peers.
-///
-/// Read the registry document once, returning both its exact bytes (for the
-/// rollback observation) and its peer servers (for the preservation guard).
-/// An absent file is a legitimate state — nothing registered yet — and yields
-/// no bytes and no peers.
-fn read_mcp_config_observation(path: &Path) -> Result<McpConfigObservation> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((None, serde_json::Map::new()));
-        }
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to read {} before Copilot CLI: {error}",
-                    path.display()
-                ),
-            });
-        }
-    };
-    let config = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("failed to parse {} as JSON: {error}", path.display()),
-        }
-    })?;
-    let Some(servers) = config.get("mcpServers") else {
-        return Ok((Some(bytes), serde_json::Map::new()));
-    };
-    let Some(servers) = servers.as_object() else {
-        return Err(TraceDecayError::Config {
-            message: format!("{}.mcpServers must be a JSON object", path.display()),
-        });
-    };
-    let peers = servers
-        .iter()
-        .filter(|(name, _)| name.as_str() != COPILOT_MCP_SERVER_NAME)
-        .map(|(name, server)| (name.clone(), server.clone()))
-        .collect();
-    Ok((Some(bytes), peers))
+fn run_mcp_registry_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
+    super::host_cli::run_mcp_registry_step(
+        copilot_cli,
+        args,
+        home,
+        &copilot_cli_mcp_config_path(home),
+        COPILOT_MCP_SERVER_NAME,
+        "Copilot CLI",
+    )
 }
 
 // ---------------------------------------------------------------------------

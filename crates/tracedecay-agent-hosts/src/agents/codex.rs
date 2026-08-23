@@ -54,7 +54,6 @@ mod mcp_registry;
 mod plugin_registry;
 mod retired_entrypoints;
 
-/// `OpenAI` Codex CLI agent.
 pub struct CodexIntegration;
 
 impl AgentIntegration for CodexIntegration {
@@ -2225,8 +2224,6 @@ fn doctor_check_plugin_dir(
     }
 }
 
-/// Check hooks.json registers the tracedecay lifecycle hooks, and report Codex
-/// hook trust state from the user-level config.
 fn doctor_check_hooks(
     dc: &mut DoctorCounters,
     hooks_path: &Path,

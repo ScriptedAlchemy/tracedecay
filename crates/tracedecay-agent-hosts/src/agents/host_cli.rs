@@ -305,6 +305,110 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
     })
 }
 
+/// Convert a finished host CLI invocation into success or the host's own
+/// diagnosis. Shared by registry-driven MCP steps and simpler plugin steps
+/// that only need the typed failure.
+pub(crate) fn require_host_cli_success(outcome: HostCliOutcomeV1) -> Result<()> {
+    if outcome.succeeded() {
+        Ok(())
+    } else {
+        Err(TraceDecayError::Config {
+            message: outcome.failure_message(),
+        })
+    }
+}
+
+/// Render an invocation the way the operator would have typed it.
+pub(crate) fn rendered_host_invocation(program: &Path, args: &[&str]) -> String {
+    if args.is_empty() {
+        program.display().to_string()
+    } else {
+        format!("{} {}", program.display(), args.join(" "))
+    }
+}
+
+/// Exact registry-document bytes (absent when nothing is registered yet) and
+/// the operator-owned peer MCP server entries read from that document.
+type McpConfigObservation = (Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>);
+
+/// Read a host MCP registry document once: exact bytes for rollback, and peer
+/// servers for the preservation guard. An absent file is a legitimate empty
+/// registry.
+fn read_mcp_config_observation(
+    path: &Path,
+    own_server_name: &str,
+    host_label: &str,
+) -> Result<McpConfigObservation> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, serde_json::Map::new()));
+        }
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to read {} before {host_label}: {error}",
+                    path.display()
+                ),
+            });
+        }
+    };
+    let config = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("failed to parse {} as JSON: {error}", path.display()),
+        }
+    })?;
+    let Some(servers) = config.get("mcpServers") else {
+        return Ok((Some(bytes), serde_json::Map::new()));
+    };
+    let Some(servers) = servers.as_object() else {
+        return Err(TraceDecayError::Config {
+            message: format!("{}.mcpServers must be a JSON object", path.display()),
+        });
+    };
+    let peers = servers
+        .iter()
+        .filter(|(name, _)| name.as_str() != own_server_name)
+        .map(|(name, server)| (name.clone(), server.clone()))
+        .collect();
+    Ok((Some(bytes), peers))
+}
+
+/// Run one host `mcp …` registry command with the shared peer-preservation
+/// guard used by Copilot and Kiro.
+///
+/// The host owns the registry merge. A buggy or changed command must not
+/// silently discard an operator's other MCP servers. The exact post-command
+/// bytes are recorded through the active host transaction so rollback can
+/// restore the pre-command document when the command fails or a later
+/// verification step rejects the effect. Snapshot once after the child exits:
+/// reading again after recording would let a foreign writer be absorbed into
+/// the transaction's intended state.
+pub(crate) fn run_mcp_registry_step(
+    program: &Path,
+    args: &[&str],
+    home: &Path,
+    mcp_path: &Path,
+    own_server_name: &str,
+    host_label: &str,
+) -> Result<()> {
+    let (_, peers_before) = read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    let outcome = run_host_cli(program, args, home)?;
+    let (observed_bytes, peers_after) =
+        read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    if peers_before != peers_after {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "`{}` changed peer MCP servers in {}; TraceDecay left the host state unaccepted",
+                rendered_host_invocation(program, args),
+                mcp_path.display()
+            ),
+        });
+    }
+    crate::agents::record_host_config_observation_bytes(mcp_path, observed_bytes.as_deref())?;
+    require_host_cli_success(outcome)
+}
+
 /// Resolve a common `#!/usr/bin/env <interpreter>` launcher before clearing
 /// the child environment.  `env` needs `PATH` to find its interpreter, but
 /// passing the operator's ambient `PATH` through would let the host command

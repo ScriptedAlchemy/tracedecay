@@ -228,8 +228,11 @@ impl AgentIntegration for ClaudeIntegration {
         // tracedecay. An unrelated project `.claude/CLAUDE.md` with neither
         // signal must not become an export destination.
         if !claude_md_path.exists()
-            || !(local_mcp_has_tracedecay(project_root)
-                || claude_md_references_tracedecay(&claude_md_path))
+            || !(super::mcp_config_has_tracedecay(
+                &project_root.join(".mcp.json"),
+                "mcpServers",
+                load_json_file,
+            ) || claude_md_references_tracedecay(&claude_md_path))
         {
             return Ok(Vec::new());
         }
@@ -458,13 +461,7 @@ fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
 /// Run one `claude plugin ...` step, converting a failed invocation into the
 /// host's own diagnosis.
 fn run_claude_plugin_step(claude: &Path, args: &[&str], home: &Path) -> Result<()> {
-    let outcome = super::host_cli::run_host_cli(claude, args, home)?;
-    if outcome.succeeded() {
-        return Ok(());
-    }
-    Err(TraceDecayError::Config {
-        message: outcome.failure_message(),
-    })
+    super::host_cli::require_host_cli_success(super::host_cli::run_host_cli(claude, args, home)?)
 }
 
 fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Value>, ()> {
@@ -473,20 +470,6 @@ fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Val
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
     }
-}
-
-/// True when a project's local `.mcp.json` declares the tracedecay MCP server,
-/// marking the project as a tracedecay-managed Claude workspace (the signal
-/// `tracedecay init` writes, independent of CLAUDE.md content).
-fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let mcp_path = project_root.join(".mcp.json");
-    if !mcp_path.exists() {
-        return false;
-    }
-    let json = load_json_file(&mcp_path);
-    json.get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some()
 }
 
 // ---------------------------------------------------------------------------

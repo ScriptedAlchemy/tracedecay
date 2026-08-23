@@ -118,7 +118,6 @@ pub(super) fn staged_manifest_path(home: &Path) -> PathBuf {
     extension_stage_dir(home).join(EXTENSION_MANIFEST_FILE)
 }
 
-/// The staged context file.
 pub(super) fn staged_context_path(home: &Path) -> PathBuf {
     extension_stage_dir(home).join(EXTENSION_CONTEXT_FILE)
 }

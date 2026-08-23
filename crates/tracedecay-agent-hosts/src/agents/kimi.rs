@@ -28,8 +28,9 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    NonInteractiveInstallOutcome, UpdatePluginOutcome, backup_and_write_json, backup_config_file,
-    load_json_file, load_json_file_strict, safe_write_json_file, safe_write_text_file,
+    McpUninstallPolicy, NonInteractiveInstallOutcome, UpdatePluginOutcome, host_home_override,
+    install_mcp_server_entry, load_json_file, load_json_file_strict, mcp_config_has_tracedecay,
+    safe_write_text_file, uninstall_mcp_server_entry,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -109,7 +110,16 @@ impl AgentIntegration for KimiIntegration {
             [mcp_path.as_path(), agents_md.as_path()],
         )?;
         std::fs::create_dir_all(project_path.join(".kimi-code"))?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_mcp_server_entry(
+            &mcp_path,
+            "mcpServers",
+            json!({
+                "command": ctx.tracedecay_bin.clone(),
+                "args": ["serve"]
+            }),
+            "Kimi",
+            load_json_file_strict,
+        )?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
             &ctx.home,
@@ -137,7 +147,16 @@ impl AgentIntegration for KimiIntegration {
         project_path: &Path,
     ) -> Result<()> {
         let mcp_path = project_path.join(".kimi-code/mcp.json");
-        uninstall_mcp_server(&mcp_path);
+        uninstall_mcp_server_entry(
+            &mcp_path,
+            "mcpServers",
+            load_json_file,
+            McpUninstallPolicy {
+                prune_empty_root: true,
+                remove_empty_file: true,
+                durable_remove: false,
+            },
+        )?;
         let agents_md = project_path.join("AGENTS.md");
         super::remove_managed_skill_prompt_index(
             &ctx.home,
@@ -275,7 +294,12 @@ impl AgentIntegration for KimiIntegration {
         profile_root: &Path,
     ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
         let agents_md = project_root.join("AGENTS.md");
-        if !local_mcp_has_tracedecay(project_root) || !agents_md.exists() {
+        if !mcp_config_has_tracedecay(
+            &project_root.join(".kimi-code/mcp.json"),
+            "mcpServers",
+            load_json_file,
+        ) || !agents_md.exists()
+        {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -288,27 +312,14 @@ impl AgentIntegration for KimiIntegration {
     }
 }
 
-fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let mcp_path = project_root.join(".kimi-code/mcp.json");
-    if !mcp_path.exists() {
-        return false;
-    }
-    let json = load_json_file(&mcp_path);
-    json.get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some()
-}
-
 // ---------------------------------------------------------------------------
 // Kimi Code CLI native plugin helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the Kimi Code CLI home: `$KIMI_CODE_HOME` when set (and non-empty),
-/// else `~/.kimi-code` under the install context's home.
+/// Resolve the Kimi Code CLI home: `$KIMI_CODE_HOME` when set, non-empty, and
+/// under the admitted `home`; otherwise `~/.kimi-code`.
 fn kimi_code_home(home: &Path) -> PathBuf {
-    std::env::var_os(KIMI_CODE_HOME_ENV)
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| home.join(".kimi-code"), PathBuf::from)
+    host_home_override(home, KIMI_CODE_HOME_ENV, ".kimi-code")
 }
 
 /// The staged source Kimi's native plugin command consumes.
@@ -483,33 +494,6 @@ fn render_kimi_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> 
 // Install helpers
 // ---------------------------------------------------------------------------
 
-/// Register tracedecay under `mcpServers` in a Kimi Code MCP config. Used by
-/// the project-local install surface (`<project>/.kimi-code/mcp.json`).
-fn install_mcp_server(mcp_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let backup = backup_config_file(mcp_path)?;
-    let mut settings = match load_json_file_strict(mcp_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    settings["mcpServers"]["tracedecay"] = json!({
-        "command": tracedecay_bin,
-        "args": ["serve"]
-    });
-
-    safe_write_json_file(mcp_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        mcp_path.display()
-    );
-    Ok(())
-}
-
 /// Install-or-refresh prompt rules in AGENTS.md.
 fn install_prompt_rules(agents_md: &Path) -> Result<()> {
     let block = super::prompt_rules::standard_prompt_rules(
@@ -524,60 +508,6 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Uninstall helpers
 // ---------------------------------------------------------------------------
-
-/// Remove tracedecay from a project-local Kimi MCP config, backing up before
-/// rewriting and deleting the file when nothing else remains.
-fn uninstall_mcp_server(mcp_path: &Path) {
-    if !mcp_path.exists() {
-        eprintln!("  {} not found, skipping", mcp_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(mcp_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    };
-
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    }
-
-    let is_empty = settings.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "mcpServers" && v.as_object().is_some_and(serde_json::Map::is_empty))
-    });
-
-    if is_empty {
-        std::fs::remove_file(mcp_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            mcp_path.display()
-        );
-    } else if backup_and_write_json(mcp_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            mcp_path.display()
-        );
-    }
-}
 
 /// Remove tracedecay rules from AGENTS.md.
 fn uninstall_prompt_rules(agents_md: &Path) {

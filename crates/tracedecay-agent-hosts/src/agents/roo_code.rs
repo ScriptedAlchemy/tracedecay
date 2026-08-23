@@ -26,6 +26,10 @@ fn roo_ext_dir(home: &Path) -> PathBuf {
     super::vscode_data_dir(home).join("User/globalStorage/rooveterinaryinc.roo-cline")
 }
 
+fn roo_settings_path(home: &Path) -> PathBuf {
+    roo_ext_dir(home).join("settings/cline_mcp_settings.json")
+}
+
 impl AgentIntegration for RooCodeIntegration {
     fn name(&self) -> &'static str {
         "Roo Code"
@@ -48,9 +52,7 @@ impl AgentIntegration for RooCodeIntegration {
         if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
             return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
         }
-        mcp_servers_registration_state(
-            &roo_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json"),
-        )
+        mcp_servers_registration_state(&roo_settings_path(&ctx.home))
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -58,7 +60,7 @@ impl AgentIntegration for RooCodeIntegration {
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
-        Some(roo_ext_dir(home).join("settings/cline_mcp_settings.json"))
+        Some(roo_settings_path(home))
     }
 
     fn host_component_registration_paths(
@@ -67,7 +69,7 @@ impl AgentIntegration for RooCodeIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
-            let path = roo_ext_dir(home).join("settings/cline_mcp_settings.json");
+            let path = roo_settings_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
             Vec::new()
@@ -81,7 +83,7 @@ impl AgentIntegration for RooCodeIntegration {
     ) -> Result<()> {
         if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
             install_mcp_server_entry(
-                &roo_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json"),
+                &roo_settings_path(&ctx.home),
                 "mcpServers",
                 serde_json::json!({
                     "command": ctx.tracedecay_bin.clone(),
@@ -104,23 +106,17 @@ impl AgentIntegration for RooCodeIntegration {
     ) -> Result<()> {
         if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
-                &roo_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json"),
+                &roo_settings_path(&ctx.home),
                 "mcpServers",
                 load_json_file,
                 McpUninstallPolicy::default(),
-            );
+            )?;
         }
         Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let settings_path = roo_ext_dir(home).join("settings/cline_mcp_settings.json");
-        if !settings_path.exists() {
-            return false;
-        }
-        let json = load_json_file(&settings_path);
-        let servers = json.get("mcpServers");
-        servers.and_then(|v| v.get("tracedecay")).is_some()
+        super::mcp_config_has_tracedecay(&roo_settings_path(home), "mcpServers", load_json_file)
     }
 }
 
@@ -130,7 +126,7 @@ impl AgentIntegration for RooCodeIntegration {
 
 /// Check Roo Code's `cline_mcp_settings.json` has tracedecay MCP server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let settings_path = roo_ext_dir(home).join("settings/cline_mcp_settings.json");
+    let settings_path = roo_settings_path(home);
     doctor_check_mcp_registration(
         dc,
         &settings_path,

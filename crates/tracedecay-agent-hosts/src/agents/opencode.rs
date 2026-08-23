@@ -28,7 +28,6 @@ use super::{
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 
-/// `OpenCode` agent.
 pub struct OpenCodeIntegration;
 
 const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../../../plugin/opencode/tracedecay.ts");
@@ -362,8 +361,6 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // Config path resolution
 // ---------------------------------------------------------------------------
 
-/// Returns the path to opencode config (global).
-///
 /// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME` —
 /// but only when `home` *is* this process user's home. See
 /// [`ambient_xdg_config_home`].
@@ -412,8 +409,6 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
         .join("opencode/opencode.json")
 }
 
-/// Returns the path to the global AGENTS.md prompt file.
-///
 /// Resolution depends only on which prompt *file* exists, never on whether the
 /// `~/.config/opencode` directory exists. The directory is created by
 /// TraceDecay's own managed artifacts (`plugins/`, `agent/`, `command/`,
@@ -900,7 +895,6 @@ fn opencode_original_config_path(config_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
-/// Remove tracedecay rules from AGENTS.md.
 fn uninstall_prompt_rules(prompt_path: &Path) {
     super::prompt_rules::remove_prompt_rules(prompt_path, PROMPT_RULE_MARKER);
 }
@@ -909,7 +903,6 @@ fn uninstall_prompt_rules(prompt_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check opencode.json has tracedecay registered.
 fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     let config_path = opencode_config_path(home);
     if !config_path.exists() {
@@ -962,7 +955,6 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     }
 }
 
-/// Check AGENTS.md contains tracedecay rules.
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
     let prompt_path = opencode_prompt_path(home);
     if prompt_path.exists() {

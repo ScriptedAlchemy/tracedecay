@@ -14,8 +14,8 @@ use crate::errors::Result;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
     McpUninstallPolicy, config_backup_path, install_mcp_server_entry, load_json_file,
-    load_json_file_strict, mcp_registration_entry, mcp_servers_registration_state,
-    report_mcp_registration, uninstall_mcp_server_entry,
+    load_json_file_strict, mcp_servers_registration_state, report_mcp_registration,
+    uninstall_mcp_server_entry,
 };
 
 /// Cline agent.
@@ -43,7 +43,7 @@ fn cline_settings_paths(home: &Path) -> [PathBuf; 2] {
 /// Cline accepts any `mcpServers.tracedecay` entry, so this deliberately skips
 /// the object-shape filter [`super::doctor_check_mcp_registration`] applies.
 fn settings_have_tracedecay(path: &Path) -> bool {
-    path.exists() && mcp_registration_entry(path, "mcpServers", load_json_file).is_some()
+    super::mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
 impl AgentIntegration for ClineIntegration {
@@ -129,7 +129,7 @@ impl AgentIntegration for ClineIntegration {
                 "mcpServers",
                 load_json_file,
                 McpUninstallPolicy::default(),
-            );
+            )?;
         }
         Ok(())
     }

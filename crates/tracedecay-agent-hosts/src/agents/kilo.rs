@@ -128,19 +128,13 @@ impl AgentIntegration for KiloIntegration {
                 "mcp",
                 load_jsonc_file,
                 McpUninstallPolicy::default(),
-            );
+            )?;
         }
         Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let config_path = kilo_config_path(home);
-        if !config_path.exists() {
-            return false;
-        }
-        let json = load_jsonc_file(&config_path);
-        let servers = json.get("mcp");
-        servers.and_then(|v| v.get("tracedecay")).is_some()
+        super::mcp_config_has_tracedecay(&kilo_config_path(home), "mcp", load_jsonc_file)
     }
 }
 
