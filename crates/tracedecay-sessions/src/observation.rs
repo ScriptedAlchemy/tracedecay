@@ -638,6 +638,7 @@ where
     /// without touching persist authority. A sanitizer reject or quarantine
     /// in the batch refuses before persistence so the stream owner can retry
     /// one request at a time and advance typed coverage between records.
+    #[hotpath::measure]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,
