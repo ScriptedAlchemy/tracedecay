@@ -1122,6 +1122,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         self.authority.resident_byte_ceiling()
     }
 
+    #[hotpath::measure]
     fn embed_batch(
         &mut self,
         batch: &BoundedSanitizedTextBatchV1,

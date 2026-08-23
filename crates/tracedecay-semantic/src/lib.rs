@@ -1097,6 +1097,7 @@ where
         Ok(vectors.pop().unwrap_or_else(|| panic!("unit vector batch")))
     }
 
+    #[hotpath::measure]
     fn encode_batch(
         &mut self,
         key: &tracedecay_domain::EmbeddingProjectionKeyV1,
@@ -1132,6 +1133,7 @@ where
     /// Failures are reported by lowest input index, matching the sequential
     /// path's first-error semantics regardless of which stripe failed first in
     /// wall-clock terms.
+    #[hotpath::measure]
     fn encode_batches(
         &mut self,
         key: &tracedecay_domain::EmbeddingProjectionKeyV1,

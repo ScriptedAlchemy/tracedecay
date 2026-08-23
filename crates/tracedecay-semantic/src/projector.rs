@@ -189,6 +189,7 @@ pub struct PreparedVectorGenerationV1 {
 /// change also embeds content-identical `reused` chunks into the new profile's
 /// generation. Deleted chunks become tombstones; ordinary reused chunks remain
 /// receipt-only so the store can copy their compatible prior vectors.
+#[hotpath::measure]
 pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     admitted_projection: &AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
