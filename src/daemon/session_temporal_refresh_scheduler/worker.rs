@@ -47,9 +47,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 break;
             }
             state.begin_pass();
-            if !state.busy.swap(true, Ordering::AcqRel) {
-                hotpath::gauge!("background_jobs").inc(1.0);
-            }
+            state.mark_worker_busy();
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let history_outcome = if history_requested {
                 session_history_refresh(&history).await
@@ -129,7 +127,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             if let Some(class) = report.retry_class {
                 retry_attempt = retry_attempt.saturating_add(1);
                 state.mark_recovering(class.into(), class);
-                state.dirty.store(true, Ordering::Release);
+                state.requeue_projection();
                 tokio::select! {
                     () = state.wait_for_cancellation() => return,
                     () = state.wake.notified() => {}
@@ -165,14 +163,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     || report.saturated
                     || report.projected_batches > 0
                 {
-                    state.dirty.store(true, Ordering::Release);
+                    state.requeue_projection();
                     tokio::task::yield_now().await;
                 }
             }
         }
-        if state.busy.swap(false, Ordering::AcqRel) {
-            hotpath::gauge!("background_jobs").inc(-1.0);
-        }
+        state.mark_worker_idle();
         state.idle.notify_waiters();
         let wake = state.wake.notified();
         if state.has_pending_work() {

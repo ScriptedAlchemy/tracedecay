@@ -178,12 +178,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
                         if error.is_panic() && !worker_state.cancelled.load(Ordering::Acquire) =>
                     {
                         panic_attempt = panic_attempt.saturating_add(1);
-                        worker_state.busy.store(false, Ordering::Release);
+                        worker_state.mark_worker_idle();
                         worker_state.mark_recovering(
                             SessionTemporalRefreshBlocker::WorkerPanicked,
                             SessionTemporalRefreshRetryClass::Projector,
                         );
-                        worker_state.dirty.store(true, Ordering::Release);
+                        worker_state.requeue_projection();
                         worker_state.recover_history_after_worker_panic();
                         tokio::select! {
                             () = worker_state.wait_for_cancellation() => return,

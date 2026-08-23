@@ -236,10 +236,14 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn wake(&self) {
+        self.requeue_projection();
+        self.wake.notify_one();
+    }
+
+    pub(super) fn requeue_projection(&self) {
         if !self.dirty.swap(true, Ordering::AcqRel) {
             hotpath::gauge!("projection_dirty").inc(1.0);
         }
-        self.wake.notify_one();
     }
 
     pub(super) fn wake_history(&self) {
@@ -251,6 +255,18 @@ impl SessionTemporalRefreshWakeState {
 
     pub(super) fn has_pending_work(&self) -> bool {
         self.dirty.load(Ordering::Acquire) || self.historical_dirty.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_worker_busy(&self) {
+        if !self.busy.swap(true, Ordering::AcqRel) {
+            hotpath::gauge!("background_jobs").inc(1.0);
+        }
+    }
+
+    pub(super) fn mark_worker_idle(&self) {
+        if self.busy.swap(false, Ordering::AcqRel) {
+            hotpath::gauge!("background_jobs").inc(-1.0);
+        }
     }
 
     pub(super) fn mark_running(&self) {
