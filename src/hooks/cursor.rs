@@ -654,9 +654,9 @@ async fn notify_cursor_after_file_edit(
     // Cursor's event carries nothing but the edited paths, so an edit that
     // touched nothing inside the project is not sent.
     notify_edited_paths(
-        &root,
+        root,
         parsed,
-        || cursor_after_file_edit_rel_paths_from_parsed(parsed, &root),
+        || cursor_after_file_edit_rel_paths_from_parsed(parsed, root),
         DaemonHookEvent::cursor_after_file_edit,
         EmptyPathPolicy::Skip,
         Some(telemetry),
@@ -681,7 +681,7 @@ async fn notify_cursor_after_shell_event(
     super::notify_hook_event_with_telemetry(
         root,
         DaemonHookEvent::cursor_after_shell_execution(cwd)
-            .with_route(hook_route_metadata_from_event(event_json, &root)),
+            .with_route(hook_route_metadata_from_event(event_json, root)),
         telemetry,
     )
     .await;
@@ -690,89 +690,22 @@ async fn notify_cursor_after_shell_event(
 /// Best-effort daemon notification for Cursor `workspaceOpen`.
 async fn notify_cursor_workspace_open(
     event_json: &str,
+    root: Option<&Path>,
     telemetry: &super::analytics::HookTimingSpan,
 ) {
-    let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
+    let Some(root) = root else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(root) {
         return;
     }
     super::notify_hook_event_with_telemetry(
-        &root,
-        DaemonHookEvent::cursor_workspace_open(root.clone())
-            .with_route(hook_route_metadata_from_event(event_json, &root)),
+        root,
+        DaemonHookEvent::cursor_workspace_open(root.to_path_buf())
+            .with_route(hook_route_metadata_from_event(event_json, root)),
         telemetry,
     )
     .await;
-}
-
-/// Incrementally ingests the Cursor transcript referenced by `event_json` into
-/// the resolved project session DB, bounded by `max_new_bytes` (the hot-path cap)
-/// and an overall `budget`. Always fails open: a timeout, missing transcript, or
-/// any error is swallowed so the calling hook never blocks the agent.
-#[derive(Default)]
-struct CursorIngestOutcome {
-    user_scope: bool,
-    messages_upserted: u64,
-}
-
-async fn ingest_cursor_transcript_for_event_inner(
-    event_json: &str,
-    project_root: Option<&Path>,
-    max_new_bytes: Option<u64>,
-    budget: Duration,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> CursorIngestOutcome {
-    let mut args = serde_json::json!({
-        "action": "ingest_transcript",
-        "provider": "cursor",
-        "user_scope": project_root.is_none(),
-        "event_json": event_json,
-    });
-    if let Some(max_new_bytes) = max_new_bytes {
-        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
-    }
-    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
-    if let Some(telemetry) = telemetry {
-        telemetry.note_timeout_budget(budget);
-    }
-    match tokio::time::timeout(
-        budget,
-        super::daemon_hook_action(project_root, args, telemetry),
-    )
-    .await
-    {
-        Ok(Ok(result)) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(false);
-            }
-            CursorIngestOutcome {
-                user_scope: result
-                    .get("user_scope")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                messages_upserted: result
-                    .get("messages_upserted")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            }
-        }
-        Ok(Err(error)) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(false);
-            }
-            eprintln!("[tracedecay] Cursor transcript ingest daemon call failed: {error}");
-            CursorIngestOutcome::default()
-        }
-        Err(_) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(true);
-            }
-            eprintln!("[tracedecay] Cursor transcript ingest daemon call timed out");
-            CursorIngestOutcome::default()
-        }
-    }
 }
 
 fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {

@@ -1006,7 +1006,11 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             ) else {
                 return test_primitive_failed(context);
             };
-            let Ok(test_annotations) = test_annotation_evidence(&reader, Arc::clone(&cancellation))
+            let Ok(test_annotations) = test_annotation_evidence(
+                &reader,
+                Arc::clone(&cancellation),
+                &self.annotation_evidence,
+            )
             else {
                 return test_primitive_failed(context);
             };
