@@ -165,7 +165,9 @@ impl GraphDb {
                 0,
                 generation_bytes,
             );
-            crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Staged);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Staged,
+            );
         }
         for (index, page) in pages.iter().enumerate() {
             check()?;
@@ -401,11 +403,11 @@ impl GraphDb {
         // reopened rows stable for the digest.
         let snapshot_gate = self.wait_snapshot_gate_write();
         {
-            let mut database_guard =
-                crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE, || {
-                    self.inner.database.write()
-                })
-                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+            let mut database_guard = crate::hotpath_observe::wait_lock(
+                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                || self.inner.database.write(),
+            )
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             self.ensure_available()?;
             check()?;
             let mut state_guard = self.state_write_guard()?;
@@ -494,16 +496,16 @@ impl GraphDb {
         // database file). The re-verification afterwards is read-only again,
         // so the gate downgrades back to upgradable and snapshot readers are
         // admitted while the repaired rows stream through the proof.
-        let write_gate =
-            crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE, || {
-                RwLockUpgradableReadGuard::upgrade(snapshot_gate)
-            });
+        let write_gate = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
+            || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
+        );
         {
-            let mut database_guard =
-                crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE, || {
-                    self.inner.database.write()
-                })
-                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+            let mut database_guard = crate::hotpath_observe::wait_lock(
+                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                || self.inner.database.write(),
+            )
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             let mut state_guard = self.state_write_guard()?;
             let mut quarantined_guard = self
                 .inner
@@ -557,7 +559,9 @@ impl GraphDb {
                     0,
                     0,
                 );
-                crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Recovered);
+                crate::hotpath_observe::record_hydration_source(
+                    crate::hotpath_observe::HydrationSource::Recovered,
+                );
                 Ok((commit, verified))
             }
             Err(error) => {
@@ -567,13 +571,11 @@ impl GraphDb {
                     crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
                     || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
                 );
-                let mut database_guard =
-                    crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE, || {
-                        self.inner.database.write()
-                    })
-                    .map_err(|_| {
-                        GraphDbError::unavailable("graph database write lock is poisoned")
-                    })?;
+                let mut database_guard = crate::hotpath_observe::wait_lock(
+                    crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                    || self.inner.database.write(),
+                )
+                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
                 let mut state_guard = self.state_write_guard()?;
                 let mut quarantined_guard =
                     self.inner.quarantined_projections.write().map_err(|_| {
@@ -918,7 +920,9 @@ impl GraphDb {
                 .filter(|visit| visit.via_relation.is_some())
                 .count();
             crate::hotpath_observe::record_counts(visits.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Snapshot,
+            );
         }
         Ok(VerifiedTraversalResult { visits })
     }
@@ -984,11 +988,11 @@ impl GraphDb {
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let physical_namespace = locator.physical_namespace()?;
         let _snapshot_gate = self.wait_snapshot_gate_write();
-        let mut database_guard =
-            crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE, || {
-                self.inner.database.write()
-            })
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        let mut database_guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+            || self.inner.database.write(),
+        )
+        .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         let mut format_state = self.state_write_guard()?;
         let mut projection_quarantine = self
             .inner

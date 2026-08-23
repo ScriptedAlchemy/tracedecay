@@ -153,13 +153,16 @@ impl GraphDb {
 
     #[hotpath::measure(label = "graph_db.snapshot.acquire", impl_type = "GraphDb")]
     pub fn snapshot(self: &Arc<Self>) -> Result<GraphSnapshot, GraphDbError> {
-        let lease = crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_READ, || {
-            self.inner.snapshot_gate.read_arc()
-        });
+        let lease = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_READ,
+            || self.inner.snapshot_gate.read_arc(),
+        );
         let guard = self.read_guard()?;
         guard.as_ref().ok_or(GraphDbError::Closed)?;
         drop(guard);
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
         Ok(GraphSnapshot {
             database: Arc::clone(self),
             _lease: lease,
@@ -404,7 +407,9 @@ impl GraphDb {
                 .filter(|visit| visit.via_relation.is_some())
                 .count();
             crate::hotpath_observe::record_counts(result.visits.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Live);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
         }
         Ok(result)
     }
@@ -481,7 +486,9 @@ impl GraphDb {
         {
             let edges = batches.iter().map(Vec::len).sum();
             crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Live);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
         }
         Ok(batches)
     }
@@ -580,21 +587,21 @@ impl GraphDb {
 
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
         let _snapshot_gate = self.wait_snapshot_gate_write();
-        let mut guard =
-            match crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE, || {
-                self.inner.database.write()
-            }) {
-                Ok(guard) => guard,
-                Err(_) => {
-                    self.inner.closed.store(true, Ordering::Release);
-                    self.inner.poisoned.store(true, Ordering::Release);
-                    return Err(GraphDbError::DurabilityUncertain {
+        let mut guard = match crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+            || self.inner.database.write(),
+        ) {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.inner.closed.store(true, Ordering::Release);
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(GraphDbError::DurabilityUncertain {
                     message:
                         "graph database write lock is poisoned; physical close cannot be confirmed"
                             .to_owned(),
                 });
-                }
-            };
+            }
+        };
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return if was_uncertain {
@@ -851,9 +858,10 @@ impl GraphDb {
 
     pub(crate) fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
-        let guard = crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_READ, || {
-            self.inner.database.read()
-        })
+        let guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_READ,
+            || self.inner.database.read(),
+        )
         .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
         self.ensure_available()?;
         Ok(guard)
@@ -863,9 +871,10 @@ impl GraphDb {
         &self,
     ) -> Result<RwLockWriteGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
-        let guard = crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE, || {
-            self.inner.database.write()
-        })
+        let guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+            || self.inner.database.write(),
+        )
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         self.ensure_available()?;
         Ok(guard)
@@ -881,23 +890,26 @@ impl GraphDb {
     }
 
     pub(crate) fn wait_snapshot_gate_write(&self) -> ParkingRwLockWriteGuard<'_, ()> {
-        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_WRITE, || {
-            self.inner.snapshot_gate.write()
-        })
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_WRITE,
+            || self.inner.snapshot_gate.write(),
+        )
     }
 
     pub(crate) fn wait_snapshot_gate_upgradable(&self) -> RwLockUpgradableReadGuard<'_, ()> {
-        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADABLE, || {
-            self.inner.snapshot_gate.upgradable_read()
-        })
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADABLE,
+            || self.inner.snapshot_gate.upgradable_read(),
+        )
     }
 
     pub(crate) fn wait_verified_generations_write(
         &self,
     ) -> Result<RwLockWriteGuard<'_, crate::lease::VerifiedGenerationState>, GraphDbError> {
-        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_VERIFIED_GENERATIONS, || {
-            self.inner.verified_generations.write()
-        })
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_VERIFIED_GENERATIONS,
+            || self.inner.verified_generations.write(),
+        )
         .map_err(|_| GraphDbError::unavailable("verified graph generation state lock is poisoned"))
     }
 

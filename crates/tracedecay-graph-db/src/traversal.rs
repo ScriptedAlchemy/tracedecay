@@ -76,7 +76,9 @@ pub struct TraversalResult {
 impl GraphSnapshot {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
         let result = self.database.traverse(request)?;
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
         Ok(result)
     }
 

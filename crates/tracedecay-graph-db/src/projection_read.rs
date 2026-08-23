@@ -94,7 +94,9 @@ impl GraphDb {
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let page = read_projection(database, request)?;
         crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Live);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Live,
+        );
         Ok(page)
     }
 
@@ -115,7 +117,9 @@ impl GraphDb {
                 0,
             );
         }
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Live);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Live,
+        );
         Ok(telemetry)
     }
 
@@ -177,7 +181,9 @@ impl GraphSnapshot {
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         let page = self.database.read_projection(request)?;
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
         Ok(page)
     }
 
@@ -186,7 +192,9 @@ impl GraphSnapshot {
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         let telemetry = self.database.projection_telemetry(request)?;
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
         Ok(telemetry)
     }
 }

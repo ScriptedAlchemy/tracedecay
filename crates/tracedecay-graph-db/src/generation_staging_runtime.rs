@@ -70,7 +70,9 @@ impl GraphDb {
         let idempotency_key = batch_idempotency_key(&receipt.key)?;
 
         crate::hotpath_observe::record_counts(batch.mutations.len(), 0, 0, 0);
-        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Staged);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Staged,
+        );
         let _snapshot_gate = self.wait_snapshot_gate_write();
         self.require_staged_generation_writable(&locator)?;
         let guard = self.write_guard()?;

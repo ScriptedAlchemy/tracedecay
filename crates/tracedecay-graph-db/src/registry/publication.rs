@@ -486,7 +486,12 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
-        crate::hotpath_observe::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
+        crate::hotpath_observe::record_counts(
+            manifest.entities.len(),
+            manifest.relations.len(),
+            1,
+            0,
+        );
         crate::hotpath_observe::record_hydration_source(if has_supplied_manifest {
             crate::hotpath_observe::HydrationSource::Supplied
         } else if metadata_only {

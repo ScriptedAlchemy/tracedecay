@@ -367,9 +367,13 @@ pub(crate) fn checked_decode_replay_source(
     Ok(source)
 }
 
-fn hydration_source(source: &GraphGenerationReplaySource) -> crate::hotpath_observe::HydrationSource {
+fn hydration_source(
+    source: &GraphGenerationReplaySource,
+) -> crate::hotpath_observe::HydrationSource {
     match source {
-        GraphGenerationReplaySource::InlineManifest(_) => crate::hotpath_observe::HydrationSource::Inline,
+        GraphGenerationReplaySource::InlineManifest(_) => {
+            crate::hotpath_observe::HydrationSource::Inline
+        }
         GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
             crate::hotpath_observe::HydrationSource::Metadata
         }
