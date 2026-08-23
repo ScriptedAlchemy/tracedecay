@@ -15,14 +15,12 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-capture/hotpath",
-    "tracedecay-domain/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
 ]
 hotpath-alloc = [
@@ -30,14 +28,12 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -45,14 +41,12 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
 ]
 # Explicit opt-in (same policy as the query kernel): exposes the registered

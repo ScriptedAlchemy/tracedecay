@@ -16,21 +16,18 @@ doctest = false
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
-    "tracedecay-domain/hotpath",
     "tracedecay-private-fs/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
 ]
 

@@ -46,21 +46,18 @@ fsys = "1.1.0"
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-code-index/hotpath",
-    "tracedecay-domain/hotpath",
     "tracedecay-query/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
 ]
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's

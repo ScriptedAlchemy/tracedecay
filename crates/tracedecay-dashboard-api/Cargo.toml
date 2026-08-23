@@ -45,7 +45,6 @@ hotpath = [
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-code-index/hotpath",
-    "tracedecay-domain/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
@@ -53,8 +52,6 @@ hotpath = [
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-tool-catalog/hotpath",
     "tracedecay-usecases/hotpath",
 ]
 hotpath-alloc = [
@@ -64,7 +61,6 @@ hotpath-alloc = [
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
@@ -72,8 +68,6 @@ hotpath-alloc = [
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
     "tracedecay-usecases/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -83,7 +77,6 @@ hotpath-cpu = [
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
@@ -91,8 +84,6 @@ hotpath-cpu = [
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
 ]
 default = []

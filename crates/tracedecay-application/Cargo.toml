@@ -12,23 +12,14 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "hotpath/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-policy/hotpath",
-    "tracedecay-tool-catalog/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-policy/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-policy/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
 ]
 # Mounts the native `gix` historical-blob reader beside its port. Off by
 # default so the crate stays a pure contract surface for consumers that only
