@@ -209,6 +209,7 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 pub async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
@@ -361,6 +362,7 @@ impl<'a> ToolCallRegistryOptions<'a> {
     }
 }
 
+#[hotpath::measure]
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
@@ -370,6 +372,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     Box::pin(async move {
+        hotpath::measure_block!("mcp.tool_call", async {
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
                 return Err(TraceDecayError::Config {
@@ -684,6 +687,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 )),
             }
         }
+        }.await)
     })
 }
 

@@ -214,6 +214,7 @@ impl DaemonSessionSyncService {
         });
     }
 
+    #[hotpath::measure]
     pub(super) async fn cancel_request(
         &self,
         control: SessionSyncControlV1,

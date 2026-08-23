@@ -773,6 +773,7 @@ impl DaemonSessionSyncService {
         }
     }
 
+    #[hotpath::measure]
     async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
         let project_gate = self.project_gate(control.scope());
         let _project = project_gate.lock().await;
@@ -787,15 +788,21 @@ impl DaemonSessionSyncService {
 
 impl SessionSyncServicePort for DaemonSessionSyncService {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_> {
-        Box::pin(async move { self.execute_request(request).await })
+        Box::pin(async move {
+            hotpath::measure_block!("session_sync.execute", self.execute_request(request).await)
+        })
     }
 
     fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
-        Box::pin(async move { self.status_request(control).await })
+        Box::pin(async move {
+            hotpath::measure_block!("session_sync.status", self.status_request(control).await)
+        })
     }
 
     fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
-        Box::pin(async move { self.cancel_request(control).await })
+        Box::pin(async move {
+            hotpath::measure_block!("session_sync.cancel", self.cancel_request(control).await)
+        })
     }
 
     fn shutdown(&self) -> SessionSyncShutdownFuture<'_> {

@@ -415,6 +415,7 @@ impl DaemonSessionSyncService {
             .cloned()
     }
 
+    #[hotpath::measure]
     pub(super) async fn execute_request(
         &self,
         request: SessionSyncRequestV1,

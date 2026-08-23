@@ -609,6 +609,7 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
+    #[hotpath::measure]
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
@@ -633,14 +634,24 @@ impl McpServer {
                 );
             }
         };
-        match crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
-            budget,
-            &profile_id,
-            &authority,
-            &project_catalog_discovery_scope(),
-            ToolRegistryMode::HostAvailable,
+        match hotpath::measure_block!(
+            "mcp.tools_list.compose",
+            crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
+                budget,
+                &profile_id,
+                &authority,
+                &project_catalog_discovery_scope(),
+                ToolRegistryMode::HostAvailable,
+            )
         ) {
-            Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+            Ok(tools) => {
+                let payload =
+                    hotpath::measure_block!("mcp.tools_list.encode", json!({ "tools": tools }));
+                if let Ok(encoded) = serde_json::to_vec(&payload) {
+                    hotpath::gauge!("mcp.tools_list.response_bytes").set(encoded.len() as f64);
+                }
+                JsonRpcResponse::success(id, payload)
+            }
             Err(error) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,
