@@ -26,7 +26,9 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 #[cfg(test)]
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_code_index::production::sealed_generation_format_revision_is_compatible;
-use tracedecay_domain::canonical_text::{encode_lowercase_hex, is_lowercase_hex, sha256_hex};
+use tracedecay_domain::canonical_text::{
+    encode_lowercase_hex, encode_tagged_lowercase_hex, is_lowercase_hex, sha256_hex,
+};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
 mod generation_scan;
@@ -4365,11 +4367,12 @@ mod tests {
         generation_id: &CodeGenerationId,
         bytes: &[u8],
     ) -> DurableCodeTextArtifactDescriptorV1 {
-        let digest = hex::encode(Sha256::digest(bytes));
+        let digest_bytes = Sha256::digest(bytes);
+        let digest = encode_lowercase_hex(&digest_bytes);
         DurableCodeTextArtifactDescriptorV1 {
             generation_id: generation_id.clone(),
             artifact_file: format!("text-artifact-{digest}.bin"),
-            artifact_digest: ManifestDigest::new(format!("sha256:{digest}"))
+            artifact_digest: ManifestDigest::from_sha256_bytes(&digest_bytes)
                 .expect("artifact digest"),
             artifact_size_bytes: u64::try_from(bytes.len()).expect("artifact byte count"),
         }
@@ -4509,7 +4512,8 @@ mod tests {
                 "chunks": [],
             }))
             .expect("serialize generation fixture");
-            let state_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+            let state_digest =
+                encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
             let file = format!(
                 "generation-{}.json",
                 state_digest.strip_prefix("sha256:").expect("digest prefix")

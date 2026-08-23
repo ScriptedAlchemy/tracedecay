@@ -353,8 +353,13 @@ pub async fn overview(
         underused_tool_families(state.lcm_db.as_deref()),
     );
     let observatory = Some(observatory);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
     let (hints, usage, diagnostics) = tokio::join!(
-        hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
+        hint_summary(
+            state.savings_db.as_deref().or(state.lcm_db.as_deref()),
+            durable_events.as_deref(),
+            Some(&project_id),
+        ),
         typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
         typed_diagnostics_summary(&state, durable_events.as_deref()),
     );
@@ -878,7 +883,13 @@ pub async fn hints(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    let payload = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
+    let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    let payload = hint_summary(
+        state.savings_db.as_deref().or(state.lcm_db.as_deref()),
+        durable_events.as_deref(),
+        Some(&project_id),
+    )
+    .await;
     if !payload.available {
         return Json(DashboardEnvelopeV1::unavailable(
             scope_from_state(&state),
@@ -1065,44 +1076,24 @@ async fn durable_analytics_rows(
     lcm_db: Option<&RegisteredGlobalDb>,
     project_id: &str,
 ) -> Option<Vec<Value>> {
-    if let Some(db) = global_db
-        && let Ok(events) = db
-            .query_analytics_events(&AnalyticsEventQuery {
-                provider: None,
-                project_id: Some(project_id.to_string()),
-                session_id: None,
-                event_kind: None,
-                since: None,
-                until: None,
-                before_id: None,
-                limit: ANALYTICS_EVENT_LIMIT,
-            })
-            .await
-        && !events.is_empty()
-    {
-        return Some(events.iter().map(durable_analytics_event_row).collect());
+    let query = AnalyticsEventQuery {
+        provider: None,
+        project_id: Some(project_id.to_string()),
+        session_id: None,
+        event_kind: None,
+        since: None,
+        until: None,
+        before_id: None,
+        limit: ANALYTICS_EVENT_LIMIT,
+    };
+    for db in [global_db, lcm_db].into_iter().flatten() {
+        if let Ok(events) = db.query_analytics_events(&query).await
+            && !events.is_empty()
+        {
+            return Some(events.iter().map(durable_analytics_event_row).collect());
+        }
     }
-
-    let lcm_db = lcm_db?;
-    let connection = lcm_db.read_connection();
-    let rows = query_rows(
-        &connection,
-        "SELECT provider, timestamp, event_kind, hook_name, tool_name,
-                tool_category, skill_name, hint_category, outcome, metadata_json
-         FROM (
-             SELECT provider, timestamp, event_kind, hook_name, tool_name,
-                    tool_category, skill_name, hint_category, outcome, metadata_json, id
-             FROM analytics_events
-             WHERE project_id = ?1
-             ORDER BY timestamp DESC, id DESC
-             LIMIT 10000
-         )
-         ORDER BY timestamp, id",
-        params![project_id],
-    )
-    .await
-    .ok()?;
-    if rows.is_empty() { None } else { Some(rows) }
+    None
 }
 
 pub fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {
@@ -1270,10 +1261,49 @@ fn decode_analytics_contract<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("{label} did not match its response contract: {error}"))
 }
 
+fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
+    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
+        .iter()
+        .map(|category| ((*category).to_string(), HintCounts::default()))
+        .collect();
+    for row in counts {
+        by_category.insert(
+            row.category.clone(),
+            HintCounts {
+                emitted: row.emitted,
+                followed: row.followed,
+                ignored: row.ignored,
+                suppressed: row.suppressed,
+            },
+        );
+    }
+    AnalyticsHintsPayloadV1 {
+        available: true,
+        source: "analytics_events".to_owned(),
+        error: None,
+        by_category: by_category
+            .into_iter()
+            .map(|(category, counts)| AnalyticsHintCategoryV1 {
+                category,
+                emitted: counts.emitted,
+                followed: counts.followed,
+                ignored: counts.ignored,
+                suppressed: counts.suppressed,
+            })
+            .collect(),
+    }
+}
+
 async fn hint_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[Value]>,
+    project_id: Option<&str>,
 ) -> AnalyticsHintsPayloadV1 {
+    if let (Some(db), Some(project_id)) = (db, project_id)
+        && let Ok(counts) = db.query_analytics_hint_counts(Some(project_id), 0).await
+    {
+        return typed_hint_summary_from_counts(&counts);
+    }
     if let Some(events) = durable_events {
         return hint_summary_from_events(events);
     }
