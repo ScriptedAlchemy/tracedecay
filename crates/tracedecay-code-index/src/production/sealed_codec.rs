@@ -210,11 +210,8 @@ fn encode_sealed_envelope_bytes(
 fn json_generation_digest(
     generation_bytes: &[u8],
 ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
-    ManifestDigest::new(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(generation_bytes))
-    ))
-    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+    ManifestDigest::from_sha256_bytes(&Sha256::digest(generation_bytes))
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
 }
 
 fn json_generation_bytes_and_digest<T: Serialize>(

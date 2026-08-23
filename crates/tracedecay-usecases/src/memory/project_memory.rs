@@ -3,6 +3,7 @@
 use sha2::{Digest, Sha256};
 
 use tracedecay_domain::RunId;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId};
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
@@ -169,9 +170,9 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         if content.trim().is_empty() || detect_secret_like(content.trim()).is_some() {
             return Ok(None);
         }
-        let digest = LocatorDigest::new(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(content.as_bytes()))
+        let digest = LocatorDigest::new(encode_tagged_lowercase_hex(
+            "sha256:",
+            &Sha256::digest(content.as_bytes()),
         ))
         .map_err(|_| MemoryApplicationError::InvalidInput {
             invariant: "exact fact content digest",

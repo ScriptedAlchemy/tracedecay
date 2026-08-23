@@ -32,13 +32,13 @@ use super::{
 
 impl DaemonSessionRetrievalService {
     fn lcm_authorization_binding(&self, provider: &str) -> String {
-        format!(
-            "sha256:{}",
-            hex::encode(message_search_digest(
+        encode_tagged_lowercase_hex(
+            "sha256:",
+            &message_search_digest(
                 b"tracedecay.mcp.lcm.authorization.v1\0",
                 &self.root.identity,
                 Some(provider),
-            ))
+            ),
         )
     }
 

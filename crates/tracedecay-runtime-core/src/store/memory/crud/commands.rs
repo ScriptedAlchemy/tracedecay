@@ -21,6 +21,7 @@ use crate::db::engine::params;
 use crate::db::tombstone_fact_derivatives_tx;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
     FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LocatorDigest,
@@ -306,9 +307,9 @@ pub(in crate::store::memory) async fn load_mutable_project_memory_fact_tx(
 }
 
 fn content_digest(content: &str) -> FactStoreResult<LocatorDigest> {
-    LocatorDigest::new(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(content.as_bytes()))
+    LocatorDigest::new(encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(content.as_bytes()),
     ))
     .map_err(FactStoreError::from)
 }
