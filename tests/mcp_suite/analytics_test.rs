@@ -10,6 +10,7 @@ use serde_json::json;
 #[cfg(feature = "test-transport")]
 use crate::support::{
     handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
+    real_mcp_server, setup_empty_project,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay::global_db::AnalyticsEventInsert;
@@ -202,34 +203,26 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_section_filter_returns_only_the_requested_section() {
-    let fixture = production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let server = real_mcp_server(cg).await;
 
     let res = handle_real_server_tool_call(
         &server,
         "tracedecay_analytics",
-        json!({"section": "facts", "format": "json"}),
+        json!({"section": "tools", "format": "json"}),
     )
     .await;
     let payload = extract_json(&res);
-    assert!(payload.get("facts").is_some(), "facts section missing");
     assert!(
-        payload.get("tools").is_none(),
-        "tools section should be omitted"
+        payload.get("tools").is_some(),
+        "tools section missing: {payload}"
     );
-    assert!(
-        payload.get("hints").is_none(),
-        "hints section should be omitted"
-    );
-    assert!(
-        payload.get("automation").is_none(),
-        "automation section should be omitted"
-    );
-    drop(server);
-    fixture.harness.shutdown().await;
+    for unrelated in ["hints", "facts", "automation", "observatory", "costs"] {
+        assert!(
+            payload.get(unrelated).is_none(),
+            "sectioned analytics unexpectedly included {unrelated}"
+        );
+    }
 }
 
 #[cfg(feature = "test-transport")]

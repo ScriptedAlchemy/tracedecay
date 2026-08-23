@@ -315,42 +315,6 @@ pub(super) async fn handle_analytics(
         .count_analytics_events(scope.filter.as_deref(), since)
         .await
         .map_err(config_error)?;
-    let observatory = tracedecay_usecases::observability::observatory_read_model(
-        gdb,
-        scope.filter.as_deref(),
-        since,
-    )
-    .await;
-    let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
-        .map_err(config_error)?;
-    let provider_scope = if all_projects {
-        None
-    } else {
-        project_sessions.and_then(|sessions| {
-            let StoreShardScopeV1::ProjectSessions { project_id } =
-                &sessions.binding().shard_id.scope
-            else {
-                return None;
-            };
-            (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str())).then(
-                || ObservationScopeV1::Project {
-                    project_id: project_id.clone(),
-                },
-            )
-        })
-    };
-    let provider_usage_db = if all_projects { None } else { project_sessions };
-    let costs = tracedecay_usecases::observability::costs_read_model(
-        gdb,
-        provider_usage_db,
-        provider_scope.as_ref(),
-        scope.filter.as_deref(),
-        since,
-    )
-    .await;
-    let costs =
-        tracedecay_usecases::observability::costs_mcp_value(&costs).map_err(config_error)?;
-
     let mut value = json!({
         "status": "ok",
         "scope": if all_projects { "all" } else { "project" },
@@ -360,9 +324,49 @@ pub(super) async fn handle_analytics(
         "since": since,
         "event_count": event_count,
         "event_count_truncated": false,
-        "observatory": observatory,
-        "costs": costs,
     });
+
+    if section.is_none() {
+        let observatory = tracedecay_usecases::observability::observatory_read_model(
+            gdb,
+            scope.filter.as_deref(),
+            since,
+        )
+        .await;
+        let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
+            .map_err(config_error)?;
+        let provider_scope = if all_projects {
+            None
+        } else {
+            project_sessions.and_then(|sessions| {
+                let StoreShardScopeV1::ProjectSessions { project_id } =
+                    &sessions.binding().shard_id.scope
+                else {
+                    return None;
+                };
+                (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str()))
+                    .then(|| ObservationScopeV1::Project {
+                        project_id: project_id.clone(),
+                    })
+            })
+        };
+        let provider_usage_db = if all_projects { None } else { project_sessions };
+        let costs = tracedecay_usecases::observability::costs_read_model(
+            gdb,
+            provider_usage_db,
+            provider_scope.as_ref(),
+            scope.filter.as_deref(),
+            since,
+        )
+        .await;
+        let costs =
+            tracedecay_usecases::observability::costs_mcp_value(&costs).map_err(config_error)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
+        object.insert("observatory".to_string(), observatory);
+        object.insert("costs".to_string(), costs);
+    }
 
     if wants_section(section, "tools") {
         let counts = gdb
