@@ -28,6 +28,15 @@ pub(super) enum PersistedCursorUpdate {
     Monotonic,
 }
 
+/// How one flush persists: the retention class the frames are captured under
+/// and whether the durable cursor may move backwards. Both are decided once per
+/// admission and always travel together, so they pass as one value.
+#[derive(Clone, Copy)]
+struct FlushPolicy<'policy> {
+    retention_class: &'policy RetentionClass,
+    persisted_cursor_update: PersistedCursorUpdate,
+}
+
 pub(super) struct JsonlObservationAdmissionRequest<'request> {
     provider: &'static str,
     path: &'request Path,
@@ -566,8 +575,7 @@ pub(super) async fn admit_jsonl_observations<State>(
         active: &ActiveAdmission<'_>,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
         pending: &mut Vec<DurableJsonlFrame>,
-        retention_class: &RetentionClass,
-        persisted_cursor_update: PersistedCursorUpdate,
+        policy: FlushPolicy<'_>,
         progress: &mut JsonlObservationAdmissionProgress,
         state: &mut State,
         mut normalize: impl FnMut(
@@ -589,8 +597,8 @@ pub(super) async fn admit_jsonl_observations<State>(
             .capture_window(
                 expected_cursor,
                 frames,
-                retention_class,
-                persisted_cursor_update,
+                policy.retention_class,
+                policy.persisted_cursor_update,
                 progress,
             )
             .await
@@ -618,8 +626,8 @@ pub(super) async fn admit_jsonl_observations<State>(
                                         native_record_id,
                                         bytes,
                                     },
-                                    retention_class,
-                                    persisted_cursor_update,
+                                    policy.retention_class,
+                                    policy.persisted_cursor_update,
                                 )
                                 .await?
                             {
@@ -676,8 +684,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                 &active,
                 &mut expected_cursor,
                 &mut pending,
-                &retention_class,
-                persisted_cursor_update,
+                FlushPolicy {
+                    retention_class: &retention_class,
+                    persisted_cursor_update,
+                },
                 &mut progress,
                 &mut state,
                 &mut normalize,
@@ -719,8 +729,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                         &active,
                         &mut expected_cursor,
                         &mut pending,
-                        &retention_class,
-                        persisted_cursor_update,
+                        FlushPolicy {
+                            retention_class: &retention_class,
+                            persisted_cursor_update,
+                        },
                         &mut progress,
                         &mut state,
                         &mut normalize,
@@ -745,8 +757,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                 &active,
                 &mut expected_cursor,
                 &mut pending,
-                &retention_class,
-                persisted_cursor_update,
+                FlushPolicy {
+                    retention_class: &retention_class,
+                    persisted_cursor_update,
+                },
                 &mut progress,
                 &mut state,
                 &mut normalize,
@@ -759,8 +773,10 @@ pub(super) async fn admit_jsonl_observations<State>(
         &active,
         &mut expected_cursor,
         &mut pending,
-        &retention_class,
-        persisted_cursor_update,
+        FlushPolicy {
+            retention_class: &retention_class,
+            persisted_cursor_update,
+        },
         &mut progress,
         &mut state,
         &mut normalize,
