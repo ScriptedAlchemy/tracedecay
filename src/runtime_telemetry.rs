@@ -449,6 +449,10 @@ pub(crate) fn read_linux_process_cpu_ticks() -> Option<u64> {
 pub(crate) fn linux_clock_ticks_per_second() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
+        static TICKS_PER_SECOND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        if let Some(ticks) = TICKS_PER_SECOND.get() {
+            return Some(*ticks);
+        }
         let output = std::process::Command::new("getconf")
             .arg("CLK_TCK")
             .output()
@@ -456,12 +460,14 @@ pub(crate) fn linux_clock_ticks_per_second() -> Option<u64> {
         if !output.status.success() {
             return None;
         }
-        std::str::from_utf8(&output.stdout)
+        let ticks = std::str::from_utf8(&output.stdout)
             .ok()?
             .trim()
             .parse::<u64>()
             .ok()
-            .filter(|ticks| *ticks != 0)
+            .filter(|ticks| *ticks != 0)?;
+        let _ = TICKS_PER_SECOND.set(ticks);
+        Some(ticks)
     }
     #[cfg(not(target_os = "linux"))]
     {
