@@ -425,6 +425,7 @@ impl<P> MemoryApplication<P> {
 }
 
 impl<P: CommitFactPort> MemoryApplication<P> {
+    #[hotpath::measure]
     pub async fn commit_fact(
         &self,
         command: MemoryCommitFactCommand<P::Command>,
