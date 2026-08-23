@@ -54,12 +54,13 @@ pub(super) fn process_batch(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
+    started: Instant,
+    queue_wait_micros: u64,
     persistence: &mut dyn WriterPersistence,
     telemetry: &WriterTelemetry,
     state: &AtomicU8,
     watermark_publisher: &CommittedWatermarkPublisher,
 ) {
-    let started = Instant::now();
     let command_count = u64::try_from(batch.items.len()).unwrap_or(u64::MAX);
     let rows_before = connection.total_changes();
     let lock_work = LockWorkScope::enter();
@@ -127,6 +128,7 @@ pub(super) fn process_batch(
             prepared,
             Some(DriverFailure::Error(error)),
             started,
+            queue_wait_micros,
             lock_held,
             telemetry,
         );
@@ -210,7 +212,14 @@ pub(super) fn process_batch(
         lock_work.take(),
     );
     drop(lock_work);
-    settle_prepared(prepared, commit_failure, started, lock_held, telemetry);
+    settle_prepared(
+        prepared,
+        commit_failure,
+        started,
+        queue_wait_micros,
+        lock_held,
+        telemetry,
+    );
 }
 
 fn publish_committed(
@@ -421,11 +430,12 @@ fn settle_prepared(
     prepared: Vec<PreparedRequest>,
     commit_failure: Option<DriverFailure>,
     started: Instant,
+    queue_wait_micros: u64,
     lock_held: Duration,
     telemetry: &WriterTelemetry,
 ) {
     if commit_failure.is_none() {
-        record_commit(&prepared, started, lock_held, telemetry);
+        record_commit(&prepared, started, queue_wait_micros, lock_held, telemetry);
     } else if matches!(commit_failure, Some(DriverFailure::Busy)) {
         telemetry.busy();
     } else {
@@ -517,6 +527,7 @@ fn settle_commit_denied(
 fn record_commit(
     prepared: &[PreparedRequest],
     started: Instant,
+    queue_wait_micros: u64,
     lock_held: Duration,
     telemetry: &WriterTelemetry,
 ) {
@@ -537,9 +548,6 @@ fn record_commit(
         .commit_sequence;
     let bytes = durable.iter().fold(0_u64, |total, (prepared, _)| {
         total.saturating_add(prepared.item.admission_bytes())
-    });
-    let queue_wait_micros = durable.iter().fold(0_u64, |longest, (prepared, _)| {
-        longest.max(micros(prepared.item.enqueued_at.elapsed()))
     });
     telemetry.committed(
         sequence,

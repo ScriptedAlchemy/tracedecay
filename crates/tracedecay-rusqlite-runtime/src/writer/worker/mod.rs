@@ -344,6 +344,7 @@ impl Worker {
                             .pop_front()
                             .expect("exact SQL queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
+                            crate::hotpath_observe::record_exact_sql_dispatch();
                             let started = Instant::now();
                             let connection = checkpoint.connection_mut();
                             let rows_before = connection.total_changes();
@@ -368,7 +369,10 @@ impl Worker {
                             .pop_front()
                             .expect("incremental vacuum queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            run_incremental_vacuum(checkpoint.connection_mut(), command);
+                            crate::hotpath_observe::record_incremental_vacuum_dispatch();
+                            hotpath::measure_block!("rusqlite.writer.incremental_vacuum", {
+                                run_incremental_vacuum(checkpoint.connection_mut(), command);
+                            });
                         } else {
                             reject_incremental_vacuum(command);
                         }
@@ -379,13 +383,16 @@ impl Worker {
                             .pop_front()
                             .expect("online backup queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            run_online_backup(
-                                checkpoint.connection_mut(),
-                                &self.binding,
-                                &self.watermark_publisher,
-                                &self.shutdown_requested,
-                                command,
-                            );
+                            crate::hotpath_observe::record_online_backup_dispatch();
+                            hotpath::measure_block!("rusqlite.writer.online_backup", {
+                                run_online_backup(
+                                    checkpoint.connection_mut(),
+                                    &self.binding,
+                                    &self.watermark_publisher,
+                                    &self.shutdown_requested,
+                                    command,
+                                );
+                            });
                         } else {
                             reject_online_backup(command);
                         }
@@ -479,6 +486,7 @@ impl Worker {
         checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
         snapshot_blockers: CheckpointBlockers,
     ) {
+        crate::hotpath_observe::record_scheduled_checkpoint_dispatch();
         match hotpath::measure_block!("rusqlite.writer.checkpoint", {
             checkpoint.evaluate_scheduled(snapshot_blockers)
         }) {
@@ -499,6 +507,7 @@ impl Worker {
             command.settle(Err(error));
             return;
         }
+        crate::hotpath_observe::record_requested_checkpoint_dispatch();
         let (snapshot_blockers, kind, authority, reply) = command.into_parts();
         let result = match kind {
             CheckpointCommandKind::Passive { probe } => {
@@ -636,6 +645,19 @@ pub(super) fn process_execution_batch(
     state: &AtomicU8,
     watermark_publisher: &CommittedWatermarkPublisher,
 ) {
+    // Freeze queue latency at the service boundary. Commit telemetry must not
+    // re-read `enqueued_at` after transaction work has elapsed.
+    let dequeued_at = Instant::now();
+    let queue_wait_micros =
+        queue_wait_micros(batch.items.iter().map(|item| item.enqueued_at), dequeued_at);
+    if let Some(first) = batch.items.first() {
+        crate::hotpath_observe::record_writer_batch(
+            first.priority(),
+            u64::try_from(batch.items.len()).unwrap_or(u64::MAX),
+            batch.bytes,
+            queue_wait_micros,
+        );
+    }
     // Cancellation is checked for each request before and after its savepoint
     // work. Aggregating probes into one SQLite progress handler lets a
     // cancelled request interrupt unrelated requests in the same transaction.
@@ -643,11 +665,21 @@ pub(super) fn process_execution_batch(
         connection,
         binding,
         batch,
+        dequeued_at,
+        queue_wait_micros,
         persistence,
         telemetry,
         state,
         watermark_publisher,
     );
+}
+
+fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at: Instant) -> u64 {
+    enqueued_at.into_iter().fold(0, |longest, enqueued_at| {
+        longest.max(duration_micros(
+            dequeued_at.saturating_duration_since(enqueued_at),
+        ))
+    })
 }
 
 fn run_incremental_vacuum(
@@ -764,16 +796,31 @@ fn build_batches(
 
 #[cfg(test)]
 mod auxiliary_scheduling_tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
 
     use tokio::sync::oneshot;
 
     use crate::{RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage};
 
     use super::{
-        AuxiliaryWork, IncrementalVacuumCommand, WriterActorError, run_incremental_vacuum,
-        select_auxiliary_work,
+        AuxiliaryWork, IncrementalVacuumCommand, WriterActorError, queue_wait_micros,
+        run_incremental_vacuum, select_auxiliary_work,
     };
+
+    #[test]
+    fn queue_wait_is_frozen_at_the_dequeue_boundary() {
+        let first_enqueued = Instant::now();
+        let second_enqueued = first_enqueued + Duration::from_micros(3);
+        let dequeued = first_enqueued + Duration::from_micros(11);
+
+        assert_eq!(
+            queue_wait_micros([first_enqueued, second_enqueued], dequeued),
+            11
+        );
+    }
 
     struct RecordingAuthority {
         stages: Arc<Mutex<Vec<RuntimeWriteAuthorityStage>>>,
