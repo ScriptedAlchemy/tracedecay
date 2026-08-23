@@ -25,6 +25,7 @@ use super::{
 };
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) async fn dispatch_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,

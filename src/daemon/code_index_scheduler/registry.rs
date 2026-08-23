@@ -3220,6 +3220,7 @@ impl CodeIndexSchedulerRegistryV1 {
         })
     }
 
+    #[hotpath::measure]
     pub(in crate::daemon) async fn install_semantic_vector_graph_provider(
         &self,
         project_root: &Path,

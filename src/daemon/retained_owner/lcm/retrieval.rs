@@ -57,6 +57,7 @@ const MAX_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_QUERY_PROMPT_CHARS: usize = 2_048;
 const MAX_QUERY_QUERY_CHARS: usize = 1_024;
 
+#[hotpath::measure]
 pub(super) async fn execute_load_session(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -145,6 +146,7 @@ pub(super) async fn execute_load_session(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_grep(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -243,6 +245,7 @@ pub(super) async fn execute_grep(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_describe(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -353,6 +356,7 @@ pub(super) async fn execute_describe(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_expand(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -423,6 +427,7 @@ pub(super) async fn execute_expand(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_expand_query(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,

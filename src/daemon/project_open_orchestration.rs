@@ -316,6 +316,7 @@ pub(super) async fn portable_cached_project_server(
 #[cfg(any(not(unix), test))]
 // Cohesive route-open context; a params struct would only move the same ownership bundle.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 async fn begin_portable_project_open(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
