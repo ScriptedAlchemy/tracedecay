@@ -580,7 +580,7 @@ where
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::DaemonUnavailable,
                 vec![ProviderEvaluationStateV1::Unavailable],
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
@@ -588,7 +588,7 @@ where
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::Blocked,
                 Vec::new(),
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
@@ -596,7 +596,7 @@ where
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::StaleReplanRequired,
                 vec![ProviderEvaluationStateV1::Stale],
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
@@ -611,7 +611,7 @@ where
         request: &FeedbackCycleExecutionRequest,
     ) -> Result<FeedbackCycleStep, ApplicationContractError> {
         if request.control == FeedbackCycleControl::UserStop {
-            let runtime = admitted_progress(progress)?.runtime.clone();
+            let runtime = admitted_progress_mut(progress)?.runtime.take();
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::UserStop,
                 Vec::new(),
@@ -635,7 +635,7 @@ where
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::BudgetExceeded,
                 vec![ProviderEvaluationStateV1::TimedOut],
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
@@ -643,7 +643,7 @@ where
             return Ok(FeedbackCycleStep::terminal(after_runtime_terminal(
                 FeedbackCycleTerminationV1::Blocked,
                 Vec::new(),
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
@@ -685,7 +685,7 @@ where
                     termination,
                     states,
                     Vec::new(),
-                    progress.runtime.clone(),
+                    progress.runtime.take(),
                     FeedbackCycleStageEmission::Suppressed,
                 )));
             }
@@ -721,7 +721,7 @@ where
                 termination,
                 states,
                 Vec::new(),
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::Suppressed,
             )));
         }
@@ -766,7 +766,7 @@ where
                 termination,
                 provider_states,
                 progress.baseline_states.clone(),
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::FromProgress,
             )));
         }
@@ -798,7 +798,7 @@ where
                     FeedbackCycleTerminationV1::Cancelled,
                     vec![ProviderEvaluationStateV1::Cancelled],
                     Vec::new(),
-                    progress.runtime.clone(),
+                    progress.runtime.take(),
                     FeedbackCycleStageEmission::FromProgress,
                 )));
             }
@@ -807,7 +807,7 @@ where
                     FeedbackCycleTerminationV1::BudgetExceeded,
                     vec![ProviderEvaluationStateV1::TimedOut],
                     Vec::new(),
-                    progress.runtime.clone(),
+                    progress.runtime.take(),
                     FeedbackCycleStageEmission::FromProgress,
                 )));
             }
@@ -820,7 +820,7 @@ where
                 termination,
                 states,
                 Vec::new(),
-                progress.runtime.clone(),
+                progress.runtime.take(),
                 FeedbackCycleStageEmission::Suppressed,
             )));
         }
@@ -867,7 +867,7 @@ where
                     termination,
                     states,
                     Vec::new(),
-                    progress.runtime.clone(),
+                    progress.runtime.take(),
                     FeedbackCycleStageEmission::Suppressed,
                 )));
             }
@@ -878,7 +878,7 @@ where
                             FeedbackCycleTerminationV1::DuplicateNoop,
                             Vec::new(),
                             Some(key),
-                            progress.runtime.clone(),
+                            progress.runtime.take(),
                             FeedbackCycleStageEmission::FromProgress,
                         ),
                     ));
@@ -889,7 +889,7 @@ where
                             FeedbackCycleTerminationV1::DaemonUnavailable,
                             vec![ProviderEvaluationStateV1::Unavailable],
                             Some(key),
-                            progress.runtime.clone(),
+                            progress.runtime.take(),
                             FeedbackCycleStageEmission::FromProgress,
                         ),
                     ));
@@ -899,7 +899,7 @@ where
                         FeedbackCycleTerminationV1::Cancelled,
                         vec![ProviderEvaluationStateV1::Cancelled],
                         Vec::new(),
-                        progress.runtime.clone(),
+                        progress.runtime.take(),
                         FeedbackCycleStageEmission::FromProgress,
                     )));
                 }
@@ -908,7 +908,7 @@ where
                         FeedbackCycleTerminationV1::BudgetExceeded,
                         vec![ProviderEvaluationStateV1::TimedOut],
                         Vec::new(),
-                        progress.runtime.clone(),
+                        progress.runtime.take(),
                         FeedbackCycleStageEmission::FromProgress,
                     )));
                 }

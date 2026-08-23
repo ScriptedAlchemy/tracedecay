@@ -26,9 +26,6 @@ use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_gr
 use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
-// The native `git` spawn adapter lives beside its consumer in this crate's
-// own `git_intelligence` module (moved down from the root's
-// `src/git_intelligence.rs`, which is now a compatibility shim).
 use crate::git_intelligence::NativeGitIntelligence;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
@@ -1034,11 +1031,7 @@ mod receipt_tests {
     use super::*;
 
     fn provider_digest(body: &str) -> ManifestDigest {
-        ManifestDigest::new(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(body.as_bytes()))
-        ))
-        .unwrap()
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(body.as_bytes())).unwrap()
     }
 
     #[test]

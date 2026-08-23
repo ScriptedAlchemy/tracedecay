@@ -5112,7 +5112,7 @@ mod tests {
         let old_path = generations_root.join(&generation.file);
         let mut bytes = std::fs::read(&old_path).expect("read generation fixture");
         bytes.extend(std::iter::repeat_n(b' ', padding_bytes));
-        let state_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
         let file = format!(
             "generation-{}.json",
             state_digest.strip_prefix("sha256:").expect("digest prefix")
