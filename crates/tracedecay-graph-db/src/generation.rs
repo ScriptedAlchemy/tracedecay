@@ -232,8 +232,8 @@ impl GraphGenerationManifest {
             return Err(GraphDbError::Conflict);
         }
         check()?;
-        crate::hotpath::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Replay);
+        crate::hotpath_observe::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
+        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Replay);
         Ok(manifest)
     }
 

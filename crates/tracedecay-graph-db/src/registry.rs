@@ -1795,7 +1795,7 @@ impl GraphDbRegistry {
     }
 
     fn state_lock(&self) -> Result<MutexGuard<'_, RegistryState>, GraphDbError> {
-        crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_REGISTRY, || {
+        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_REGISTRY, || {
             self.inner.state.lock()
         })
         .map_err(|_| GraphDbError::unavailable("graph registry state lock is poisoned"))

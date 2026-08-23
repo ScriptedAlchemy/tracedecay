@@ -486,13 +486,13 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
-        crate::hotpath::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
-        crate::hotpath::record_hydration_source(if has_supplied_manifest {
-            crate::hotpath::HydrationSource::Supplied
+        crate::hotpath_observe::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
+        crate::hotpath_observe::record_hydration_source(if has_supplied_manifest {
+            crate::hotpath_observe::HydrationSource::Supplied
         } else if metadata_only {
-            crate::hotpath::HydrationSource::Metadata
+            crate::hotpath_observe::HydrationSource::Metadata
         } else {
-            crate::hotpath::HydrationSource::Replay
+            crate::hotpath_observe::HydrationSource::Replay
         });
         let current = authority
             .verified_head(&publication_key.projection, context)
@@ -875,6 +875,12 @@ impl GraphDbRegistry {
         visiting: &mut BTreeSet<GenerationLocator>,
     ) -> Result<Arc<VerifiedGenerationLease>, GraphDbError> {
         operation.check(self, context)?;
+        let locator = locator_from_key(&head.key)?;
+        if let Some(lease) = database.verified_generation(&locator)?
+            && lease.head == head
+        {
+            return Ok(lease);
+        }
         let replay = authority
             .replay(&head.key, context)
             .map_err(map_publication_error)?;

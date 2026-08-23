@@ -12,7 +12,7 @@ use tracedecay_graph_db::{
     GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind,
     GraphRelationRef, GraphReplayCollectionOutcome, GraphWatermark, SealedCodeGenerationReplay,
-    SealedGraphStateDigest, SourceGeneration,
+    SealedGraphStateDigest, SourceGeneration, take_graph_db_hydration_counters,
 };
 use tracedecay_store::{
     GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
@@ -464,6 +464,77 @@ fn stage_manifest(
             )
             .unwrap(),
     )
+}
+
+/// A no-change recover of an already-installed verified head must not decode
+/// the journaled replay or re-hydrate the generation. Idle daemon polls take
+/// this path; re-reading the full replay/native generation is the 334MiB
+/// grafeo / graph.db rchar burst while the process should be idle.
+#[test]
+fn no_change_recover_does_not_reread_full_generation() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("namespace:idle-poll", "code");
+    let published = manifest(identity.clone(), "idle-g1", "idle", vec![], vec![]);
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &published,
+        "publish:idle-g1",
+        None,
+        'c',
+    );
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .unwrap();
+    assert_eq!(commit.snapshot.generation(), &published.generation);
+    let first = take_graph_db_hydration_counters();
+    assert!(
+        first.replay_rows >= 1,
+        "first publish must decode replay so counters are live: {first:?}"
+    );
+    assert!(
+        first.generation_bytes > 0,
+        "first publish must record replay payload bytes: {first:?}"
+    );
+
+    let recovered = registered
+        .registry
+        .recover_verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(recovered.generation(), &published.generation);
+    assert_eq!(recovered.projection(), &identity);
+    let poll = take_graph_db_hydration_counters();
+    assert_eq!(
+        poll.replay_rows, 0,
+        "no-change recover must not decode replay rows: {poll:?}"
+    );
+    assert_eq!(
+        poll.generation_bytes, 0,
+        "no-change recover must not re-read generation bytes: {poll:?}"
+    );
+    assert!(
+        !matches!(
+            poll.hydration_source,
+            Some("replay" | "inline" | "sealed" | "recovered")
+        ),
+        "no-change recover must not re-hydrate: {poll:?}"
+    );
 }
 
 /// Sealed code generations journal only their replay source; the projection

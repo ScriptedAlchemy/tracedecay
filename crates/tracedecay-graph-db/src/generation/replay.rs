@@ -362,22 +362,22 @@ pub(crate) fn checked_decode_replay_source(
             "canonical graph generation replay is invalid: {error}"
         ))
     })?;
-    crate::hotpath::record_counts(0, 0, 1, payload.len());
-    crate::hotpath::record_hydration_source(hydration_source(&source));
+    crate::hotpath_observe::record_counts(0, 0, 1, payload.len());
+    crate::hotpath_observe::record_hydration_source(hydration_source(&source));
     Ok(source)
 }
 
-fn hydration_source(source: &GraphGenerationReplaySource) -> crate::hotpath::HydrationSource {
+fn hydration_source(source: &GraphGenerationReplaySource) -> crate::hotpath_observe::HydrationSource {
     match source {
-        GraphGenerationReplaySource::InlineManifest(_) => crate::hotpath::HydrationSource::Inline,
+        GraphGenerationReplaySource::InlineManifest(_) => crate::hotpath_observe::HydrationSource::Inline,
         GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
-            crate::hotpath::HydrationSource::Metadata
+            crate::hotpath_observe::HydrationSource::Metadata
         }
         GraphGenerationReplaySource::SealedCodeGeneration(_) => {
-            crate::hotpath::HydrationSource::Sealed
+            crate::hotpath_observe::HydrationSource::Sealed
         }
         GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
-            crate::hotpath::HydrationSource::SemanticVector
+            crate::hotpath_observe::HydrationSource::SemanticVector
         }
     }
 }

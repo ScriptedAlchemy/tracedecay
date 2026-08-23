@@ -3,7 +3,7 @@ mod error;
 mod generation;
 mod generation_runtime;
 mod generation_staging_runtime;
-mod hotpath;
+mod hotpath_observe;
 mod lease;
 mod limits;
 mod location;
@@ -85,6 +85,21 @@ pub use registry::{
     VerifiedGenerationBatchCommit,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphDbHydrationCounters {
+    pub nodes: u64,
+    pub edges: u64,
+    pub replay_rows: u64,
+    pub generation_bytes: u64,
+    pub hydration_source: Option<&'static str>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn take_graph_db_hydration_counters() -> GraphDbHydrationCounters {
+    hotpath_observe::take_hydration_counters()
+}
 pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use vector::{GraphVectorIndexRequest, GraphVectorIndexStatus};

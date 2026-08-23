@@ -93,8 +93,8 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let page = read_projection(database, request)?;
-        crate::hotpath::record_counts(page.entities.len(), page.relations.len(), 0, 0);
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
+        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Live);
         Ok(page)
     }
 
@@ -108,14 +108,14 @@ impl GraphDb {
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let telemetry = projection_telemetry(database, request)?;
         if let Some(telemetry) = &telemetry {
-            crate::hotpath::record_counts(
+            crate::hotpath_observe::record_counts(
                 usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
                 usize::try_from(telemetry.relation_count).unwrap_or(usize::MAX),
                 0,
                 0,
             );
         }
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Live);
         Ok(telemetry)
     }
 
@@ -176,7 +176,7 @@ impl GraphSnapshot {
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         let page = self.database.read_projection(request)?;
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
         Ok(page)
     }
 
@@ -185,7 +185,7 @@ impl GraphSnapshot {
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         let telemetry = self.database.projection_telemetry(request)?;
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        crate::hotpath_observe::record_hydration_source(crate::hotpath_observe::HydrationSource::Snapshot);
         Ok(telemetry)
     }
 }
