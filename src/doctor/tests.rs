@@ -488,7 +488,7 @@ fn canonical_temp_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn current_project_store_surfaces_split_identity_conflict()
+async fn store_layout_resolution_surfaces_split_identity_conflict()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let profile_root = dir.path().join("profile");
@@ -525,7 +525,11 @@ async fn current_project_store_surfaces_split_identity_conflict()
     let selected_before = std::fs::read(&selected_db)?;
     let legacy_before = std::fs::read(&legacy_db)?;
 
-    let resolution = super::resolve_current_project_store(&project_root, &open_options).await;
+    let resolution = crate::tracedecay::TraceDecay::try_initialized_store_layout_with_options(
+        &project_root,
+        &open_options,
+    )
+    .await;
     let diagnostic = format!("{resolution:?}");
     assert!(
         diagnostic.contains("identity cutover conflict"),
@@ -546,7 +550,6 @@ async fn current_project_store_surfaces_split_identity_conflict()
         "{diagnostic}"
     );
     assert!(diagnostic.contains("no files changed"), "{diagnostic}");
-    assert!(!diagnostic.contains("Uninitialized"), "{diagnostic}");
     assert_eq!(std::fs::read(selected_db)?, selected_before);
     assert_eq!(std::fs::read(legacy_db)?, legacy_before);
     Ok(())

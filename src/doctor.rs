@@ -769,37 +769,5 @@ fn print_summary(dc: &DoctorCounters) {
     eprintln!();
 }
 
-/// How the doctor "Current project" check sees the working directory's store.
-#[cfg(test)]
-#[derive(Debug)]
-enum CurrentProjectStore {
-    /// A store resolved through the same registry/alias-aware path the tools
-    /// use (enrollment marker, git-common-dir alias, profile shard, …).
-    Resolved(Box<crate::storage::StoreLayout>),
-    /// No resolvable store, but an old repo-local `.tracedecay/` database exists.
-    LegacyRepoLocal,
-    /// Resolution genuinely found nothing — `tracedecay init` is warranted.
-    Uninitialized,
-}
-
-#[cfg(test)]
-async fn resolve_current_project_store(
-    project_path: &Path,
-    open_options: &crate::tracedecay::TraceDecayOpenOptions,
-) -> crate::errors::Result<CurrentProjectStore> {
-    if let Some(layout) = crate::tracedecay::TraceDecay::try_initialized_store_layout_with_options(
-        project_path,
-        open_options,
-    )
-    .await?
-    {
-        return Ok(CurrentProjectStore::Resolved(Box::new(layout)));
-    }
-    if crate::config::has_project_database(project_path) {
-        return Ok(CurrentProjectStore::LegacyRepoLocal);
-    }
-    Ok(CurrentProjectStore::Uninitialized)
-}
-
 #[cfg(test)]
 mod tests;
