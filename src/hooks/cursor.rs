@@ -648,11 +648,9 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
 /// scheduling and sync execution. No-ops when no in-project paths were edited.
 async fn notify_cursor_after_file_edit(
     parsed: &Value,
+    root: &Path,
     telemetry: &super::analytics::HookTimingSpan,
 ) {
-    let Some(root) = cursor_project_root_from_parsed_event_with_identity(parsed).await else {
-        return;
-    };
     // Cursor's event carries nothing but the edited paths, so an edit that
     // touched nothing inside the project is not sent.
     notify_edited_paths(
@@ -669,20 +667,19 @@ async fn notify_cursor_after_file_edit(
 /// Best-effort daemon notification for Cursor `afterShellExecution`.
 async fn notify_cursor_after_shell_event(
     event_json: &str,
+    parsed: &Value,
+    root: Option<&Path>,
     telemetry: &super::analytics::HookTimingSpan,
 ) {
-    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+    let Some(root) = root else {
         return;
     };
-    let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
-        return;
-    };
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(root) {
         return;
     }
-    let cwd = cursor_hook_cwd(&parsed).unwrap_or_else(|| root.clone());
+    let cwd = cursor_hook_cwd(parsed).unwrap_or_else(|| root.to_path_buf());
     super::notify_hook_event_with_telemetry(
-        &root,
+        root,
         DaemonHookEvent::cursor_after_shell_execution(cwd)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,

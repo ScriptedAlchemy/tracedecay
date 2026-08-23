@@ -1153,12 +1153,16 @@ impl<'a> ArtifactQueryV1<'a> {
         document: u32,
     ) -> Result<usize, RetrievalPortError> {
         let field = encode_field(field).map_err(map_query_artifact_error)?;
-        self.connection
-            .query_row(
+        let mut statement = self
+            .connection
+            .prepare_cached(
                 "SELECT frequency FROM term_postings WHERE field = ?1 AND term = ?2 AND document_id = ?3",
-                params![field, term, i64::from(document)],
-                |row| row.get::<_, i64>(0),
             )
+            .map_err(map_query_sql_error)?;
+        statement
+            .query_row(params![field, term, i64::from(document)], |row| {
+                row.get::<_, i64>(0)
+            })
             .optional()
             .map_err(map_query_sql_error)?
             .unwrap_or_default()

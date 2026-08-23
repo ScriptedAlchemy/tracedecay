@@ -807,11 +807,20 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
 
 pub struct TraceDecayTestPrimitivePortV1 {
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+    annotation_evidence: Mutex<
+        Option<(
+            CodeGenerationId,
+            std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+        )>,
+    >,
 }
 
 impl TraceDecayTestPrimitivePortV1 {
     pub fn new(code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
-        Self { code_graph }
+        Self {
+            code_graph,
+            annotation_evidence: Mutex::new(None),
+        }
     }
 }
 
@@ -852,7 +861,11 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             } else {
                 return test_primitive_failed(context);
             };
-            let Ok(test_evidence) = test_annotation_evidence(&reader, Arc::clone(&cancellation))
+            let Ok(test_evidence) = test_annotation_evidence(
+                &reader,
+                Arc::clone(&cancellation),
+                &self.annotation_evidence,
+            )
             else {
                 return test_primitive_failed(context);
             };
