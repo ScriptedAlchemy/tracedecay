@@ -189,6 +189,11 @@ pub struct AstGrepSearchMatch {
 pub struct AstGrepSearchResult {
     pub matches: Vec<AstGrepSearchMatch>,
     pub files_scanned: usize,
+    /// Line slices pulled from source text for display. Early caps must
+    /// stop pulling; materializing every line first makes this equal the
+    /// file's line count even when only a few matches are examined.
+    pub lines_visited: usize,
+    pub lines_examined: usize,
     pub truncated: bool,
     pub cancelled: bool,
 }
@@ -383,7 +388,6 @@ where
         };
 
         result.files_scanned += 1;
-        let source_lines: Vec<&str> = source.lines().collect();
 
         let Ok(doc) = StrDoc::try_new(&source, td_lang.clone()) else {
             continue;
@@ -397,9 +401,12 @@ where
             let start = node.start_pos();
             let range = node.range();
             let line0 = start.line();
-            let line_text = source_lines
-                .get(line0)
-                .map(|l| (*l).to_string())
+            result.lines_examined = result.lines_examined.saturating_add(1);
+            result.lines_visited = result.lines_visited.saturating_add(1);
+            let line_text = source
+                .lines()
+                .nth(line0)
+                .map(str::to_owned)
                 .unwrap_or_default();
             result.matches.push(AstGrepSearchMatch {
                 file: rel_str.clone(),
@@ -674,5 +681,30 @@ mod tests {
         let res = search_tree(dir.path(), "g($A)", Some("rust"), None, 2).unwrap();
         assert_eq!(res.matches.len(), 2);
         assert!(res.truncated);
+    }
+
+    #[test]
+    fn early_result_cap_does_not_visit_unexamined_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        const TOTAL_LINES: usize = 8_192;
+        let mut body = String::from("fn f() {\n");
+        for index in 0..TOTAL_LINES {
+            body.push_str(&format!("    target({index});\n"));
+        }
+        body.push_str("}\n");
+        write(dir.path(), "dense.rs", &body);
+
+        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 1).unwrap();
+
+        assert_eq!(result.matches.len(), 1);
+        assert!(result.truncated);
+        assert_eq!(result.lines_examined, 2);
+        assert!(
+            result.lines_visited <= result.lines_examined,
+            "visited {} lines after examining {}; full collect materializes every line",
+            result.lines_visited,
+            result.lines_examined
+        );
+        assert!(result.lines_visited < TOTAL_LINES);
     }
 }
