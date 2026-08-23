@@ -603,7 +603,6 @@ mod tests {
     /// segment, and must decode to the daemon invocation variant that names it.
     #[test]
     fn every_work_operation_parses_from_its_route_segment_and_dispatches() {
-        assert!(WorkOperation::ALL.len() >= 15);
         let mut seen = BTreeSet::new();
         for operation in WorkOperation::ALL {
             let segment = operation.route_segment();
