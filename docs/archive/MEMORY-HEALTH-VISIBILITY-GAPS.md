@@ -303,7 +303,7 @@ owners, not to Doctor.
 - Data: `src/memory/types.rs:161` (`MemoryStatus`), `:155` (`MemoryRepairStats`),
   `src/tracedecay.rs:3386` (`memory_status`), `:3367` (`repair_derived_memory`).
 - Prior audits: `docs/archive/DASHBOARD-API-AUDIT.md`, `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md`,
-  `docs/HOLOGRAPHIC-DASHBOARD-SEAMS.md`.
+  `docs/archive/HOLOGRAPHIC-DASHBOARD-SEAMS.md`.
 - Live DB: `.tracedecay/tracedecay.db` (129 facts; memory subsystem 2.43 MiB of
   78.5 MB total; 5 orphan entities; 3 dirty banks; 129/129 facts never recalled).
 

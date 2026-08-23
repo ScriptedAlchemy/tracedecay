@@ -31,7 +31,7 @@ the current checkout, only `retrieval.rs::temporal_decay_factor` remains.
 | Storage | `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md` | per-fact byte cost, capacity math, unbounded-growth paths |
 | Retrieval/entity | `docs/RETRIEVAL-QUALITY-EVAL.md` | recall pipeline + 7 empirically-measured quality risks (binary-driven evidence) |
 | Trust-decay | `docs/TRUST-DECAY-SEMANTICS.md` | persisted vs. ranking decay, dead code, explainability gaps |
-| Visibility | `docs/MEMORY-HEALTH-VISIBILITY-GAPS.md` | dashboard/CLI/doctor/MCP surfacing gaps (G1–G11) |
+| Visibility | `docs/archive/MEMORY-HEALTH-VISIBILITY-GAPS.md` | dashboard/CLI/doctor/MCP surfacing gaps (G1–G11) |
 
 All four audited the same live checkout (`.tracedecay/tracedecay.db`, 129 facts,
 memory subsystem 2.43 MiB of a 78.5 MiB DB) and agree on the headline numbers.

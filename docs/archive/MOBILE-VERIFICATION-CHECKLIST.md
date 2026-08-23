@@ -12,9 +12,9 @@ and **LCM** plugin tabs were inspected on mobile viewports.
 
 Companion docs (read these for the "why" behind the regression-risk checks):
 
-- `docs/HOLOGRAPHIC-DASHBOARD-SEAMS.md` — `SemanticMap.tsx`, `AssociationGraph.tsx`,
+- `docs/archive/HOLOGRAPHIC-DASHBOARD-SEAMS.md` — `SemanticMap.tsx`, `AssociationGraph.tsx`,
   `CurationPanel.tsx` seams, risk ratings, and the load-bearing invariants.
-- `docs/CODE-GRAPH-EXPLORER-SEAMS.md` — `CodeGraphExplorer.tsx` + `GraphCanvas.tsx`
+- `docs/archive/CODE-GRAPH-EXPLORER-SEAMS.md` — `CodeGraphExplorer.tsx` + `GraphCanvas.tsx`
   seams, and the canvas interaction/`propsRef` invariants.
 - `docs/dashboard.md`, `docs/archive/dashboard-port-handoff.md` — how the dashboard is
   served and launched.
