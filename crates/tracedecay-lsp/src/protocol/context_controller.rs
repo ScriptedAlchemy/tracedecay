@@ -66,7 +66,7 @@ pub(super) fn bind_context_document_digest(
         .document_uri
         .as_deref()
         .and_then(|uri| overlays.snapshot(uri))
-        .map(|snapshot| ContentDigest::of_bytes(snapshot.text.as_bytes()));
+        .map(|snapshot| snapshot.content_digest.clone());
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>

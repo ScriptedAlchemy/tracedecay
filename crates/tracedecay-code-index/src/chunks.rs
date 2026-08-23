@@ -388,15 +388,13 @@ impl CodeFileChunksV1 {
     }
 }
 
-/// Compatibility re-export for callers that previously obtained raw source
-/// digests from the chunking module.
 pub use super::intake::content_digest;
 
 /// Pinned fallback window size for oversized regions with no usable
-/// structural boundary (Plan 25).
+/// structural boundary.
 pub const FALLBACK_WINDOW_BYTES: u64 = 16 * 1024;
 
-/// Pinned fallback window overlap (Plan 25).
+/// Pinned fallback window overlap.
 pub const FALLBACK_WINDOW_OVERLAP_BYTES: u64 = 1024;
 
 /// Domain separator for chunk logical identity digests.
