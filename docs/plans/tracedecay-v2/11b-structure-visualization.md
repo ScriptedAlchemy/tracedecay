@@ -294,7 +294,7 @@ PNGs). View an existing file without switching branches:
 | CORE SAMPLE strat sheet | same | `mockups/code-topography/shots/core-sample-{dark,light}.png` |
 | LENS zoom-as-position sheet | same | `mockups/code-topography/shots/lens-{dark,light}.png` |
 | Live physics prototype + QA keyframes | `worktree-agent-af882d6565fbab159` | `mockups/code-topography/prototype/` (`shots/{hub,leaf}-{1..4}*.png`, `README.md` tuning table) |
-| PR-421 reasoning weave (real data) | same branch, uncommitted copy also served in-session | `mockups/code-topography/prototype/pr421-weave.html` |
+| PR-421 reasoning weave (real data) | same branch, uncommitted copy also served in-session | `mockups/code-topography/prototype/session-commit-weave.html` |
 | Shipped-state pixel baselines (all 12 workspaces × themes × widths) | trunk | `dashboard/audit-baselines/` |
 
 Design notes accompany each sheet in the same directory (`notes/` or

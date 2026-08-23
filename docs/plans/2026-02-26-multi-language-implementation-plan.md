@@ -7,8 +7,6 @@
 > attestations, PR packets, and gate matrices below are not rebuild
 > instructions; validate current parser, runtime, and product behavior directly.
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Add Go and Java language support to codegraph with deep extraction, using a trait-based abstraction layer.
 
 **Architecture:** Introduce a `LanguageExtractor` trait and `LanguageRegistry` that dispatches to per-language extractors based on file extension. Each extractor uses tree-sitter with a language-specific grammar. The existing `RustExtractor` is retrofitted to implement the trait.
