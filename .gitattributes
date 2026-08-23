@@ -17,7 +17,7 @@ src/agents/hermes/templates/** text eol=lf
 # Keep those bytes identical when Git checks the repository out on Windows.
 src/sessions/claude_observation_benchmark.rs text eol=lf
 src/sessions/claude_observation_benchmark/** text eol=lf
-benchmarks/claude-observation/** text eol=lf
+benchmark_data/claude-observation/** text eol=lf
 # Vendored, patched tree-sitter grammars: generated parser sources are
 # reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
 # Collapse them out of PR diffs and language stats.

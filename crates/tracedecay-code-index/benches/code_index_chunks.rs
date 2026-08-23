@@ -32,15 +32,15 @@ use tracedecay_domain::{
 
 const WORKLOAD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmarks/query-code-index/workload-v1.json"
+    "/../../benchmark_data/query-code-index/workload-v1.json"
 );
 const EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmarks/query-code-index/expected-v1.json"
+    "/../../benchmark_data/query-code-index/expected-v1.json"
 );
 const DEFAULT_RESULT_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmarks/query-code-index/result-provisional.json"
+    "/../../benchmark_data/query-code-index/result-provisional.json"
 );
 const CHUNKER_V1: &str = "chunker.query-benchmark.v1";
 const CHUNKER_REPLAY: &str = "chunker.query-benchmark.replay";

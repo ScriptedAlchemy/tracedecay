@@ -17,4 +17,4 @@ fi
 
 unset TRACEDECAY_HOME TRACEDECAY_PROFILE TRACEDECAY_PROFILE_DIR
 
-exec python3 "$REPO_ROOT/benchmarks/runtime/run.py" "$@"
+exec python3 "$REPO_ROOT/benchmark_data/runtime/run.py" "$@"
