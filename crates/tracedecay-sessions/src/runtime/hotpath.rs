@@ -88,6 +88,16 @@ pub(crate) fn record_file_opened() {
     add("sessions.discovery.files.opened", 1);
 }
 
+/// One `read_dir` of a transcript directory.
+///
+/// Enumerations are the discovery cost that file counters cannot see: the same
+/// bucket listed three times to answer three questions charges three times here
+/// while `files.considered` reports one tree. Divergence between this and the
+/// bucket count is the signal that a pass is re-walking what it already knows.
+pub(crate) fn record_dir_enumerated() {
+    add("sessions.discovery.dirs.enumerated", 1);
+}
+
 #[inline(always)]
 #[cfg(feature = "hotpath")]
 pub(crate) fn record_discovery_slice(recent_selected: u64, history_selected: u64) {

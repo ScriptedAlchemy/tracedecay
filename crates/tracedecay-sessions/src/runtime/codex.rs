@@ -187,7 +187,8 @@ impl CodexSource {
 
         let history_units = (bounds.max_files / 8).min(HISTORY_CATCH_UP_UNITS);
         let recent_units = bounds.max_files.saturating_sub(history_units);
-        let total_files = count_jsonl_files_in_buckets(&buckets);
+        let counts = JsonlBucketCounts::measure(&buckets);
+        let total_files = counts.total;
         let incoming_complete = history_rotation_sweep_complete(history_rotation);
         let incoming_count = history_rotation_file_count(history_rotation).unwrap_or(0);
         // A Complete watermark stays valid only while the tree has not grown.
@@ -275,8 +276,12 @@ impl CodexSource {
                 // last jsonl is visited; complete when no jsonl remains in
                 // the unvisited remainder of this wrap, not when every
                 // directory slot has been counted.
-                let remaining_jsonl =
-                    remaining_older_jsonl(older, start, completed_buckets, intra_offset);
+                let remaining_jsonl = remaining_older_jsonl(
+                    &counts.per_bucket[first_unfinished_bucket..],
+                    start,
+                    completed_buckets,
+                    intra_offset,
+                );
                 let wrapped = pass.truncated.is_none()
                     && (bucket_rotation >= older.len() as u64 || remaining_jsonl == 0);
                 sweep_complete = wrapped;
@@ -393,6 +398,7 @@ pub struct CodexDiscoveryPass {
 }
 
 fn count_jsonl_in_dir(dir: &Path) -> u64 {
+    crate::runtime::hotpath::record_dir_enumerated();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -409,36 +415,59 @@ fn count_jsonl_in_dir(dir: &Path) -> u64 {
     total
 }
 
-fn count_jsonl_files_in_buckets(buckets: &[PathBuf]) -> u64 {
-    buckets.iter().fold(0u64, |total, bucket| {
-        total.saturating_add(count_jsonl_in_dir(bucket))
-    })
+/// Per-bucket jsonl counts for one discovery pass.
+///
+/// Both consumers — the sweep watermark's `total` and the history phase's
+/// remainder — need the same unbounded per-bucket counts, and each used to
+/// re-`read_dir` every bucket to get them. Counting once per pass and indexing
+/// the result keeps one directory enumeration per bucket instead of two, which
+/// on a 25k-file tree is the difference between one metadata sweep and three.
+struct JsonlBucketCounts {
+    /// Positionally aligned with the `buckets` slice it was measured from, so
+    /// a sub-slice of those buckets indexes the matching sub-slice here.
+    per_bucket: Vec<u64>,
+    total: u64,
+}
+
+impl JsonlBucketCounts {
+    fn measure(buckets: &[PathBuf]) -> Self {
+        let per_bucket: Vec<u64> = buckets
+            .iter()
+            .map(|bucket| count_jsonl_in_dir(bucket))
+            .collect();
+        let total = per_bucket
+            .iter()
+            .fold(0u64, |total, count| total.saturating_add(*count));
+        Self { per_bucket, total }
+    }
 }
 
 /// jsonl files still ahead of the history frontier on this wrap — the
 /// remainder of an incomplete current bucket plus later older buckets
 /// before the slice ends. Already-visited buckets earlier in `older` are
 /// not recounted (modulo wrap-around would treat them as still pending).
+///
+/// `older_counts` is the slice of [`JsonlBucketCounts::per_bucket`] covering
+/// the same buckets as `older`, so this reads counts already taken this pass.
 fn remaining_older_jsonl(
-    older: &[PathBuf],
+    older_counts: &[u64],
     start: usize,
     completed_buckets: u64,
     intra_offset: u64,
 ) -> u64 {
-    if older.is_empty() || start >= older.len() {
+    if older_counts.is_empty() || start >= older_counts.len() {
         return 0;
     }
-    let completed = usize::try_from(completed_buckets).unwrap_or(older.len());
+    let completed = usize::try_from(completed_buckets).unwrap_or(older_counts.len());
     let mut total = 0u64;
     let first_idx = if completed == 0 {
-        total =
-            total.saturating_add(count_jsonl_in_dir(&older[start]).saturating_sub(intra_offset));
+        total = total.saturating_add(older_counts[start].saturating_sub(intra_offset));
         start.saturating_add(1)
     } else {
         start.saturating_add(completed)
     };
-    for bucket in older.iter().skip(first_idx) {
-        total = total.saturating_add(count_jsonl_in_dir(bucket));
+    for count in older_counts.iter().skip(first_idx) {
+        total = total.saturating_add(*count);
     }
     total
 }
@@ -458,6 +487,7 @@ fn collect_bucket_dirs(root: &Path, max_depth: u8, max_dirs: usize) -> Vec<PathB
         if depth >= max_depth {
             continue;
         }
+        crate::runtime::hotpath::record_dir_enumerated();
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -556,8 +586,19 @@ impl BucketScanState {
         // Skipped listings are still charged against the discovery byte
         // budget, so a large resume offset truncates conservatively rather
         // than exceeding the caps.
+        //
+        // The enumeration bound is deliberately NOT `remaining`: entries the
+        // recent phase already retained are re-listed here and rejected by
+        // `seen`, consuming a listing slot without producing a retention. Bound
+        // by `remaining` and every such overlap silently shrinks the history
+        // phase's budget — the pass stops short of `max_files` even though the
+        // bucket still holds unseen files. `seen` can hold at most `max_files`
+        // entries, so `skip + max_files` is the tight upper bound on how far we
+        // may need to list to find `remaining` unseen ones. Retention is capped
+        // at `remaining` by the loop below, and the byte budget still bounds
+        // total work.
         let bucket_bounds = TranscriptDiscoveryBounds {
-            max_files: remaining.saturating_add(skip),
+            max_files: self.bounds.max_files.saturating_add(skip),
             max_discovery_bytes: remaining_bytes,
             ..self.bounds
         };

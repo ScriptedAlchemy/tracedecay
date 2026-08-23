@@ -1238,4 +1238,77 @@ mod recent_first_discovery_tests {
         );
         assert_eq!(restarted.next_history_rotation, stored);
     }
+
+    /// The counts driving the sweep watermark and the paths discovery selects
+    /// must describe the same population: `remaining_older_jsonl` compares the
+    /// count against selection progress, so a counter that disagrees leaves the
+    /// remainder permanently non-zero and history rotation never settles.
+    ///
+    /// Symlink-to-file candidates are the case where the two could drift, and
+    /// they are deliberately retained by discovery (`source/discovery.rs`
+    /// includes them by link-path extension while refusing to recurse into
+    /// symlinked directories). The counter must therefore follow symlinks too —
+    /// this pins that agreement so a future switch to `DirEntry::file_type`,
+    /// which reports symlinks as neither file nor dir, cannot land silently.
+    #[test]
+    #[cfg(unix)]
+    fn jsonl_counts_and_discovery_selection_describe_the_same_files() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let real = write_dated_rollout(home, ("2026", "08", "17"), "real");
+        let bucket = real.parent().unwrap();
+        std::os::unix::fs::symlink(&real, bucket.join("rollout-link.jsonl")).unwrap();
+
+        let counted = super::super::count_jsonl_in_dir(bucket);
+        let selected = CodexSource::with_home(home)
+            .discover_transcript_paths_with_rotation(
+                TranscriptDiscoveryBounds::from_discovered_units(64),
+                0,
+            )
+            .report
+            .paths
+            .len();
+
+        assert_eq!(selected, 2, "discovery retains symlink-to-file candidates");
+        assert_eq!(
+            counted, selected as u64,
+            "the sweep watermark must count exactly what discovery selects"
+        );
+    }
+
+    /// The per-bucket jsonl counts feed two consumers — the sweep watermark's
+    /// total and the history phase's remainder — and both must read one
+    /// measurement. Counting per consumer re-`read_dir`s every bucket, which on
+    /// a large tree is the difference between one metadata sweep and several.
+    #[test]
+    fn bucket_counts_are_measured_once_per_pass_not_once_per_consumer() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        for day in 1..=6 {
+            for item in 0..4 {
+                write_dated_rollout(
+                    home,
+                    ("2025", "11", &format!("{day:02}")),
+                    &format!("old-{day:02}-{item}"),
+                );
+            }
+        }
+        let buckets: Vec<PathBuf> = (1..=6)
+            .map(|day| {
+                home.join(".codex/sessions/2025/11")
+                    .join(format!("{day:02}"))
+            })
+            .collect();
+
+        let counts = super::super::JsonlBucketCounts::measure(&buckets);
+        assert_eq!(counts.total, 24, "6 buckets x 4 rollouts");
+        assert_eq!(counts.per_bucket, vec![4; 6]);
+
+        // The remainder consumer reads the same measurement rather than
+        // re-listing: with two buckets already completed, four buckets remain.
+        assert_eq!(
+            super::super::remaining_older_jsonl(&counts.per_bucket, 0, 2, 0),
+            16
+        );
+    }
 }

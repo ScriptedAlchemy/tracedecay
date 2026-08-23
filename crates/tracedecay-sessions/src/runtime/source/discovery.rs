@@ -218,6 +218,7 @@ impl WalkState<'_> {
         if depth > self.max_depth {
             return;
         }
+        crate::runtime::hotpath::record_dir_enumerated();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
