@@ -61,7 +61,6 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
                 maintenance_observations,
             )
             .await;
-        unit_succeeded &= scope_reconciled;
         if !scope_reconciled {
             outcome = MaintenanceTickOutcome::Retry;
         }
@@ -71,14 +70,12 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     {
         let project_compacted =
             crate::daemon::store_maintenance::run_project_compaction(graph.db(), compaction).await;
-        unit_succeeded &= project_compacted;
         if !project_compacted {
             outcome = MaintenanceTickOutcome::Retry;
         }
         if !cancellation.is_cancelled() {
             let branch_compacted =
                 crate::daemon::store_maintenance::run_branch_compaction(graph, compaction).await;
-            unit_succeeded &= branch_compacted;
             if !branch_compacted {
                 outcome = MaintenanceTickOutcome::Retry;
             }

@@ -742,8 +742,10 @@ mod tests {
     #[tokio::test]
     async fn disabled_fixed_task_preflight_creates_no_effect_journal() {
         let dashboard = tempfile::tempdir().expect("dashboard root");
-        let mut config = tracedecay_agent_hosts::automation::config::AutomationConfig::default();
-        config.enabled = false;
+        let config = tracedecay_agent_hosts::automation::config::AutomationConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let decision = fixed_task_schedule_decision(
             dashboard.path(),
