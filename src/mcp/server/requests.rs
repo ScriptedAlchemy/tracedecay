@@ -830,6 +830,7 @@ impl McpServer {
 
     /// Applies the pre-dispatch freshness policy and records the call in the
     /// server counters and the activity lane.
+    #[hotpath::measure(label = "mcp.tools_call.begin_dispatch")]
     async fn begin_tool_dispatch(
         &self,
         tool_name: &str,

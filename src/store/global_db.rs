@@ -173,6 +173,7 @@ where
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
+    #[hotpath::measure(label = "store.persist_transcript_batch")]
     async fn persist_transcript_batch(
         &self,
         batch: TranscriptWriteBatch,
