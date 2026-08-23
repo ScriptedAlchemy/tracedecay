@@ -82,6 +82,7 @@ impl std::fmt::Display for GrepSearchError {
 
 impl std::error::Error for GrepSearchError {}
 
+#[hotpath::measure]
 pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,
@@ -96,6 +97,8 @@ pub fn search_tree_with_cancel(
     })?;
     let mut result = GrepSearchResult::default();
     let max_results = query.max_results.max(1);
+    #[cfg(feature = "hotpath")]
+    let mut source_bytes = 0_u64;
 
     for entry in walker {
         if is_cancelled() {
@@ -133,47 +136,97 @@ pub fn search_tree_with_cancel(
             result.omissions.unavailable_sources += 1;
             continue;
         };
-        result.files_scanned += 1;
-        let lines = content.lines().collect::<Vec<_>>();
-        let mut file_hits = 0;
-        for (index, line) in lines.iter().enumerate() {
-            if is_cancelled() {
-                result.cancelled = true;
-                return Ok(result);
-            }
-            if line.len() > MAX_LINE_BYTES {
-                result.omissions.oversized_lines += 1;
-                continue;
-            }
-            result.lines_examined += 1;
-            if !matcher.is_match(line) {
-                continue;
-            }
-            if file_hits >= MAX_HITS_PER_FILE {
-                result.truncated = true;
-                break;
-            }
-            file_hits += 1;
-            result.hits.push(GrepSearchHit {
-                file: relative.to_string_lossy().replace('\\', "/"),
-                line: index as u32 + 1,
-                text: (*line).to_owned(),
-                before: context_slice(&lines, index.saturating_sub(query.context_lines), index),
-                after: context_slice(
-                    &lines,
-                    index + 1,
-                    (index + 1 + query.context_lines).min(lines.len()),
-                ),
-            });
-            // Collect one past the cap so callers can report truncation
-            // without scanning the remainder of a high-frequency tree.
-            if result.hits.len() > max_results {
-                result.truncated = true;
-                return Ok(result);
-            }
+        #[cfg(feature = "hotpath")]
+        {
+            source_bytes = source_bytes.saturating_add(content.len() as u64);
+        }
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let stop = if crate::hotpath_observe::sample_hot_loop() {
+            hotpath::measure_block!(
+                "code_index_grep_file",
+                examine_grep_file(
+                    &matcher,
+                    query,
+                    &relative,
+                    &content,
+                    &mut result,
+                    max_results,
+                    &is_cancelled,
+                )
+            )
+        } else {
+            examine_grep_file(
+                &matcher,
+                query,
+                &relative,
+                &content,
+                &mut result,
+                max_results,
+                &is_cancelled,
+            )
+        };
+        if stop {
+            crate::hotpath_observe::record_files(result.files_scanned);
+            #[cfg(feature = "hotpath")]
+            crate::hotpath_observe::record_source_bytes(source_bytes);
+            return Ok(result);
         }
     }
+    crate::hotpath_observe::record_files(result.files_scanned);
+    #[cfg(feature = "hotpath")]
+    crate::hotpath_observe::record_source_bytes(source_bytes);
     Ok(result)
+}
+
+fn examine_grep_file<C: Fn() -> bool>(
+    matcher: &Regex,
+    query: &GrepSearchQuery,
+    relative: &str,
+    content: &str,
+    result: &mut GrepSearchResult,
+    max_results: usize,
+    is_cancelled: &C,
+) -> bool {
+    result.files_scanned += 1;
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut file_hits = 0;
+    for (index, line) in lines.iter().enumerate() {
+        if is_cancelled() {
+            result.cancelled = true;
+            return true;
+        }
+        if line.len() > MAX_LINE_BYTES {
+            result.omissions.oversized_lines += 1;
+            continue;
+        }
+        result.lines_examined += 1;
+        if !matcher.is_match(line) {
+            continue;
+        }
+        if file_hits >= MAX_HITS_PER_FILE {
+            result.truncated = true;
+            break;
+        }
+        file_hits += 1;
+        result.hits.push(GrepSearchHit {
+            file: relative.to_owned(),
+            line: index as u32 + 1,
+            text: (*line).to_owned(),
+            before: context_slice(&lines, index.saturating_sub(query.context_lines), index),
+            after: context_slice(
+                &lines,
+                index + 1,
+                (index + 1 + query.context_lines).min(lines.len()),
+            ),
+        });
+        // Collect one past the cap so callers can report truncation
+        // without scanning the remainder of a high-frequency tree.
+        if result.hits.len() > max_results {
+            result.truncated = true;
+            return true;
+        }
+    }
+    false
 }
 
 fn build_matcher(query: &GrepSearchQuery) -> Result<Regex, GrepSearchError> {

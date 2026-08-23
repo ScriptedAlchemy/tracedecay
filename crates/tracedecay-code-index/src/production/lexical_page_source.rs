@@ -682,6 +682,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
+    #[hotpath::measure]
     pub fn open(
         mut reader: R,
         admitted_len: u64,
@@ -727,6 +728,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// in the durable generation index while the same bounded scan discovers
     /// the lexical layout. The caller can therefore pass a `File` directly;
     /// no whole-generation `Vec` is required merely to authenticate it.
+    #[hotpath::measure]
     pub fn open_content_addressed(
         mut reader: R,
         admitted_len: u64,
@@ -794,6 +796,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     /// Adopt a persisted cursor after binding it to this source and validating
     /// its first unread file. This deliberately never walks earlier files.
+    #[hotpath::measure]
     pub fn restore_cursor(
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
@@ -894,6 +897,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         std::mem::size_of::<u64>().saturating_mul(4)
     }
 
+    #[hotpath::measure]
     pub fn next_page(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -919,6 +923,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
                 }
+                crate::hotpath_observe::record_pages(staged.cursor.next_page_ordinal());
                 self.cursor = staged.cursor;
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }

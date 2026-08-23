@@ -135,6 +135,7 @@ const PARALLEL_CHUNK_THRESHOLD: usize = 16;
 /// is large enough. Results are returned in chunk order and the reported
 /// failure is always the lowest-index one, so the outcome is identical to the
 /// sequential sweep this replaces.
+#[hotpath::measure]
 fn map_chunks_ordered<T, F>(
     chunks: &[CodeSearchChunkV1],
     operation: F,
@@ -521,6 +522,7 @@ impl DeterministicCodeChunker {
     /// Index one file from the parser rows that produced its extraction batch.
     /// The opaque output type prevents callers from pairing a batch with rows
     /// from a different parse.
+    #[hotpath::measure]
     pub fn index_file_with_authority_from_extraction(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -1074,6 +1076,7 @@ struct PendingChunk {
 }
 
 impl CodeChunker for DeterministicCodeChunker {
+    #[hotpath::measure]
     fn chunk_file(
         &self,
         file: &ReceiptBoundCodeFileV1,

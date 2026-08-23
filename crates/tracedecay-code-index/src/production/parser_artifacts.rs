@@ -11,6 +11,7 @@ use super::{
     CodeIndexRepositoryParseIdentityV1,
 };
 
+#[hotpath::measure]
 pub(super) fn parse_for_indexing(
     retained_parses: &SharedRetainedParsePool,
     config: &CodeIndexProductionConfigV1,

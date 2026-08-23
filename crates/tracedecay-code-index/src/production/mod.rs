@@ -288,6 +288,7 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 /// tradeoff for having no barrier. Cancellation still short-circuits, because
 /// every per-file closure checkpoints the execution control first and
 /// returns immediately once the reconcile is cancelled.
+#[hotpath::measure]
 fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
 where
     T: Sync,
@@ -295,6 +296,8 @@ where
     E: Send,
     F: Fn(&T) -> Result<R, E> + Sync,
 {
+    crate::hotpath_observe::record_queue_depth(items.len());
+    crate::hotpath_observe::record_files(items.len());
     // Always enter the indexing pool, even when the width is 1: the pool is
     // what keeps the nested chunk-level fan-out inside the reservation
     // instead of spilling onto rayon's global (all-cores) pool.
@@ -1144,6 +1147,7 @@ where
     /// the foreign generation is never adopted, never config-checked, and the
     /// refusal is a reset journey, not a transient error to retry on a
     /// cadence.
+    #[hotpath::measure]
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -1192,11 +1196,15 @@ where
     /// Build one complete generation and atomically publish it only after
     /// intake, parser evidence, lineage, exact admission, projection receipt,
     /// and capability validation have all succeeded.
+    #[hotpath::measure]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
+        let started = crate::hotpath_observe::start_ttfq();
+        crate::hotpath_observe::record_generation_state("building");
+        crate::hotpath_observe::record_rebuild_state("unknown");
         Self::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
@@ -1213,6 +1221,16 @@ where
             .map_err(CodeIndexProductionErrorV1::Intake)?;
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
+        #[cfg(feature = "hotpath")]
+        {
+            crate::hotpath_observe::record_files(captured_files.len());
+            crate::hotpath_observe::record_source_bytes(
+                captured_files
+                    .values()
+                    .map(|file| file.sanitized_bytes.len() as u64)
+                    .fold(0_u64, u64::saturating_add),
+            );
+        }
         Self::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
@@ -1278,6 +1296,16 @@ where
             self.config.chunker_revision.clone(),
             parser_registry,
         );
+        crate::hotpath_observe::record_rebuild_state(match increment.as_ref() {
+            Some(plan) if plan.is_full_rebuild() => "rebuild",
+            Some(_) => "increment",
+            None => "full",
+        });
+        crate::hotpath_observe::record_generation_state(if active.is_some() {
+            "resume"
+        } else {
+            "initial"
+        });
         let staged = match (active.as_ref(), increment.as_ref()) {
             (Some(active), Some(increment)) => self.materialize_increment(
                 &intake,
@@ -1356,6 +1384,13 @@ where
             graph_manifest: OnceLock::new(),
         };
         candidate.validate()?;
+        #[cfg(feature = "hotpath")]
+        if let Ok(statistics) = candidate.generation_statistics() {
+            crate::hotpath_observe::record_source_bytes(statistics.source_total_bytes);
+            crate::hotpath_observe::record_symbols(statistics.symbol_count);
+            crate::hotpath_observe::record_relations(statistics.edge_count);
+            crate::hotpath_observe::record_files(candidate.files.len());
+        }
 
         let expected = active
             .as_ref()
@@ -1365,6 +1400,8 @@ where
         let candidate = Arc::new(candidate);
         self.publication
             .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))?;
+        crate::hotpath_observe::record_generation_state("queryable");
+        crate::hotpath_observe::record_ttfq(started);
         Ok(candidate)
     }
 
@@ -1413,6 +1450,7 @@ where
     /// snapshot order after the parallel sweep, and the key binds the same
     /// inputs either way, so recomputing it per recording was pure waste.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     fn extract_file(
         config: &CodeIndexProductionConfigV1,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
@@ -1427,6 +1465,7 @@ where
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(ManifestDigest, FileGenerationArtifactsV1), CodeIndexProductionErrorV1> {
+        let _worker = crate::hotpath_observe::WorkerBusyGuard::enter();
         Self::checkpoint(control)?;
         let captured = captured_files
             .get(&file.file_occurrence_id)
@@ -1456,6 +1495,7 @@ where
         let physical_reuse_key =
             Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
         if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound) {
+            crate::hotpath_observe::add_reused_parses(1);
             Self::checkpoint(control)?;
             return Ok((physical_reuse_key, reused));
         }
@@ -1568,6 +1608,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     fn materialize_full(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -1618,6 +1659,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     fn materialize_increment(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -1691,6 +1733,7 @@ where
                             )
                             .map_err(CodeIndexProductionErrorV1::Intake)?;
                         if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
+                            crate::hotpath_observe::add_reused_parses(1);
                             Ok(IncrementFileMaterializationV1::CarryForward(artifact))
                         } else {
                             // Opaque exact evidence may refuse generation-local

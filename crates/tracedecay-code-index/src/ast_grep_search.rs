@@ -244,6 +244,7 @@ fn build_lang_pattern(key: &str, pattern: &str) -> Option<Result<(TdLang, Patter
 ///   scanned.
 /// * `max_results` — hard cap; one extra match past the cap is collected so
 ///   truncation can be reported honestly.
+#[hotpath::measure]
 pub fn search_tree(
     project_root: &Path,
     pattern: &str,
@@ -273,6 +274,7 @@ pub(crate) fn search_tree_scoped(
     )
 }
 
+#[hotpath::measure]
 pub fn search_tree_scoped_with_cancel<F>(
     project_root: &Path,
     pattern: &str,

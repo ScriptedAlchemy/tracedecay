@@ -411,6 +411,7 @@ pub enum GenerationGitJoinErrorV1 {
 }
 
 impl GenerationGitHistoryJoinV1 {
+    #[hotpath::measure]
     pub fn join(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,
@@ -450,6 +451,7 @@ impl GenerationGitHistoryJoinV1 {
 
 impl GenerationGitBlameJoinV1 {
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     pub fn join(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,
@@ -591,6 +593,7 @@ impl GenerationGitJoinV1 {
         )
     }
 
+    #[hotpath::measure]
     fn join_internal(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,

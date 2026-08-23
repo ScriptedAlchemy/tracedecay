@@ -228,6 +228,7 @@ fn json_generation_bytes_and_digest<T: Serialize>(
 
 impl CodeIndexPublishedGenerationV1 {
     /// Encode the complete sealed generation for immutable store publication.
+    #[hotpath::measure]
     pub fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         self.validate()?;
         let generation = PersistedPublishedGenerationRefV1 {
@@ -259,11 +260,14 @@ impl CodeIndexPublishedGenerationV1 {
         admit_sealed_generation_len(u64::try_from(sealed.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
         })?)?;
+        crate::hotpath_observe::record_seal_bytes(sealed.len() as u64);
         Ok(sealed)
     }
 
     /// Restore and revalidate a complete sealed generation.
+    #[hotpath::measure]
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
+        crate::hotpath_observe::record_seal_bytes(bytes.len() as u64);
         let admitted_len = u64::try_from(bytes.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
         })?;

@@ -207,11 +207,13 @@ fn indexing_pool() -> Option<&'static rayon::ThreadPool> {
 /// the same pool, so the reservation holds for the whole pipeline rather than
 /// being multiplied by pipeline depth. Falls back to running inline only if
 /// the pool could not be built at all.
+#[hotpath::measure]
 pub fn install<R, F>(operation: F) -> R
 where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    hotpath::gauge!("code_index_worker_count").set(indexing_workers());
     match indexing_pool() {
         Some(pool) => pool.install(operation),
         None => operation(),

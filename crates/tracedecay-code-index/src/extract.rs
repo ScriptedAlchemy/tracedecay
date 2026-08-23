@@ -199,6 +199,7 @@ impl TreeSitterExtractor {
         })
     }
 
+    #[hotpath::measure]
     pub(crate) fn extract_preparsed(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -489,6 +490,7 @@ pub(crate) fn parser_import_rows_digest(
 }
 
 impl LanguageExtractor for TreeSitterExtractor {
+    #[hotpath::measure]
     fn extract(
         &self,
         file: &ReceiptBoundCodeFileV1,
