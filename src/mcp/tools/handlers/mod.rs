@@ -209,7 +209,6 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 pub async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
@@ -362,7 +361,6 @@ impl<'a> ToolCallRegistryOptions<'a> {
     }
 }
 
-#[hotpath::measure]
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,

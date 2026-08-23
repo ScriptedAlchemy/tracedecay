@@ -645,11 +645,10 @@ impl McpServer {
             )
         ) {
             Ok(tools) => {
-                let payload =
-                    hotpath::measure_block!("mcp.tools_list.encode", json!({ "tools": tools }));
-                if let Ok(encoded) = serde_json::to_vec(&payload) {
-                    hotpath::gauge!("mcp.tools_list.response_bytes").set(encoded.len() as f64);
-                }
+                let payload = hotpath::measure_block!(
+                    "mcp.tools_list.compose_payload",
+                    json!({ "tools": tools })
+                );
                 JsonRpcResponse::success(id, payload)
             }
             Err(error) => JsonRpcResponse::error(
