@@ -444,9 +444,9 @@ pub(super) fn unique_mounted_for_scope<'a>(
     }
 }
 
-fn dashboard_freshness_identity(
-    latest: Option<&LatestCompleteCodeIndexV1>,
-) -> (
+/// Repository, worktree, branch, commit, generation and index identities, plus
+/// the sealed-at stamp — every field absent when no complete index exists.
+type DashboardFreshnessIdentity = (
     Option<String>,
     Option<String>,
     Option<String>,
@@ -454,7 +454,11 @@ fn dashboard_freshness_identity(
     Option<String>,
     Option<String>,
     Option<i64>,
-) {
+);
+
+fn dashboard_freshness_identity(
+    latest: Option<&LatestCompleteCodeIndexV1>,
+) -> DashboardFreshnessIdentity {
     latest.map_or((None, None, None, None, None, None, None), |latest| {
         let generation = &latest.generation;
         let snapshot = generation.snapshot();

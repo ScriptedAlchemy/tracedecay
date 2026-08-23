@@ -785,7 +785,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         };
         // Decoded with NO cache lock held: unrelated readers and publishers keep
         // making progress while this runs.
-        let matched = self.load_indexed_generation(generation_id, &entry);
+        let matched = self.load_indexed_generation(generation_id, entry);
         if let Ok(Some(generation)) = matched.as_ref() {
             self.cache.remember(Arc::clone(generation))?;
         }
@@ -1074,7 +1074,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
         let _ = self.load_active_shared()?;
-        let mut state = self.cache.lock_state()?;
+        let state = self.cache.lock_state()?;
         if state
             .active
             .as_ref()

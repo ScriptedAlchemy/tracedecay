@@ -64,6 +64,7 @@ impl SessionRetrievalCommand {
         Self { query }
     }
 
+    #[cfg(test)]
     pub(crate) fn query(&self) -> &SessionTemporalQuery {
         &self.query
     }

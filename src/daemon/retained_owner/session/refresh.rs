@@ -291,7 +291,7 @@ fn refresh_receipt(
     value: SessionRefreshReceiptView,
 ) -> Result<SessionRefreshReceiptV1, RetainedSurfaceExecutionErrorV1> {
     SessionRefreshReceiptV1::try_from(value)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+        .map_err(|()| RetainedSurfaceExecutionErrorV1::Unavailable)
 }
 
 impl From<SessionRefreshFrontierView> for SessionRefreshFrontierResultV1 {

@@ -299,8 +299,6 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn transcript_ingest_forwards_its_budget_to_the_daemon() {

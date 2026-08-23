@@ -1648,6 +1648,7 @@ fn walk_store_stats(dir: &Path) -> StoreWalkStats {
 }
 
 /// Newest mtime under `dir`, unix seconds, or `0` when nothing is readable.
+#[cfg(test)]
 fn newest_mtime_secs(dir: &Path) -> i64 {
     walk_store_stats(dir).newest_mtime_secs
 }

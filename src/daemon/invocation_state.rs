@@ -770,7 +770,7 @@ impl DaemonInvocationState {
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
-                        request.clone(),
+                        (**request).clone(),
                         observed_at,
                         deadline.clone(),
                         cancellation,
@@ -838,8 +838,10 @@ impl DaemonInvocationState {
 /// One multi-root operation parsed and family-validated once per request.
 /// Per-root execution clones the typed value instead of re-deserializing the
 /// identical operation JSON for every admitted root.
-enum ParsedMultiRootOperationV1 {
-    Work(service::invocation::WorkApplicationInvocationV1),
+pub(super) enum ParsedMultiRootOperationV1 {
+    /// Boxed: the work invocation is ~1KiB against a ~33-byte sibling, and one
+    /// of these is cloned per admitted root.
+    Work(Box<service::invocation::WorkApplicationInvocationV1>),
     Surface {
         operation: crate::application_surface::ApplicationSurfaceOperation,
         request: Value,
@@ -862,7 +864,7 @@ fn parse_multi_root_operation(
             ) {
                 return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
             }
-            Ok(ParsedMultiRootOperationV1::Work(request))
+            Ok(ParsedMultiRootOperationV1::Work(Box::new(request)))
         }
         tracedecay_application::MultiRootOperationV1::Git { request }
         | tracedecay_application::MultiRootOperationV1::Feedback { request }

@@ -903,6 +903,8 @@ fn take_test_daemon_hook_action(
     )
 }
 
+// Only the hook tests assert on the derived route metadata.
+#[cfg(test)]
 fn hook_route_metadata_from_event(
     event_json: &str,
     project_root: &Path,

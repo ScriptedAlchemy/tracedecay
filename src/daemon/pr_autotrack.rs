@@ -2378,7 +2378,7 @@ async fn cleanup_pr_worktree_off_runtime(
                 ("reason", error.to_string()),
             ],
         );
-    }
+    };
 }
 
 fn cleanup_pr_worktree(

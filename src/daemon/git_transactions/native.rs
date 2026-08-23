@@ -852,6 +852,8 @@ fn unsupported_hunk_selection(
     unsupported_selected_paths(runner, intelligence, operation, &unique_paths)
 }
 
+// Only the transaction tests exercise this refusal shape.
+#[cfg(test)]
 fn unsupported_path_state(
     runner: &FixedGitIndexRunner,
     intelligence: &NativeGitIntelligence,
@@ -999,6 +1001,9 @@ fn read_scope_diff(
     String::from_utf8(output.stdout).map_err(|_| GitIndexTransactionPortError::StalePreview)
 }
 
+// Test-only wrapper: production reads the diff itself and calls
+// `extract_patch_from_diff` directly.
+#[cfg(test)]
 fn extract_patch(
     repository_root: &Path,
     scope: &GitDiffScopeV1,

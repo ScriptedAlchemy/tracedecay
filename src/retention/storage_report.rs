@@ -257,7 +257,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// registered project's graph database, then scanning `projects/` bottom-up
 /// for directories with no matching registry row. Read-only throughout.
 ///
-/// Filesystem sizing, SQLite family copy, and per-store probes run on the
+/// Filesystem sizing, `SQLite` family copy, and per-store probes run on the
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
 pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<StorageReport> {
