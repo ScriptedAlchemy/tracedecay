@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
 use grafeo_core::graph::Direction;
@@ -39,6 +39,8 @@ pub(crate) struct StoredEntity {
 pub(crate) struct StoredRelation {
     pub(crate) locator: NodeId,
     pub(crate) edge: EdgeId,
+    pub(crate) source: NodeId,
+    pub(crate) target: NodeId,
     pub(crate) projection: GraphProjectionId,
     pub(crate) relation: GraphRelation,
 }
@@ -152,6 +154,29 @@ pub(crate) struct EntityLocator {
     pub(crate) node: NodeId,
     pub(crate) namespace: GraphNamespace,
     pub(crate) projection: GraphProjectionId,
+}
+
+/// Verified `(namespace, identity)` for relation endpoints, memoized by
+/// `NodeId` for one bulk load. Hub entities otherwise re-decode on every
+/// incident edge.
+#[derive(Default)]
+pub(crate) struct EndpointIdentityCache {
+    identities: HashMap<NodeId, (GraphNamespace, GraphEntityId)>,
+}
+
+impl EndpointIdentityCache {
+    pub(crate) fn identity(
+        &mut self,
+        database: &GrafeoDB,
+        node_id: NodeId,
+    ) -> Result<(GraphNamespace, GraphEntityId), GraphDbError> {
+        if let Some(cached) = self.identities.get(&node_id) {
+            return Ok(cached.clone());
+        }
+        let identity = entity_endpoint_identity(database, node_id)?;
+        self.identities.insert(node_id, identity.clone());
+        Ok(identity)
+    }
 }
 
 /// Identity + owner fields from one already-loaded node, without decoding
@@ -279,11 +304,13 @@ fn load_requested_relations(
     batch: &GraphWriteBatch,
 ) -> Result<BTreeMap<String, StoredRelation>, GraphDbError> {
     let mut loaded = BTreeMap::new();
+    let mut endpoints = EndpointIdentityCache::default();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(relation) = load_relation(database, namespace, &identity)? {
+        if let Some(relation) = load_relation_cached(database, namespace, &identity, &mut endpoints)?
+        {
             loaded.insert(key, relation);
         }
     }
@@ -320,12 +347,34 @@ pub(crate) fn load_relation(
     namespace: &GraphNamespace,
     identity: &GraphRelationId,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
-    load_relation_by_key(database, namespace, identity)
+    load_relation_cached(
+        database,
+        namespace,
+        identity,
+        &mut EndpointIdentityCache::default(),
+    )
+}
+
+pub(crate) fn load_relation_cached(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    identity: &GraphRelationId,
+    cache: &mut EndpointIdentityCache,
+) -> Result<Option<StoredRelation>, GraphDbError> {
+    load_relation_by_key(database, namespace, identity, cache)
 }
 
 pub(crate) fn load_relation_by_edge(
     database: &GrafeoDB,
     edge_id: EdgeId,
+) -> Result<Option<StoredRelation>, GraphDbError> {
+    load_relation_by_edge_cached(database, edge_id, &mut EndpointIdentityCache::default())
+}
+
+pub(crate) fn load_relation_by_edge_cached(
+    database: &GrafeoDB,
+    edge_id: EdgeId,
+    cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
     let Some(locator) = unique_labeled_node(
         database,
@@ -336,13 +385,14 @@ pub(crate) fn load_relation_by_edge(
     else {
         return Ok(None);
     };
-    load_relation_by_locator(database, locator).map(Some)
+    load_relation_by_locator_cached(database, locator, cache).map(Some)
 }
 
 fn load_relation_by_key(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
     identity: &GraphRelationId,
+    cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
     let Some(locator) = unique_labeled_node(
         database,
@@ -353,12 +403,24 @@ fn load_relation_by_key(
     else {
         return Ok(None);
     };
-    load_relation_by_locator(database, locator).map(Some)
+    load_relation_by_locator_cached(database, locator, cache).map(Some)
 }
 
 pub(crate) fn load_relation_by_locator(
     database: &GrafeoDB,
     locator_id: NodeId,
+) -> Result<StoredRelation, GraphDbError> {
+    load_relation_by_locator_cached(
+        database,
+        locator_id,
+        &mut EndpointIdentityCache::default(),
+    )
+}
+
+pub(crate) fn load_relation_by_locator_cached(
+    database: &GrafeoDB,
+    locator_id: NodeId,
+    cache: &mut EndpointIdentityCache,
 ) -> Result<StoredRelation, GraphDbError> {
     let store = database.graph_store();
     let locator = store
@@ -390,8 +452,8 @@ pub(crate) fn load_relation_by_locator(
     )?)
     .map_err(|error| persisted_validation_error("relation projection", error))?;
     let relation = decode_relation(&locator, &edge)?;
-    let (source_namespace, source_identity) = entity_endpoint_identity(database, edge.src)?;
-    let (target_namespace, target_identity) = entity_endpoint_identity(database, edge.dst)?;
+    let (source_namespace, source_identity) = cache.identity(database, edge.src)?;
+    let (target_namespace, target_identity) = cache.identity(database, edge.dst)?;
     let same_namespace = source_namespace == namespace && target_namespace == namespace;
     let generation_scoped = crate::generation::is_physical_generation_namespace(&namespace)
         && crate::generation::is_physical_generation_namespace(&source_namespace)
@@ -407,6 +469,8 @@ pub(crate) fn load_relation_by_locator(
     Ok(StoredRelation {
         locator: locator_id,
         edge: edge_id,
+        source: edge.src,
+        target: edge.dst,
         projection,
         relation,
     })
@@ -602,14 +666,16 @@ pub(crate) fn projection_relations(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
 ) -> Result<Vec<StoredRelation>, GraphDbError> {
-    labeled_projection_nodes(
+    let locators = labeled_projection_nodes(
         database,
         &relation_projection_label(namespace, projection),
         RELATION_LABEL,
-    )?
-    .into_iter()
-    .map(|locator| load_relation_by_locator(database, locator))
-    .collect()
+    )?;
+    let mut endpoints = EndpointIdentityCache::default();
+    locators
+        .into_iter()
+        .map(|locator| load_relation_by_locator_cached(database, locator, &mut endpoints))
+        .collect()
 }
 
 #[cfg(test)]
@@ -627,9 +693,14 @@ pub(crate) fn projection_relations_checked(
         check,
     )?;
     let mut relations = Vec::with_capacity(locators.len());
+    let mut endpoints = EndpointIdentityCache::default();
     for locator in locators {
         check()?;
-        relations.push(load_relation_by_locator(database, locator)?);
+        relations.push(load_relation_by_locator_cached(
+            database,
+            locator,
+            &mut endpoints,
+        )?);
     }
     check()?;
     Ok(relations)

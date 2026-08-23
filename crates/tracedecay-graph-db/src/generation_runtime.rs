@@ -21,7 +21,7 @@ use crate::recovery::{
 use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::state::{
-    latest_projection, load_entity_by_node, load_relation, load_relation_by_edge,
+    EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
     projection_entity_deletion_page_checked, projection_relation_deletion_page_checked,
 };
 use crate::{
@@ -744,14 +744,19 @@ impl GraphDb {
         else {
             return Ok(None);
         };
-        let edge = database
-            .graph_store()
-            .get_edge(stored.edge)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "verified generation relation edge is missing".to_owned(),
-            })?;
-        let from = typed_entity_ref(database, edge.src, &namespace_projection)?;
-        let to = typed_entity_ref(database, edge.dst, &namespace_projection)?;
+        let mut endpoints = EndpointIdentityCache::default();
+        let from = typed_entity_ref(
+            database,
+            stored.source,
+            &namespace_projection,
+            &mut endpoints,
+        )?;
+        let to = typed_entity_ref(
+            database,
+            stored.target,
+            &namespace_projection,
+            &mut endpoints,
+        )?;
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -793,6 +798,7 @@ impl GraphDb {
         let start = crate::state::load_entity(database, &head_namespace, &request.start)?
             .ok_or_else(|| GraphDbError::invalid("traversal start entity does not exist"))?;
         let store = database.graph_store();
+        let mut endpoints = EndpointIdentityCache::default();
         let mut queue = VecDeque::from([(start.node, 0_usize, None)]);
         let mut discovered = HashSet::from([start.node]);
         let mut visits = Vec::new();
@@ -807,7 +813,12 @@ impl GraphDb {
                 ));
             }
             visits.push(VerifiedTraversalVisit {
-                entity: typed_entity_ref(database, node, &namespace_projection)?,
+                entity: typed_entity_ref(
+                    database,
+                    node,
+                    &namespace_projection,
+                    &mut endpoints,
+                )?,
                 depth,
                 via_relation,
             });
@@ -849,21 +860,19 @@ impl GraphDb {
                     else {
                         continue;
                     };
-                    let stored = load_relation_by_edge(database, edge_id)?.ok_or_else(|| {
-                        GraphDbError::Corrupt {
+                    let stored = load_relation_by_edge_cached(database, edge_id, &mut endpoints)?
+                        .ok_or_else(|| GraphDbError::Corrupt {
                             message: "verified traversal edge has no typed relation locator"
                                 .to_owned(),
-                        }
-                    })?;
-                    let neighbor_entity = load_entity_by_node(database, neighbor)?;
-                    let Some(entity_projection) = namespace_projection
-                        .get(&neighbor_entity.namespace)
-                        .cloned()
+                        })?;
+                    let (neighbor_namespace, neighbor_identity) =
+                        endpoints.identity(database, neighbor)?;
+                    let Some(entity_projection) =
+                        namespace_projection.get(&neighbor_namespace).cloned()
                     else {
                         continue;
                     };
-                    let entity =
-                        GraphEntityRef::new(entity_projection, neighbor_entity.entity.identity);
+                    let entity = GraphEntityRef::new(entity_projection, neighbor_identity);
                     adjacent.push((
                         GraphRelationRef::new(relation_projection, stored.relation.identity),
                         entity,
@@ -1002,15 +1011,16 @@ fn typed_entity_ref(
     database: &grafeo_engine::GrafeoDB,
     node: grafeo_common::types::NodeId,
     namespace_projection: &BTreeMap<GraphNamespace, crate::GraphProjectionIdentity>,
+    cache: &mut EndpointIdentityCache,
 ) -> Result<GraphEntityRef, GraphDbError> {
-    let stored = load_entity_by_node(database, node)?;
+    let (namespace, identity) = cache.identity(database, node)?;
     let projection = namespace_projection
-        .get(&stored.namespace)
+        .get(&namespace)
         .cloned()
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "verified graph entity escapes snapshot dependency closure".to_owned(),
         })?;
-    Ok(GraphEntityRef::new(projection, stored.entity.identity))
+    Ok(GraphEntityRef::new(projection, identity))
 }
 
 fn generation_stage_pages(
