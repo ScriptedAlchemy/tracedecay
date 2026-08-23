@@ -477,10 +477,8 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         return Ok(TranscriptIngestStats::default());
     }
     protect_parsed_transcript_structural_ids(&mut parsed)?;
-    let commit_records =
-        crate::runtime::git_correlation::direct_commit_records(&parsed.messages, project_root);
-    let span_observations =
-        crate::runtime::git_correlation::ingest_span_observations(&parsed.messages);
+    let (commit_records, span_observations) =
+        crate::runtime::git_correlation::transcript_git_evidence(&parsed.messages, project_root);
     let draft = parsed.draft;
     let existing = store.get_session(provider, &draft.session_id).await?;
     let started_at = existing
@@ -708,6 +706,10 @@ pub fn preflight_strict_jsonl(
 /// Full contents of a changed file plus the advanced cursor.
 pub struct ChangedFile {
     pub contents: String,
+    /// Sidecar file contents when [`read_changed_with_companion`] hashed a
+    /// companion; `None` when the companion is absent or the primary-only
+    /// reader produced this change.
+    pub companion_contents: Option<String>,
     pub new_cursor: StoredCursor,
 }
 
@@ -738,6 +740,7 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Opt
 
     Some(ChangedFile {
         contents,
+        companion_contents: None,
         new_cursor: StoredCursor {
             position: hash,
             mtime,
@@ -766,7 +769,7 @@ pub fn read_changed_with_companion(
     let mtime = file_mtime_secs(&meta);
     let contents = read_file_to_string_bounded(primary, max_bytes)?;
     let primary_hash = content_hash64(&contents);
-    let (companion_hash, companion_mtime) = companion
+    let companion = companion
         .is_file()
         .then(|| {
             let companion_meta = match std::fs::metadata(companion) {
@@ -780,10 +783,13 @@ pub fn read_changed_with_companion(
             Some((
                 content_hash64(&companion_contents),
                 file_mtime_secs(&companion_meta),
+                companion_contents,
             ))
         })
-        .flatten()
-        .unwrap_or((0, 0));
+        .flatten();
+    let (companion_hash, companion_mtime, companion_contents) = companion
+        .map(|(hash, mtime, contents)| (hash, mtime, Some(contents)))
+        .unwrap_or((0, 0, None));
     let combined_hash = content_hash64(&format!("{primary_hash:016x}:{companion_hash:016x}"));
     let combined_mtime = mtime.max(companion_mtime);
 
@@ -796,6 +802,7 @@ pub fn read_changed_with_companion(
 
     Some(ChangedFile {
         contents,
+        companion_contents,
         new_cursor: StoredCursor {
             position: combined_hash,
             mtime: combined_mtime,

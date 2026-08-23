@@ -92,7 +92,7 @@ fn cursor_observation_context(
     }
 }
 
-/// Memoizes parent-transcript dispatch-model lookups per subagent transcript
+/// Memoizes parent-transcript dispatch-model lookups per parent transcript
 /// and agent id. A dispatch record never changes once written, so a found
 /// model holds for every later incremental batch of the same subagent
 /// transcript; misses stay uncached because the parent transcript may simply
@@ -109,7 +109,11 @@ impl DispatchModelCache {
         parent_session_id: &str,
         agent_id: &str,
     ) -> Option<String> {
-        let key = (path.to_path_buf(), agent_id.to_string());
+        let parent_path = path
+            .parent()?
+            .parent()?
+            .join(format!("{parent_session_id}.jsonl"));
+        let key = (parent_path, agent_id.to_string());
         if let Some(model) = self
             .models
             .lock()

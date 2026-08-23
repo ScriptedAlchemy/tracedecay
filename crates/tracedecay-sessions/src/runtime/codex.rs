@@ -525,6 +525,13 @@ impl TranscriptSource for CodexSource {
         );
         let mut last_in_scope_cwd = None;
         let mut last_in_scope_git = None;
+        let push_annotated = |messages: &mut Vec<_>,
+                              mut message,
+                              cwd: Option<&Path>,
+                              git: Option<&serde_json::Value>| {
+            context::annotate_message(&mut message, cwd, git, &self.project_matchers);
+            messages.push(message);
+        };
         for line in &new.lines {
             let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
             // `Unknown` means a bounded git timeout left this record's scope
@@ -552,6 +559,8 @@ impl TranscriptSource for CodexSource {
             }
             last_in_scope_cwd.clone_from(&context_state.cwd);
             last_in_scope_git.clone_from(&context_state.git);
+            let cwd = context_state.cwd.as_deref();
+            let git = context_state.git.as_ref();
             // Non-consuming: harvest session-level policy/effort/rate-limit
             // summary before the line is routed to its owning handler below.
             structured.observe_summary(&line.value);
@@ -565,14 +574,8 @@ impl TranscriptSource for CodexSource {
                 path,
                 line.offset,
             ) {
-                for mut message in rows {
-                    context::annotate_message(
-                        &mut message,
-                        context_state.cwd.as_deref(),
-                        context_state.git.as_ref(),
-                        &self.project_matchers,
-                    );
-                    messages.push(message);
+                for message in rows {
+                    push_annotated(&mut messages, message, cwd, git);
                 }
                 continue;
             }
@@ -582,56 +585,42 @@ impl TranscriptSource for CodexSource {
                     continue;
                 }
                 last_goal_key = Some(key);
-                let mut message = goal_event_message(
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    timestamp_from_record(&line.value),
-                    &event,
+                push_annotated(
+                    &mut messages,
+                    goal_event_message(
+                        &meta,
+                        context_state.model.as_deref(),
+                        path,
+                        line.offset,
+                        timestamp_from_record(&line.value),
+                        &event,
+                    ),
+                    cwd,
+                    git,
                 );
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
                 continue;
             }
-            if let Some(mut message) = response_item_goal_context_from_line(
+            if let Some(message) = response_item_goal_context_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
                 continue;
             }
-            if let Some(mut message) = response_item_tool_event_from_line(
+            if let Some(message) = response_item_tool_event_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
                 continue;
             }
-            if let Some(mut message) = compacted_summary_from_line(
+            if let Some(message) = compacted_summary_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
@@ -639,58 +628,39 @@ impl TranscriptSource for CodexSource {
                 line.offset,
                 context_state.compaction_depth + 1,
             ) {
+                push_annotated(&mut messages, message, cwd, git);
                 context_state.compaction_depth += 1;
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
                 continue;
             }
-            if let Some(mut message) = goal_context_from_line(
+            if let Some(message) = goal_context_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
                 continue;
             }
-            if let Some(mut message) = message_from_line(
+            if let Some(message) = message_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
             }
         }
         // Emit any `exec_command` calls whose paired output never arrived in
         // this pass so the tool call is not silently dropped.
-        for mut message in structured.flush_pending(&meta, path) {
-            context::annotate_message(
-                &mut message,
+        for message in structured.flush_pending(&meta, path) {
+            push_annotated(
+                &mut messages,
+                message,
                 last_in_scope_cwd.as_deref(),
                 last_in_scope_git.as_ref(),
-                &self.project_matchers,
             );
-            messages.push(message);
         }
 
         // A truncate-and-rewrite can reuse every byte offset from the previous

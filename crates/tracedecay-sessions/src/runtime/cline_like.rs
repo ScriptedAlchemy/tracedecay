@@ -15,8 +15,9 @@
 //! is ingested only when its metadata contains a project/workspace/cwd path that
 //! resolves to the current tracedecay project root.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use crate::admission::HostAdmission;
@@ -70,6 +71,30 @@ const CLINE_LIKE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
         "cline_like_task_location_provenance",
     );
 
+#[derive(Clone, Default)]
+struct TaskMetadataCache {
+    entries: Arc<Mutex<HashMap<PathBuf, Value>>>,
+}
+
+impl TaskMetadataCache {
+    fn get(&self, provider: &'static str, task_dir: &Path) -> Option<Value> {
+        if let Some(cached) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(task_dir)
+        {
+            return Some(cached.clone());
+        }
+        let metadata = read_task_metadata(provider, task_dir)?;
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task_dir.to_path_buf(), metadata.clone());
+        Some(metadata)
+    }
+}
+
 /// One Cline-family provider configuration.
 #[derive(Clone)]
 pub struct ClineLikeSource {
@@ -79,6 +104,9 @@ pub struct ClineLikeSource {
     /// Source-lifetime cache so one scan pass resolves git identity once per
     /// root/task path instead of once per task directory.
     project_matchers: ProjectRootMatcherCache,
+    /// Task metadata is read during discovery and again at parse; keep the
+    /// parsed document for the life of the source.
+    task_metadata: TaskMetadataCache,
 }
 
 impl ClineLikeSource {
@@ -112,6 +140,7 @@ impl ClineLikeSource {
             ],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         }
     }
 
@@ -124,6 +153,7 @@ impl ClineLikeSource {
             ],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         }
     }
 
@@ -137,6 +167,7 @@ impl ClineLikeSource {
             ],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         }
     }
 
@@ -194,7 +225,7 @@ impl TranscriptSource for ClineLikeSource {
 
 impl ClineLikeSource {
     fn snapshot_location(&self, path: &Path, project_root: &Path) -> Option<PathBuf> {
-        let metadata = read_task_metadata(self.provider, path.parent()?)?;
+        let metadata = self.task_metadata.get(self.provider, path.parent()?)?;
         self.snapshot_location_from_metadata(&metadata, project_root)
     }
 
@@ -257,7 +288,7 @@ impl ClineLikeSource {
         let Some(changed) = read_changed_with_companion(path, &ui_path, prev, byte_cap) else {
             return Ok(None);
         };
-        let Some(metadata) = read_task_metadata(self.provider, task_dir) else {
+        let Some(metadata) = self.task_metadata.get(self.provider, task_dir) else {
             return Ok(None);
         };
         let Some(location_cwd) = self.snapshot_location_from_metadata(&metadata, project_root)
@@ -308,6 +339,7 @@ impl ClineLikeSource {
             self.provider,
             task_id,
             &ui_path,
+            changed.companion_contents.as_deref(),
             entries.len(),
             &location_cwd,
         )?
@@ -517,17 +549,26 @@ fn usage_records(
     provider: &'static str,
     task_id: &str,
     ui_path: &Path,
+    companion_contents: Option<&str>,
     ordinal_base: usize,
     location_cwd: &Path,
 ) -> TranscriptIngestResult<Option<Vec<SessionMessageRecord>>> {
     if !ui_path.is_file() {
         return Ok(Some(Vec::new()));
     }
-    let Ok(Some(contents)) = read_snapshot_text_bounded(provider, ui_path, MAX_SNAPSHOT_FILE_BYTES)
-    else {
-        return Ok(None);
+    let owned;
+    let contents = if let Some(contents) = companion_contents {
+        contents
+    } else {
+        match read_snapshot_text_bounded(provider, ui_path, MAX_SNAPSHOT_FILE_BYTES) {
+            Ok(Some(contents)) => {
+                owned = contents;
+                owned.as_str()
+            }
+            _ => return Ok(None),
+        }
     };
-    let document: Value = match serde_json::from_str(&contents) {
+    let document: Value = match serde_json::from_str(contents) {
         Ok(document) => document,
         Err(error) if error.is_eof() => return Ok(None),
         Err(_) => {
@@ -967,6 +1008,7 @@ mod observation_tests {
                 storage_roots: vec![tasks],
                 user_registered_roots: None,
                 project_matchers: ProjectRootMatcherCache::default(),
+                task_metadata: TaskMetadataCache::default(),
             };
             let admission = MemoryHostAdmission::default();
 
@@ -1126,6 +1168,7 @@ mod observation_tests {
             storage_roots: vec![tasks],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         };
 
         let paths = source.transcript_paths(&project);
@@ -1170,6 +1213,7 @@ mod observation_tests {
             storage_roots: vec![first_tasks, second_tasks.clone()],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         };
         let paths = source.transcript_paths(&project);
         assert_eq!(paths.len(), 2);
@@ -1197,6 +1241,7 @@ mod observation_tests {
             storage_roots: vec![second_tasks],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         };
         let err = capture_cline_like_snapshot_observations(
             &admission,
@@ -1241,6 +1286,7 @@ mod observation_tests {
             storage_roots: vec![temp.path().join("tasks")],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
         };
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
