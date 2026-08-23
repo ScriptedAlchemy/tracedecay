@@ -138,7 +138,45 @@ impl ProjectedChunkV1 {
         chunk: CodeSearchChunkV1,
         logical_path: String,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
+        let fields = Self::projected_fields(&chunk, &logical_path);
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
+        Self::from_parts(
+            chunk.id,
+            chunk.anchor,
+            chunk.language_descriptor_revision,
+            chunk.exact_terms,
+            chunk.sanitized_text,
+            logical_path,
+            normalized_text,
+            fields,
+        )
+    }
+
+    /// Clone only the fields the projection retains. Sealed pages lend chunks,
+    /// so this avoids `admitted.clone().into_chunk()` copying subtokens and
+    /// other dropped payloads on the artifact append path.
+    fn from_ref(
+        chunk: &CodeSearchChunkV1,
+        logical_path: String,
+    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
+        let fields = Self::projected_fields(chunk, &logical_path);
+        let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
+        Self::from_parts(
+            chunk.id.clone(),
+            chunk.anchor.clone(),
+            chunk.language_descriptor_revision.clone(),
+            chunk.exact_terms.clone(),
+            chunk.sanitized_text.clone(),
+            logical_path,
+            normalized_text,
+            fields,
+        )
+    }
+
+    fn projected_fields(
+        chunk: &CodeSearchChunkV1,
+        logical_path: &str,
+    ) -> BTreeMap<LexicalFieldV1, Vec<String>> {
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
             LexicalFieldV1::PreambleText
@@ -146,7 +184,7 @@ impl ProjectedChunkV1 {
             LexicalFieldV1::BodyText
         };
         fields.insert(text_field, lexical_tokens(chunk.sanitized_text.as_str()));
-        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(&logical_path)]);
+        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(logical_path)]);
         fields.insert(
             LexicalFieldV1::Subtoken,
             chunk
@@ -192,17 +230,31 @@ impl ProjectedChunkV1 {
                 _ => {}
             }
         }
+        fields
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        id: CodeSearchChunkId,
+        anchor: CodeSearchChunkAnchorV1,
+        language_descriptor_revision: LanguageDescriptorRevision,
+        exact_terms: Vec<ExactTechnicalTermV1>,
+        sanitized_text: BoundedSanitizedText,
+        logical_path: String,
+        normalized_text: String,
+        fields: BTreeMap<LexicalFieldV1, Vec<String>>,
+    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
         let field_lengths = fields
             .iter()
             .map(|(field, terms)| (*field, terms.len()))
             .collect();
         (
             Self {
-                id: chunk.id,
-                anchor: chunk.anchor,
-                language_descriptor_revision: chunk.language_descriptor_revision,
-                exact_terms: chunk.exact_terms,
-                sanitized_text: chunk.sanitized_text,
+                id,
+                anchor,
+                language_descriptor_revision,
+                exact_terms,
+                sanitized_text,
                 logical_path,
                 field_lengths,
                 normalized_text,

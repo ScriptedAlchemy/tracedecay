@@ -138,8 +138,6 @@ fn split_identifier_parts(token: &str) -> impl Iterator<Item = String> + '_ {
     parts.into_iter()
 }
 
-/// Typed lexical fields over code-search result grains.
-///
 /// Whole exact terms and language-profiled subtokens are distinct fields.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LexicalFieldV1 {

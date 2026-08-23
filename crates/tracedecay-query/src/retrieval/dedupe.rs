@@ -17,7 +17,6 @@ use tracedecay_domain::{
 
 use super::ordering::compare_fused;
 
-/// Failures of the dedupe stage.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DedupeStageError {
     #[error("a logical-copy relation lacks its evidence anchor")]

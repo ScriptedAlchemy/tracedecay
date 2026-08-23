@@ -43,7 +43,6 @@ pub trait SemanticRerankExecutionPortV1 {
     ) -> BoundedRerankOutcomeV1;
 }
 
-/// Typed readiness of the configured optional rerank stage.
 pub enum SemanticRerankReadinessV1<'a> {
     Ready(&'a mut dyn SemanticRerankExecutionPortV1),
     Unavailable(SanitizedStageFailure),

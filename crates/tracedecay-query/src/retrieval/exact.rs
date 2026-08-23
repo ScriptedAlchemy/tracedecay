@@ -32,8 +32,6 @@ const EXACT_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
     unaddressed_binding: "exact lane binding does not address its candidate",
 };
 
-/// Typed exact-lane request.
-///
 /// Exact technical literals are parsed under a versioned exact-admission
 /// specification before any lane executes.
 #[derive(Debug, PartialEq, Eq)]

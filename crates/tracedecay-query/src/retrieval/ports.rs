@@ -7,22 +7,18 @@
 //! scheduling and cancellation are application-layer concerns.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, CompactCandidate, CursorPayloadDigest,
     ExactTechnicalTermKindV1, FileOccurrenceId, LanguageDescriptorRevision, RetrievalAnchorId,
     RetrievalBudget, RetrieverBatch, RetrieverKind, RetrieverOutcome, SourceOccurrenceId,
-    SymbolOccurrenceId,
+    SymbolOccurrenceId, canonical_sha256,
 };
 
 use super::exact::{ExactLaneEvidence, ExactLaneRequest};
 use super::graph::{GraphLaneEvidence, GraphLaneRequest};
 use super::lexical::{LexicalLaneEvidence, LexicalLaneRequest};
 
-/// Failures of a store/projector read port or a lane adapter.
-///
 /// Incompatible indexes or models never trigger silent fallback.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalPortError {
@@ -57,19 +53,17 @@ pub(crate) fn contract_error(error: impl std::fmt::Display) -> RetrievalPortErro
 /// Hash one lane's already-domain-separated checkpoint payload.
 ///
 /// Every lane commits its admitted prefix under the same construction:
-/// canonical JSON of the lane's own payload tuple, SHA-256, then the
-/// `sha256:<hex>` spelling a cursor payload digest accepts. Only the payload
-/// differs between lanes, so only the payload is a lane's business.
+/// the domain `canonical_sha256` stream (canonical JSON into the hasher,
+/// then the `sha256:<hex>` spelling a cursor payload digest accepts). Only
+/// the payload differs between lanes, so only the payload is a lane's
+/// business. Cursor bytes are ephemeral; live cursors minted before this
+/// encoding are rejected as a set mismatch.
 pub(crate) fn checkpoint_digest<T>(payload: &T) -> Result<CursorPayloadDigest, RetrievalPortError>
 where
-    T: Serialize + ?Sized,
+    T: Serialize,
 {
-    let bytes = serde_json::to_vec(payload).map_err(contract_error)?;
-    CursorPayloadDigest::new(encode_tagged_lowercase_hex(
-        "sha256:",
-        &Sha256::digest(&bytes),
-    ))
-    .map_err(contract_error)
+    let digest = canonical_sha256(payload).map_err(contract_error)?;
+    CursorPayloadDigest::new(digest.as_str()).map_err(contract_error)
 }
 
 /// How many candidates one lane may commit: the tighter of its own budget and

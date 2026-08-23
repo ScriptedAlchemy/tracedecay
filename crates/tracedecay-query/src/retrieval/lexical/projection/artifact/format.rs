@@ -6,8 +6,8 @@ use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkId,
-    ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
-    RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    ExactFieldV1, ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision,
+    ManifestDigest, RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
@@ -240,6 +240,11 @@ pub(super) fn artifact_digest(
 }
 
 pub(super) fn encode_field(field: LexicalFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
+    serde_json::to_string(&field)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
+pub(super) fn encode_exact_field(field: ExactFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
     serde_json::to_string(&field)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }

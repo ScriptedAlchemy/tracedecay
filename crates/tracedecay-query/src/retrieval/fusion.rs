@@ -1,7 +1,7 @@
 //! Deterministic fixed-point fusion stage contracts (Plan 15 pipeline steps
-//! 4-8; Plan 25: `src/query/retrieval/fusion.rs` operates on compact
-//! candidates with deterministic fixed-point contributions, complete
-//! comparator provenance, and source/file caps).
+//! 4-8; Plan 25). Fusion operates on compact candidates with deterministic
+//! fixed-point contributions, complete comparator provenance, and source/file
+//! caps.
 //!
 //! RRF may be evaluated as a profile candidate inside this generic
 //! fixed-point framework; no constant or weight is production authority
@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use thiserror::Error;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
@@ -25,6 +25,7 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId,
     RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind,
     RetrieverOutcome, SanitizerRevision, SourceFreshness, SourceOccurrenceId, UtcMicros,
+    canonical_sha256,
 };
 use zeroize::Zeroizing;
 
@@ -407,8 +408,8 @@ impl RetrievalCursorKeyringV1 {
     }
 }
 
-/// Failures of the fusion stage. Fusion never substitutes or simulates a
-/// missing lane; it composes the typed outcomes it is given.
+/// Fusion never substitutes or simulates a missing lane; it composes the typed
+/// outcomes it is given.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum FusionStageError {
     #[error("a required exact or lexical lane outcome is unavailable")]
@@ -1168,17 +1169,9 @@ fn attach_same_source_decisions(
 pub fn digest_candidate_set(
     candidates: &[RankedCandidate],
 ) -> Result<CandidateSetDigest, RetrievalError> {
-    digest_value("tracedecay.retrieval-candidate-set.v1", candidates)
-        .and_then(|value| CandidateSetDigest::new(value).map_err(RetrievalError::from))
-}
-
-fn digest_value<T: Serialize + ?Sized>(
-    domain: &'static str,
-    value: &T,
-) -> Result<String, RetrievalError> {
-    let bytes = serde_json::to_vec(&(domain, value))
+    let digest = canonical_sha256(&("tracedecay.retrieval-candidate-set.v1", candidates))
         .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
-    Ok(encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes)))
+    CandidateSetDigest::new(digest.as_str()).map_err(RetrievalError::from)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -21,7 +21,7 @@ use super::builder::compute_section_digests;
 use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactOccurrenceV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_padded_receipt, encode_field, metadata_digest,
+    decode_padded_receipt, encode_exact_field, encode_field, metadata_digest,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::{
@@ -679,7 +679,10 @@ impl<'a> ArtifactQueryV1<'a> {
             retain_bounded(
                 &mut ranked,
                 cap,
-                (Reverse(ranking), row.id.as_str().to_owned(), document),
+                RankedLexicalEntryV1 {
+                    key: (Reverse(ranking), row.id.as_str().to_owned(), document),
+                    score,
+                },
             );
             Ok(())
         })?;
@@ -687,10 +690,12 @@ impl<'a> ArtifactQueryV1<'a> {
         let truncated = eligible - selected.len() as u64;
         let mut candidates = Vec::with_capacity(selected.len());
         let mut evidence_by_occurrence = BTreeMap::new();
-        for (ordinal, (_, _, document)) in selected.into_iter().enumerate() {
+        for (ordinal, entry) in selected.into_iter().enumerate() {
+            let RankedLexicalEntryV1 {
+                key: (_, _, document),
+                score,
+            } = entry;
             let row = self.row(document)?;
-            let score =
-                self.score_row(document, &row, request, &fuzzy, &phrase_frequencies, &stats)?;
             let mut candidate = candidate(
                 self.receipt,
                 &row,
@@ -742,7 +747,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut ranked = BinaryHeap::new();
         self.visit_documents(&documents, |document| {
             let row = self.row(document)?;
-            let (matched_literals, _) = exact_matches_artifact(&row, request);
+            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             if matched_literals.is_empty() {
                 return Ok(());
             }
@@ -770,6 +775,8 @@ impl<'a> ArtifactQueryV1<'a> {
                         document,
                     ),
                     proof,
+                    matched_literals,
+                    matched_kinds,
                 },
             );
             Ok(())
@@ -782,9 +789,10 @@ impl<'a> ArtifactQueryV1<'a> {
             let RankedExactEntryV1 {
                 key: (_, _, document),
                 proof,
+                matched_literals,
+                matched_kinds,
             } = entry;
             let row = self.row(document)?;
-            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             let mut candidate = candidate(
                 self.receipt,
                 &row,
@@ -878,7 +886,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     &literal.original_bytes,
                 ));
             }
-            let field = serde_json::to_string(&literal.field).map_err(contract_error)?;
+            let field = encode_exact_field(literal.field).map_err(map_query_artifact_error)?;
             sources.push(DocumentQueryV1::exact(
                 field,
                 literal.canonical_bytes.clone(),
@@ -1292,10 +1300,40 @@ fn binding(
 
 /// One admitted exact candidate retained during bounded selection: the
 /// canonical ranking key plus the proof the central authority already
-/// minted for it. Ordering is by key alone.
+/// minted for it, and the matches already computed during selection.
+/// Ordering is by key alone.
 struct RankedExactEntryV1 {
     key: (Reverse<usize>, String, u32),
     proof: ExactAdmissionProof,
+    matched_literals: Vec<crate::retrieval::exact::ExactLiteralV1>,
+    matched_kinds: Vec<ExactTechnicalTermKindV1>,
+}
+
+/// One lexical winner retained during bounded selection. The score is
+/// carried so the post-heap hydrate does not re-run `score_row`.
+struct RankedLexicalEntryV1 {
+    key: (Reverse<u64>, String, u32),
+    score: LexicalRowScoreV1,
+}
+
+impl PartialEq for RankedLexicalEntryV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for RankedLexicalEntryV1 {}
+
+impl PartialOrd for RankedLexicalEntryV1 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedLexicalEntryV1 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
 }
 
 impl PartialEq for RankedExactEntryV1 {

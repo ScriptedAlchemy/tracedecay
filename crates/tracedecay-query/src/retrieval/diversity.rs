@@ -13,7 +13,6 @@ use tracedecay_domain::{
     SessionOrThreadId, SourceInstanceKey, SourceNamespace,
 };
 
-/// Failures of the diversity stage.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DiversityStageError {
     #[error("an enabled diversity cap lacks its locked evaluation anchor")]

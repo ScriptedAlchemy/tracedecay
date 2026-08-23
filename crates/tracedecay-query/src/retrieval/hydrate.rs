@@ -15,8 +15,8 @@ use tracedecay_domain::{
     SourceOccurrenceId,
 };
 
-/// Failures of the hydration stage. Hydration denial removes the anchor and
-/// is indistinguishable from absence in public results (Plan 15).
+/// Hydration denial removes the anchor and is indistinguishable from absence
+/// in public results (Plan 15).
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum HydrationStageError {
     #[error("hydration exceeded its byte or deadline budget")]

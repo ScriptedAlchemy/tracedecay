@@ -23,8 +23,8 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_padded_receipt, decode_padded_receipt_with_control, encode_field, metadata_digest,
-    new_verified_receipt, padded_receipt,
+    decode_padded_receipt, decode_padded_receipt_with_control, encode_exact_field, encode_field,
+    metadata_digest, new_verified_receipt, padded_receipt,
 };
 use super::postings::{
     NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngram_scratch, insert_document_ngrams,
@@ -1935,7 +1935,7 @@ fn append_page_rows(
                 "lexical artifact exceeds the posting document-id range".to_owned(),
             )
         })?;
-        let chunk = admitted.clone().into_chunk();
+        let chunk = admitted.chunk();
         if chunk.anchor.generation_id != metadata.generation {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "sealed lexical page contains a foreign generation".to_owned(),
@@ -1951,7 +1951,7 @@ fn append_page_rows(
                     chunk.anchor.file_occurrence_id
                 ))
             })?;
-        let (row, fields) = ProjectedChunkV1::new(chunk, logical_path);
+        let (row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path);
         insert_fields(transaction, document, &fields)?;
         insert_exact(transaction, document, &row)?;
         insert_document_ngrams(
@@ -2073,11 +2073,6 @@ fn insert_exact(
         )?;
     }
     Ok(())
-}
-
-fn encode_exact_field(field: ExactFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
-    serde_json::to_string(&field)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
 fn insert_exact_posting(

@@ -70,7 +70,6 @@ impl CanonicalSemanticDistanceV1 {
     }
 }
 
-/// Typed semantic evidence attached to one generic compact candidate.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSemanticEvidenceV1 {

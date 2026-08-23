@@ -57,9 +57,6 @@ const GRAPH_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
     unaddressed_binding: "graph lane binding does not address its candidate",
 };
 
-/// Typed graph-lane request for bounded traversal from generation-matched
-/// anchors.
-///
 /// Relation and path requests preserve edge authority and weakest coverage
 /// state.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -444,11 +441,7 @@ fn graph_checkpoint_digest(
                     "graph checkpoint evidence is missing for a returned occurrence".to_owned(),
                 )
             })?;
-        let path_ids: Vec<String> = evidence
-            .ordered_path_ids()?
-            .into_iter()
-            .map(|path_id| path_id.as_str().to_owned())
-            .collect();
+        let path_ids = evidence.ordered_path_ids()?;
         let edge_kinds: Vec<RelationEdgeKindV1> = evidence
             .path
             .iter()
@@ -460,10 +453,13 @@ fn graph_checkpoint_digest(
             .map(|segment| segment.authority)
             .collect();
         prefix.push((
-            candidate.source_occurrence_id.as_str().to_owned(),
-            candidate.retriever_evidence_anchor.as_str().to_owned(),
+            candidate.source_occurrence_id.as_str(),
+            candidate.retriever_evidence_anchor.as_str(),
             candidate.raw_score.micros(),
-            path_ids,
+            path_ids
+                .iter()
+                .map(|path_id| path_id.as_str())
+                .collect::<Vec<_>>(),
             edge_kinds,
             authorities,
             evidence.weakest_authority,
