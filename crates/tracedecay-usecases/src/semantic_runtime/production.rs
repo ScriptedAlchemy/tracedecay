@@ -2906,28 +2906,6 @@ fn projection_case_sample_from_prepared(
     }
 }
 
-/// Application search admits semantics only when `query_factory` observes an
-/// exact cache match for the already-authorized request tuple.
-pub fn semantic_lane_readiness_for_request<'a>(
-    handle: &DaemonSemanticRuntimeHandleV1,
-    request: &'a SemanticRetrievalRequestV1<'a>,
-    generation: &'a CompleteSemanticGenerationV1,
-    calibration: Option<&'a SemanticCalibrationProfileV1>,
-) -> SemanticLaneReadinessV1<'a> {
-    match handle.query_factory(
-        &request.code_generation,
-        &request.vector_generation,
-        request.projection.projection_key(),
-    ) {
-        Some(_) => SemanticLaneReadinessV1::Ready {
-            request,
-            generation,
-            calibration,
-        },
-        None => SemanticLaneReadinessV1::Unavailable(index_state_from_status(handle.status())),
-    }
-}
-
 fn execute_calibrated_semantic_query<'a, L>(
     lane: &'a L,
     readiness: SemanticLaneReadinessV1<'a>,

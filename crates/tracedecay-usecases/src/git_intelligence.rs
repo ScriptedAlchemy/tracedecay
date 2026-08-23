@@ -1267,7 +1267,10 @@ impl NativeGitIntelligence {
                 detail: "attribute output was not complete NUL-delimited triples".to_owned(),
             });
         }
-        let mut triples_by_path: BTreeMap<String, Vec<(&[u8], &[u8], &[u8])>> = BTreeMap::new();
+        // check-attr emits NUL-delimited (path, attribute, value) triples; this
+        // groups the raw slices by path before any of them are decoded.
+        type AttributeTriples<'a> = BTreeMap<String, Vec<(&'a [u8], &'a [u8], &'a [u8])>>;
+        let mut triples_by_path: AttributeTriples<'_> = BTreeMap::new();
         for triple in records.chunks_exact(3) {
             triples_by_path
                 .entry(String::from_utf8_lossy(triple[0]).into_owned())
@@ -1723,7 +1726,7 @@ fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::symlink;
     use std::process::Command;
     use tempfile::TempDir;
     use tracedecay_domain::git::GitStatusEntryV1;

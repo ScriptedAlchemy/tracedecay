@@ -1900,7 +1900,12 @@ impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
         let source = self.clone();
         Box::pin(async move {
             source.cycle.execute(request.clone()).await?;
-            source.queue_feedback_changes(&request).await;
+            // Best-effort queueing, as it has been since this moved out of
+            // src/application: the cycle above already succeeded, and its
+            // result is what `execute` reports. Propagating this failure
+            // instead would make a queueing fault fail the whole cycle — a
+            // deliberate semantic change, not a lint fix.
+            let _ = source.queue_feedback_changes(&request).await;
             Ok(())
         })
     }

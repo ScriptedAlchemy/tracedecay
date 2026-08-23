@@ -292,6 +292,42 @@ pub fn is_deterministic_failure_class(class: AgentTaskFailureClass) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) struct CodexBinEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl CodexBinEnvGuard {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        let lock = crate::config::lock_user_data_dir_test_env();
+        let previous = std::env::var_os("TRACEDECAY_CODEX_BIN");
+        // SAFETY: the shared user-data-dir lock is held for the guard
+        // lifetime, so sibling env tests cannot observe this override.
+        unsafe {
+            std::env::set_var("TRACEDECAY_CODEX_BIN", path);
+        }
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CodexBinEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `CodexBinEnvGuard::set`.
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var("TRACEDECAY_CODEX_BIN", previous),
+                None => std::env::remove_var("TRACEDECAY_CODEX_BIN"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -387,38 +423,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct CodexBinEnvGuard {
-    previous: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl CodexBinEnvGuard {
-    pub(crate) fn set(path: &std::path::Path) -> Self {
-        let lock = crate::config::lock_user_data_dir_test_env();
-        let previous = std::env::var_os("TRACEDECAY_CODEX_BIN");
-        // SAFETY: the shared user-data-dir lock is held for the guard
-        // lifetime, so sibling env tests cannot observe this override.
-        unsafe {
-            std::env::set_var("TRACEDECAY_CODEX_BIN", path);
-        }
-        Self {
-            previous,
-            _lock: lock,
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for CodexBinEnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: see `CodexBinEnvGuard::set`.
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var("TRACEDECAY_CODEX_BIN", previous),
-                None => std::env::remove_var("TRACEDECAY_CODEX_BIN"),
-            }
-        }
-    }
-}
