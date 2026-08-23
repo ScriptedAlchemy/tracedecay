@@ -186,7 +186,7 @@ fn read_anchor(
             let record: StoredRetrievalAnchorRecordV1 = decode(record_json)?;
             record.validate().map_err(invalid)?;
             if record.anchor_id() != anchor_id
-                || record.owner() != owner
+                || record.owner() != *owner
                 || record.projection_generation().as_str() != projection_generation
             {
                 return Err(invalid("retrieval anchor record identity mismatch"));
