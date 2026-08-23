@@ -60,6 +60,21 @@ struct SessionTemporalRefreshSchedulerEntry {
     task: tokio::task::JoinHandle<()>,
 }
 
+struct SessionTemporalRefreshSupervisorInstrumentation;
+
+impl SessionTemporalRefreshSupervisorInstrumentation {
+    fn new() -> Self {
+        hotpath::gauge!("session_temporal_refresh_supervisors_active").inc(1.0);
+        Self
+    }
+}
+
+impl Drop for SessionTemporalRefreshSupervisorInstrumentation {
+    fn drop(&mut self) {
+        hotpath::gauge!("session_temporal_refresh_supervisors_active").inc(-1.0);
+    }
+}
+
 impl SessionTemporalRefreshSchedulerEntry {
     async fn shutdown(self) {
         if let Some(history) = self
@@ -158,48 +173,68 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let worker_history = Arc::clone(&history);
         let policy = self.policy;
         state.wake();
-        let task = tokio::spawn(async move {
-            let mut workers = tokio::task::JoinSet::new();
-            let mut panic_attempt = 0u32;
-            loop {
-                workers.spawn(run_session_temporal_refresh_scheduler(
-                    database.clone(),
-                    Arc::clone(&worker_state),
-                    Arc::clone(&projector),
-                    Arc::clone(&worker_history),
-                    policy,
-                ));
-                let Some(result) = workers.join_next().await else {
-                    worker_state.mark_stopped();
-                    return;
-                };
-                match result {
-                    Err(error)
-                        if error.is_panic() && !worker_state.cancelled.load(Ordering::Acquire) =>
-                    {
-                        panic_attempt = panic_attempt.saturating_add(1);
-                        worker_state.mark_worker_idle();
-                        worker_state.mark_recovering(
-                            SessionTemporalRefreshBlocker::WorkerPanicked,
-                            SessionTemporalRefreshRetryClass::Projector,
-                        );
-                        worker_state.requeue_projection();
-                        worker_state.recover_history_after_worker_panic();
-                        tokio::select! {
-                            () = worker_state.wait_for_cancellation() => return,
-                            () = tokio::time::sleep(session_refresh_retry_delay(
-                                SessionTemporalRefreshRetryClass::Projector,
-                                panic_attempt,
-                            )) => {}
-                        }
-                    }
-                    Ok(()) | Err(_) => {
+        let supervisor = hotpath::future!(
+            async move {
+                let _instrumentation = SessionTemporalRefreshSupervisorInstrumentation::new();
+                let mut workers = tokio::task::JoinSet::new();
+                let mut panic_attempt = 0u32;
+                loop {
+                    workers.spawn(hotpath::future!(
+                        run_session_temporal_refresh_scheduler(
+                            database.clone(),
+                            Arc::clone(&worker_state),
+                            Arc::clone(&projector),
+                            Arc::clone(&worker_history),
+                            policy,
+                        ),
+                        label = "session_temporal_refresh.worker"
+                    ));
+                    let Some(result) = hotpath::future!(
+                        workers.join_next(),
+                        label = "session_temporal_refresh.worker_join_wait"
+                    )
+                    .await
+                    else {
                         worker_state.mark_stopped();
                         return;
+                    };
+                    match result {
+                        Err(error)
+                            if error.is_panic()
+                                && !worker_state.cancelled.load(Ordering::Acquire) =>
+                        {
+                            panic_attempt = panic_attempt.saturating_add(1);
+                            worker_state.mark_worker_idle();
+                            worker_state.mark_recovering(
+                                SessionTemporalRefreshBlocker::WorkerPanicked,
+                                SessionTemporalRefreshRetryClass::Projector,
+                            );
+                            worker_state.requeue_projection();
+                            worker_state.recover_history_after_worker_panic();
+                            tokio::select! {
+                                () = hotpath::future!(
+                                    worker_state.wait_for_cancellation(),
+                                    label = "session_temporal_refresh.cancellation_wait"
+                                ) => return,
+                                () = hotpath::future!(
+                                    tokio::time::sleep(session_refresh_retry_delay(
+                                        SessionTemporalRefreshRetryClass::Projector,
+                                        panic_attempt,
+                                    )),
+                                    label = "session_temporal_refresh.supervisor_retry_wait"
+                                ) => {}
+                            }
+                        }
+                        Ok(()) | Err(_) => {
+                            worker_state.mark_stopped();
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            },
+            label = "session_temporal_refresh.supervisor"
+        );
+        let task = tokio::spawn(supervisor);
         SessionTemporalRefreshSchedulerEntry {
             state,
             wake,

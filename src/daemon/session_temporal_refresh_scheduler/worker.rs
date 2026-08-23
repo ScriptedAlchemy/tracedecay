@@ -34,11 +34,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     policy: SessionTemporalRefreshPolicy,
 ) {
     let mut retry_attempt = 0u32;
-    let mut history_retry_pending = false;
+    let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
     state.mark_running();
     loop {
         if state.cancelled.load(Ordering::Acquire) {
-            stop_worker(&state, &mut history_retry_pending);
             return;
         }
         loop {
@@ -51,7 +50,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.mark_worker_busy();
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let history_outcome = if history_requested {
-                session_history_refresh(&history).await
+                hotpath::future!(
+                    session_history_refresh(&history),
+                    label = "session_temporal_refresh.history"
+                )
+                .await
             } else {
                 None
             };
@@ -64,7 +67,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 Some(SessionHistoricalIngestOutcome::Cancelled)
             ) || state.cancelled.load(Ordering::Acquire)
             {
-                stop_worker(&state, &mut history_retry_pending);
                 return;
             }
             match history_outcome {
@@ -98,22 +100,23 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             };
             let report =
                 if projection_requested || state.has_requests() || history_requires_projection {
-                    let pass =
-                        session_projection_refresh(&database, &state, projector.as_ref(), policy);
+                    let pass = hotpath::future!(
+                        session_projection_refresh(&database, &state, projector.as_ref(), policy),
+                        label = "session_temporal_refresh.projection"
+                    );
                     tokio::pin!(pass);
                     tokio::select! {
                         biased;
-                        () = state.wait_for_cancellation() => {
-                            stop_worker(&state, &mut history_retry_pending);
-                            return;
-                        },
+                        () = hotpath::future!(
+                            state.wait_for_cancellation(),
+                            label = "session_temporal_refresh.cancellation_wait"
+                        ) => return,
                         report = &mut pass => report,
                     }
                 } else {
                     SessionTemporalRefreshPassReport::default()
                 };
             if state.cancelled.load(Ordering::Acquire) {
-                stop_worker(&state, &mut history_retry_pending);
                 return;
             }
             let made_progress = report.begun > 0
@@ -124,6 +127,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress);
             let history_needs_another_pass =
                 history_outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass);
+            observe_pass_report(
+                &report,
+                !made_progress && (report.retry_class.is_some() || history_needs_another_pass),
+            );
             if let Some(backlog) = report.backlog {
                 state.record_pass(
                     backlog.saturating_add(usize::from(history_needs_another_pass)),
@@ -132,36 +139,31 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
             if let Some(class) = report.retry_class {
                 retry_attempt = retry_attempt.saturating_add(1);
+                observe_retry(class, retry_attempt);
                 state.mark_recovering(class.into(), class);
                 state.requeue_projection();
+                let retry_delay = session_refresh_retry_delay(class, retry_attempt);
                 tokio::select! {
-                    () = state.wait_for_cancellation() => {
-                        stop_worker(&state, &mut history_retry_pending);
-                        return;
-                    },
-                    () = state.wake.notified() => {}
-                    () = tokio::time::sleep(session_refresh_retry_delay(class, retry_attempt)) => {}
+                    () = hotpath::future!(
+                        state.wait_for_cancellation(),
+                        label = "session_temporal_refresh.cancellation_wait"
+                    ) => return,
+                    () = hotpath::future!(
+                        state.wake.notified(),
+                        label = "session_temporal_refresh.wake_wait"
+                    ) => {}
+                    () = hotpath::future!(
+                        tokio::time::sleep(retry_delay),
+                        label = "session_temporal_refresh.retry_wait"
+                    ) => {}
                 }
             } else if history_needs_another_pass {
-                if matches!(
-                    history_outcome,
-                    Some(
-                        SessionHistoricalIngestOutcome::Pending {
-                            made_progress: false
-                        } | SessionHistoricalIngestOutcome::Retryable {
-                            made_progress: false,
-                            ..
-                        }
-                    )
-                ) {
-                    hotpath::gauge!("no_progress_passes").inc(1.0);
-                }
                 state.mark_running();
                 retry_attempt = 0;
-                update_history_retry_state(&mut history_retry_pending, true);
+                state.update_history_retry_state(true);
             } else {
                 if history_outcome.is_some() {
-                    update_history_retry_state(&mut history_retry_pending, false);
+                    state.update_history_retry_state(false);
                 }
                 state.mark_running();
                 retry_attempt = 0;
@@ -177,45 +179,113 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         }
         state.mark_worker_idle();
         state.idle.notify_waiters();
-        let wake = state.wake.notified();
+        let wake = hotpath::future!(
+            state.wake.notified(),
+            label = "session_temporal_refresh.wake_wait"
+        );
         if state.has_pending_work() {
             continue;
         }
-        if history_retry_pending {
+        if state.history_retry_pending() {
             tokio::select! {
-                () = state.wait_for_cancellation() => {
-                    stop_worker(&state, &mut history_retry_pending);
-                    return;
-                },
+                () = hotpath::future!(
+                    state.wait_for_cancellation(),
+                    label = "session_temporal_refresh.cancellation_wait"
+                ) => return,
                 () = wake => {}
-                () = tokio::time::sleep(Duration::from_millis(250)) => {
-                    update_history_retry_state(&mut history_retry_pending, false);
+                () = hotpath::future!(
+                    tokio::time::sleep(Duration::from_millis(250)),
+                    label = "session_temporal_refresh.history_retry_wait"
+                ) => {
+                    state.update_history_retry_state(false);
                     state.wake_history();
                 },
             }
         } else {
             tokio::select! {
-                () = state.wait_for_cancellation() => {
-                    stop_worker(&state, &mut history_retry_pending);
-                    return;
-                },
+                () = hotpath::future!(
+                    state.wait_for_cancellation(),
+                    label = "session_temporal_refresh.cancellation_wait"
+                ) => return,
                 () = wake => {}
             }
         }
     }
 }
 
-fn update_history_retry_state(current: &mut bool, pending: bool) {
-    if *current == pending {
-        return;
-    }
-    hotpath::gauge!("history_retry_state").inc(if pending { 1.0 } else { -1.0 });
-    *current = pending;
+struct SessionTemporalRefreshWorkerInstrumentation<'a> {
+    state: &'a SessionTemporalRefreshWakeState,
 }
 
-fn stop_worker(state: &SessionTemporalRefreshWakeState, history_retry_pending: &mut bool) {
-    state.mark_worker_idle();
-    update_history_retry_state(history_retry_pending, false);
+impl<'a> SessionTemporalRefreshWorkerInstrumentation<'a> {
+    fn new(state: &'a SessionTemporalRefreshWakeState) -> Self {
+        hotpath::gauge!("session_temporal_refresh_workers_active").inc(1.0);
+        Self { state }
+    }
+}
+
+impl Drop for SessionTemporalRefreshWorkerInstrumentation<'_> {
+    fn drop(&mut self) {
+        stop_worker(self.state);
+        hotpath::gauge!("session_temporal_refresh_workers_active").inc(-1.0);
+    }
+}
+
+fn stop_worker(state: &SessionTemporalRefreshWakeState) {
+    state.clear_worker_activity_instrumentation();
+}
+
+macro_rules! increment_outcome {
+    ($key:literal, $count:expr) => {{
+        let count = $count;
+        if count > 0 {
+            hotpath::gauge!($key).inc(count.min(u32::MAX as usize) as f64);
+        }
+    }};
+}
+
+fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_retry: bool) {
+    hotpath::gauge!("session_temporal_refresh_passes").inc(1.0);
+    if no_progress_retry {
+        hotpath::gauge!("session_temporal_refresh_no_progress_passes").inc(1.0);
+    }
+    increment_outcome!("session_temporal_refresh_begun", report.begun);
+    increment_outcome!("session_temporal_refresh_joined", report.joined);
+    increment_outcome!(
+        "session_temporal_refresh_projected_batches",
+        report.projected_batches
+    );
+    increment_outcome!("session_temporal_refresh_completed", report.completed);
+    increment_outcome!("session_temporal_refresh_failed", report.failed);
+    increment_outcome!("session_temporal_refresh_cancelled", report.cancelled);
+    increment_outcome!("session_temporal_refresh_deferred", report.deferred);
+    increment_outcome!(
+        "session_temporal_refresh_retryable_errors",
+        report.retryable_errors
+    );
+    increment_outcome!(
+        "session_temporal_refresh_terminal_errors",
+        report.terminal_errors
+    );
+    increment_outcome!(
+        "session_temporal_refresh_deadline_errors",
+        report.deadline_errors
+    );
+}
+
+fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
+    match class {
+        SessionTemporalRefreshRetryClass::Storage => {
+            hotpath::gauge!("session_temporal_refresh_storage_retries").inc(1.0);
+        }
+        SessionTemporalRefreshRetryClass::Projector => {
+            hotpath::gauge!("session_temporal_refresh_projector_retries").inc(1.0);
+        }
+        SessionTemporalRefreshRetryClass::Deadline => {
+            hotpath::gauge!("session_temporal_refresh_deadline_retries").inc(1.0);
+        }
+    }
+    hotpath::gauge!("session_temporal_refresh_last_retry_attempt").set(attempt);
 }
 
 #[hotpath::measure]
@@ -458,13 +528,22 @@ async fn project_running_refresh(
     report: &mut SessionTemporalRefreshPassReport,
 ) {
     let deadline_at = tokio::time::Instant::now() + policy.operation_deadline;
-    let projection = projector.project(database, recovery.clone());
+    let projection = hotpath::future!(
+        projector.project(database, recovery.clone()),
+        label = "session_temporal_refresh.projector"
+    );
     tokio::pin!(projection);
-    let deadline = tokio::time::sleep_until(deadline_at);
+    let deadline = hotpath::future!(
+        tokio::time::sleep_until(deadline_at),
+        label = "session_temporal_refresh.operation_deadline"
+    );
     tokio::pin!(deadline);
     let effect = tokio::select! {
         biased;
-        () = state.wait_for_cancellation() => return,
+        () = hotpath::future!(
+            state.wait_for_cancellation(),
+            label = "session_temporal_refresh.cancellation_wait"
+        ) => return,
         () = &mut deadline => {
             report.deadline_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
@@ -519,11 +598,17 @@ async fn project_running_refresh(
     if state.cancelled.load(Ordering::Acquire) {
         return;
     }
-    let deadline = tokio::time::sleep_until(deadline_at);
+    let deadline = hotpath::future!(
+        tokio::time::sleep_until(deadline_at),
+        label = "session_temporal_refresh.operation_deadline"
+    );
     tokio::pin!(deadline);
     tokio::select! {
         biased;
-        () = state.wait_for_cancellation() => {}
+        () = hotpath::future!(
+            state.wait_for_cancellation(),
+            label = "session_temporal_refresh.cancellation_wait"
+        ) => {}
         () = &mut deadline => {
             report.deadline_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
@@ -658,4 +743,30 @@ pub(super) async fn run_session_temporal_refresh_pass(
             .saturating_add(selected_count.saturating_sub(terminal)),
     );
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_worker_instrumentation_clears_pending_state_once() {
+        let state = SessionTemporalRefreshWakeState::default();
+        {
+            let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
+            state.requeue_projection();
+            state.wake_history();
+            state.mark_worker_busy();
+            state.update_history_retry_state(true);
+        }
+
+        assert!(state.dirty.load(Ordering::Acquire));
+        assert!(state.has_pending_work());
+        assert!(!state.busy.load(Ordering::Acquire));
+        assert!(!state.history_retry_pending());
+
+        state.cancel();
+        assert!(!state.dirty.load(Ordering::Acquire));
+        assert!(!state.has_pending_work());
+    }
 }
