@@ -43,6 +43,11 @@ fn duration_micros(duration: Duration) -> Option<u64> {
     u64::try_from(duration.as_micros()).ok()
 }
 
+fn session_acquire_failed(error: SessionAcquireError) -> SessionAcquireError {
+    crate::hotpath::record_session_failure(crate::hotpath::session_acquire_error_class(&error));
+    error
+}
+
 /// The complete projection/privacy identity of a warmed session. It can only
 /// be created from the domain's admitted embedding projection key, so a
 /// projection, privacy-domain, or key-epoch change produces zero cache hits.
@@ -319,12 +324,14 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     /// matching identity or opens a new one within the bounds; otherwise
     /// fails with a typed error. Never blocks and never substitutes a
     /// session from another identity.
+    #[hotpath::measure]
     pub fn acquire(
         &self,
         authority: &AdmittedProjectionArtifactV1,
     ) -> Result<PooledSession<R, C>, SessionAcquireError> {
         self.verify_artifact(authority)?;
         self.acquire_verified(authority, None)
+            .map_err(session_acquire_failed)
     }
 
     fn verify_artifact(
@@ -375,6 +382,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             if reaped != 0 {
                 self.inner.wakeups.notify_all();
             }
+            crate::hotpath::record_session_acquire("warm");
             return Ok(self.make_guard(identity, entry.session, entry.resident_bytes));
         }
         if state.live_sessions() >= self.inner.config.max_sessions {
@@ -421,7 +429,9 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         drop(state);
 
         let load_started = self.inner.clock.now();
-        let session = match self.inner.runtime.open_session(authority) {
+        let session = match hotpath::measure_block!("semantic.model.load", {
+            self.inner.runtime.open_session(authority)
+        }) {
             Ok(session) => session,
             Err(err) => {
                 let mut state = self.inner.lock_state();
@@ -493,12 +503,14 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             projected_resident.unwrap_or_else(|| panic!("resident total checked above"));
         state.sessions_opened += 1;
         state.last_cold_load_micros = duration_micros(load_elapsed);
+        crate::hotpath::record_session_acquire("cold");
         Ok(self.make_guard(identity, session, resident_bytes))
     }
 
     /// Bounded blocking acquisition with FIFO-fair waiter accounting.
     /// Waits on resource, cancellation, and deadline wakeups until the caller
     /// reaches the head of the FIFO queue and a resource is available.
+    #[hotpath::measure]
     pub fn acquire_blocking(
         &self,
         authority: &AdmittedProjectionArtifactV1,
@@ -507,13 +519,15 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     ) -> Result<PooledSession<R, C>, SessionAcquireError> {
         match cancel.interruption() {
             Some(SemanticExecutionInterruptionV1::Cancelled) => {
-                return Err(SessionAcquireError::Cancelled);
+                return Err(session_acquire_failed(SessionAcquireError::Cancelled));
             }
             Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
-                return Err(SessionAcquireError::DeadlineExceeded {
-                    waited: Duration::ZERO,
-                    budget,
-                });
+                return Err(session_acquire_failed(
+                    SessionAcquireError::DeadlineExceeded {
+                        waited: Duration::ZERO,
+                        budget,
+                    },
+                ));
             }
             None => {}
         }
@@ -521,42 +535,48 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         let (waiter_id, mut observed_epoch) = {
             let mut state = self.inner.lock_state();
             if state.closed {
-                return Err(SessionAcquireError::Closed);
+                return Err(session_acquire_failed(SessionAcquireError::Closed));
             }
             if state.waiters.len() >= self.inner.config.max_queued_waiters {
-                return Err(SessionAcquireError::QueueFull {
+                return Err(session_acquire_failed(SessionAcquireError::QueueFull {
                     queued: state.waiters.len(),
                     max: self.inner.config.max_queued_waiters,
-                });
+                }));
             }
             let waiter_id = state.next_waiter_id();
             state.waiters.push_back(waiter_id);
+            hotpath::gauge!("semantic_session_waiters").set(state.waiters.len());
             (waiter_id, state.availability_epoch.wrapping_sub(1))
         };
         let _permit = WaiterPermit {
             inner: Arc::clone(&self.inner),
             waiter_id,
         };
-        self.verify_artifact(authority)?;
+        self.verify_artifact(authority)
+            .map_err(session_acquire_failed)?;
         loop {
             let waited = self.inner.clock.now().saturating_sub(start);
             match cancel.interruption() {
                 Some(SemanticExecutionInterruptionV1::Cancelled) => {
-                    return Err(SessionAcquireError::Cancelled);
+                    return Err(session_acquire_failed(SessionAcquireError::Cancelled));
                 }
                 Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
-                    return Err(SessionAcquireError::DeadlineExceeded { waited, budget });
+                    return Err(session_acquire_failed(
+                        SessionAcquireError::DeadlineExceeded { waited, budget },
+                    ));
                 }
                 None => {}
             }
             if waited >= budget {
-                return Err(SessionAcquireError::DeadlineExceeded { waited, budget });
+                return Err(session_acquire_failed(
+                    SessionAcquireError::DeadlineExceeded { waited, budget },
+                ));
             }
 
             let should_attempt = {
                 let state = self.inner.lock_state();
                 if state.closed {
-                    return Err(SessionAcquireError::Closed);
+                    return Err(session_acquire_failed(SessionAcquireError::Closed));
                 }
                 let attempt = state.allows_acquire(Some(waiter_id))
                     && state.availability_epoch != observed_epoch;
@@ -581,7 +601,9 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                             ceiling_bytes,
                             ..
                         },
-                    ) if requested_bytes > ceiling_bytes => return Err(permanent),
+                    ) if requested_bytes > ceiling_bytes => {
+                        return Err(session_acquire_failed(permanent));
+                    }
                     Err(
                         retryable @ (SessionAcquireError::Exhausted { .. }
                         | SessionAcquireError::MemoryCeilingExceeded { .. }),
@@ -589,18 +611,20 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                         drop(retryable);
                         continue;
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => return Err(session_acquire_failed(err)),
                 }
             }
 
             let remaining = budget.saturating_sub(waited);
             let timeout = remaining.min(WAITER_WAKEUP_INTERVAL);
+            crate::hotpath::record_session_acquire("wait");
             let state = self.inner.lock_state();
-            let (state, _) = self
-                .inner
-                .wakeups
-                .wait_timeout(state, timeout)
-                .unwrap_or_else(PoisonError::into_inner);
+            let (state, _) = hotpath::measure_block!("semantic.session_pool.wait", {
+                self.inner
+                    .wakeups
+                    .wait_timeout(state, timeout)
+                    .unwrap_or_else(PoisonError::into_inner)
+            });
             drop(state);
         }
     }

@@ -161,34 +161,46 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
         Ok(candidate_count.div_ceil(self.authority.max_batch_size))
     }
 
+    #[hotpath::measure]
     fn rerank(
         &self,
         _policy: &RerankPolicy,
         inputs: &[LocalRerankInputV1<'_>],
         permit: LocalRerankPermitV1,
     ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1> {
-        let (query, documents) = decode_views(inputs)?;
+        let (query, documents) = decode_views(inputs).inspect_err(|error| {
+            crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(error));
+        })?;
         let expected_invocations = u32::try_from(inputs.len())
             .unwrap_or(u32::MAX)
             .div_ceil(self.authority.max_batch_size);
+        hotpath::gauge!("semantic_rerank_batch_size").set(inputs.len());
+        hotpath::gauge!("semantic_rerank_planned_invocations").set(expected_invocations);
         if permit.model_invocations != expected_invocations
             || permit.input_bytes > self.authority.resident_byte_ceiling
         {
-            return Err(LocalRerankFailureV1::Rejected(
-                SanitizedStageFailure::Incompatible,
-            ));
+            let error = LocalRerankFailureV1::Rejected(SanitizedStageFailure::Incompatible);
+            crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(&error));
+            return Err(error);
         }
         let mut session = match self.session.try_lock() {
             Ok(session) => session,
             Err(TryLockError::WouldBlock) => {
-                return Err(LocalRerankFailureV1::Unavailable(
-                    SanitizedStageFailure::AuthorityUnavailable,
-                ));
+                let error =
+                    LocalRerankFailureV1::Unavailable(SanitizedStageFailure::AuthorityUnavailable);
+                crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(&error));
+                return Err(error);
             }
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
         };
         if session.is_none() {
-            *session = Some(open_session(&self.authority)?);
+            *session = Some(hotpath::measure_block!("semantic.model.load", {
+                open_session(&self.authority).inspect_err(|error| {
+                    crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(
+                        error,
+                    ));
+                })?
+            }));
         }
         run_session(
             session
@@ -199,6 +211,9 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             inputs,
             self.authority.max_batch_size,
         )
+        .inspect_err(|error| {
+            crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(error));
+        })
     }
 }
 
@@ -262,10 +277,13 @@ fn run_session(
     inputs: &[LocalRerankInputV1<'_>],
     batch_size: u32,
 ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1> {
-    let results = session
-        .model
-        .rerank(query, documents, false, Some(batch_size as usize))
-        .map_err(|_| LocalRerankFailureV1::Unavailable(SanitizedStageFailure::Internal))?;
+    hotpath::gauge!("semantic_rerank_infer_batch_size").set(batch_size);
+    let results = hotpath::measure_block!("semantic.rerank.infer", {
+        session
+            .model
+            .rerank(query, documents, false, Some(batch_size as usize))
+            .map_err(|_| LocalRerankFailureV1::Unavailable(SanitizedStageFailure::Internal))
+    })?;
     if results.len() != inputs.len()
         || results
             .iter()

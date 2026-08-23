@@ -254,6 +254,7 @@ impl ModelArtifactStore {
     /// prior opaque staging handle only after an `InterruptedResumable`
     /// result. Each response must repeat the configured immutable revision,
     /// exact offset, and declared total length.
+    #[hotpath::measure]
     pub fn import_configured_https(
         &self,
         manifest: &ModelArtifactManifestV1,
@@ -292,9 +293,12 @@ impl ModelArtifactStore {
                     expected_sha256: member.digest.clone(),
                     immutable_revision: source.immutable_revision.clone(),
                 };
-                let response = match transport.fetch_range(&request) {
+                let response = match hotpath::measure_block!("semantic.https.download", {
+                    transport.fetch_range(&request)
+                }) {
                     Ok(response) => response,
                     Err(_) => {
+                        crate::hotpath::record_remote_failure("https_interrupted");
                         return Err(ArtifactImportErrorV1::InterruptedResumable {
                             staging_id: session.staging_id(),
                         });
@@ -313,11 +317,12 @@ impl ModelArtifactStore {
                         QuarantineReasonV1::IdentityMismatch,
                         now_unix,
                     )?;
+                    crate::hotpath::record_remote_failure("immutable_range_mismatch");
                     return Err(ArtifactImportErrorV1::ImmutableRangeMismatch);
                 }
-                if let Err(error) =
+                if let Err(error) = hotpath::measure_block!("semantic.https.decode", {
                     self.stage_member_chunk(&mut session, member.role, &response.bytes, now_unix)
-                {
+                }) {
                     self.quarantine_and_discard(
                         &session,
                         quarantine_reason_for_import_error(&error),

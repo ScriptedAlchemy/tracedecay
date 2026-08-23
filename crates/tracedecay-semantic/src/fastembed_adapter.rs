@@ -1076,6 +1076,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn open_session(
         &self,
         authority: &AdmittedProjectionArtifactV1,
@@ -1086,14 +1087,18 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         let options = InitOptionsUserDefined::new()
             .with_max_length(artifact.truncation_length() as usize)
             .with_intra_threads(artifact.max_threads() as usize);
-        let embedding =
+        let embedding = hotpath::measure_block!("semantic.model.load", {
             TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
-                fastembed_error(
+                let failure = fastembed_error(
                     RuntimeFailureKindV1::LoadFailed,
                     "FastEmbed could not initialize the verified artifact",
                     &error,
-                )
-            })?;
+                );
+                crate::hotpath::record_model_failure(crate::hotpath::embed_error_class(&failure));
+                failure
+            })
+        })?;
+        crate::hotpath::record_model_state("ready");
         Ok(FastEmbedEmbeddingSession {
             authority: authority.clone(),
             embedding,
@@ -1124,21 +1129,27 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         let artifact = self.authority.runtime_artifact();
         validate_batch_limits(batch, artifact)?;
+        hotpath::gauge!("semantic_embed_batch_size").set(batch.len());
 
         check_execution_authority(authority)?;
         // FastEmbed/ORT inference is synchronous. Keep batches small at the
         // projector boundary, then perform one tensor invocation per admitted
         // batch instead of one invocation per text.
-        let embedded = self
-            .embedding
-            .embed(batch.texts(), Some(batch.len()))
-            .map_err(|error| {
-                fastembed_error(
-                    RuntimeFailureKindV1::EmbedFailed,
-                    "FastEmbed inference failed for the verified artifact",
-                    &error,
-                )
-            })?;
+        let embedded = hotpath::measure_block!("semantic.embed.infer", {
+            self.embedding
+                .embed(batch.texts(), Some(batch.len()))
+                .map_err(|error| {
+                    let failure = fastembed_error(
+                        RuntimeFailureKindV1::EmbedFailed,
+                        "FastEmbed inference failed for the verified artifact",
+                        &error,
+                    );
+                    crate::hotpath::record_model_failure(crate::hotpath::embed_error_class(
+                        &failure,
+                    ));
+                    failure
+                })
+        })?;
         check_execution_authority(authority)?;
         if embedded.len() != batch.len() {
             return Err(fastembed_failure(

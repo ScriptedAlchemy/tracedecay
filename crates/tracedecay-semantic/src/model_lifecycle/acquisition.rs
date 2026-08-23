@@ -4,6 +4,7 @@ fn current_unix_seconds() -> Result<u64, ModelLifecycleErrorV1> {
         .map(|duration| duration.as_secs())
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)
 }
+#[hotpath::measure]
 fn run_acquisition(
     root: &Path,
     catalog: &FastEmbedModelCatalogV1,
@@ -22,6 +23,12 @@ fn run_acquisition(
         inner,
         verified_ready,
     );
+    match &result {
+        Ok(()) => crate::hotpath::record_model_state("installed"),
+        Err(error) => {
+            crate::hotpath::record_model_failure(crate::hotpath::lifecycle_error_class(error));
+        }
+    }
     if let Err(error) = &result
         && !matches!(error, ModelLifecycleErrorV1::Cancelled)
         && let Some(model) = catalog.get(model_id)
@@ -83,6 +90,7 @@ fn run_acquisition_inner(
         });
         persist_durable(root, &guard.durable)
     })?;
+    crate::hotpath::record_model_state("downloading");
 
     let staging = root.join("staging").join(format!(
         "{}-{}",
@@ -144,6 +152,7 @@ fn run_acquisition_inner(
         cleanup_cancelled_path(root, &staging, epoch)?;
     }
     verifying?;
+    crate::hotpath::record_model_state("verifying");
 
     for member in model.members.values() {
         let path = staging.join(&member.path);

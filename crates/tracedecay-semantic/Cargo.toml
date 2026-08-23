@@ -41,6 +41,8 @@ fsys = "1.1.0"
 [features]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
+# This crate has no reqwest 0.12 client, so `hotpath/reqwest-0-12` and
+# `hotpath::http!` stay unused; download vs decode are timed separately.
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-code-index/hotpath",

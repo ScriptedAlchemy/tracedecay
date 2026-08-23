@@ -430,6 +430,7 @@ pub fn split_projection_request(
     inference_batch_bytes: usize,
 ) -> Result<Vec<ProjectionRequestBatchV1>, SemanticProjectionErrorV1> {
     let unsplit = || {
+        hotpath::gauge!("semantic_projection_batch_count").set(1_usize);
         Ok(vec![ProjectionRequestBatchV1 {
             request: request.clone(),
             canonical_chunks: canonical_chunks.to_vec(),
@@ -568,6 +569,7 @@ pub fn split_projection_request(
             canonical_chunks: batch_chunks,
         });
     }
+    hotpath::gauge!("semantic_projection_batch_count").set(batches.len());
     Ok(batches)
 }
 
