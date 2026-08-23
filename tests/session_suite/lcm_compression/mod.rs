@@ -3,14 +3,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_sessions::runtime::lcm::compression_decision::{
-    AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput, PreflightDecisionInput,
-    compression_plan, effective_assembly_token_cap, overflow_recovery_assembly_cap,
-    preflight_decision,
-};
 use tracedecay_sessions::runtime::lcm::{
-    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
-    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPreflightRequest, LcmRawMessage, LcmScope,
+    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate,
+    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPreflightRequest, LcmScope,
     LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummarizerMode,
     LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
@@ -277,25 +272,6 @@ fn limited_compress_request(
     }
 }
 
-fn lcm_raw_message(store_id: i64, role: &str, content: &str) -> LcmRawMessage {
-    LcmRawMessage {
-        provider: "cursor".into(),
-        message_id: format!("message-{store_id}"),
-        session_id: "session-1".into(),
-        store_id,
-        role: role.into(),
-        ordinal: store_id,
-        timestamp: Some(1_715_000_000 + store_id),
-        content: content.into(),
-        content_hash: format!("hash-{store_id}"),
-        storage_kind: LcmStorageKind::Inline,
-        payload_ref: None,
-        legacy_source: false,
-        legacy_truncated: false,
-        metadata_json: None,
-    }
-}
-
 fn active_multi_tool_transaction() -> Vec<Value> {
     vec![
         json!({
@@ -328,18 +304,6 @@ fn active_multi_tool_transaction() -> Vec<Value> {
             "content": "beta result",
         }),
     ]
-}
-
-fn lifecycle_state_with_debt(maintenance_debt: Vec<LcmMaintenanceDebt>) -> LcmLifecycleState {
-    LcmLifecycleState {
-        provider: "cursor".into(),
-        conversation_id: "session-1".into(),
-        current_session_id: "session-1".into(),
-        current_frontier_store_id: None,
-        last_finalized_session_id: None,
-        last_finalized_frontier_store_id: None,
-        maintenance_debt,
-    }
 }
 
 // Characterization fixture for `compress_in_transaction` seam extractions.
