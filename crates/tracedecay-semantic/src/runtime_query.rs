@@ -137,6 +137,7 @@ impl<R> SemanticQueryEmbeddingPort for PooledSemanticQueryEmbedder<'_, R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
+    #[hotpath::measure]
     fn embed_query(
         &self,
         request: SemanticQueryEmbeddingRequestV1<'_>,
@@ -167,6 +168,7 @@ where
         let text = request.query_view.as_str().to_owned();
         let batch = BoundedSanitizedTextBatchV1::try_new(vec![text], 1, max_query_bytes)
             .map_err(map_embed_error)?;
+        hotpath::gauge!("semantic_query_embed_batch_size").set(batch.len());
         // ORT inference cannot be preempted once entered. Admit only one
         // request per published runtime so a timed-out caller cannot cause
         // concurrent cold session opens and multiply resident model memory.
