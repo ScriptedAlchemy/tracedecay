@@ -1697,7 +1697,7 @@ where
                             // occurrence rebinding. Re-extract through the parser
                             // authority instead of rewriting that evidence.
                             let file = current_file;
-                            let artifact = Self::extract_file(
+                            let (reuse_key, artifact) = Self::extract_file(
                                 config,
                                 physical_artifacts,
                                 retained_parses,
@@ -1710,17 +1710,16 @@ where
                                 file,
                                 captured_files,
                                 control,
-                                false,
                             )?;
                             Ok(IncrementFileMaterializationV1::ReExtracted {
-                                file: (**file).clone(),
+                                reuse_key,
                                 artifact,
                                 fallback: true,
                             })
                         }
                     }
                     FileExtractionActionV1::ReExtract { file } => {
-                        let artifact = Self::extract_file(
+                        let (reuse_key, artifact) = Self::extract_file(
                             config,
                             physical_artifacts,
                             retained_parses,
@@ -1733,10 +1732,9 @@ where
                             file,
                             captured_files,
                             control,
-                            false,
                         )?;
                         Ok(IncrementFileMaterializationV1::ReExtracted {
-                            file: file.clone(),
+                            reuse_key,
                             artifact,
                             fallback: false,
                         })
@@ -1758,18 +1756,11 @@ where
             match materialization {
                 IncrementFileMaterializationV1::CarryForward(artifact) => files.push(artifact),
                 IncrementFileMaterializationV1::ReExtracted {
-                    file,
+                    reuse_key,
                     artifact,
                     fallback,
                 } => {
-                    Self::record_physical_artifact(
-                        config,
-                        physical_artifacts,
-                        intake,
-                        &file,
-                        captured_files,
-                        &artifact,
-                    )?;
+                    physical_artifacts.insert(reuse_key, &artifact);
                     used_reextraction_fallback |= fallback;
                     if !fallback {
                         reextracted_files.push(artifact.artifacts.chunks.clone());
