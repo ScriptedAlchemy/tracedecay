@@ -138,11 +138,11 @@ pub(super) async fn run_semantic_vector_generation_retention(
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_usecases::context::CancellationToken,
-) -> bool {
+) -> crate::daemon::maintenance::MaintenanceTickOutcome {
     if cancellation.is_cancelled() {
         observations.record_semantic_vector_retention_failure(graph.project_root());
         log_semantic_vector_retention_degraded("retention_cancelled");
-        return false;
+        return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
     }
     let root = graph.project_root();
     let Some(configuration) = graph
@@ -166,17 +166,17 @@ pub(super) async fn run_semantic_vector_generation_retention(
                 // quietly instead of resetting to Unknown and re-logging a
                 // degraded retry loop every tick.
                 observations.record_semantic_vector_retention_unseated(root);
-                true
+                crate::daemon::maintenance::MaintenanceTickOutcome::Complete
             }
             Ok(_) => {
                 observations.record_semantic_vector_retention_failure(root);
                 log_semantic_vector_retention_degraded("configuration_inventory_unavailable");
-                false
+                crate::daemon::maintenance::MaintenanceTickOutcome::Retry
             }
             Err(_) => {
                 observations.record_semantic_vector_retention_failure(root);
                 log_semantic_vector_retention_degraded("runtime_configuration_unavailable");
-                false
+                crate::daemon::maintenance::MaintenanceTickOutcome::Retry
             }
         };
     };
@@ -201,7 +201,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
                 );
             if !observations.record_semantic_vector_retention_census(root, &census) {
                 log_semantic_vector_retention_degraded("census_count_overflow");
-                return false;
+                return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
             }
             if !matches!(
                 census.action,
@@ -215,37 +215,41 @@ pub(super) async fn run_semantic_vector_generation_retention(
                     ],
                 );
             }
-            // A bounded page/action deliberately requests the short retry
-            // cadence until a post-mutation census reaches its end.
-            !convergence_pending
+            if convergence_pending {
+                crate::daemon::maintenance::MaintenanceTickOutcome::Continue(
+                    crate::daemon::maintenance::MaintenanceContinuation::SemanticVectorRetention,
+                )
+            } else {
+                crate::daemon::maintenance::MaintenanceTickOutcome::Complete
+            }
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::ResetRequired(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("reset_required:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Corrupt(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("corrupt:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Unavailable(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("unavailable:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Denied(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("denied:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
     }
 }
