@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
@@ -58,7 +59,10 @@ export function WorkTopologyAccounting({
   graph: WorkGraphReading;
   metrics?: WorkResult<ExecutionTopologyMetricsV1> | undefined;
 }) {
-  const reading = workTopologyAccounting(attemptList, graph, topology, metrics);
+  const reading = useMemo(
+    () => workTopologyAccounting(attemptList, graph, topology, metrics),
+    [attemptList, graph, topology, metrics],
+  );
   return (
     <Panel legend="Execution-topology accounting" elevation="well">
       <div className="flex min-w-0 flex-col gap-3">

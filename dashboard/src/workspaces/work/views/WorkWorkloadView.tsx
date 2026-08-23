@@ -16,6 +16,7 @@ import {
   type WorkloadRegion,
   workloadReading,
 } from '../workViewsModel.ts';
+import { TaskChip } from './TaskChip.tsx';
 import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -586,21 +587,12 @@ function TaskMark({
   onSelect: (taskId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(member.taskId)}
-      aria-pressed={selected}
-      // 44px explicitly rather than a spacing utility: this app's root font
-      // size is 14px, so `min-h-11` computes to 38.5px and lands under the
-      // target size the accessibility gate measures.
-      className={cn(
-        'flex min-h-[44px] min-w-0 max-w-[16rem] flex-col justify-center gap-0.5 border px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected
-          ? 'border-accent bg-surface-3'
-          : 'border-edge-subtle bg-surface-2 hover:bg-surface-3',
-      )}
-      data-work-task={member.taskId}
+    <TaskChip
+      taskId={member.taskId}
+      selected={selected}
+      onSelect={onSelect}
+      variant="filled"
+      className="max-w-[16rem]"
       data-work-attempts={member.attemptCount}
     >
       <span className="min-w-0 truncate text-2xs text-text-primary">{member.title}</span>
@@ -608,7 +600,7 @@ function TaskMark({
         {member.attemptCount} attempts in this region
         {member.terminal ? ' · terminal' : ''}
       </span>
-    </button>
+    </TaskChip>
   );
 }
 
@@ -709,26 +701,19 @@ function HollowMark({
   onSelect: (taskId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(taskId)}
-      aria-pressed={selected}
-      // 44px explicitly rather than a spacing utility: this app's root font
-      // size is 14px, so `min-h-11` computes to 38.5px and lands under the
-      // target size the accessibility gate measures.
-      //
-      // No fill in either state. Hollow is the reading, so selection moves the
-      // outline rather than filling the mark in.
+    <TaskChip
+      taskId={taskId}
+      selected={selected}
+      onSelect={onSelect}
+      variant="hollow"
       className={cn(
-        'flex min-h-[44px] min-w-0 max-w-[16rem] flex-col justify-center gap-0.5 border border-dashed px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected ? 'border-accent' : 'border-edge hover:border-edge-strong',
+        'max-w-[16rem] border-dashed',
+        selected ? undefined : 'border-edge hover:border-edge-strong',
       )}
-      data-work-task={taskId}
       data-work-hollow="true"
     >
       <span className="min-w-0 truncate text-2xs text-text-secondary">{title}</span>
       <span className="truncate font-mono text-3xs text-text-muted">{taskId}</span>
-    </button>
+    </TaskChip>
   );
 }
