@@ -530,11 +530,14 @@ pub enum ConfigurationValueKindV1 {
 /// Profile-level worker-count intent for the process-wide code-index pool.
 /// `Automatic` delegates the concrete count to runtime resource admission;
 /// `Exact` persists an operator-requested positive worker count.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum CodeIndexWorkerSelectionV1 {
+    #[default]
     Automatic,
-    Exact { workers: u16 },
+    Exact {
+        workers: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -556,12 +559,6 @@ pub struct CodeIndexWorkerStatusV1 {
     pub available_logical_cpus: u16,
     pub memory_safe_workers: u16,
     pub limiting_reason: CodeIndexWorkerLimitingReasonV1,
-}
-
-impl Default for CodeIndexWorkerSelectionV1 {
-    fn default() -> Self {
-        Self::Automatic
-    }
 }
 
 impl CodeIndexWorkerSelectionV1 {
