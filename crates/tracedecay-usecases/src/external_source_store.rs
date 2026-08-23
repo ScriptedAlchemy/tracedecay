@@ -82,6 +82,70 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) request_digest: ManifestDigest,
 }
 
+fn prepare_sanitized_commit(
+    capture: &SourceCaptureApplicationV1,
+    request: RuntimeSourceCaptureRequestV1<'_>,
+) -> Result<
+    (tracedecay_domain::SourceBindingIdentityV1, SourceCommitV1),
+    RuntimeExternalSourceErrorV1,
+> {
+    let observations = request
+        .mutations
+        .iter()
+        .map(|mutation| mutation.observation().clone())
+        .collect();
+    let admission = capture.capture_sanitized(
+        request.definition,
+        request.binding,
+        request.refresh,
+        request.provider_envelope,
+        request.authority.canonical_refetch(),
+        request.expected_frontier,
+        request.next_partition,
+        request.previous_whole_root_stage,
+        observations,
+        request.idempotency_key,
+        request.request_digest,
+    )?;
+    let (
+        definition,
+        binding,
+        _refresh,
+        envelope,
+        expected_frontier,
+        next_frontier,
+        admitted_observations,
+        _whole_root_stage,
+        snapshot_completion,
+        idempotency_key,
+        request_digest,
+    ) = admission.into_parts();
+    if admitted_observations.len() != request.mutations.len()
+        || admitted_observations
+            .iter()
+            .zip(&request.mutations)
+            .any(|(observation, mutation)| observation != mutation.observation())
+    {
+        return Err(RuntimeExternalSourceErrorV1::Invalid(
+            "external source mutations do not match the admitted sanitized observations".to_owned(),
+        ));
+    }
+    let binding_identity = binding.immutable_identity().map_err(invalid)?;
+    let commit = SourceCommitV1::new(
+        definition,
+        binding,
+        envelope.partition().clone(),
+        idempotency_key,
+        request_digest,
+        expected_frontier,
+        next_frontier,
+        request.mutations,
+        snapshot_completion,
+    )
+    .map_err(invalid)?;
+    Ok((binding_identity, commit))
+}
+
 #[derive(Clone)]
 pub struct RuntimeExternalSourceStore {
     runtime: DatabaseRuntimeClientV1,
@@ -119,61 +183,7 @@ impl RuntimeExternalSourceStore {
                 return self.finish_capture(requested_binding, receipt).await;
             }
         }
-        let observations = request
-            .mutations
-            .iter()
-            .map(|mutation| mutation.observation().clone())
-            .collect();
-        let admission = capture.capture_sanitized(
-            request.definition,
-            request.binding,
-            request.refresh,
-            request.provider_envelope,
-            request.authority.canonical_refetch(),
-            request.expected_frontier,
-            request.next_partition,
-            request.previous_whole_root_stage,
-            observations,
-            request.idempotency_key,
-            request.request_digest,
-        )?;
-        let (
-            definition,
-            binding,
-            _refresh,
-            envelope,
-            expected_frontier,
-            next_frontier,
-            admitted_observations,
-            _whole_root_stage,
-            snapshot_completion,
-            idempotency_key,
-            request_digest,
-        ) = admission.into_parts();
-        if admitted_observations.len() != request.mutations.len()
-            || admitted_observations
-                .iter()
-                .zip(&request.mutations)
-                .any(|(observation, mutation)| observation != mutation.observation())
-        {
-            return Err(RuntimeExternalSourceErrorV1::Invalid(
-                "external source mutations do not match the admitted sanitized observations"
-                    .to_owned(),
-            ));
-        }
-        let binding_identity = binding.immutable_identity().map_err(invalid)?;
-        let commit = SourceCommitV1::new(
-            definition,
-            binding,
-            envelope.partition().clone(),
-            idempotency_key,
-            request_digest,
-            expected_frontier,
-            next_frontier,
-            request.mutations,
-            snapshot_completion,
-        )
-        .map_err(invalid)?;
+        let (binding_identity, commit) = prepare_sanitized_commit(capture, request)?;
         let payload = RepositoryWritePayloadV1::ExternalSource(Box::new(commit.clone()));
         let request = runtime_submit_request(
             self.runtime.binding(),
