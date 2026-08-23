@@ -2685,17 +2685,6 @@ impl PublishedSemanticVectorReadPortV1 {
     }
 }
 
-impl SemanticVectorReadPort for Arc<PublishedSemanticVectorReadPortV1> {
-    fn scan_exact_flat(
-        &self,
-        request: SemanticVectorReadRequestV1<'_>,
-        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
-        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
-        self.as_ref().scan_exact_flat(request, examine, visit)
-    }
-}
-
 impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
     fn scan_exact_flat(
         &self,
