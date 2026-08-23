@@ -460,7 +460,7 @@ pub(crate) mod test_support {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct MemoryObservationState {
         observations: Vec<StoredObservation>,
         cursors: Vec<ObservationSourceCursorV1>,
@@ -572,10 +572,12 @@ pub(crate) mod test_support {
                 return Ok(Vec::new());
             }
             let mut state = self.state();
+            let mut staged = state.clone();
             let mut outcomes = Vec::with_capacity(writes.len());
             for write in writes {
-                outcomes.push(Self::persist_one(&mut state, write)?);
+                outcomes.push(Self::persist_one(&mut staged, write)?);
             }
+            *state = staged;
             Ok(outcomes)
         }
 

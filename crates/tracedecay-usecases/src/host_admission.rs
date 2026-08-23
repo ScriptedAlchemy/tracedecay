@@ -405,6 +405,13 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         Box::pin(HostAdmissionFacade::capture_observation(self, request))
     }
 
+    fn capture_observations<'a>(
+        &'a self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
+        Box::pin(HostAdmissionFacade::capture_observations(self, requests))
+    }
+
     fn advance_non_durable_source_cursor<'a>(
         &'a self,
         advance: ObservationCursorAdvance,
@@ -582,36 +589,52 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        if let CaptureObservationOutcome::Persisted {
-            outcome: persisted, ..
-        } = &outcome
-        {
-            let projection = crate::external_source_store::RuntimeExternalSourceStore::new(
-                database.runtime_client(),
-            )
-            .capture_host_observation(persisted.receipt())
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "registered external-source commit failed");
-                match error {
-                    crate::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
-                        HostAdmissionOutcome::retained_unavailable(
-                            "external_source_runtime_unavailable",
-                        )
-                    }
-                    _ => {
-                        HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
-                    }
-                }
-            })?;
-            if let crate::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(
-                receipt,
-            ) = projection
-            {
-                return accepted_for_external_source_replay(outcome, receipt);
+        project_captured_outcome(database, outcome).await
+    }
+
+    /// Sanitize then persist a bounded window through one store-owned batch.
+    ///
+    /// This overrides the trait default, which still walks
+    /// [`Self::capture_observation`] one frame at a time. An empty window
+    /// returns empty without minting a skipped-authority success.
+    pub async fn capture_observations(
+        &self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> Result<Vec<CaptureObservationOutcome>, HostAdmissionOutcome> {
+        let Some(first) = requests.first() else {
+            return Ok(Vec::new());
+        };
+        let provider = first.provider().to_owned();
+        let scope = first.scope().clone();
+        self.authorities.validate_scope(&scope)?;
+        for request in &requests {
+            if request.provider() != provider || request.scope() != &scope {
+                return Err(admission_outcome(
+                    HostAdmissionStatus::Degraded,
+                    false,
+                    Some("invalid_observation_contract"),
+                ));
             }
         }
-        Ok(outcome)
+        let database = self
+            .authorities
+            .registered_database(host_scope(&scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        let application = self.application(&provider, &scope)?;
+        let provenance = self.authorities.repository_provenance.clone();
+        let requests = requests
+            .into_iter()
+            .map(|request| request.with_repository_provenance(provenance.clone()))
+            .collect();
+        let outcomes = application
+            .capture_observations(requests)
+            .await
+            .map_err(|error| classify_error(&error))?;
+        let mut projected = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            projected.push(project_captured_outcome(database, outcome).await?);
+        }
+        Ok(projected)
     }
 
     pub async fn capture(&self, request: CaptureObservationRequest) -> HostAdmissionOutcome {
@@ -897,6 +920,41 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
     }
 }
 
+async fn project_captured_outcome(
+    database: &RegisteredGlobalDb,
+    outcome: CaptureObservationOutcome,
+) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
+    let CaptureObservationOutcome::Persisted {
+        outcome: persisted, ..
+    } = &outcome
+    else {
+        return Ok(outcome);
+    };
+    let projection =
+        crate::external_source_store::RuntimeExternalSourceStore::new(database.runtime_client())
+            .capture_host_observation(persisted.receipt())
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "registered external-source commit failed");
+                match error {
+                    crate::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+                        HostAdmissionOutcome::retained_unavailable(
+                            "external_source_runtime_unavailable",
+                        )
+                    }
+                    _ => {
+                        HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+                    }
+                }
+            })?;
+    if let crate::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) =
+        projection
+    {
+        return accepted_for_external_source_replay(outcome, receipt);
+    }
+    Ok(outcome)
+}
+
 fn accepted_for_external_source_replay(
     outcome: CaptureObservationOutcome,
     receipt: tracedecay_store::SourceCommitReceiptV1,
@@ -1023,6 +1081,9 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
     }
 }
 
+#[cfg(test)]
+#[path = "host_admission_batch_test.rs"]
+mod host_admission_batch_test;
 #[cfg(test)]
 #[path = "host_admission_test.rs"]
 mod host_admission_test;
