@@ -221,35 +221,27 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
                 if !request.validate() {
                     Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
                 } else {
-                    self.ports
-                        .automation
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_fact_store_curate(execution_context, request)
-                        .await
+                    match self.ports.automation.as_ref() {
+                        Some(port) => {
+                            port.execute_fact_store_curate(execution_context, request)
+                                .await
+                        }
+                        None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+                    }
                 }
             }
-            RetainedSurfaceDispatch::Memory(request) => self
-                .ports
-                .memory
-                .as_ref()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                .execute_memory(execution_context, request)
-                .await,
-            RetainedSurfaceDispatch::Session(request) => self
-                .ports
-                .session
-                .as_ref()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                .execute_session(execution_context, request)
-                .await,
-            RetainedSurfaceDispatch::Lcm(request) => self
-                .ports
-                .lcm
-                .as_ref()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                .execute_lcm(execution_context, request)
-                .await,
+            RetainedSurfaceDispatch::Memory(request) => match self.ports.memory.as_ref() {
+                Some(port) => port.execute_memory(execution_context, request).await,
+                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+            },
+            RetainedSurfaceDispatch::Session(request) => match self.ports.session.as_ref() {
+                Some(port) => port.execute_session(execution_context, request).await,
+                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+            },
+            RetainedSurfaceDispatch::Lcm(request) => match self.ports.lcm.as_ref() {
+                Some(port) => port.execute_lcm(execution_context, request).await,
+                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+            },
         }
         .map_err(retained_surface_execution_problem)?;
         ensure_post_execution_cancellation(request.operation(), cancellation)?;
