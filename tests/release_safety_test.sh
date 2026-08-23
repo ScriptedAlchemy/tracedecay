@@ -166,9 +166,10 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
             )
     for required in (
         "scripts/plan-release-recovery.py",
-        "gh attestation verify",
+        "scripts/verify-retained-release-assets.sh",
+        "--tag",
+        "--repo",
         "--signer-workflow",
-        "--source-ref",
         "--source-digest",
         "outputs.build_required",
         'test "$GITHUB_REF" = "refs/tags/',
@@ -189,6 +190,121 @@ for forbidden in (
             "release recovery must not compare rebuilt mutable outputs: "
             f"{forbidden}"
         )
+PY
+
+# Exercise the canonical verifier rather than requiring every workflow to copy
+# its `gh attestation verify` implementation. This keeps the workflow guard
+# focused on delegation while proving the shared authority derives the exact
+# tag source ref, preserves the source digest and signer, rejects self-hosted
+# attestations, and propagates verification failures.
+python3 - <<'PY'
+import json
+import os
+import stat
+import subprocess
+import tempfile
+from pathlib import Path
+
+root = Path.cwd()
+verifier = root / "scripts/verify-retained-release-assets.sh"
+tag = "v9.8.7"
+repo = "ScriptedAlchemy/tracedecay"
+signer = "ScriptedAlchemy/tracedecay/.github/workflows/release.yml"
+source_digest = "0123456789abcdef"
+
+with tempfile.TemporaryDirectory() as temp:
+    temp_path = Path(temp)
+    fake_bin = temp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = temp_path / "gh-invocations.jsonl"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+arguments = sys.argv[1:]
+with Path(os.environ["GH_INVOCATION_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(arguments) + "\\n")
+
+if arguments[:2] == ["release", "download"]:
+    pattern = arguments[arguments.index("--pattern") + 1]
+    destination = Path(arguments[arguments.index("--dir") + 1])
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / pattern).write_bytes(b"retained release asset")
+
+if (
+    arguments[:2] == ["attestation", "verify"]
+    and os.environ.get("GH_FAIL_ATTESTATION") == "1"
+):
+    raise SystemExit(17)
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["GH_INVOCATION_LOG"] = str(invocation_log)
+
+    files = [temp_path / "first.tar.gz", temp_path / "second.mcpb"]
+    for file in files:
+        file.write_bytes(b"release asset")
+
+    command = [
+        str(verifier),
+        "--tag",
+        tag,
+        "--repo",
+        repo,
+        "--signer-workflow",
+        signer,
+        "--source-digest",
+        source_digest,
+        "--files",
+        *(str(file) for file in files),
+    ]
+    subprocess.run(command, cwd=root, env=environment, check=True)
+
+    invocations = [
+        json.loads(line)
+        for line in invocation_log.read_text(encoding="utf-8").splitlines()
+    ]
+    expected_suffix = [
+        "--repo",
+        repo,
+        "--signer-workflow",
+        signer,
+        "--source-ref",
+        f"refs/tags/{tag}",
+        "--source-digest",
+        source_digest,
+        "--deny-self-hosted-runners",
+    ]
+    expected = [
+        ["attestation", "verify", str(file), *expected_suffix]
+        for file in files
+    ]
+    if invocations != expected:
+        raise SystemExit(
+            "canonical release verifier did not preserve exact provenance: "
+            f"{invocations!r}"
+        )
+
+    failure_environment = environment.copy()
+    failure_environment["GH_FAIL_ATTESTATION"] = "1"
+    failed = subprocess.run(
+        command[:-1],
+        cwd=root,
+        env=failure_environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if failed.returncode == 0:
+        raise SystemExit("canonical release verifier swallowed attestation failure")
 PY
 
 python3 - "$release_pr_integrity" <<'PY'
