@@ -522,47 +522,21 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn codex_checked_in_agent_message_golden_matches_parser_envelope() {
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        assert_codex_golden_envelope(
-            "agent_message",
-            "codex-golden-session",
-            Some("codex-golden-session"),
-            range,
-        );
-    }
-
-    #[test]
-    fn codex_checked_in_session_meta_golden_matches_parser_envelope() {
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        assert_codex_golden_envelope(
-            "session_meta",
-            "codex-golden-session",
-            Some("codex-golden-session"),
-            range,
-        );
-    }
-
-    #[test]
-    fn codex_checked_in_function_call_golden_matches_parser_envelope() {
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(40, 80).unwrap();
-        assert_codex_golden_envelope(
-            "function_call",
-            "codex-golden-session",
-            Some("codex-golden-session"),
-            range,
-        );
-    }
-
-    #[test]
-    fn codex_checked_in_thread_goal_updated_golden_matches_parser_envelope() {
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        assert_codex_golden_envelope(
-            "thread_goal_updated",
-            "codex-golden-session",
-            Some("codex-golden-session"),
-            range,
-        );
+    fn checked_in_codex_goldens_match_parser_envelopes() {
+        for (name, start, end) in [
+            ("agent_message", 0, 1),
+            ("session_meta", 0, 1),
+            ("function_call", 40, 80),
+            ("thread_goal_updated", 0, 1),
+        ] {
+            let range = tracedecay_domain::ObservationSourceRangeV1::new(start, end).unwrap();
+            assert_codex_golden_envelope(
+                name,
+                "codex-golden-session",
+                Some("codex-golden-session"),
+                range,
+            );
+        }
     }
 
     #[test]
