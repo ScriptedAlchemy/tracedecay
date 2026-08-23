@@ -1062,7 +1062,9 @@ fn empty_hint_categories() -> Vec<AnalyticsHintCategoryV1> {
         .collect()
 }
 
-async fn durable_analytics_rows_for_state(state: &DashboardState) -> Option<Vec<Value>> {
+async fn durable_analytics_rows_for_state(
+    state: &DashboardState,
+) -> Option<Vec<AnalyticsEventRecord>> {
     durable_analytics_rows(
         state.savings_db.as_deref(),
         state.lcm_db.as_deref(),
@@ -1075,7 +1077,7 @@ async fn durable_analytics_rows(
     global_db: Option<&RegisteredGlobalDb>,
     lcm_db: Option<&RegisteredGlobalDb>,
     project_id: &str,
-) -> Option<Vec<Value>> {
+) -> Option<Vec<AnalyticsEventRecord>> {
     let query = AnalyticsEventQuery {
         provider: None,
         project_id: Some(project_id.to_string()),
@@ -1090,7 +1092,7 @@ async fn durable_analytics_rows(
         if let Ok(events) = db.query_analytics_events(&query).await
             && !events.is_empty()
         {
-            return Some(events.iter().map(durable_analytics_event_row).collect());
+            return Some(events);
         }
     }
     None
@@ -1111,22 +1113,22 @@ pub fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {
     })
 }
 
-pub fn hint_summary_from_events(events: &[Value]) -> AnalyticsHintsPayloadV1 {
+pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintsPayloadV1 {
     let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
         .collect();
 
     for event in events {
-        let category = str_field(event, "hint_category");
+        let category = event.hint_category.as_deref().unwrap_or("");
         if category.is_empty() {
             continue;
         }
-        let counts = by_category.entry(category.to_string()).or_default();
-        let event_kind = normalize(str_field(event, "event_kind"));
+        let counts = by_category.entry(category.to_owned()).or_default();
+        let event_kind = normalize(&event.event_kind);
         match event_kind.as_str() {
             "hint_emitted" | "hint_escalated" | "missing_session" => counts.emitted += 1,
-            "hint_outcome" => match normalize(str_field(event, "outcome")).as_str() {
+            "hint_outcome" => match normalize(event.outcome.as_deref().unwrap_or("")).as_str() {
                 "acted" => counts.followed += 1,
                 "ignored" => counts.ignored += 1,
                 _ => {}
@@ -1196,17 +1198,17 @@ struct HintEfficacyCounts {
 /// many it ignored, and how many remain unresolved (emitted with no outcome yet
 /// — the correlator's later-pass backlog). `unresolved` is derived so it stays
 /// non-negative even if the event sample is truncated mid-pair.
-fn hint_efficacy_from_events(events: &[Value]) -> AnalyticsHintEfficacyV1 {
+fn hint_efficacy_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintEfficacyV1 {
     let mut by_category: BTreeMap<String, HintEfficacyCounts> = BTreeMap::new();
     let mut totals = HintEfficacyCounts::default();
 
     for event in events {
-        let category = str_field(event, "hint_category");
+        let category = event.hint_category.as_deref().unwrap_or("");
         if category.is_empty() {
             continue;
         }
-        let event_kind = str_field(event, "event_kind");
-        let outcome = str_field(event, "outcome");
+        let event_kind = event.event_kind.as_str();
+        let outcome = event.outcome.as_deref().unwrap_or("");
         if let Some(counts) = by_category.get_mut(category) {
             apply_hint_efficacy_event(counts, &mut totals, event_kind, outcome);
             continue;
@@ -1312,7 +1314,7 @@ fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHi
 
 async fn hint_summary(
     db: Option<&RegisteredGlobalDb>,
-    durable_events: Option<&[Value]>,
+    durable_events: Option<&[AnalyticsEventRecord]>,
     project_id: Option<&str>,
 ) -> AnalyticsHintsPayloadV1 {
     if let (Some(db), Some(project_id)) = (db, project_id)
@@ -1424,19 +1426,15 @@ async fn session_message_rows(
     .map_err(|error| format!("session-message query failed: {error}"))
 }
 
-fn usage_summary_from_events(events: &[Value]) -> AnalyticsUsageSummaryV1 {
+fn usage_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsUsageSummaryV1 {
     let mut counts: BTreeMap<(String, String), i64> = BTreeMap::new();
     for event in events {
-        let event_kind = str_field(event, "event_kind");
-        let tool_name = str_field(event, "tool_name");
-        let skill_name = str_field(event, "skill_name");
-        let metadata_json = str_field(event, "metadata_json");
         record_event_usage(
             &mut counts,
-            event_kind,
-            tool_name,
-            skill_name,
-            metadata_json,
+            &event.event_kind,
+            event.tool_name.as_deref().unwrap_or(""),
+            event.skill_name.as_deref().unwrap_or(""),
+            event.metadata_json.as_deref().unwrap_or(""),
         );
     }
 
@@ -1516,14 +1514,14 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
 /// had to round-trip through this type to keep that distinction.
 async fn typed_usage_summary(
     db: Option<&RegisteredGlobalDb>,
-    durable_events: Option<&[Value]>,
+    durable_events: Option<&[AnalyticsEventRecord]>,
 ) -> Result<AnalyticsUsageSummaryV1, String> {
     usage_summary(db, durable_events).await
 }
 
 async fn usage_summary(
     db: Option<&RegisteredGlobalDb>,
-    durable_events: Option<&[Value]>,
+    durable_events: Option<&[AnalyticsEventRecord]>,
 ) -> Result<AnalyticsUsageSummaryV1, String> {
     if let Some(events) = durable_events {
         return Ok(usage_summary_from_events(events));
@@ -1590,7 +1588,7 @@ async fn session_message_count(db: Option<&RegisteredGlobalDb>) -> Result<i64, S
 
 async fn typed_diagnostics_summary(
     state: &DashboardState,
-    durable_events: Option<&[Value]>,
+    durable_events: Option<&[AnalyticsEventRecord]>,
 ) -> Result<AnalyticsDiagnosticsPayloadV1, String> {
     let message_count = session_message_count(state.lcm_db.as_deref()).await?;
     // The hook stream is plain synchronous file IO over up-to-megabyte tails;
@@ -1614,10 +1612,16 @@ pub fn diagnostics_summary_from_parts(
     hook_analytics: &HookAnalyticsRows,
     durable_events: Option<&[Value]>,
 ) -> Value {
+    let records = durable_events.map(|events| {
+        events
+            .iter()
+            .map(analytics_event_from_json_row)
+            .collect::<Vec<_>>()
+    });
     match serde_json::to_value(diagnostics_payload_from_parts(
         message_count,
         hook_analytics,
-        durable_events,
+        records.as_deref(),
     )) {
         Ok(value) => value,
         Err(error) => json!({
@@ -1628,10 +1632,29 @@ pub fn diagnostics_summary_from_parts(
     }
 }
 
+fn analytics_event_from_json_row(row: &Value) -> AnalyticsEventRecord {
+    AnalyticsEventRecord {
+        id: 0,
+        provider: str_field(row, "provider").to_owned(),
+        project_id: String::new(),
+        session_id: optional_text(row, "session_id"),
+        timestamp: row.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
+        event_kind: str_field(row, "event_kind").to_owned(),
+        hook_name: optional_text(row, "hook_name"),
+        tool_name: optional_text(row, "tool_name"),
+        tool_category: optional_text(row, "tool_category"),
+        skill_name: optional_text(row, "skill_name"),
+        hint_category: optional_text(row, "hint_category"),
+        hint_id: optional_text(row, "hint_id"),
+        outcome: optional_text(row, "outcome"),
+        metadata_json: optional_text(row, "metadata_json"),
+    }
+}
+
 fn diagnostics_payload_from_parts(
     message_count: i64,
     hook_analytics: &HookAnalyticsRows,
-    durable_events: Option<&[Value]>,
+    durable_events: Option<&[AnalyticsEventRecord]>,
 ) -> AnalyticsDiagnosticsPayloadV1 {
     let hook_rows = &hook_analytics.rows;
     let hook_call_count = hook_invocation_count(hook_rows);
@@ -1687,16 +1710,17 @@ fn diagnostics_payload_from_parts(
     let mut last_ts: Option<i64> = None;
 
     for event in events {
-        let event_kind = str_field(event, "event_kind");
-        let tool_name = str_field(event, "tool_name");
+        let event_kind = event.event_kind.as_str();
+        let tool_name = event.tool_name.as_deref().unwrap_or("");
         increment_string_count(&mut by_event_kind, event_kind);
-        increment_string_count(&mut by_tool_category, str_field(event, "tool_category"));
-        increment_string_count(&mut by_outcome, str_field(event, "outcome"));
+        increment_string_count(
+            &mut by_tool_category,
+            event.tool_category.as_deref().unwrap_or(""),
+        );
+        increment_string_count(&mut by_outcome, event.outcome.as_deref().unwrap_or(""));
 
-        if let Some(ts) = event.get("timestamp").and_then(Value::as_i64) {
-            first_ts = Some(first_ts.map_or(ts, |current| current.min(ts)));
-            last_ts = Some(last_ts.map_or(ts, |current| current.max(ts)));
-        }
+        first_ts = Some(first_ts.map_or(event.timestamp, |current| current.min(event.timestamp)));
+        last_ts = Some(last_ts.map_or(event.timestamp, |current| current.max(event.timestamp)));
 
         if !tool_name.is_empty() {
             tool_call_count += 1;
@@ -2096,17 +2120,17 @@ fn hook_prompt_category_rows(rows: &[Value]) -> Vec<AnalyticsPromptCategoryCount
         .collect()
 }
 
-fn recent_event_rows(events: &[Value], limit: usize) -> Vec<AnalyticsRecentEventV1> {
+fn recent_event_rows(events: &[AnalyticsEventRecord], limit: usize) -> Vec<AnalyticsRecentEventV1> {
     events
         .iter()
         .rev()
         .take(limit)
         .map(|event| AnalyticsRecentEventV1 {
-            timestamp: event.get("timestamp").and_then(Value::as_i64),
-            event_kind: str_field(event, "event_kind").to_owned(),
-            hook_name: str_field(event, "hook_name").to_owned(),
-            tool_name: str_field(event, "tool_name").to_owned(),
-            outcome: str_field(event, "outcome").to_owned(),
+            timestamp: Some(event.timestamp),
+            event_kind: event.event_kind.clone(),
+            hook_name: event.hook_name.clone().unwrap_or_default(),
+            tool_name: event.tool_name.clone().unwrap_or_default(),
+            outcome: event.outcome.clone().unwrap_or_default(),
         })
         .collect()
 }
@@ -2170,6 +2194,30 @@ mod tests {
         hint_summary_from_events, read_hook_analytics_file, recent_hook_rows,
         sort_hook_analytics_rows,
     };
+    use tracedecay_global_db::AnalyticsEventRecord;
+
+    fn analytics_event(
+        event_kind: &str,
+        hint_category: &str,
+        outcome: &str,
+    ) -> AnalyticsEventRecord {
+        AnalyticsEventRecord {
+            id: 0,
+            provider: String::new(),
+            project_id: String::new(),
+            session_id: None,
+            timestamp: 0,
+            event_kind: event_kind.to_owned(),
+            hook_name: None,
+            tool_name: None,
+            tool_category: None,
+            skill_name: None,
+            hint_category: (!hint_category.is_empty()).then(|| hint_category.to_owned()),
+            hint_id: None,
+            outcome: (!outcome.is_empty()).then(|| outcome.to_owned()),
+            metadata_json: None,
+        }
+    }
 
     fn row(session_id: &str, parent: Option<&str>) -> SubagentSessionRow {
         SubagentSessionRow {
@@ -2329,12 +2377,12 @@ mod tests {
     #[test]
     fn hint_summary_counts_current_event_kinds_without_impossible_outcomes() {
         let events = vec![
-            json!({"event_kind": "hint_emitted", "hint_category": "search", "outcome": "observed"}),
-            json!({"event_kind": "hint_outcome", "hint_category": "search", "outcome": "acted"}),
-            json!({"event_kind": "hint_emitted", "hint_category": "file_lookup", "outcome": "observed"}),
-            json!({"event_kind": "hint_outcome", "hint_category": "file_lookup", "outcome": "ignored"}),
-            json!({"event_kind": "hint_escalated", "hint_category": "impact", "outcome": "observed"}),
-            json!({"event_kind": "suppressed_duplicate", "hint_category": "impact", "outcome": "observed"}),
+            analytics_event("hint_emitted", "search", "observed"),
+            analytics_event("hint_outcome", "search", "acted"),
+            analytics_event("hint_emitted", "file_lookup", "observed"),
+            analytics_event("hint_outcome", "file_lookup", "ignored"),
+            analytics_event("hint_escalated", "impact", "observed"),
+            analytics_event("suppressed_duplicate", "impact", "observed"),
         ];
 
         let summary = hint_summary_from_events(&events);
@@ -2356,14 +2404,18 @@ mod tests {
     #[test]
     fn hint_efficacy_counts_emitted_acted_ignored_and_unresolved() {
         let events = vec![
-            json!({"event_kind": "hint_emitted", "hint_category": "search"}),
-            json!({"event_kind": "hint_emitted", "hint_category": "search"}),
-            json!({"event_kind": "hint_emitted", "hint_category": "search"}),
-            json!({"event_kind": "hint_outcome", "hint_category": "search", "outcome": "acted"}),
-            json!({"event_kind": "hint_outcome", "hint_category": "search", "outcome": "ignored"}),
-            json!({"event_kind": "hint_emitted", "hint_category": "impact"}),
+            analytics_event("hint_emitted", "search", ""),
+            analytics_event("hint_emitted", "search", ""),
+            analytics_event("hint_emitted", "search", ""),
+            analytics_event("hint_outcome", "search", "acted"),
+            analytics_event("hint_outcome", "search", "ignored"),
+            analytics_event("hint_emitted", "impact", ""),
             // Unrelated events must not affect hint efficacy.
-            json!({"event_kind": "mcp_tool_call", "tool_name": "tracedecay_context"}),
+            {
+                let mut event = analytics_event("mcp_tool_call", "", "");
+                event.tool_name = Some("tracedecay_context".to_owned());
+                event
+            },
         ];
 
         let summary = hint_efficacy_from_events(&events);
@@ -2395,7 +2447,7 @@ mod tests {
 
     #[test]
     fn hint_efficacy_is_unavailable_without_hint_events() {
-        let summary = hint_efficacy_from_events(&[json!({"event_kind": "mcp_tool_call"})]);
+        let summary = hint_efficacy_from_events(&[analytics_event("mcp_tool_call", "", "")]);
         assert!(!summary.available);
         assert!(summary.by_category.is_empty());
     }
