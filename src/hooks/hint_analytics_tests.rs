@@ -1,6 +1,6 @@
 use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
 use super::{
-    HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id, mint_hint_id,
+    EnvGuard, HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id, mint_hint_id,
     record_hint_emitted, record_hook_invoked,
 };
 use crate::config::USER_DATA_DIR_ENV;
@@ -16,8 +16,6 @@ const TERMINAL_EVENTS: &[&str] = &[
     "dropped_no_root",
     "missing_session",
 ];
-
-use super::EnvGuard;
 
 fn test_hint() -> ToolHint {
     ToolHint {

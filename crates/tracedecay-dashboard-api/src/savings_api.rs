@@ -864,24 +864,29 @@ pub async fn ledger(
     let total = gdb.sum_savings(None, since).await;
     let history = gdb.savings_history(None, since).await;
     let conn = gdb.read_connection();
+    const SAVED_TOKENS_EXPR: &str = "COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0)";
     let by_tool = query_rows(
         &conn,
-        "SELECT tool_name,
-                COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
+        &format!(
+            "SELECT tool_name,
+                {SAVED_TOKENS_EXPR} AS saved_tokens,
                 COUNT(*) AS calls
          FROM savings_ledger WHERE ts >= ?1
-         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50",
+         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50"
+        ),
         params![since],
     )
     .await
     .unwrap_or_default();
     let by_project = query_rows(
         &conn,
-        "SELECT project_path,
-                COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
+        &format!(
+            "SELECT project_path,
+                {SAVED_TOKENS_EXPR} AS saved_tokens,
                 COUNT(*) AS calls
          FROM savings_ledger WHERE ts >= ?1
-         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50",
+         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50"
+        ),
         params![since],
     )
     .await

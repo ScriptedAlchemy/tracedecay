@@ -13,10 +13,8 @@ use serde_json::Value;
 
 use super::analytics::{HOOK_ANALYTICS_FILENAME, record_hook_invoked};
 use super::tool_hints::HintAgent;
-use super::{TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
+use super::{EnvGuard, TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
 use crate::config::USER_DATA_DIR_ENV;
-
-use super::EnvGuard;
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
     crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();

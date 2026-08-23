@@ -21,7 +21,6 @@
 //! the Savings tab doesn't pay the initial counting cost.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
@@ -169,14 +168,14 @@ fn displayed_message_cache() -> DisplayedMessageCache {
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
 /// built from.
 struct OverlayCache {
-    /// Cheap aggregate fingerprint of `session_messages` at build time.
-    /// Includes text/model lengths. Provider-accounting metadata is deliberately
+    /// Cheap aggregate fingerprint of `session_messages` at build time:
+    /// `(COUNT(*), MAX(rowid))`. Provider-accounting metadata is deliberately
     /// excluded because it is not content-token evidence.
     fingerprint: OverlayFingerprint,
     overlay: Arc<Vec<MessageTokens>>,
 }
 
-type OverlayFingerprint = (i64, i64, u64);
+type OverlayFingerprint = (i64, i64);
 
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub struct TokenCountCache {
@@ -315,27 +314,17 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
 async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
-        "SELECT rowid, provider, message_id, model, LENGTH(text) AS text_len
-         FROM session_messages ORDER BY rowid",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS max_rowid
+         FROM session_messages",
         (),
     )
     .await
     .ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut max_rowid = 0_i64;
-    for row in &rows {
-        let rowid = row.get("rowid").and_then(Value::as_i64).unwrap_or(0);
-        max_rowid = max_rowid.max(rowid);
-        rowid.hash(&mut hasher);
-        row_str(row, "provider").hash(&mut hasher);
-        row_str(row, "message_id").hash(&mut hasher);
-        row_str(row, "model").hash(&mut hasher);
-        row.get("text_len")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .hash(&mut hasher);
-    }
-    Some((rows.len() as i64, max_rowid, hasher.finish()))
+    let row = rows.first()?;
+    Some((
+        row.get("n").and_then(Value::as_i64).unwrap_or(0),
+        row.get("max_rowid").and_then(Value::as_i64).unwrap_or(0),
+    ))
 }
 
 async fn build_overlay(
