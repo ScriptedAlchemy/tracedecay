@@ -421,6 +421,7 @@ pub struct PrivateStoreIo;
 
 mod identity;
 mod layout;
+mod legacy_layouts;
 mod manifest;
 mod paths_and_io;
 
@@ -438,6 +439,7 @@ pub use layout::{
     resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_persisted_layout,
     resolve_project_session_db_path, resolve_response_handle_root,
 };
+pub use legacy_layouts::matching_legacy_profile_layouts;
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{
     acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,
