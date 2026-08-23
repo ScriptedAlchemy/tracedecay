@@ -43,6 +43,17 @@ pub(crate) fn status_from_reader(
     scope: DashboardScopeV1,
     reader: Option<crate::RemoteOperationalStatusReader>,
 ) -> DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1> {
+    let envelope = hotpath::measure_block!("dashboard.status.projection", {
+        project_remote_status(scope, reader)
+    });
+    crate::observe::record_freshness_state(envelope.freshness.state);
+    envelope
+}
+
+fn project_remote_status(
+    scope: DashboardScopeV1,
+    reader: Option<crate::RemoteOperationalStatusReader>,
+) -> DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1> {
     match reader {
         None => envelope(
             scope,

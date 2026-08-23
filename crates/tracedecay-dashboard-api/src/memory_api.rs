@@ -550,12 +550,14 @@ pub async fn overview(
         }
         coverage
     };
-    let freshness =
+    let freshness = hotpath::measure_block!("dashboard.freshness.projection", {
         if !request_timed_out && !request_cancelled && overview_ready && ready_read_count == 3 {
             DashboardFreshnessV1::fresh_now()
         } else {
             DashboardFreshnessV1::unknown()
-        };
+        }
+    });
+    crate::observe::record_freshness_state(freshness.state);
     let providers = match serde_json::from_value(memory_service::providers_payload()) {
         Ok(providers) => providers,
         Err(error) => {

@@ -371,17 +371,23 @@ impl EnrolledRemoteClient {
         if let Some((name, credential)) = additional_credential {
             builder = builder.header(name, credential);
         }
-        let response = builder
-            .json(&serde_json::json!({ "request": request }))
-            .send()
-            .map_err(|error| RemoteClientError::Transport(error.to_string()))?;
-        decode_typed_response(
-            response,
-            &request.request_id,
-            &result_contract,
-            success_kind,
-            validate_payload,
-        )
+        crate::observe::finish_remote((|| {
+            let response = crate::observe::headers(|| {
+                builder
+                    .json(&serde_json::json!({ "request": request }))
+                    .send()
+                    .map_err(|error| RemoteClientError::Transport(error.to_string()))
+            })?;
+            crate::observe::body_decode(|| {
+                decode_typed_response(
+                    response,
+                    &request.request_id,
+                    &result_contract,
+                    success_kind,
+                    validate_payload,
+                )
+            })
+        })())
     }
 }
 

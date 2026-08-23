@@ -69,9 +69,11 @@ where
     if let Some(sequence) = sequence {
         encoded = encoded.id(sequence.to_string());
     }
-    encoded
-        .json_data(event)
-        .map_err(|_| HttpAdapterError::EventEncoding)
+    let data = hotpath::measure_block!("api.http.serialize", {
+        serde_json::to_string(&event).map_err(|_| HttpAdapterError::EventEncoding)
+    })?;
+    crate::observe::record_response_bytes(data.len());
+    Ok(encoded.data(data))
 }
 
 #[cfg(test)]

@@ -96,19 +96,23 @@ async fn dispatch<O>(
 where
     O: MultiRootApplicationOwner,
 {
-    let Ok(Json(body)) = body else {
-        return invalid_request_response(
-            request_id,
-            "multi_root.invalid_body",
-            "The multi-root request body is invalid or exceeds the configured limit",
-        );
+    let request = match hotpath::measure_block!("api.http.admission", {
+        match body {
+            Ok(Json(body)) => Ok(MultiRootHttpRequest {
+                operation,
+                request_id,
+                controls,
+                body,
+            }),
+            Err(_) => Err(invalid_request_response(
+                request_id,
+                "multi_root.invalid_body",
+                "The multi-root request body is invalid or exceeds the configured limit",
+            )),
+        }
+    }) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
-    owner
-        .invoke_multi_root(MultiRootHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        })
-        .await
+    hotpath::measure_block!("api.http.handler", owner.invoke_multi_root(request).await)
 }

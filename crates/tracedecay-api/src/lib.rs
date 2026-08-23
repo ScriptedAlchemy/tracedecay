@@ -17,6 +17,7 @@ pub mod doctor;
 pub mod feedback;
 pub mod handoff;
 mod http;
+mod observe;
 pub mod multi_root;
 pub mod read_model;
 pub mod remote;

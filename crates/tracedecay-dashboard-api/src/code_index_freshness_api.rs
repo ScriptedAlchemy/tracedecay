@@ -79,6 +79,16 @@ const UNAVAILABLE_NOTE: &str =
 pub async fn freshness(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1>> {
+    let envelope = hotpath::measure_block!("dashboard.freshness.projection", {
+        project_code_index_freshness(&state).await
+    });
+    crate::observe::record_freshness_state(envelope.freshness.state);
+    Json(envelope)
+}
+
+async fn project_code_index_freshness(
+    state: &DashboardState,
+) -> DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1> {
     let authority_attached = state.code_index_freshness_reader.is_some();
     let read = match &state.code_index_freshness_reader {
         Some(reader) => reader(state.project_root.clone()).await,
@@ -148,7 +158,7 @@ pub async fn freshness(
         DashboardLegalActionKindV1::Refresh,
         "use-case.dashboard.code-index.freshness.refresh",
     )]);
-    Json(envelope)
+    envelope
 }
 
 #[cfg(test)]

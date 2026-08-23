@@ -158,27 +158,31 @@ async fn operation<O>(
 where
     O: HandoffApplicationOwner,
 {
-    let Some(operation) = HandoffOperation::parse(&segment) else {
-        return adapter_problem_response(
-            request_id,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        );
+    let request = match hotpath::measure_block!("api.http.admission", {
+        match HandoffOperation::parse(&segment) {
+            None => Err(adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            )),
+            Some(operation) => match body {
+                Ok(Json(body)) => Ok(HandoffHttpRequest {
+                    operation,
+                    request_id,
+                    controls,
+                    body,
+                }),
+                Err(_) => Err(invalid_request_response(
+                    request_id,
+                    "handoff.invalid_body",
+                    "The handoff-open request body is invalid or exceeds the configured limit",
+                )),
+            },
+        }
+    }) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
-    let Ok(Json(body)) = body else {
-        return invalid_request_response(
-            request_id,
-            "handoff.invalid_body",
-            "The handoff-open request body is invalid or exceeds the configured limit",
-        );
-    };
-    owner
-        .invoke_handoff(HandoffHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        })
-        .await
+    hotpath::measure_block!("api.http.handler", owner.invoke_handoff(request).await)
 }
 
 pub fn handoff_invalid_request_response(request_id: RequestId) -> Response {

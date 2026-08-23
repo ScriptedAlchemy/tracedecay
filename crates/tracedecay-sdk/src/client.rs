@@ -444,18 +444,23 @@ impl Client {
                 "typed operation route must begin with /application".into(),
             )
         })?;
-        let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
-            .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
-        let mut headers = self.headers("application/json");
-        crate::request_control::apply_http_headers(&mut headers, options)?;
-        let response = self
-            .http
-            .post(url)
-            .headers(headers)
-            .json(request)
-            .send()
-            .map_err(ClientError::transport)?;
-        self.decode_application_response(response, expected_request_id)
+        crate::observe::finish((|| {
+            let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
+                .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+            let mut headers = self.headers("application/json");
+            crate::request_control::apply_http_headers(&mut headers, options)?;
+            let response = crate::observe::headers(|| {
+                self.http
+                    .post(url)
+                    .headers(headers)
+                    .json(request)
+                    .send()
+                    .map_err(ClientError::transport)
+            })?;
+            crate::observe::body_decode(|| {
+                self.decode_application_response(response, expected_request_id)
+            })
+        })())
     }
 
     /// Requests cancellation of a previously accepted operation.
@@ -464,19 +469,23 @@ impl Client {
         operation_id: &str,
     ) -> Result<OperationCancellation, ClientError> {
         validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
-        let response = self
-            .http
-            .post(self.lifecycle_url(operation_id, "cancel")?)
-            .headers(self.headers("application/json"))
-            .send()
-            .map_err(ClientError::transport)?;
+        crate::observe::finish((|| {
+        let response = crate::observe::headers(|| {
+            self.http
+                .post(self.lifecycle_url(operation_id, "cancel")?)
+                .headers(self.headers("application/json"))
+                .send()
+                .map_err(ClientError::transport)
+        })?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ClientError::Authentication(status.as_u16()));
         }
-        let body: Value = response.json().map_err(|error| ClientError::Protocol {
-            status: Some(status.as_u16()),
-            message: format!("daemon returned malformed cancellation JSON: {error}"),
+        let body: Value = crate::observe::body_decode(|| {
+            response.json().map_err(|error| ClientError::Protocol {
+                status: Some(status.as_u16()),
+                message: format!("daemon returned malformed cancellation JSON: {error}"),
+            })
         })?;
         if body.get("kind").and_then(Value::as_str) == Some("problem") {
             return Err(problem_error(
@@ -503,6 +512,7 @@ impl Client {
             });
         }
         Ok(value)
+        })())
     }
 
     /// Opens the canonical event stream, optionally from a resume frontier.
@@ -511,6 +521,7 @@ impl Client {
         operation_id: &str,
         options: StreamOptions,
     ) -> Result<OperationStream, ClientError> {
+        crate::observe::finish((|| {
         validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
         if let Some(resume) = &options.resume {
             validate_opaque(&resume.token, MAX_OPAQUE_BYTES, "resume token")?;
@@ -534,6 +545,7 @@ impl Client {
         }
         stream.connect()?;
         Ok(stream)
+        })())
     }
 
     fn lifecycle_url(&self, operation_id: &str, suffix: &str) -> Result<reqwest::Url, ClientError> {
@@ -1018,22 +1030,25 @@ impl OperationStream {
                 query.append_pair("resume_token", token);
             }
         }
-        let response = self
-            .client
-            .http
-            .get(url)
-            .headers(self.client.headers("text/event-stream"))
-            .send()
-            .map_err(ClientError::transport)?;
+        let response = crate::observe::headers(|| {
+            self.client
+                .http
+                .get(url)
+                .headers(self.client.headers("text/event-stream"))
+                .send()
+                .map_err(ClientError::transport)
+        })?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ClientError::Authentication(status.as_u16()));
         }
         let media_type = media_type(response.headers());
         if !status.is_success() && media_type == Some("application/json") {
-            let body: Value = response.json().map_err(|error| ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: format!("daemon returned malformed stream problem JSON: {error}"),
+            let body: Value = crate::observe::body_decode(|| {
+                response.json().map_err(|error| ClientError::Protocol {
+                    status: Some(status.as_u16()),
+                    message: format!("daemon returned malformed stream problem JSON: {error}"),
+                })
             })?;
             if body.get("kind").and_then(Value::as_str) == Some("problem") {
                 return Err(problem_error(
