@@ -418,6 +418,37 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         )
     }
 
+    async fn execute_lcm_inner(
+        &self,
+        context: RetainedSurfaceExecutionContextV1<'_>,
+        request: RetainedLcmRequestV1<'_>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match request {
+            RetainedLcmRequestV1::Status(request) => self.execute_status(&context, request).await,
+            RetainedLcmRequestV1::Doctor(request) => self.execute_doctor(&context, request).await,
+            RetainedLcmRequestV1::LoadSession(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.load_session(&context, request).await
+            }
+            RetainedLcmRequestV1::Grep(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.grep(&context, request).await
+            }
+            RetainedLcmRequestV1::Describe(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.describe(&context, request).await
+            }
+            RetainedLcmRequestV1::Expand(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.expand(&context, request).await
+            }
+            RetainedLcmRequestV1::ExpandQuery(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.expand_query(&context, request).await
+            }
+        }
+    }
+
     async fn execute_doctor(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -466,36 +497,7 @@ impl RetainedLcmExecutionPortV1 for DirectRetainedLcmPortV1<'_> {
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedLcmRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move {
-            match request {
-                RetainedLcmRequestV1::Status(request) => {
-                    self.execute_status(&context, request).await
-                }
-                RetainedLcmRequestV1::Doctor(request) => {
-                    self.execute_doctor(&context, request).await
-                }
-                RetainedLcmRequestV1::LoadSession(request) => {
-                    let service = self.retrieval_service(&context).await?;
-                    service.load_session(&context, request).await
-                }
-                RetainedLcmRequestV1::Grep(request) => {
-                    let service = self.retrieval_service(&context).await?;
-                    service.grep(&context, request).await
-                }
-                RetainedLcmRequestV1::Describe(request) => {
-                    let service = self.retrieval_service(&context).await?;
-                    service.describe(&context, request).await
-                }
-                RetainedLcmRequestV1::Expand(request) => {
-                    let service = self.retrieval_service(&context).await?;
-                    service.expand(&context, request).await
-                }
-                RetainedLcmRequestV1::ExpandQuery(request) => {
-                    let service = self.retrieval_service(&context).await?;
-                    service.expand_query(&context, request).await
-                }
-            }
-        })
+        Box::pin(self.execute_lcm_inner(context, request))
     }
 }
 
