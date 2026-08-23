@@ -3,6 +3,7 @@
 //! Keys are static product-capability names. Never pass query text, user
 //! text, paths, or identifiers.
 
+#[cfg(feature = "hotpath")]
 use std::cell::Cell;
 
 use tracedecay_domain::{RetrieverBatch, RetrieverOutcome};
@@ -16,6 +17,7 @@ pub(crate) enum Residency {
 }
 
 impl Residency {
+    #[cfg(feature = "hotpath")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Cold => "cold",
@@ -24,14 +26,18 @@ impl Residency {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn record(self, scope: &'static str) {
-        let _ = scope;
+        #[cfg(feature = "hotpath")]
         hotpath::val!(scope).set(&self.as_str());
+        #[cfg(not(feature = "hotpath"))]
+        let _ = (self, scope);
     }
 }
 
 /// Sample 1-in-16 of frequent inner scopes (per-row scoring).
 #[inline]
+#[cfg(feature = "hotpath")]
 pub(crate) fn sample_frequent() -> bool {
     thread_local! {
         static TICK: Cell<u32> = const { Cell::new(0) };
@@ -46,10 +52,17 @@ pub(crate) fn sample_frequent() -> bool {
 /// Time a frequent inner scope only when sampled. The body always runs.
 #[inline]
 pub(crate) fn measure_frequent<T>(label: &'static str, body: impl FnOnce() -> T) -> T {
-    let _ = label;
-    if sample_frequent() {
-        hotpath::measure_block!(label, body())
-    } else {
+    #[cfg(feature = "hotpath")]
+    {
+        if sample_frequent() {
+            hotpath::measure_block!(label, body())
+        } else {
+            body()
+        }
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = label;
         body()
     }
 }
@@ -61,18 +74,22 @@ pub(crate) fn record_lane<E>(
     residency: &'static str,
     outcome: &RetrieverOutcome<RetrieverBatch<E>>,
 ) {
-    let _ = (candidates, examined, results, residency);
-    match outcome {
-        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
-            hotpath::gauge!(candidates).set(batch.candidates.len());
-            hotpath::gauge!(examined).set(batch.coverage.examined);
-            hotpath::gauge!(results).set(batch.candidates.len());
-            Residency::Warm.record(residency);
+    #[cfg(feature = "hotpath")]
+    {
+        match outcome {
+            RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
+                hotpath::gauge!(candidates).set(batch.candidates.len());
+                hotpath::gauge!(examined).set(batch.coverage.examined);
+                hotpath::gauge!(results).set(batch.candidates.len());
+                Residency::Warm.record(residency);
+            }
+            RetrieverOutcome::Stale(_) => Residency::Rebuilding.record(residency),
+            RetrieverOutcome::Cancelled => {
+                hotpath::gauge!("query.cancel.count").inc(1u32);
+            }
+            _ => {}
         }
-        RetrieverOutcome::Stale(_) => Residency::Rebuilding.record(residency),
-        RetrieverOutcome::Cancelled => {
-            hotpath::gauge!("query.cancel.count").inc(1u32);
-        }
-        _ => {}
     }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = (candidates, examined, results, residency, outcome);
 }
