@@ -13,6 +13,30 @@ search handler emits.
 
 ---
 
+> **Status: historical — code layer superseded.** Every `retrieval.rs:NNN` /
+> `entities.rs:NNN` / `encoding.rs:NNN` / `migrations.rs:NNN` / `trust.rs:NNN`
+> anchor below was written against a single-crate `src/memory/` layout that no
+> longer exists. The retrieval pipeline was rewritten and split into
+> `crates/tracedecay-runtime-core/src/store/memory/{candidates.rs,scoring.rs,search.rs}`
+> (async, transaction-based, `project_memory_*`-prefixed functions) reading
+> `memory_v2_*` tables (`crates/tracedecay-runtime-core/src/db/migrations.rs`),
+> not the `memory_facts`/`memory_entities` tables this document cites. Verified
+> directly against the current source: **Risk A is resolved** —
+> `crates/tracedecay-runtime-core/src/memory/entities.rs` now extracts single
+> capitalized proper nouns and strips inflected leading verbs
+> (`is_non_entity_leading_word` matches "Prefers"/"Uses"/etc., not just exact
+> base forms), with code comments explicitly citing "Risk A" as the motivation.
+> The 0.40/0.30/0.30 fusion weights and the `(sim+1)/2` holographic floor
+> (Risks C/D) still exist verbatim in
+> `crates/tracedecay-runtime-core/src/store/memory/scoring.rs`, but scoring also
+> gained a `usage_boost` term from `retrieval_count` not described here, and
+> candidate FTS queries now add prefix-wildcarding for tokens ≥4 chars
+> (`crates/tracedecay-runtime-core/src/store/memory/candidates.rs`), which
+> likely changes Risk B's conclusion. The specific line citations throughout
+> this document are stale and unresolvable; re-verify each remaining risk
+> against the current module layout before acting on it rather than trusting
+> the numbers below.
+
 ## 1. Current retrieval pipeline (with code references)
 
 `FactRetriever::search` (`src/memory/retrieval.rs:36`) fuses four recall channels and one
