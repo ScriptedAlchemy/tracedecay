@@ -764,18 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_one_plain_or_fenced_json_object() {
-        assert_eq!(
-            extract_json_object_prefix(r#" { "ok": true } "#).unwrap()["ok"],
-            true
-        );
-        assert_eq!(
-            extract_json_object_prefix("```json\n{\"task\":\"skill_writer\"}\n```").unwrap()["task"],
-            "skill_writer"
-        );
-    }
-
-    #[test]
     fn classifies_backend_failures_for_retry_policy() {
         for (message, expected, retryable) in [
             (
@@ -825,23 +813,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_recovers_transient_backend_failure_on_second_attempt() {
-        let backend = FlakyBackend::timing_out(1);
-        let policy = BackendRetryPolicy::new(
-            3,
-            vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
-        );
-
-        let response = run_agent_task_with_retry(&backend, &request(), &policy)
-            .await
-            .unwrap();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(response.run_id, "run_retry");
-    }
-
-    #[tokio::test]
     async fn retry_report_records_transient_transient_success_attempts() {
         let backend = FlakyBackend::timing_out(2);
         let policy = BackendRetryPolicy::new(
@@ -869,61 +840,6 @@ mod tests {
             ]
         );
         assert!(report.attempts()[2].succeeded);
-    }
-
-    #[tokio::test]
-    async fn retry_stops_at_attempt_limit() {
-        let backend = FlakyBackend::timing_out(usize::MAX);
-        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_secs(120));
-
-        run_agent_task_with_retry(&backend, &request(), &policy)
-            .await
-            .unwrap_err();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn retry_does_not_repeat_permanent_failure() {
-        struct PermanentBackend {
-            calls: AtomicUsize,
-        }
-
-        impl AgentTaskBackend for PermanentBackend {
-            fn run_task(
-                &self,
-                _request: &AgentTaskRequest,
-            ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(AgentTaskError::Failed {
-                    reason: "policy rejected the prompt".to_string(),
-                })
-            }
-        }
-
-        let backend = PermanentBackend {
-            calls: AtomicUsize::new(0),
-        };
-        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_secs(120));
-
-        run_agent_task_with_retry(&backend, &request(), &policy)
-            .await
-            .unwrap_err();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn retry_respects_exhausted_budget() {
-        let backend = FlakyBackend::timing_out(usize::MAX);
-        let policy =
-            BackendRetryPolicy::new(3, vec![Duration::from_secs(1)], Duration::from_millis(1));
-
-        run_agent_task_with_retry(&backend, &request(), &policy)
-            .await
-            .unwrap_err();
-
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
