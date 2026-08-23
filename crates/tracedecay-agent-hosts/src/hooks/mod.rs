@@ -68,8 +68,11 @@ pub use steering::{
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
-pub use analytics::HookCompletedReadinessDistributions;
 use analytics::mint_hint_id;
+pub use analytics::{
+    HookCompletedReadinessDistributions, host_hook_telemetry_contract,
+    measure_host_event_payload_bytes,
+};
 use analytics::{
     record_hint_analytics, record_hint_emitted, record_hook_analytics, record_hook_invoked,
     record_hook_invoked_parsed, record_other_hook_invoked, record_workspace_status_analytics,

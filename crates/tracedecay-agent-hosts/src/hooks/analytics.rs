@@ -346,8 +346,7 @@ fn disposition_severity(disposition: &HookDispositionTelemetry) -> u8 {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn host_hook_telemetry_contract() -> Value {
+pub fn host_hook_telemetry_contract() -> Value {
     let mut hosts = tracedecay_domain::HostIntegrationIdV1::ALL
         .into_iter()
         .map(tracedecay_domain::HostIntegrationIdV1::as_str)
@@ -411,7 +410,7 @@ pub(crate) fn host_hook_telemetry_contract() -> Value {
 }
 
 /// Length-only host-event size. The bytes themselves are never retained.
-pub(crate) fn measure_host_event_payload_bytes(event_json: &str) -> Option<u64> {
+pub fn measure_host_event_payload_bytes(event_json: &str) -> Option<u64> {
     u64::try_from(event_json.len()).ok()
 }
 
