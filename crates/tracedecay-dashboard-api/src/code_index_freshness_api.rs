@@ -106,20 +106,20 @@ async fn project_code_index_freshness(
         }
         .to_string(),
     };
-    let envelope = match live {
+    match live {
         Some(worktree)
             if worktree.latest_generation_id.is_some()
                 && worktree.coverage == "complete"
                 && worktree.staleness_state.as_deref() == Some("fresh") =>
         {
             DashboardEnvelopeV1::ready(
-                scope_from_state(&state),
+                scope_from_state(state),
                 DashboardCoverageV1::complete(1, "mounted_worktree"),
                 payload,
             )
         }
         Some(worktree) if worktree.latest_generation_id.is_none() => DashboardEnvelopeV1::new(
-            scope_from_state(&state),
+            scope_from_state(state),
             if worktree.staleness_state.as_deref() == Some("indexing") {
                 DashboardDomainStateV1::Loading
             } else {
@@ -130,7 +130,7 @@ async fn project_code_index_freshness(
             payload,
         ),
         Some(_) => DashboardEnvelopeV1::new(
-            scope_from_state(&state),
+            scope_from_state(state),
             DashboardDomainStateV1::Partial,
             DashboardCoverageV1::partial(
                 1,
@@ -142,7 +142,7 @@ async fn project_code_index_freshness(
             payload,
         ),
         None if authority_attached => DashboardEnvelopeV1::new(
-            scope_from_state(&state),
+            scope_from_state(state),
             DashboardDomainStateV1::Unknown,
             DashboardCoverageV1::unknown(),
             DashboardFreshnessV1 {
@@ -152,13 +152,12 @@ async fn project_code_index_freshness(
             },
             payload,
         ),
-        None => DashboardEnvelopeV1::unsupported(scope_from_state(&state), payload),
+        None => DashboardEnvelopeV1::unsupported(scope_from_state(state), payload),
     }
     .with_legal_actions(vec![DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::Refresh,
         "use-case.dashboard.code-index.freshness.refresh",
-    )]);
-    envelope
+    )])
 }
 
 #[cfg(test)]

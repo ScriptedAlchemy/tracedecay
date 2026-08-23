@@ -1801,27 +1801,29 @@ async fn forward_project_request(
     state: DashboardState,
     req: Request<Body>,
 ) -> Response {
-    let (mut parts, body) = req.into_parts();
-    let request_control = parts
-        .extensions
-        .get::<DashboardHttpRequestControlV1>()
-        .cloned();
-    parts.extensions.clear();
-    if let Some(request_control) = request_control {
-        parts.extensions.insert(request_control);
-    }
-    let req = Request::from_parts(parts, body);
-    match project_api.with_state(state).oneshot(req).await {
-        Ok(response) => response,
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "error",
-                "detail": format!("dashboard project route failed: {err}"),
-            })),
-        )
-            .into_response(),
-    }
+    hotpath::measure_block!("dashboard.http.forward_project", {
+        let (mut parts, body) = req.into_parts();
+        let request_control = parts
+            .extensions
+            .get::<DashboardHttpRequestControlV1>()
+            .cloned();
+        parts.extensions.clear();
+        if let Some(request_control) = request_control {
+            parts.extensions.insert(request_control);
+        }
+        let req = Request::from_parts(parts, body);
+        match project_api.with_state(state).oneshot(req).await {
+            Ok(response) => response,
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "detail": format!("dashboard project route failed: {err}"),
+                })),
+            )
+                .into_response(),
+        }
+    })
 }
 
 /// Capability discovery for hosts and future delegated-host extensions. The UI

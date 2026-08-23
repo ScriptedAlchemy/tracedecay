@@ -1,13 +1,15 @@
-//! Opt-in hotpath labels for the semantic crate.
-//!
-//! Every `hotpath::*` macro expands to a no-op unless the `hotpath` feature is
-//! selected. Recorded values are model-lifecycle state names, failure classes,
-//! and numeric batch/count gauges only. Query text, model identifiers, artifact
-//! digests, paths, and error detail strings must never enter a label or value.
-//!
-//! This crate has no reqwest 0.12 client. Acquisition uses hf-hub/ureq and an
-//! explicit HTTPS transport trait, so `hotpath::http!` stays unused; download
-//! and decode are timed as separate `measure_block!` labels instead.
+// NOTE: `include!`d into `mod hotpath` in lib.rs, so these must stay plain
+// line comments — inner doc comments cannot appear mid-module.
+// Opt-in hotpath labels for the semantic crate.
+//
+// Every `hotpath::*` macro expands to a no-op unless the `hotpath` feature is
+// selected. Recorded values are model-lifecycle state names, failure classes,
+// and numeric batch/count gauges only. Query text, model identifiers, artifact
+// digests, paths, and error detail strings must never enter a label or value.
+//
+// This crate has no reqwest 0.12 client. Acquisition uses hf-hub/ureq and an
+// explicit HTTPS transport trait, so `hotpath::http!` stays unused; download
+// and decode are timed as separate `measure_block!` labels instead.
 
 use tracedecay_query::retrieval::rerank::LocalRerankFailureV1;
 
@@ -216,9 +218,6 @@ pub(crate) fn record_lifecycle_error(error: &ModelLifecycleErrorV1) {
     let _ = error;
 }
 
-/// Every call site lives in the FastEmbed adapter, compiled only when
-/// `semantic-fastembed` is selected.
-#[cfg(feature = "semantic-fastembed")]
 #[inline(always)]
 pub(crate) fn record_embed_error(error: &EmbedError) {
     #[cfg(feature = "hotpath")]
