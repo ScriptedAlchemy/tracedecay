@@ -409,6 +409,13 @@ fn load_relation_by_key(
     load_relation_by_locator_cached(database, locator, cache).map(Some)
 }
 
+pub(crate) fn load_relation_by_locator(
+    database: &GrafeoDB,
+    locator_id: NodeId,
+) -> Result<StoredRelation, GraphDbError> {
+    load_relation_by_locator_cached(database, locator_id, &mut EndpointIdentityCache::default())
+}
+
 pub(crate) fn load_relation_by_locator_cached(
     database: &GrafeoDB,
     locator_id: NodeId,
