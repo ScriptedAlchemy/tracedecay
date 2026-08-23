@@ -50,12 +50,11 @@ describe('AgentsPage read coverage', () => {
     expect(screen.queryByText(/no tool families reported/i)).toBeNull();
   });
 
-  /** An unreported window size used to be substituted with the categorized
-   * total, which made the two agree by construction: the uncategorized
-   * remainder came out as zero and the whole disclosure disappeared, so unknown
-   * coverage read as complete coverage. The composition caption had the mirror
-   * defect — "share of 0" under counts that were really served. */
-  it('does not let an unreported window size read as complete categorization', async () => {
+  /** The fast usage read and slower diagnostics fold are separate snapshots.
+   * An unavailable usage total must stay unknown rather than borrowing the
+   * categorized sum, while diagnostics composition uses the count served with
+   * its own rows instead of the fixture's former fabricated zero. */
+  it('keeps an unknown usage window distinct from diagnostics composition', async () => {
     stubAnalytics({
       usage: usageSummary({
         source: 'analytics_events',
@@ -67,6 +66,7 @@ describe('AgentsPage read coverage', () => {
         ],
       }),
       diagnostics: diagnosticsPayload({
+        event_count: 4,
         by_event_kind: [{ event_kind: 'pre_tool_use', count: 4 }],
         by_outcome: [{ outcome: 'ok', count: 4 }],
       }),
@@ -77,11 +77,12 @@ describe('AgentsPage read coverage', () => {
     expect(
       await screen.findByText(/window's own event count was not reported/i),
     ).toBeTruthy();
-    // The quantified disclosure needs a window size; only the unknown reading
-    // is on screen, and no count of uncategorized events is claimed.
+    // The usage disclosure still has no denominator, so it makes no quantified
+    // completeness claim. The two diagnostics figures have their own exact
+    // four-event denominator from the same diagnostics snapshot.
     expect(screen.queryByText(/events in the window carry no tool/i)).toBeNull();
-    expect(screen.queryByText(/share of 0$/)).toBeNull();
-    expect(screen.getAllByText(/window total unreported/i).length).toBe(2);
+    expect(screen.queryAllByText(/share of 0$/)).toHaveLength(0);
+    expect(screen.getAllByText(/share of 4$/)).toHaveLength(2);
   });
 
   it('discloses that hook counts come from a truncated recent suffix', async () => {
