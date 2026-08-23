@@ -733,6 +733,7 @@ pub fn export_codex_plugin_artifact(
     )
 }
 
+#[hotpath::measure(label = "codex_plugin_bundle_write")]
 fn write_codex_plugin_bundle_base(
     install_dir: &Path,
     tracedecay_bin: &str,

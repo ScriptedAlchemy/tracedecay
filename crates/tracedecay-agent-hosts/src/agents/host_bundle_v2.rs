@@ -2574,6 +2574,7 @@ impl HostBundleWriterV1 {
 
     /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
     /// mutations, then execute them atomically with a recoverable journal.
+    #[hotpath::measure(label = "host_bundle_execute")]
     pub fn execute(
         &mut self,
         manifest: &HostBundleManifestV1,
@@ -2808,6 +2809,7 @@ impl HostBundleWriterV1 {
         )
     }
 
+    #[hotpath::measure(label = "host_bundle_component_set_execute")]
     fn execute_component_set_with_preview<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,
