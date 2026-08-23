@@ -318,22 +318,51 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     assert_eq!(branch["branch_resolution"], json!("stale_serving_branch"));
 }
 
+/// The shared fixture plants exactly four functions, and every one of them is
+/// excluded from the default dead-code census for a *different* reason:
+///
+/// | symbol            | why it is not dead                                  |
+/// |-------------------|-----------------------------------------------------|
+/// | `main`            | entry-point name exclusion                          |
+/// | `test_helper`     | `test`-prefixed and `#[test]`-annotated             |
+/// | `helper`          | `pub`, and `include_public` defaults to false       |
+/// | `format_greeting` | private, but `helper` calls it (incoming edge)      |
+///
+/// So the correct answer is an empty dead-code set. Resolving `format_greeting`
+/// first is the anti-vacuity gate: it waits for the graph to become current and
+/// panics unless that private, *called* symbol is in the census, which makes the
+/// zero below a real negative result rather than an unpopulated index.
 #[tokio::test]
 async fn test_dead_code() {
     let (cg, _dir) = setup_project().await;
+    let _populated = find_node_id(&cg, "format_greeting").await;
+
     let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+    let symbols = payload["symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("dead_code must return a symbols array: {payload}"));
+
+    assert_eq!(
+        payload["dead_code_count"].as_u64(),
+        Some(0),
+        "no fixture symbol qualifies as dead code: {payload}"
+    );
     assert!(
-        text.contains("dead_code_count"),
-        "should have dead_code_count key"
+        symbols.is_empty(),
+        "dead_code_count and symbols must agree: {payload}"
     );
 }
 
+/// `src/utils.rs` holds `helper` and `format_greeting`, and `main` (in
+/// `src/main.rs`) calls `helper`. A correct semantic diff therefore reports both
+/// of the file's symbols as modified and `main` as impacted downstream.
 #[tokio::test]
 async fn test_diff_context() {
     let (cg, _dir) = setup_project().await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_diff_context",
@@ -343,25 +372,72 @@ async fn test_diff_context() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("changed_files"),
-        "should have changed_files key"
+    let payload = extract_json(&result.value);
+
+    assert_eq!(
+        payload["changed_files"],
+        json!(["src/utils.rs"]),
+        "changed_files must echo the requested paths: {payload}"
     );
+
+    let modified: Vec<&str> = payload["modified_symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diff_context must return modified_symbols: {payload}"))
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    for expected in ["helper", "format_greeting"] {
+        assert!(
+            modified.contains(&expected),
+            "every symbol defined in src/utils.rs must be reported modified, \
+             missing `{expected}` in {modified:?}: {payload}"
+        );
+    }
+
+    let impacted = payload["impacted_symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diff_context must return impacted_symbols: {payload}"));
+    assert_eq!(
+        payload["impacted_symbols_count"].as_u64(),
+        Some(impacted.len() as u64),
+        "impacted_symbols_count must match the returned list: {payload}"
+    );
+    let impacted_names: Vec<&str> = impacted
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
     assert!(
-        text.contains("modified_symbols"),
-        "should have modified_symbols key"
+        impacted_names.contains(&"main"),
+        "`main` calls `helper`, so it must appear downstream of a utils.rs change, \
+         got {impacted_names:?}: {payload}"
     );
 }
 
+/// The fixture's file dependencies are strictly acyclic (`main.rs` imports
+/// `utils.rs`; nothing imports back), so a correct analysis reports no cycles.
+/// Resolving a symbol first proves the graph is populated, so the zero below is
+/// a real "no cycles here" rather than "nothing was analysed".
 #[tokio::test]
 async fn test_circular() {
     let (cg, _dir) = setup_project().await;
+    let _populated = find_node_id(&cg, "helper").await;
+
     let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("cycle_count"), "should have cycle_count key");
+    let payload = extract_json(&result.value);
+
+    assert_eq!(
+        payload["cycle_count"].as_u64(),
+        Some(0),
+        "the acyclic fixture must not report dependency cycles: {payload}"
+    );
+    assert_eq!(payload["reported_cycle_count"].as_u64(), Some(0));
+    assert_eq!(payload["omitted_cycle_count"].as_u64(), Some(0));
+    assert!(
+        payload["cycles"].as_array().is_some_and(Vec::is_empty),
+        "cycle_count and cycles must agree: {payload}"
+    );
 }
 
 #[tokio::test]
@@ -377,35 +453,102 @@ async fn test_rename_preview() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("reference_count"),
-        "should have reference_count key"
+    let payload = extract_json(&result.value);
+
+    assert_eq!(payload["symbol"], json!("helper"), "payload: {payload}");
+    assert_eq!(
+        payload["node"]["name"],
+        json!("helper"),
+        "payload: {payload}"
     );
-    assert!(text.contains("node"), "should have node key");
+    assert_eq!(
+        payload["node"]["file"],
+        json!("src/utils.rs"),
+        "payload: {payload}"
+    );
+    assert_eq!(
+        payload["read_only"],
+        json!(true),
+        "rename_preview must never claim to have written: {payload}"
+    );
+
+    // `main` calls `helper`, so renaming it has at least that one real
+    // reference to update.
+    let references = payload["references"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rename_preview must return references: {payload}"));
+    assert_eq!(
+        payload["reference_count"].as_u64(),
+        Some(references.len() as u64),
+        "reference_count must match the returned references: {payload}"
+    );
+    let referrers: Vec<&str> = references
+        .iter()
+        .filter_map(|reference| reference["from_name"].as_str())
+        .collect();
+    assert!(
+        referrers.contains(&"main"),
+        "`main` calls `helper`, so it must appear as a rename reference, \
+         got {referrers:?}: {payload}"
+    );
 }
 
+/// Both `use crate::utils::helper;` statements the fixture plants (in
+/// `src/main.rs` and `tests/test_utils.rs`) are followed by a real `helper()`
+/// call, so nothing is unused. `scanned_files` is the anti-vacuity signal: a
+/// zero finding only means something if the scan actually inspected files.
 #[tokio::test]
 async fn test_unused_imports() {
     let (cg, _dir) = setup_project().await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+
     assert!(
-        text.contains("unused_import_count"),
-        "should have unused_import_count key"
+        payload["scanned_files"].as_u64().is_some_and(|n| n > 0),
+        "a zero finding is only meaningful if files were scanned: {payload}"
+    );
+    assert_eq!(
+        payload["complete"],
+        json!(true),
+        "the fixture is far under the scan budget: {payload}"
+    );
+    assert_eq!(
+        payload["unused_import_count"].as_u64(),
+        Some(0),
+        "every fixture import is used, so none may be flagged: {payload}"
+    );
+    assert!(
+        payload["imports"].as_array().is_some_and(Vec::is_empty),
+        "unused_import_count and imports must agree: {payload}"
     );
 }
 
+/// The fixture's call graph is a straight chain (`main` -> `helper` ->
+/// `format_greeting`) with no symbol calling itself or looping back, so a
+/// correct analysis finds no recursion. Resolving a symbol on that chain first
+/// proves the call edges are present, which is what makes zero meaningful.
 #[tokio::test]
 async fn test_recursion() {
     let (cg, _dir) = setup_project().await;
+    let _populated = find_node_id(&cg, "format_greeting").await;
+
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("cycle_count"), "should have cycle_count key");
+    let payload = extract_json(&result.value);
+
+    assert_eq!(
+        payload["cycle_count"].as_u64(),
+        Some(0),
+        "the non-recursive fixture must not report call cycles: {payload}"
+    );
+    assert!(
+        payload["cycles"].as_array().is_some_and(Vec::is_empty),
+        "cycle_count and cycles must agree: {payload}"
+    );
 }
 
 #[tokio::test]
@@ -487,11 +630,48 @@ async fn test_port_status() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+
+    assert_eq!(payload["source_dir"], json!("src"), "payload: {payload}");
+    assert_eq!(payload["target_dir"], json!("tests"), "payload: {payload}");
+
+    // `src/` holds `main`, `helper`, and `format_greeting`; `tests/` holds only
+    // `test_helper`. No source name has a counterpart in the target, so nothing
+    // is matched and coverage is exactly zero.
+    let source_count = payload["source_count"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("port_status must report source_count: {payload}"));
     assert!(
-        text.contains("coverage_percent"),
-        "should have coverage_percent key"
+        source_count >= 3,
+        "src/ defines at least main, helper, and format_greeting: {payload}"
     );
+    assert_eq!(
+        payload["matched"].as_u64(),
+        Some(0),
+        "`test_helper` is not a counterpart of any src symbol: {payload}"
+    );
+    assert_eq!(
+        payload["unmatched"].as_u64(),
+        Some(source_count),
+        "matched + unmatched must account for every source symbol: {payload}"
+    );
+    assert_eq!(
+        payload["coverage_percent"].as_f64(),
+        Some(0.0),
+        "zero matches must render as zero percent coverage: {payload}"
+    );
+
+    let target_only: Vec<&str> = payload["target_only_symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("port_status must report target_only_symbols: {payload}"))
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert!(
+        target_only.contains(&"test_helper"),
+        "`test_helper` exists only in the target dir, got {target_only:?}: {payload}"
+    );
+
     close_test_graph(cg).await;
 }
 
@@ -619,12 +799,62 @@ async fn test_port_order() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+
+    assert_eq!(payload["source_dir"], json!("src"), "payload: {payload}");
+    let total_symbols = payload["total_symbols"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("port_order must report total_symbols: {payload}"));
     assert!(
-        text.contains("total_symbols"),
-        "should have total_symbols key"
+        total_symbols >= 3,
+        "src/ defines at least main, helper, and format_greeting: {payload}"
     );
-    assert!(text.contains("levels"), "should have levels key");
+
+    let levels = payload["levels"]
+        .as_array()
+        .unwrap_or_else(|| panic!("port_order must report levels: {payload}"));
+    assert!(!levels.is_empty(), "payload: {payload}");
+
+    // Map every ordered symbol to the level it landed in.
+    let mut level_of = std::collections::HashMap::<&str, u64>::new();
+    let mut emitted = 0usize;
+    for level in levels {
+        let index = level["level"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("each level must carry its index: {payload}"));
+        for symbol in level["symbols"]
+            .as_array()
+            .unwrap_or_else(|| panic!("each level must carry symbols: {payload}"))
+        {
+            emitted += 1;
+            if let Some(name) = symbol["name"].as_str() {
+                level_of.insert(name, index);
+            }
+        }
+    }
+    assert_eq!(
+        payload["returned"].as_u64(),
+        Some(emitted as u64),
+        "`returned` must count the symbols actually laid out: {payload}"
+    );
+
+    // The fixture's dependency chain is main -> helper -> format_greeting, and
+    // port order is leaves first, so the chain must come back strictly
+    // reversed. This is the assertion that a topological sort can actually
+    // fail: a broken layering collapses all three into one level.
+    let level_for = |name: &str| -> u64 {
+        *level_of
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` missing from the port order: {payload}"))
+    };
+    assert!(
+        level_for("format_greeting") < level_for("helper"),
+        "`helper` depends on `format_greeting`, so the leaf must be ported first: {payload}"
+    );
+    assert!(
+        level_for("helper") < level_for("main"),
+        "`main` depends on `helper`, so `helper` must be ported first: {payload}"
+    );
 }
 
 #[tokio::test]
@@ -647,39 +877,11 @@ async fn test_rename_preview_not_found() {
     );
 }
 
-#[tokio::test]
-async fn test_diff_context_missing_files() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_diff_context", json!({}), None, None).await;
-    assert!(result.is_err(), "diff_context without files should error");
-}
-
-#[tokio::test]
-async fn test_changelog_missing_refs() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_changelog", json!({}), None, None).await;
-    assert!(result.is_err(), "changelog without from_ref should error");
-}
-
-#[tokio::test]
-async fn test_port_status_missing_dirs() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_port_status", json!({}), None, None).await;
-    assert!(
-        result.is_err(),
-        "port_status without source_dir should error"
-    );
-}
-
-#[tokio::test]
-async fn test_port_order_missing_source_dir() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_port_order", json!({}), None, None).await;
-    assert!(
-        result.is_err(),
-        "port_order without source_dir should error"
-    );
-}
+// The missing-required-argument cases for `tracedecay_diff_context`,
+// `tracedecay_changelog`, `tracedecay_port_status`, and `tracedecay_port_order`
+// live in `schema_test::schema_required_arguments_match_representative_handler_parsers`,
+// which pairs each one with the schema `required` array the handler parser is
+// supposed to mirror instead of only asserting that *some* error came back.
 
 #[tokio::test]
 async fn commit_context_clean_worktree_returns_json() {
@@ -762,10 +964,21 @@ async fn test_changelog_with_real_git() {
         "changelog in git repo should not fail, got: {}",
         text,
     );
-    assert!(
-        text.contains("changed_file_count") || text.contains("lib.rs"),
-        "changelog should mention changed files, got: {}",
-        text,
+
+    // The second commit touches exactly one file, so the tree diff between
+    // HEAD~1 and HEAD is precisely `src/lib.rs`.
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["from_ref"], json!("HEAD~1"), "payload: {payload}");
+    assert_eq!(payload["to_ref"], json!("HEAD"), "payload: {payload}");
+    assert_eq!(
+        payload["changed_file_count"].as_u64(),
+        Some(1),
+        "the second commit changed exactly one file: {payload}"
+    );
+    assert_eq!(
+        payload["changed_files"],
+        json!(["src/lib.rs"]),
+        "src/lib.rs is the only file in the diff: {payload}"
     );
 }
 

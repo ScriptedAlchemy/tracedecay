@@ -19,6 +19,7 @@ use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common;
+use crate::support::extract_tool_result_json as extract_json;
 
 fn run_git(dir: &Path, args: &[&str]) {
     let status = Command::new(common::git_program())
@@ -110,13 +111,6 @@ async fn record_span(runtime: &HostAdmissionTestRuntimeV1, observation: &SpanObs
         .record_project_span_for_test(observation, DEFAULT_SPAN_MERGE_GAP_SECS)
         .await
         .unwrap_or_else(|e| panic!("record span: {e}"));
-}
-
-fn extract_json(result: &tracedecay::mcp::ToolResult) -> Value {
-    let text = result.value["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("tool result should carry text content: {}", result.value));
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result should be JSON: {e}\n{text}"))
 }
 
 async fn call(

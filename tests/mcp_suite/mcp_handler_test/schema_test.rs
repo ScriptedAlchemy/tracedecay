@@ -59,45 +59,74 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     )
     .await;
 
-    // Exact fact routes project only their operation-specific required fields.
-    for (tool_name, required_arg, expected_message) in [
+    // Tools whose advertised `required` array and handler parser must agree.
+    // Exact fact routes project only their operation-specific required fields;
+    // the git, port, and context routes are here so that "the handler rejects a
+    // call with no arguments" is checked together with "the schema told the
+    // caller which arguments were missing" — either half alone lets the two
+    // drift apart.
+    for (tool_name, required_args, expected_message) in [
         (
             "tracedecay_fact_store_add",
-            "content",
+            &["content"][..],
             "missing required parameter: content",
         ),
         (
             "tracedecay_fact_store_search",
-            "query",
+            &["query"][..],
             "missing required parameter: query",
         ),
         (
             "tracedecay_fact_store_probe",
-            "entity",
+            &["entity"][..],
             "missing required parameter: entity",
         ),
         (
             "tracedecay_fact_store_related",
-            "entity",
+            &["entity"][..],
             "missing required parameter: entity",
         ),
         (
             "tracedecay_fact_store_get",
-            "fact_id",
+            &["fact_id"][..],
             "missing required parameter: fact_id",
         ),
         (
             "tracedecay_fact_store_update",
-            "fact_id",
+            &["fact_id"][..],
             "missing required parameter: fact_id",
         ),
         (
             "tracedecay_fact_store_remove",
-            "fact_id",
+            &["fact_id"][..],
             "missing required parameter: fact_id",
         ),
+        // Hand-written git schemas, parsed with the `require_*_arg` helpers.
+        (
+            "tracedecay_diff_context",
+            &["files"][..],
+            "missing required parameter: files",
+        ),
+        (
+            "tracedecay_changelog",
+            &["from_ref", "to_ref"][..],
+            "missing required parameter: from_ref",
+        ),
+        // Generated schemas, decoded straight into a typed request struct, so
+        // the parser error is serde's rather than a hand-written message.
+        (
+            "tracedecay_port_status",
+            &["source_dir", "target_dir"][..],
+            "missing field `source_dir`",
+        ),
+        (
+            "tracedecay_port_order",
+            &["source_dir"][..],
+            "missing field `source_dir`",
+        ),
+        ("tracedecay_context", &["task"][..], "missing field `task`"),
     ] {
-        assert_schema_requires(&tools, tool_name, &[required_arg]);
+        assert_schema_requires(&tools, tool_name, required_args);
         expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
     }
 

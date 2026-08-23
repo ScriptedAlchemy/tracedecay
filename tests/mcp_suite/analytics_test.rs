@@ -3,14 +3,12 @@
 //! seeded `analytics_events` store.
 
 #[cfg(feature = "test-transport")]
-use serde_json::Value;
-#[cfg(feature = "test-transport")]
 use serde_json::json;
 
 #[cfg(feature = "test-transport")]
 use crate::support::{
-    handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
-    real_mcp_server, setup_empty_project,
+    extract_json, extract_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
+    production_composition_fixture, real_mcp_server, setup_empty_project,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay::global_db::AnalyticsEventInsert;
@@ -18,22 +16,6 @@ use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::tracedecay::current_timestamp;
-
-#[cfg(feature = "test-transport")]
-fn extract_text(v: &Value) -> String {
-    v.get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|a| a.first())
-        .and_then(|t| t.get("text"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-#[cfg(feature = "test-transport")]
-fn extract_json(v: &Value) -> Value {
-    serde_json::from_str(&extract_text(v)).expect("tool response should be valid JSON")
-}
 
 #[cfg(feature = "test-transport")]
 fn tool_call_event(
