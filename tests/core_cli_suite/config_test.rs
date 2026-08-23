@@ -129,45 +129,39 @@ fn test_legacy_config_with_include_field_still_loads() {
 
 // ── is_in_gitignore ─────────────────────────────────────────────────────────
 
+/// Every `.gitignore` spelling the detector must accept or reject. The table is
+/// a fixed-size array, so it can never iterate empty. The no-file case is a
+/// separate test below because it writes no `.gitignore` at all.
 #[test]
-fn test_is_in_gitignore_present() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), ".tracedecay\n").unwrap();
-    assert!(is_in_gitignore(dir.path()));
-}
+fn test_is_in_gitignore_recognizes_tracedecay_entry_spellings() {
+    let cases: [(&str, bool); 5] = [
+        // present
+        (".tracedecay\n", true),
+        // with a trailing slash
+        (".tracedecay/\n", true),
+        // with a leading slash
+        ("/.tracedecay\n", true),
+        // absent
+        ("target/\n*.o\n", false),
+        // among other entries
+        ("target/\n.tracedecay\n*.o\n", true),
+    ];
 
-#[test]
-fn test_is_in_gitignore_with_slash() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), ".tracedecay/\n").unwrap();
-    assert!(is_in_gitignore(dir.path()));
-}
-
-#[test]
-fn test_is_in_gitignore_with_leading_slash() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), "/.tracedecay\n").unwrap();
-    assert!(is_in_gitignore(dir.path()));
-}
-
-#[test]
-fn test_is_in_gitignore_absent() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), "target/\n*.o\n").unwrap();
-    assert!(!is_in_gitignore(dir.path()));
+    for (contents, expected) in cases {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), contents).unwrap();
+        assert_eq!(
+            is_in_gitignore(dir.path()),
+            expected,
+            "unexpected is_in_gitignore result for .gitignore contents {contents:?}"
+        );
+    }
 }
 
 #[test]
 fn test_is_in_gitignore_no_file() {
     let dir = TempDir::new().unwrap();
     assert!(!is_in_gitignore(dir.path()));
-}
-
-#[test]
-fn test_is_in_gitignore_among_other_entries() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), "target/\n.tracedecay\n*.o\n").unwrap();
-    assert!(is_in_gitignore(dir.path()));
 }
 
 // ── resolve_path ────────────────────────────────────────────────────────────

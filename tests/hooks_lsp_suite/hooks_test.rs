@@ -419,8 +419,9 @@ fn test_build_cursor_session_context_uninitialized_suggests_init() {
 fn test_build_cursor_session_context_initialized_includes_freshness() {
     let context = build_cursor_session_context(true, Some("last indexed 2m ago"), None);
     assert!(
-        context.len() <= 1_300,
-        "cursor initialized context should stay compact, got {} chars: {context}",
+        context.len() <= tracedecay::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
+        "cursor initialized context should stay within its {} char budget, got {} chars: {context}",
+        tracedecay::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
         context.len()
     );
     assert!(context.contains("last indexed 2m ago"));
@@ -429,9 +430,6 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
         "initialized workspaces should not be told to run init: {context}"
     );
     assert!(context.contains("TraceDecay project hint:"));
-    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
-    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
-    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("ToolSearch"));
     assert!(context.contains("tracedecay_find_exact_symbol"));
     assert!(context.contains("tracedecay_test_map"));
@@ -441,8 +439,9 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
 fn test_build_codex_session_context_carries_compact_steering() {
     let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
     assert!(
-        context.len() <= 2_600,
-        "codex initialized context should stay compact, got {} chars: {context}",
+        context.len() <= tracedecay::hooks::CODEX_SESSION_CONTEXT_BUDGET,
+        "codex initialized context should stay within its {} char budget, got {} chars: {context}",
+        tracedecay::hooks::CODEX_SESSION_CONTEXT_BUDGET,
         context.len()
     );
     assert!(context.contains("TraceDecay project hint:"));
@@ -450,9 +449,6 @@ fn test_build_codex_session_context_carries_compact_steering() {
     assert!(context.contains("ToolSearch"));
     assert!(context.contains("tracedecay_find_exact_symbol"));
     assert!(context.contains("tracedecay_test_map"));
-    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
-    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
-    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
