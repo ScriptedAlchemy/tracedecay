@@ -37,6 +37,12 @@ const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 pub struct CodexJsonlAdmissionProgress {
     pub bytes_consumed: u64,
     pub source_deferred: bool,
+    pub frames_decoded: u64,
+    pub frames_accepted: u64,
+    pub frames_skipped: u64,
+    pub frames_refused: u64,
+    pub frames_persisted: u64,
+    pub writer_txns: u64,
 }
 
 /// Admit a Codex rollout for one exact project identity.
@@ -226,6 +232,7 @@ async fn try_admit_codex_jsonl_observations(
         return Ok(CodexJsonlAdmissionProgress {
             bytes_consumed: 0,
             source_deferred: true,
+            ..CodexJsonlAdmissionProgress::default()
         });
     }
     let parsed_meta = session_meta_with_provenance(path).ok_or_else(|| {
@@ -317,5 +324,11 @@ async fn try_admit_codex_jsonl_observations(
     Ok(CodexJsonlAdmissionProgress {
         bytes_consumed: progress.bytes_consumed,
         source_deferred: progress.source_deferred,
+        frames_decoded: progress.frames_decoded,
+        frames_accepted: progress.frames_accepted,
+        frames_skipped: progress.frames_skipped,
+        frames_refused: progress.frames_refused,
+        frames_persisted: progress.frames_persisted,
+        writer_txns: progress.writer_txns,
     })
 }

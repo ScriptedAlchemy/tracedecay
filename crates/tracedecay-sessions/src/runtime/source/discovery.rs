@@ -72,6 +72,8 @@ pub struct FileDiscoveryReport {
     pub skipped_oversized_entries: u64,
     /// Cumulative path + metadata bytes charged for retained + skipped decisions.
     pub bytes_charged: u64,
+    /// File entries examined for retention, including oversized and cap skips.
+    pub files_considered: u64,
 }
 
 impl FileDiscoveryReport {
@@ -143,16 +145,23 @@ pub fn bound_path_list(
         out.push(path);
     }
 
+    let files_considered = u64::try_from(out.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(skipped_oversized_entries);
+    let selected = u64::try_from(out.len()).unwrap_or(u64::MAX);
+    crate::runtime::hotpath::record_discovery_files(files_considered, selected, bytes_charged);
     FileDiscoveryReport {
         paths: out,
         truncated,
         skipped_oversized_entries,
         bytes_charged,
+        files_considered,
     }
 }
 
 /// Recursively collect files with `ext` under `dir`, enforcing discovery bounds
 /// before retaining each path. Directory symlinks are not followed.
+#[hotpath::measure]
 pub fn collect_files_with_ext_bounded(
     dir: &Path,
     ext: &str,
@@ -167,13 +176,22 @@ pub fn collect_files_with_ext_bounded(
         truncated: None,
         skipped_oversized_entries: 0,
         bytes_charged: 0,
+        files_considered: 0,
     };
     state.walk(dir, 0);
+    let selected = u64::try_from(state.paths.len()).unwrap_or(u64::MAX);
+    crate::runtime::hotpath::record_discovery_files(
+        state.files_considered,
+        selected,
+        state.bytes_charged,
+    );
+    crate::runtime::hotpath::record_sweep_outcome(state.truncated.is_none());
     FileDiscoveryReport {
         paths: state.paths,
         truncated: state.truncated,
         skipped_oversized_entries: state.skipped_oversized_entries,
         bytes_charged: state.bytes_charged,
+        files_considered: state.files_considered,
     }
 }
 
@@ -185,6 +203,7 @@ struct WalkState<'a> {
     truncated: Option<FileDiscoveryLimit>,
     skipped_oversized_entries: u64,
     bytes_charged: u64,
+    files_considered: u64,
 }
 
 impl WalkState<'_> {
@@ -252,6 +271,7 @@ impl WalkState<'_> {
     }
 
     fn try_retain(&mut self, path: PathBuf) {
+        self.files_considered = self.files_considered.saturating_add(1);
         if self.truncated.is_some() {
             return;
         }

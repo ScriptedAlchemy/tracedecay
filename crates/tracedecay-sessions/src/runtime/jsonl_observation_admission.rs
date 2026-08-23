@@ -109,6 +109,29 @@ impl JsonlFrameAdmission {
 pub(super) struct JsonlObservationAdmissionProgress {
     pub bytes_consumed: u64,
     pub source_deferred: bool,
+    pub frames_decoded: u64,
+    pub frames_accepted: u64,
+    pub frames_skipped: u64,
+    pub frames_refused: u64,
+    pub frames_persisted: u64,
+    pub writer_txns: u64,
+    pub io: crate::runtime::source::JsonlIoAccounting,
+}
+
+impl Default for JsonlObservationAdmissionProgress {
+    fn default() -> Self {
+        Self {
+            bytes_consumed: 0,
+            source_deferred: false,
+            frames_decoded: 0,
+            frames_accepted: 0,
+            frames_skipped: 0,
+            frames_refused: 0,
+            frames_persisted: 0,
+            writer_txns: 0,
+            io: crate::runtime::source::JsonlIoAccounting::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -354,6 +377,7 @@ impl ActiveAdmission<'_> {
     }
 }
 
+#[hotpath::measure]
 pub(super) async fn admit_jsonl_observations<State>(
     request: JsonlObservationAdmissionRequest<'_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
@@ -414,9 +438,12 @@ pub(super) async fn admit_jsonl_observations<State>(
         MAX_JSONL_RECORD_BYTES,
         resume_state,
     )?;
-    let progress = JsonlObservationAdmissionProgress {
+    let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
+        frames_decoded: u64::try_from(raw.frames.len()).unwrap_or(u64::MAX),
+        io: raw.io,
+        ..JsonlObservationAdmissionProgress::default()
     };
     let total_frames = raw.frames.len();
     let retained_frame_bytes = raw.frames.iter().fold(0_u64, |total, frame| {
@@ -495,6 +522,8 @@ pub(super) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
+            progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+            progress.writer_txns = progress.writer_txns.saturating_add(1);
         }
         if active.cancellation.is_cancelled() {
             return Err(TranscriptIngestError::Cancelled { provider });
@@ -514,6 +543,8 @@ pub(super) async fn admit_jsonl_observations<State>(
                     active
                         .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                         .await?;
+                    progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                    progress.writer_txns = progress.writer_txns.saturating_add(1);
                     continue;
                 }
             };
@@ -530,6 +561,9 @@ pub(super) async fn admit_jsonl_observations<State>(
                 persisted_cursor_update,
             )
             .await?;
+        progress.frames_accepted = progress.frames_accepted.saturating_add(1);
+        progress.frames_persisted = progress.frames_persisted.saturating_add(1);
+        progress.writer_txns = progress.writer_txns.saturating_add(1);
     }
 
     if !active.cancellation.is_cancelled() {
@@ -546,6 +580,8 @@ pub(super) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
+            progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+            progress.writer_txns = progress.writer_txns.saturating_add(1);
         }
     } else {
         return Err(TranscriptIngestError::Cancelled { provider });
@@ -560,6 +596,14 @@ pub(super) async fn admit_jsonl_observations<State>(
         bytes_consumed = progress.bytes_consumed,
         source_deferred = progress.source_deferred,
         "transcript admission batch finished"
+    );
+    crate::runtime::hotpath::record_admission_progress(
+        progress.frames_decoded,
+        progress.frames_accepted,
+        progress.frames_skipped,
+        progress.frames_refused,
+        progress.frames_persisted,
+        progress.writer_txns,
     );
     Ok(progress)
 }

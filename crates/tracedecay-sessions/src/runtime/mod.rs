@@ -13,6 +13,7 @@ pub mod cursor;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
+mod hotpath;
 mod host_scan;
 pub mod ingest;
 mod ingest_byte_budget;

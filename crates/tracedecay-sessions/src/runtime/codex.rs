@@ -161,6 +161,7 @@ impl CodexSource {
     /// persists [`CodexDiscoveryPass::next_history_rotation`] through the
     /// durable ingest frontier so consecutive passes cover the whole backlog
     /// as bounded background catch-up.
+    #[hotpath::measure]
     pub fn discover_transcript_paths_with_rotation(
         &self,
         bounds: TranscriptDiscoveryBounds,
@@ -201,6 +202,7 @@ impl CodexSource {
         let intra_offset = history_rotation & HISTORY_INTRA_MASK;
         let mut next_history_rotation = history_rotation;
         let older = &buckets[first_unfinished_bucket..];
+        let recent_selected = u64::try_from(pass.paths.len()).unwrap_or(u64::MAX);
         if !older.is_empty() && history_units > 0 && pass.truncated_by_recent_budget() {
             pass.enter_history_phase();
             let start = usize::try_from(bucket_rotation % older.len() as u64).unwrap_or(0);
@@ -249,8 +251,14 @@ impl CodexSource {
             }
         }
 
+        let report = pass.into_report();
+        let history_selected = u64::try_from(report.paths.len())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(recent_selected);
+        crate::runtime::hotpath::record_discovery_slice(recent_selected, history_selected);
+        crate::runtime::hotpath::record_sweep_outcome(!report.is_truncated());
         CodexDiscoveryPass {
-            report: pass.into_report(),
+            report,
             next_history_rotation,
         }
     }
@@ -453,6 +461,7 @@ impl BucketScanState {
             truncated,
             skipped_oversized_entries: self.skipped_oversized_entries,
             bytes_charged: self.bytes_charged,
+            files_considered: u64::try_from(self.seen.len()).unwrap_or(u64::MAX),
         }
     }
 }

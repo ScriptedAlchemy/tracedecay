@@ -148,6 +148,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure]
     async fn run_codex(self) -> ProviderRunOutcome {
         // Recent-first with a durable historical rotation: the frontier picks
         // which older discovery buckets this pass covers. A missing frontier
@@ -177,6 +178,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     usize::try_from(advance).unwrap_or(usize::MAX),
                 )
                 .await;
+                crate::runtime::hotpath::record_historical_ingest(!outcome.deferred_by_byte_cap);
                 ProviderRunOutcome::bounded(
                     outcome.stats,
                     outcome.bytes_consumed,

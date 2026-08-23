@@ -263,10 +263,7 @@ async fn capture_vibe_path(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
     let Some(meta) = source.scoped_meta(path, project_root) else {
-        return Ok(JsonlObservationAdmissionProgress {
-            bytes_consumed: 0,
-            source_deferred: false,
-        });
+        return Ok(JsonlObservationAdmissionProgress::default());
     };
     let provider = ProviderId::new(PROVIDER)
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
@@ -366,11 +363,18 @@ fn collect_eligible_messages_jsonl(
         &mut skipped_oversized_entries,
         &mut bytes_charged,
     );
+    let files_considered = u64::try_from(paths.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(skipped_oversized_entries);
+    let selected = u64::try_from(paths.len()).unwrap_or(u64::MAX);
+    crate::runtime::hotpath::record_discovery_files(files_considered, selected, bytes_charged);
+    crate::runtime::hotpath::record_sweep_outcome(truncated.is_none());
     FileDiscoveryReport {
         paths,
         truncated,
         skipped_oversized_entries,
         bytes_charged,
+        files_considered,
     }
 }
 

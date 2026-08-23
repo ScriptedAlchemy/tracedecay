@@ -347,6 +347,7 @@ fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
     replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
+#[hotpath::measure]
 pub async fn compress(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
@@ -373,7 +374,7 @@ pub async fn compress(
             &request.session_id,
         )
         .await?;
-        return Ok(compression_response(
+        return Ok(record_compression_gauges(compression_response(
             "ok",
             reason,
             Vec::new(),
@@ -381,7 +382,7 @@ pub async fn compress(
             frontier,
             None,
             request.max_assembly_tokens,
-        ));
+        )));
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
@@ -415,10 +416,20 @@ pub async fn compress(
             None,
             request.max_assembly_tokens,
         );
-        return Ok(response);
+        return Ok(record_compression_gauges(response));
     }
 
-    compress_in_transaction(conn, publisher, request, &summarizer).await
+    Ok(record_compression_gauges(
+        compress_in_transaction(conn, publisher, request, &summarizer).await?,
+    ))
+}
+
+fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
+    crate::runtime::hotpath::record_lcm_compression(
+        response.summary_nodes_created,
+        response.compression_attempts,
+    );
+    response
 }
 
 async fn compress_in_transaction(

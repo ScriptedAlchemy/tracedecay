@@ -672,6 +672,7 @@ pub use discovery::{
 
 #[cfg(test)]
 pub use jsonl::try_stream_new_jsonl_raw_strict;
+pub use crate::runtime::hotpath::{JsonlChangeKind, JsonlIoAccounting};
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
     RawJsonlFrameReader, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,
@@ -878,7 +879,7 @@ fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: 
 fn stable_jsonl_file_id(
     file: &mut std::fs::File,
     meta: &std::fs::Metadata,
-) -> std::io::Result<u64> {
+) -> std::io::Result<(u64, u64)> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-file-id-v1");
     #[cfg(unix)]
@@ -910,20 +911,21 @@ fn stable_jsonl_file_id(
             }
         }
     }
-    hasher.update(jsonl_head_fingerprint(file)?.to_le_bytes());
+    let (head, identity_window_bytes) = jsonl_head_fingerprint(file)?;
+    hasher.update(head.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_be_bytes(bytes))
+    Ok((u64::from_be_bytes(bytes), identity_window_bytes))
 }
 
 pub(super) fn jsonl_file_identity(path: &Path) -> std::io::Result<u64> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
-    stable_jsonl_file_id(&mut file, &metadata)
+    Ok(stable_jsonl_file_id(&mut file, &metadata)?.0)
 }
 
-fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
+fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<(u64, u64)> {
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
@@ -933,13 +935,14 @@ fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
         .by_ref()
         .take(JSONL_HEAD_FINGERPRINT_BYTES as u64)
         .read_until(b'\n', &mut buf)?;
+    let window = u64::try_from(buf.len()).unwrap_or(u64::MAX);
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-head-v1");
     hasher.update(&buf);
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_be_bytes(bytes))
+    Ok((u64::from_be_bytes(bytes), window))
 }
 
 /// Stable 64-bit content hash prefix suitable for the existing integer

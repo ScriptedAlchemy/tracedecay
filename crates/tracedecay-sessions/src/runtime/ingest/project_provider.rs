@@ -174,6 +174,7 @@ impl<'a> ProjectProviderRun<'a> {
         })
     }
 
+    #[hotpath::measure]
     async fn run_codex(self) -> ProviderRunOutcome {
         let Some(source) = codex::CodexSource::new() else {
             return ProviderRunOutcome::skipped();
@@ -229,6 +230,7 @@ impl<'a> ProjectProviderRun<'a> {
         }
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
         outcome.add_deferred_units(u64::from(deferred));
+        crate::runtime::hotpath::record_historical_ingest(!deferred);
         outcome
     }
 

@@ -1029,6 +1029,62 @@ fn raw_strict_resume_checkpoint_preserves_append_only_progress() {
     assert_eq!(second.frames.len(), 1);
 }
 
+/// One resumed scan must walk the validated prefix exactly once.
+///
+/// Checkpoint validation and the scanner's resume digest both need the digest
+/// of `[0, cursor)`, and they used to derive it independently, so every resumed
+/// scan read that prefix twice. The charge is byte-exact, so this asserts the
+/// count rather than elapsed time: before the fix it was `2 * prefix`.
+#[test]
+fn raw_strict_resume_validates_the_prefix_once_per_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prefix-once.jsonl");
+    let record = b"{\"v\":0}\n";
+    let prefix_records = 512;
+    std::fs::write(&path, record.repeat(prefix_records)).unwrap();
+
+    let first = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+    let checkpoint = JsonlResumeState {
+        generation: first.new_cursor.file_id,
+        file_identity: first.file_identity,
+        fingerprint: first.frames.last().unwrap().resume_fingerprint,
+    };
+    let prefix_bytes = first.new_cursor.position;
+    assert_eq!(prefix_bytes, (record.len() * prefix_records) as u64);
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"v\":1}\n")
+        .unwrap();
+
+    let second = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint),
+    )
+    .unwrap();
+
+    // The append is still read, so the scan did real work and the byte charge
+    // below is not vacuously zero.
+    assert_eq!(second.frames.len(), 1, "the appended frame must be scanned");
+    assert_eq!(second.start_offset, prefix_bytes);
+    assert_eq!(
+        second.io.prefix_validation_bytes, prefix_bytes,
+        "the resumed prefix must be hashed once, not once per consumer"
+    );
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn stream_new_jsonl_resets_when_replaced_file_keeps_same_head() {

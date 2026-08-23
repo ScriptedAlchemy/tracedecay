@@ -313,10 +313,17 @@ async fn exact_duplicates_are_idempotent_no_op_receipts() {
     let (_temp, path, len) = rollout_fixture();
     let spy = SeamSpyAdmission::default();
 
-    try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
-        .await
-        .expect("initial admission must persist both records");
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("initial admission must persist both records");
     assert_eq!(spy.inner.observations().len(), 2);
+    assert_eq!(first.frames_decoded, 2);
+    assert_eq!(
+        first.writer_txns, first.frames_decoded,
+        "HEAD observation catch-up still issues one writer op per decoded frame"
+    );
+    assert_eq!(first.frames_persisted, first.frames_decoded);
     assert!(spy.cover_past_advances().is_empty());
     let committed = stored_cursor(&spy)
         .await

@@ -63,6 +63,7 @@ fn rerank_fetch_limit(limit: usize) -> usize {
     crate::retrieval_content::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
+#[hotpath::measure]
 pub async fn expand_query(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmExpandQueryRequest,
@@ -201,6 +202,7 @@ pub async fn expand_query(
     let synthesis_prompt =
         expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
 
+    crate::runtime::hotpath::record_lcm_retrieval(matches.len());
     Ok(LcmExpandQueryResponse {
         prompt: request.prompt,
         query: request.query,

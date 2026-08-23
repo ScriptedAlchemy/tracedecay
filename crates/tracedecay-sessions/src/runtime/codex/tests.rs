@@ -1015,6 +1015,11 @@ mod recent_first_discovery_tests {
             pass.report.is_truncated(),
             "an over-cap backlog must report truncation so catch-up stays scheduled"
         );
+        assert_eq!(
+            pass.report.files_considered,
+            u64::try_from(pass.report.paths.len()).unwrap(),
+            "Codex files_considered is unique files this pass retained, not the unvisited backlog"
+        );
     }
 
     /// Coverage: advancing the rotation frontier across passes must visit every
@@ -1056,6 +1061,11 @@ mod recent_first_discovery_tests {
         assert_eq!(
             covered, all,
             "rotating passes must cover the entire backlog, no skipped-and-forgotten range"
+        );
+        let settled = source.discover_transcript_paths_with_rotation(bounds, rotation);
+        assert!(
+            settled.report.is_truncated(),
+            "HEAD still marks a recent-cap pass truncated after history coverage; Codex does not persist a Complete sweep watermark"
         );
     }
 

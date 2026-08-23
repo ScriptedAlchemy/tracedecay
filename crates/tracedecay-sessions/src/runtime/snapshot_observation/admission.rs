@@ -557,6 +557,7 @@ mod tests {
             truncated: None,
             skipped_oversized_entries: 0,
             bytes_charged: 0,
+            files_considered: 0,
         }
     }
 
