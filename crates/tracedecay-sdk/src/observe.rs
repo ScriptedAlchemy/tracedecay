@@ -19,22 +19,27 @@ pub(crate) fn body_decode<T, E>(decode: impl FnOnce() -> Result<T, E>) -> Result
     hotpath::measure_block!("sdk.http.body_decode", decode())
 }
 
+#[inline(always)]
 pub(crate) fn finish<T>(result: Result<T, ClientError>) -> Result<T, ClientError> {
+    #[cfg(feature = "hotpath")]
     if let Err(error) = &result {
         record_client_error(error);
     }
     result
 }
 
+#[inline(always)]
 pub(crate) fn finish_remote<T>(
     result: Result<T, RemoteClientError>,
 ) -> Result<T, RemoteClientError> {
+    #[cfg(feature = "hotpath")]
     if let Err(error) = &result {
         record_remote_error(error);
     }
     result
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn record_client_error(error: &ClientError) {
     let class = match error {
         ClientError::InvalidConfiguration(_) => "invalid_configuration",
@@ -49,6 +54,7 @@ pub(crate) fn record_client_error(error: &ClientError) {
     hotpath::val!("sdk.http.error_class").set(&class);
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn record_remote_error(error: &RemoteClientError) {
     let class = match error {
         RemoteClientError::Configuration(_) => "configuration",
@@ -58,6 +64,7 @@ pub(crate) fn record_remote_error(error: &RemoteClientError) {
     hotpath::val!("sdk.http.error_class").set(&class);
 }
 
+#[cfg(any(feature = "hotpath", test))]
 fn problem_kind_name(kind: &str) -> &'static str {
     match kind {
         "invalid_request" => "invalid_request",
