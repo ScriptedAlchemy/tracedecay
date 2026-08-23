@@ -526,6 +526,7 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
       AND length(CAST(o.snippet_text AS BLOB)) <= ?12
       ",
     root_occurrence_cursor_bound!("?11"),
+    "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?13"
 );
@@ -560,6 +561,7 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     "
       ",
     root_occurrence_cursor_bound!("?11"),
+    "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?12"
 );
@@ -593,6 +595,7 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
       ",
     root_occurrence_cursor_bound!("?12"),
+    "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?13"
 );
