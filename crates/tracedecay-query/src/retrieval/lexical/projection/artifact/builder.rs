@@ -25,7 +25,7 @@ use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
     decode_padded_receipt, decode_padded_receipt_with_control, encode_exact_field, encode_field,
-    metadata_digest, new_verified_receipt, padded_receipt,
+    metadata_digest, new_verified_receipt, padded_receipt, verify_required_artifact_indexes,
 };
 use super::postings::{
     NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngram_scratch, insert_document_ngrams,
@@ -42,12 +42,13 @@ use super::super::{
     exact_field_for_kind,
 };
 
-const DOCUMENT_TERM_POSTINGS_QUERY: &str =
-    "SELECT field, term, frequency FROM term_postings WHERE document_id = ?1 ORDER BY field, term";
+const DOCUMENT_TERM_POSTINGS_QUERY: &str = "SELECT field, term, frequency FROM term_postings INDEXED BY term_postings_by_document WHERE document_id = ?1 ORDER BY field, term";
 const DOCUMENT_EXACT_POSTINGS_QUERY: &str =
     "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term";
 const DOCUMENT_NGRAM_POSTINGS_QUERY: &str =
     "SELECT kind, ngram FROM ngram_postings WHERE document_id = ?1 ORDER BY kind, ngram";
+const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest, cumulative_digest, next_cursor \
+     FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalizationSectionV1 {
@@ -309,6 +310,86 @@ enum PersistedFinalizationPhaseV1 {
     Verify,
 }
 
+struct FinalizationWakeMetricsV1;
+
+impl FinalizationWakeMetricsV1 {
+    #[inline(always)]
+    fn new() -> Self {
+        Self
+    }
+
+    #[inline(always)]
+    fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {
+        #[cfg(feature = "hotpath")]
+        match pass {
+            PersistedFinalizationPhaseV1::Build => {
+                hotpath::gauge!("query.artifact.finalization.digest_pass.build_total").inc(1u64);
+            }
+            PersistedFinalizationPhaseV1::Verify => {
+                hotpath::gauge!("query.artifact.finalization.digest_pass.verify_total").inc(1u64);
+            }
+        };
+        #[cfg(not(feature = "hotpath"))]
+        let _ = pass;
+    }
+
+    #[inline(always)]
+    fn phase(&self, phase: FinalizationSectionV1) {
+        #[cfg(feature = "hotpath")]
+        match phase {
+            FinalizationSectionV1::SourcePages => {
+                hotpath::gauge!("query.artifact.finalization.phase.source_pages_total").inc(1u64);
+            }
+            FinalizationSectionV1::DocumentIntegrity => {
+                hotpath::gauge!("query.artifact.finalization.phase.document_integrity_total")
+                    .inc(1u64);
+            }
+            FinalizationSectionV1::ImportIntegrity => {
+                hotpath::gauge!("query.artifact.finalization.phase.import_integrity_total")
+                    .inc(1u64);
+            }
+            FinalizationSectionV1::ImportEvidence => {
+                hotpath::gauge!("query.artifact.finalization.phase.import_evidence_total").inc(1u64);
+            }
+            FinalizationSectionV1::Rows => {
+                hotpath::gauge!("query.artifact.finalization.phase.rows_total").inc(1u64);
+            }
+            FinalizationSectionV1::TermPostings => {
+                hotpath::gauge!("query.artifact.finalization.phase.term_postings_total").inc(1u64);
+            }
+            FinalizationSectionV1::ExactPostings => {
+                hotpath::gauge!("query.artifact.finalization.phase.exact_postings_total").inc(1u64);
+            }
+            FinalizationSectionV1::NgramPostings => {
+                hotpath::gauge!("query.artifact.finalization.phase.ngram_postings_total").inc(1u64);
+            }
+            FinalizationSectionV1::FieldStatistics => {
+                hotpath::gauge!("query.artifact.finalization.phase.field_stats_total").inc(1u64);
+            }
+            FinalizationSectionV1::TermStatistics => {
+                hotpath::gauge!("query.artifact.finalization.phase.term_stats_total").inc(1u64);
+            }
+            FinalizationSectionV1::Vocabulary => {
+                hotpath::gauge!("query.artifact.finalization.phase.vocabulary_total").inc(1u64);
+            }
+        };
+        #[cfg(not(feature = "hotpath"))]
+        let _ = phase;
+    }
+
+    #[inline(always)]
+    fn probe(&self) {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.finalization.section_probes_total").inc(1u64);
+    }
+}
+
+#[inline(always)]
+fn record_finalization_row() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("query.artifact.finalization.rows_total").inc(1u64);
+}
+
 /// Stable identity of the private staging authority, captured from an exact
 /// no-follow file handle rather than mutable path metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,6 +497,7 @@ impl CodeLexicalArtifactBuilderV1 {
         require_integrity(&connection, control)?;
         let expected_digest = metadata_digest(&expected_metadata)?;
         verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
+        verify_required_artifact_indexes(&connection)?;
         read_receipt_with_control(&connection, control)?;
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
@@ -523,7 +605,13 @@ impl CodeLexicalArtifactBuilderV1 {
 
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         append_imports(&transaction, page, control)?;
-        append_page_rows(&transaction, &self.metadata, page, control)?;
+        append_page_rows(
+            &transaction,
+            &self.metadata,
+            current.completed_chunks,
+            page,
+            control,
+        )?;
         insert_source_page(&transaction, page)?;
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
@@ -549,6 +637,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization work budget must be non-zero".to_owned(),
             ));
         }
+        let wake_metrics = FinalizationWakeMetricsV1::new();
         checkpoint(control)?;
         self.verify_path_binding()?;
         verify_artifact_state_metadata(
@@ -582,6 +671,7 @@ impl CodeLexicalArtifactBuilderV1 {
             )
         })?;
         validate_finalization_state(&state)?;
+        wake_metrics.digest_pass(state.phase);
         ensure_content_epoch(&transaction, state.content_epoch)?;
         if &state.source_state_digest != source.source_state_digest() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -597,6 +687,8 @@ impl CodeLexicalArtifactBuilderV1 {
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
             let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
             let section_name = section.name();
+            wake_metrics.phase(section);
+            wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
             if rows > 0 {
@@ -1263,7 +1355,9 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id);
-            CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term);
+            CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term, frequency);
+            CREATE INDEX term_postings_by_document_term ON term_postings(document_id, term, field, frequency);
+            CREATE INDEX term_stats_by_term ON term_stats(term, field);
             CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term);
             CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram);
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
@@ -1628,6 +1722,9 @@ fn advance_native_section_rows<P: rusqlite::Params>(
     let mut rows = statement.query(parameters).map_err(sqlite_error)?;
     let mut advanced = 0usize;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
+        // Count the row before cancellation so rolled-back and interrupted
+        // work remains visible rather than masquerading as an idle wake.
+        record_finalization_row();
         checkpoint(control)?;
         let key = native_row_key(section, row)?;
         if state
@@ -1944,12 +2041,14 @@ fn append_imports(
 fn append_page_rows(
     transaction: &Transaction<'_>,
     metadata: &CodeLexicalProjectionMetadataV1,
+    first_document: u64,
     page: &VerifiedSealedLexicalPageV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut document: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM rows", [], |row| row.get(0))
-        .map_err(sqlite_error)?;
+    // The verified persisted cursor is the exact row-count authority. Using
+    // it avoids a full table COUNT on every page while preserving contiguous
+    // document IDs across restarts and replay.
+    let mut document = i64::try_from(first_document).map_err(contract_number)?;
     for admitted in page.chunks() {
         checkpoint(control)?;
         u32::try_from(document).map_err(|_| {
@@ -2215,20 +2314,6 @@ fn integrity_digest(hasher: Sha256) -> Result<ManifestDigest, CodeLexicalArtifac
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-/// Aggregated `source_pages` progress: page count, chunk and payload sums,
-/// import sums, then the latest dictionary digest, cumulative digest, and
-/// persisted cursor.
-type PersistedProgressRowV1 = (
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<Vec<u8>>,
-);
-
 /// One staged `source_pages` receipt row: page and cumulative digests, chunk
 /// and payload counts, import counts, dictionary digest, and cursor bytes.
 type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8>);
@@ -2236,47 +2321,51 @@ type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8
 fn progress(
     connection: &Connection,
 ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-    let progress: PersistedProgressRowV1 = connection
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(chunk_count), 0), COALESCE(SUM(payload_bytes), 0), COALESCE(SUM(import_count), 0), COALESCE(SUM(import_payload_bytes), 0), (SELECT import_dictionary_digest FROM source_pages ORDER BY page_ordinal DESC LIMIT 1), (SELECT cumulative_digest FROM source_pages ORDER BY page_ordinal DESC LIMIT 1), (SELECT next_cursor FROM source_pages ORDER BY page_ordinal DESC LIMIT 1) FROM source_pages",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
-        )
+    let tail: Option<(i64, String, String, Vec<u8>)> = connection
+        .query_row(PROGRESS_TAIL_QUERY, [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .optional()
         .map_err(sqlite_error)?;
-    let next_cursor = progress.7.as_deref().map(decode_cursor).transpose()?;
-    let result = CodeLexicalArtifactBuildProgressV1 {
-        next_page_ordinal: u64::try_from(progress.0).map_err(contract_number)?,
-        completed_chunks: u64::try_from(progress.1).map_err(contract_number)?,
-        completed_payload_bytes: u64::try_from(progress.2).map_err(contract_number)?,
-        completed_imports: u64::try_from(progress.3).map_err(contract_number)?,
-        completed_import_payload_bytes: u64::try_from(progress.4).map_err(contract_number)?,
-        import_dictionary_digest: progress
-            .5
-            .map(ManifestDigest::new)
-            .transpose()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?,
-        cumulative_source_digest: progress
-            .6
-            .map(ManifestDigest::new)
-            .transpose()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?,
-        next_cursor,
+    let Some((page_ordinal, import_digest, cumulative_digest, cursor_bytes)) = tail else {
+        return Ok(CodeLexicalArtifactBuildProgressV1 {
+            next_page_ordinal: 0,
+            completed_chunks: 0,
+            completed_payload_bytes: 0,
+            completed_imports: 0,
+            completed_import_payload_bytes: 0,
+            import_dictionary_digest: None,
+            cumulative_source_digest: None,
+            next_cursor: None,
+        });
     };
-    if result.next_cursor.as_ref().is_some_and(|cursor| {
-        cursor.next_page_ordinal() != result.next_page_ordinal
-            || cursor.emitted_chunks() != result.completed_chunks
-            || cursor.emitted_payload_bytes() != result.completed_payload_bytes
-            || cursor.emitted_imports() != result.completed_imports
-            || cursor.emitted_import_payload_bytes() != result.completed_import_payload_bytes
-            || Some(cursor.import_dictionary_digest()) != result.import_dictionary_digest.as_ref()
-            || Some(cursor.cumulative_digest()) != result.cumulative_source_digest.as_ref()
-    }) || (result.next_page_ordinal == 0) != result.next_cursor.is_none()
+    let cursor = decode_cursor(&cursor_bytes)?;
+    let next_page_ordinal = u64::try_from(page_ordinal)
+        .map_err(contract_number)?
+        .checked_add(1)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "persisted lexical artifact page ordinal overflowed".to_owned(),
+            )
+        })?;
+    if cursor.next_page_ordinal() != next_page_ordinal
+        || cursor.import_dictionary_digest().as_str() != import_digest
+        || cursor.cumulative_digest().as_str() != cumulative_digest
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "persisted lexical artifact progress disagrees with its exact source cursor".to_owned(),
         ));
     }
-    Ok(result)
+    Ok(CodeLexicalArtifactBuildProgressV1 {
+        next_page_ordinal,
+        completed_chunks: cursor.emitted_chunks(),
+        completed_payload_bytes: cursor.emitted_payload_bytes(),
+        completed_imports: cursor.emitted_imports(),
+        completed_import_payload_bytes: cursor.emitted_import_payload_bytes(),
+        import_dictionary_digest: Some(cursor.import_dictionary_digest().clone()),
+        cumulative_source_digest: Some(cursor.cumulative_digest().clone()),
+        next_cursor: Some(cursor),
+    })
 }
 
 fn cursor_before_page(
@@ -2511,10 +2600,12 @@ fn verify_source_receipt(
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
     match step {
         CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
+            hotpath::gauge!("query.artifact.finalization.outcome.pending_total").inc(1u64);
             crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
             hotpath::gauge!("query.artifact.rows").set(*completed_rows);
         }
         CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
+            hotpath::gauge!("query.artifact.finalization.outcome.ready_total").inc(1u64);
             crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
             hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
             hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
@@ -2636,6 +2727,48 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn persisted_progress_tail_seeks_latest_maintained_cursor_without_full_scan() {
+        let connection = Connection::open_in_memory().expect("open progress database");
+        connection
+            .execute_batch(
+                "CREATE TABLE source_pages (
+                    page_ordinal INTEGER PRIMARY KEY,
+                    import_dictionary_digest TEXT NOT NULL,
+                    cumulative_digest TEXT NOT NULL,
+                    next_cursor BLOB NOT NULL
+                );",
+            )
+            .expect("create source progress table");
+        for page in 0..4_096i64 {
+            connection
+                .execute(
+                    "INSERT INTO source_pages(page_ordinal, import_dictionary_digest, cumulative_digest, next_cursor) VALUES (?1, 'imports', 'cumulative', X'00')",
+                    [page],
+                )
+                .expect("seed persisted progress");
+        }
+
+        let mut statement = connection
+            .prepare(PROGRESS_TAIL_QUERY)
+            .expect("prepare maintained progress lookup");
+        let latest: i64 = statement
+            .query_row([], |row| row.get(0))
+            .expect("read latest progress row");
+
+        assert_eq!(latest, 4_095);
+        assert_eq!(
+            statement.get_status(StatementStatus::FullscanStep),
+            0,
+            "progress must seek the latest maintained cursor regardless of page count"
+        );
+        assert_eq!(
+            statement.get_status(StatementStatus::Sort),
+            0,
+            "the primary-key tail lookup must not build a temporary order"
+        );
     }
 
     #[test]
