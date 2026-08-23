@@ -834,7 +834,11 @@ async fn expand_query_from_nodes(
 > {
     let mut omitted = node_ids.len().saturating_sub(max_results);
     let selected: Vec<String> = node_ids.into_iter().take(max_results).collect();
-    let mut expansions = stream::iter(selected.iter().enumerate())
+    // Own each id rather than borrowing out of `selected`: an async block that
+    // captures `&String` leaves the closure's return type tied to the input
+    // lifetime, so it is not higher-ranked and `buffer_unordered` rejects it.
+    // `selected` is not read after this, so moving is also one clone cheaper.
+    let mut expansions = stream::iter(selected.into_iter().enumerate())
         .map(|(index, node_id)| {
             let cursor = cursor.clone();
             async move {
@@ -859,7 +863,7 @@ async fn expand_query_from_nodes(
                         ),
                     )
                     .await;
-                (index, node_id.clone(), outcome)
+                (index, node_id, outcome)
             }
         })
         .buffer_unordered(EXPAND_QUERY_CONCURRENCY)
