@@ -950,7 +950,6 @@ impl JavaExtractor {
         Visibility::Private
     }
 
-    /// Check if a node has a specific modifier keyword.
     fn has_modifier(node: TsNode<'_>, state: &ExtractionState, modifier: &str) -> bool {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -968,7 +967,6 @@ impl JavaExtractor {
         false
     }
 
-    /// Check if a node has a direct child of a given kind.
     fn has_child_of_kind(node: TsNode<'_>, kind: &str) -> bool {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {

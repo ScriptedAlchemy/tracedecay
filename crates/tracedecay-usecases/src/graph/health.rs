@@ -344,7 +344,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Sort by depth descending for convenience
     results.sort_by_key(|ch| std::cmp::Reverse(ch.depth));
 
     DepthResult {

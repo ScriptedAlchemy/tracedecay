@@ -207,7 +207,7 @@ pub(super) fn session() -> DaemonLspProtocolSession<Feedback, Semantics, Diagnos
         &upstream,
     );
     DaemonLspProtocolSession::new(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback::default(),
@@ -852,7 +852,7 @@ fn catalog_admitted_context_dispatch_supplies_overlay_digest_to_canonical_reader
     let effective =
         negotiate_capabilities(&ClientCapabilities::default(), &capabilities, &upstream);
     let mut session = DaemonLspProtocolSession::new(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback::default(),

@@ -103,12 +103,7 @@ fn session(provider: SnapshotProvider) -> StressSession {
         &upstream_capabilities,
     );
     let mut session = DaemonLspProtocolSession::new(
-        DaemonLspGateway::with_semantic_provider(
-            AdmittedRoot::new(ROOT_URI),
-            effective,
-            Feedback,
-            Semantics,
-        ),
+        DaemonLspGateway::new(AdmittedRoot::new(ROOT_URI), effective, Feedback, Semantics),
         gateway_capabilities,
         upstream_capabilities,
         provider,

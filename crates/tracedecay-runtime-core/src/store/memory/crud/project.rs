@@ -9,19 +9,17 @@ use super::super::projection::{
     load_project_memory_projection_controlled_tx, load_project_memory_projection_tx,
     load_project_memory_projections_controlled_tx, load_project_memory_projections_tx,
 };
-use super::{DEFAULT_TRUST, commit_fact_tx, query_fact_lineage_controlled_tx};
+use super::{DEFAULT_TRUST, commit_fact_tx, content_digest, query_fact_lineage_controlled_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
-    FactOwnerV1, FactPayloadV1, LocatorDigest, PayloadAccessState, ProvenanceId, RetentionClass,
+    FactOwnerV1, FactPayloadV1, PayloadAccessState, ProvenanceId, RetentionClass,
     SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
@@ -238,14 +236,6 @@ pub(in crate::store::memory) async fn get_project_memory_fact_controlled_tx(
     .await?;
     ensure_project_memory_read_active(read_control)?;
     Ok(projection)
-}
-
-fn content_digest(content: &str) -> FactStoreResult<LocatorDigest> {
-    LocatorDigest::new(encode_tagged_lowercase_hex(
-        "sha256:",
-        &Sha256::digest(content.as_bytes()),
-    ))
-    .map_err(FactStoreError::from)
 }
 
 pub(in crate::store::memory) async fn find_project_memory_fact_by_content_digest_tx(

@@ -2188,17 +2188,6 @@ where
         }
     }
 
-    /// Compatibility alias for callers that already made the semantic port
-    /// explicit. New daemon integration should prefer [`Self::new`].
-    pub fn with_semantic_provider(
-        root: AdmittedRoot,
-        capabilities: EffectiveCapabilities,
-        feedback_cycle: P,
-        semantic_provider: S,
-    ) -> Self {
-        Self::new(root, capabilities, feedback_cycle, semantic_provider)
-    }
-
     pub fn root(&self) -> &AdmittedRoot {
         self.workspace.primary()
     }

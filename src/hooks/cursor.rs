@@ -145,8 +145,13 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         return 0;
     };
     let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
-    let hook_telemetry =
-        record_hook_invoked_parsed(root.as_deref(), HintAgent::Cursor, hook_name, &event, &parsed);
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        hook_name,
+        &event,
+        &parsed,
+    );
     let guidance = if hook_name == "stop"
         && let Some(root) = root.as_deref()
     {
@@ -171,7 +176,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         Some(&hook_telemetry),
     )
     .await;
-    if outcome.user_scope && outcome.messages_upserted > 0 {
+    if outcome.should_schedule_user_review() {
         let session_id = event_session_id(&parsed);
         super::schedule_user_session_review("cursor", session_id.as_deref()).await;
     }
@@ -871,6 +876,9 @@ mod tests {
 
         assert!(outcome.user_scope);
         assert_eq!(outcome.messages_upserted, 2);
+        assert!(outcome.should_schedule_user_review());
+        assert!(!outcome.failed);
+        assert!(!outcome.timed_out);
         let calls = daemon.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, None);
@@ -879,6 +887,29 @@ mod tests {
         assert_eq!(calls[0].1["max_new_bytes"], 4_096);
         assert_eq!(calls[0].1["timeout_budget_ms"], 250);
         assert_eq!(calls[0].1["format"], "json");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn transcript_ingest_types_daemon_failure() {
+        let _lock = crate::hooks::lock_test_env();
+        let _daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
+        let event = serde_json::json!({ "session_id": "cursor-fail" }).to_string();
+
+        let outcome = crate::hooks::ingest_transcript_for_event(
+            "cursor",
+            &event,
+            None,
+            Some(4_096),
+            Duration::from_millis(250),
+            None,
+        )
+        .await;
+
+        assert!(outcome.failed);
+        assert!(!outcome.timed_out);
+        assert!(!outcome.should_schedule_user_review());
+        assert_eq!(outcome.messages_upserted, 0);
     }
 
     #[tokio::test]

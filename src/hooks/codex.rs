@@ -18,9 +18,9 @@ use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide
 use super::{
     additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
     event_cwd_from_parsed, event_project_root, event_project_root_from_json,
-    event_project_root_with_identity, event_session_id, format_tool_hint, is_project_like_workspace,
-    mint_hint_id, prompt_like_text, read_hook_event, record_hint_analytics, record_hook_analytics,
-    record_hook_invoked_parsed,
+    event_project_root_with_identity, event_session_id, format_tool_hint,
+    is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
+    record_hint_analytics, record_hook_analytics, record_hook_invoked_parsed,
     record_workspace_status_analytics, rel_under_root, text_field,
 };
 
@@ -109,8 +109,11 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         // prompt-only review followed immediately by a final-turn review.
         let _ = ingest_user_codex_session(session_id, Some(&hook_telemetry)).await;
     }
-    let context =
-        Box::pin(codex_user_prompt_submit_context_with_root(&parsed, root.as_deref())).await;
+    let context = Box::pin(codex_user_prompt_submit_context_with_root(
+        &parsed,
+        root.as_deref(),
+    ))
+    .await;
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
@@ -381,8 +384,6 @@ async fn retain_codex_stop_in_daemon(
     };
     super::await_within_stop_budget(retain, CODEX_STOP_RETENTION_BUDGET, telemetry, || false).await
 }
-
-pub use super::additional_context_json as codex_additional_context_json;
 
 /// Pure decision logic for Codex `SubagentStart` events.
 pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {

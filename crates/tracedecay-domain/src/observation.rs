@@ -185,6 +185,11 @@ impl ObservationSourceIdentityV1 {
         self.source_key.as_ref().unwrap_or(&self.session_id)
     }
 
+    /// Explicit constructed key, without falling back to [`Self::session_id`].
+    pub fn explicit_source_key(&self) -> Option<&SessionId> {
+        self.source_key.as_ref()
+    }
+
     pub fn validate(&self) -> Result<(), ObservationContractError> {
         self.provider
             .validate()

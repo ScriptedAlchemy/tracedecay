@@ -36,17 +36,16 @@ pub(crate) use dispatch::project_id_for_layout as hook_project_id_for_layout;
 pub(crate) use dispatch::protected_session_id_for_native as protected_native_session_id;
 pub(crate) use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
-pub use additional_context_json as codex_additional_context_json;
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
     hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
     hook_stop,
 };
 pub use codex::{
-    codex_apply_patch_rel_paths, codex_project_root_from_event,
-    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
-    codex_workspace_status_from_event, evaluate_codex_subagent_start, hook_codex_post_compact,
-    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_stop, hook_codex_subagent_start,
+    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
+    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
+    evaluate_codex_subagent_start, hook_codex_post_compact, hook_codex_post_tool_use,
+    hook_codex_session_start, hook_codex_stop, hook_codex_subagent_start,
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
@@ -475,10 +474,56 @@ pub(crate) async fn ingest_user_session(
 }
 
 /// Fail-open transcript ingest shared by Cursor and Kiro catch-up hooks.
+///
+/// Daemon errors and budget timeouts are typed here. They must not collapse
+/// into a zero-counter success that hosts would treat as "nothing to review".
 #[derive(Default)]
 pub(crate) struct TranscriptIngestOutcome {
     user_scope: bool,
     messages_upserted: u64,
+    failed: bool,
+    timed_out: bool,
+}
+
+impl TranscriptIngestOutcome {
+    fn from_daemon_result(result: &Value) -> Self {
+        Self {
+            user_scope: result
+                .get("user_scope")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            messages_upserted: result
+                .get("messages_upserted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            failed: false,
+            timed_out: false,
+        }
+    }
+
+    fn failed() -> Self {
+        Self {
+            failed: true,
+            ..Self::default()
+        }
+    }
+
+    fn timed_out() -> Self {
+        Self {
+            timed_out: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn should_schedule_user_review(&self) -> bool {
+        !self.failed && !self.timed_out && self.user_scope && self.messages_upserted > 0
+    }
+}
+
+enum IngestAttempt {
+    Succeeded(Value),
+    Failed,
+    TimedOut,
 }
 
 pub(crate) async fn await_within_stop_budget<T>(
@@ -524,13 +569,13 @@ pub(crate) async fn ingest_transcript_for_event(
         args["max_new_bytes"] = serde_json::json!(max_new_bytes);
     }
     args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
-    let result = await_within_stop_budget(
+    match await_within_stop_budget(
         async {
             match daemon_hook_action(project_root, args, telemetry).await {
-                Ok(result) => Some(result),
+                Ok(result) => IngestAttempt::Succeeded(result),
                 Err(error) => {
                     tracing::warn!(provider, %error, "transcript ingest daemon call failed");
-                    None
+                    IngestAttempt::Failed
                 }
             }
         },
@@ -538,22 +583,15 @@ pub(crate) async fn ingest_transcript_for_event(
         telemetry,
         || {
             tracing::warn!(provider, "transcript ingest daemon call timed out");
-            None
+            IngestAttempt::TimedOut
         },
     )
-    .await;
-    result
-        .map(|result| TranscriptIngestOutcome {
-            user_scope: result
-                .get("user_scope")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            messages_upserted: result
-                .get("messages_upserted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        })
-        .unwrap_or_default()
+    .await
+    {
+        IngestAttempt::Succeeded(result) => TranscriptIngestOutcome::from_daemon_result(&result),
+        IngestAttempt::Failed => TranscriptIngestOutcome::failed(),
+        IngestAttempt::TimedOut => TranscriptIngestOutcome::timed_out(),
+    }
 }
 
 pub(crate) async fn reset_counter_for_project(
@@ -873,7 +911,10 @@ fn hook_route_metadata_from_event(
     Some(hook_route_metadata_from_parsed(&parsed, project_root))
 }
 
-pub(crate) fn hook_route_metadata_from_parsed(parsed: &Value, project_root: &Path) -> HookRouteMetadata {
+pub(crate) fn hook_route_metadata_from_parsed(
+    parsed: &Value,
+    project_root: &Path,
+) -> HookRouteMetadata {
     let cwd = event_cwd_from_parsed(parsed);
     let route_root = cwd.as_deref().unwrap_or(project_root);
     let worktree = crate::worktree::git_worktree_root(route_root)

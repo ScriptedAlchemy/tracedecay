@@ -29,8 +29,13 @@ pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root(&parsed);
-    let _hook_telemetry =
-        record_hook_invoked_parsed(root.as_deref(), HintAgent::Kiro, "preToolUse", &event, &parsed);
+    let _hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Kiro,
+        "preToolUse",
+        &event,
+        &parsed,
+    );
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
         eprintln!("{reason}");
         2
@@ -169,7 +174,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         Some(&hook_telemetry),
     )
     .await;
-    if ingest.user_scope && ingest.messages_upserted > 0 {
+    if ingest.should_schedule_user_review() {
         // User-scope catch-up can ingest several changed Kiro sessions in one
         // bounded sweep, so let the reflector select all recent Kiro evidence
         // instead of falsely attributing the batch to the prompt's session id.
@@ -322,6 +327,9 @@ mod tests {
 
         assert!(outcome.user_scope);
         assert_eq!(outcome.messages_upserted, 3);
+        assert!(outcome.should_schedule_user_review());
+        assert!(!outcome.failed);
+        assert!(!outcome.timed_out);
         let calls = daemon.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, None);

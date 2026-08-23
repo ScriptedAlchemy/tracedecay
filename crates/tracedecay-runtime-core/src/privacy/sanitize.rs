@@ -442,10 +442,7 @@ fn protect_observation_identity(
     let provider = identity.source().provider().clone();
     let (session_id, session_changed) =
         protected_session_id(identity.source().session_id().as_str())?;
-    let source_has_explicit_key = serde_json::to_value(identity.source())
-        .map_err(|_| PrivacySanitizerError::StructuralIdentityProtection)?
-        .get("source_key")
-        .is_some();
+    let source_has_explicit_key = identity.source().explicit_source_key().is_some();
     let (source_key, source_key_changed) =
         protected_session_id(identity.source().source_key().as_str())?;
     let source = if source_has_explicit_key {

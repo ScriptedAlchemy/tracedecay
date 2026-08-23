@@ -2,7 +2,7 @@ use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{
-    HookWorkspaceStatus, build_cursor_session_context, codex_additional_context_json,
+    HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
     codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
     codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
     cursor_project_root_from_event, cursor_session_start_json, cursor_should_run_sync,
@@ -689,7 +689,7 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
 
 #[test]
 fn test_codex_additional_context_json_uses_codex_schema() {
-    let json = codex_additional_context_json("SessionStart", "hello context");
+    let json = additional_context_json("SessionStart", "hello context");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["hookEventName"].as_str(),
