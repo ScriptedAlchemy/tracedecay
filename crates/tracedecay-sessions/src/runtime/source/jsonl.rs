@@ -733,6 +733,11 @@ fn try_stream_new_jsonl_raw_with_policy(
 struct JsonlScanGeneration {
     file_size: u64,
     mtime: u64,
+    /// High-resolution platform change token captured with the opening
+    /// `fstat`. Unix includes ctime as well as mtime so restoring an old mtime
+    /// cannot hide an in-place rewrite. A metadata-only change may cause one
+    /// conservative retry; admitting mixed bytes is the worse outcome.
+    change: JsonlFileChangeToken,
     file_id: u64,
     file_identity: u64,
     /// `None` only when the scan proved it would read nothing, so no batch —
@@ -868,20 +873,23 @@ impl PreparedJsonlScan {
         } else {
             (0, file_identity)
         };
-        // The fingerprint must be captured before `after_generation_capture`
-        // (the seam that simulates concurrent mutation) so revalidation still
-        // rejects same-handle rewrites that race the scan. Append-only resumes
-        // keep identity + size; hashing the whole file again would re-read the
-        // already-validated prefix.
-        if seek_to == 0 && seek_to < file_size {
-            memoized_jsonl_snapshot_fingerprint(
-                &mut snapshot_fingerprint,
-                &mut io.snapshot_hash_bytes,
-                &mut file,
-                file_size,
-            )
-            .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        }
+        // No snapshot fingerprint is minted here for the common full-file scan.
+        //
+        // Detecting a rewrite that lands *during* a scan needs two independent
+        // full-extent hashes — one before the read and one in `revalidate`
+        // after it — because a single pass folded into the read would hash the
+        // rewritten bytes and match itself. On a cold catch-up every file is a
+        // full-file scan, so that pair ran over the whole corpus twice:
+        // ingesting 109 MB of transcript charged 43.5 GB of hashing.
+        //
+        // `revalidate` fails closed on every observable change without it —
+        // identity (which covers the head window and the inode), size, and
+        // mtime. What is given up is a rewrite that preserves all three: same
+        // inode, same length, same head window, landing inside the same mtime
+        // second as the scan. The pair is still spent on the one path that has
+        // real evidence of rewriting, where `rewritten_jsonl_generation` above
+        // mints a generation from the fingerprint and `revalidate` then
+        // re-checks it.
         after_generation_capture();
         // A generation that is not the file's own identity was minted for a
         // rewrite, so it stays flagged for every batch it covers. The rewind
@@ -900,6 +908,7 @@ impl PreparedJsonlScan {
             generation: JsonlScanGeneration {
                 file_size,
                 mtime,
+                change: jsonl_file_change_token(&metadata),
                 file_id,
                 file_identity,
                 snapshot_fingerprint,
@@ -1256,6 +1265,7 @@ impl RawJsonlBatchScanner {
     }
 
     fn revalidate(self, path: &Path) -> TranscriptIngestResult<RawNewJsonl> {
+        let scan_fingerprint = self.reader.resume_fingerprint(self.read_through);
         let mut file = self.reader.into_inner().into_inner();
         let final_metadata = file
             .metadata()
@@ -1278,13 +1288,41 @@ impl RawJsonlBatchScanner {
             false
         };
         io.content_bytes = self.read_through.saturating_sub(self.generation.seek_to);
-        // Full-file scans compare the snapshot they captured. Append-only
-        // resumes compare identity and size so a same-handle rewrite of the
-        // head still fails closed without hashing the validated prefix again.
+        // Scans that minted a snapshot (a rewrite was already observed) compare
+        // it. Every scan compares identity, size, and the high-resolution
+        // change token:
+        //
+        // * identity covers the inode and the head window;
+        // * a length below what was read means the file shrank under the scan;
+        // * a changed token without growth rejects conservatively, including a
+        //   same-size rewrite whose mtime was restored;
+        // * growth is accepted only after the prefix actually consumed by the
+        //   scan still hashes to the digest accumulated while parsing it. That
+        //   distinguishes a normal append from a prefix rewrite plus append.
+        //
+        // The common unchanged cold scan performs no extra extent hash. The
+        // one-pass prefix proof is paid only when the file changed while open.
+        let generation_changed = jsonl_file_change_token(&final_metadata) != self.generation.change;
+        let changed_without_growth =
+            generation_changed && final_metadata.len() <= self.generation.file_size;
+        let changed_consumed_prefix = if generation_changed
+            && final_metadata.len() > self.generation.file_size
+            && self.generation.snapshot_fingerprint.is_none()
+        {
+            let (digest, hashed) = jsonl_prefix_digest(&mut file, self.read_through)
+                .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
+            digest.fingerprint(self.read_through) != scan_fingerprint
+        } else {
+            false
+        };
         if final_file_id != self.generation.file_identity
             || snapshot_changed
+            || changed_without_growth
+            || changed_consumed_prefix
             || final_metadata.len() < self.read_through
         {
+            crate::runtime::hotpath::record_scan_generation_changed();
             return Err(TranscriptIngestError::ScanGenerationChanged {
                 path: path.to_path_buf(),
             });
@@ -1410,6 +1448,87 @@ mod tests {
             TranscriptIngestError::ScanGenerationChanged { path: error_path }
                 if error_path == path
         ));
+    }
+
+    /// The narrowest same-handle rewrite: identical length, identical head
+    /// line, differing only past the identity window, inside one mtime second.
+    /// This is the exact case the retired capture-time snapshot used to catch,
+    /// so it pins what the cheap checks actually still cover.
+    #[test]
+    fn same_size_middle_rewrite_after_generation_capture_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("middle.jsonl");
+        let head = b"{\"id\":\"head-stays-identical\"}\n";
+        let mut original = head.to_vec();
+        original.extend_from_slice(b"{\"body\":\"aaaaaaaaaaaaaaaaaaaa\"}\n");
+        let mut replacement = head.to_vec();
+        replacement.extend_from_slice(b"{\"body\":\"bbbbbbbbbbbbbbbbbbbb\"}\n");
+        assert_eq!(original.len(), replacement.len());
+        std::fs::write(&path, &original).unwrap();
+        let handle = std::fs::File::open(&path).unwrap();
+
+        let outcome = try_stream_new_jsonl_raw_from_file(
+            &path,
+            handle,
+            RawJsonlScanRequest {
+                previous: StoredCursor::default(),
+                max_new_bytes: None,
+                oversized_policy: MalformedJsonlPolicy::Defer,
+                max_record_bytes: MAX_JSONL_RECORD_BYTES,
+                resume_state: None,
+            },
+            || std::fs::write(&path, &replacement).unwrap(),
+        );
+
+        assert!(
+            matches!(
+                outcome,
+                Err(TranscriptIngestError::ScanGenerationChanged { path: ref p })
+                    if *p == path
+            ),
+            "a same-handle rewrite must invalidate the scan generation"
+        );
+    }
+
+    /// The counterpart to the rewrite test: a transcript being appended to
+    /// while it is scanned is the normal case for a live session, and the
+    /// appended bytes are past what the scan consumed. Growth moves the same
+    /// change token an in-place rewrite moves, so this pins that growth alone
+    /// is not treated as a changed generation — otherwise every scan of an
+    /// active session would fail and retry forever.
+    #[test]
+    fn concurrent_append_during_a_scan_is_not_a_generation_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appending.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n").unwrap();
+        let handle = std::fs::File::open(&path).unwrap();
+
+        let outcome = try_stream_new_jsonl_raw_from_file(
+            &path,
+            handle,
+            RawJsonlScanRequest {
+                previous: StoredCursor::default(),
+                max_new_bytes: None,
+                oversized_policy: MalformedJsonlPolicy::Defer,
+                max_record_bytes: MAX_JSONL_RECORD_BYTES,
+                resume_state: None,
+            },
+            || {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b"{\"v\":1}\n")
+                    .unwrap();
+            },
+        )
+        .expect("an append past the scanned extent must not invalidate the scan");
+
+        assert_eq!(outcome.frames.len(), 1, "the scan keeps its own extent");
+        assert_eq!(
+            outcome.io.snapshot_hash_bytes, 0,
+            "and still does not hash the file to prove it"
+        );
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! `hotpath` feature is off. Counts stay exact; do not put paths, session IDs,
 //! or query text in names or values.
 
+use tracedecay_store::observation::ObservationCoverageReason;
+
 /// How one JSONL scan classified the file relative to the stored cursor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum JsonlChangeKind {
@@ -115,6 +117,53 @@ pub(crate) fn record_sweep_outcome(complete: bool) {
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = complete;
+}
+
+/// One scan discarded because the file changed under it.
+///
+/// Revalidation decides this from identity, size, and mtime rather than by
+/// hashing the extent twice, so the rate is the guard on that trade: a rewrite
+/// storm and a rule that mistakes ordinary appends for rewrites look identical
+/// in latency and nowhere else. Rejected scans are re-read from scratch on the
+/// next pass, so a persistently non-zero rate is wasted I/O, not just noise.
+pub(crate) fn record_scan_generation_changed() {
+    add("sessions.jsonl.scan.generation_changed", 1);
+}
+
+/// One frame decoded and then dropped, split by why.
+///
+/// The aggregate says three quarters of decoded frames are thrown away but not
+/// which are cheap to avoid: a blank line costs only a decode, while an
+/// out-of-scope frame was read, decoded, and parsed before anything consulted
+/// its scope. Only the split says whether the scope test belongs earlier —
+/// which is why this takes the reason rather than counting skips as one number.
+pub(crate) fn record_frame_skipped(reason: ObservationCoverageReason) {
+    add(
+        match reason {
+            ObservationCoverageReason::BlankFrame => "sessions.jsonl.frames.skipped.blank",
+            ObservationCoverageReason::OutOfScope => "sessions.jsonl.frames.skipped.out_of_scope",
+            ObservationCoverageReason::MalformedFrame => "sessions.jsonl.frames.skipped.malformed",
+            ObservationCoverageReason::OversizedFrame => "sessions.jsonl.frames.skipped.oversized",
+            ObservationCoverageReason::DuplicateObservation => {
+                "sessions.jsonl.frames.skipped.duplicate"
+            }
+            ObservationCoverageReason::SanitizerRejected
+            | ObservationCoverageReason::SanitizerQuarantined => {
+                "sessions.jsonl.frames.skipped.sanitizer"
+            }
+            ObservationCoverageReason::AdmissionRefused => {
+                "sessions.jsonl.frames.skipped.admission_refused"
+            }
+            // `ObservationCoverageReason` is `non_exhaustive`, so the residual
+            // arm is required. A new reason lands in `other` and stays counted
+            // rather than vanishing from the split.
+            ObservationCoverageReason::UnknownVersion
+            | ObservationCoverageReason::UnsupportedFact
+            | ObservationCoverageReason::CanonicalPayloadRevision
+            | _ => "sessions.jsonl.frames.skipped.other",
+        },
+        1,
+    );
 }
 
 #[inline(always)]

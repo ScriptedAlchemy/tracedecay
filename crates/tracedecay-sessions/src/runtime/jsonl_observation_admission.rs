@@ -648,6 +648,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                             active
                                 .advance_coverage(expected_cursor, checkpoint, reason, None)
                                 .await?;
+                            crate::runtime::hotpath::record_frame_skipped(reason);
                             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                         }
                     }
@@ -709,6 +710,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
+            crate::runtime::hotpath::record_frame_skipped(skipped_reason(skipped.reason));
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
         if active.cancellation.is_cancelled() {
@@ -742,6 +744,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                     active
                         .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                         .await?;
+                    crate::runtime::hotpath::record_frame_skipped(reason);
                     progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                     continue;
                 }
@@ -798,6 +801,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
+            crate::runtime::hotpath::record_frame_skipped(skipped_reason(skipped.reason));
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
     } else {

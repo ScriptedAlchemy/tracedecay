@@ -1085,6 +1085,40 @@ fn raw_strict_resume_validates_the_prefix_once_per_scan() {
     );
 }
 
+/// A first-sight scan must not hash the whole file to police itself.
+///
+/// The snapshot fingerprint exists to catch a rewrite that lands *during* a
+/// scan, and catching that needs two independent full passes — one before the
+/// read and one after. On a cold catch-up every file takes both, which is why
+/// ingesting 109 MB of transcript cost 43.5 GB of hashing. Identity, size and
+/// mtime already fail closed on every observable change, so the pair is spent
+/// only where a rewrite has actually been observed, never on first sight.
+#[test]
+fn cold_full_file_scan_does_not_hash_the_whole_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cold.jsonl");
+    let record = b"{\"v\":0}\n";
+    let records = 512;
+    std::fs::write(&path, record.repeat(records)).unwrap();
+
+    let scan = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+
+    // The scan really consumed the file, so the charge below is not vacuous.
+    assert_eq!(scan.frames.len(), records);
+    assert_eq!(scan.io.content_bytes, (record.len() * records) as u64);
+    assert_eq!(
+        scan.io.snapshot_hash_bytes, 0,
+        "a first-sight scan must not hash the extent it is already reading"
+    );
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn stream_new_jsonl_resets_when_replaced_file_keeps_same_head() {
