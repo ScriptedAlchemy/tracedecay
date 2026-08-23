@@ -22,6 +22,12 @@ REQUIRED_SEMANTIC_MEMBERS = {
     "dep:fastembed",
     "fastembed/ort-download-binaries-rustls-tls",
 }
+LANGUAGE_TIERS = ("lite", "medium", "full")
+CODE_INDEX_LOCAL_TIER_MEMBERS = {
+    "lite": {"lang-markdown"},
+    "medium": set(),
+    "full": {"lang-markdown"},
+}
 
 
 def load(path: Path) -> dict:
@@ -94,9 +100,66 @@ def require_optional_dependencies_wired(name: str, manifest: dict, features: dic
         )
 
 
+def language_feature_names(features: dict) -> set[str]:
+    return {name for name in features if name.startswith("lang-")}
+
+
+def require_language_forwarding(
+    name: str,
+    features: dict,
+    authority_features: set[str],
+    dependency: str,
+) -> None:
+    actual_features = language_feature_names(features)
+    if actual_features != authority_features:
+        missing = sorted(authority_features - actual_features)
+        extra = sorted(actual_features - authority_features)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if extra:
+            details.append("extra " + ", ".join(extra))
+        raise SystemExit(
+            f"distribution acceptance: {name} language features differ from "
+            "tracedecay-code-extraction: " + "; ".join(details)
+        )
+
+    for feature in sorted(authority_features):
+        expected = [f"{dependency}/{feature}"]
+        if features.get(feature) != expected:
+            raise SystemExit(
+                f"distribution acceptance: {name} {feature} must forward exactly to "
+                f"{expected[0]}"
+            )
+
+
+def require_tier_forwarding(
+    name: str,
+    features: dict,
+    dependency: str,
+    local_members: dict[str, set[str]],
+) -> None:
+    for tier in LANGUAGE_TIERS:
+        expected = {f"{dependency}/{tier}", *local_members.get(tier, set())}
+        members = features.get(tier)
+        if (
+            not isinstance(members, list)
+            or len(members) != len(expected)
+            or set(members) != expected
+        ):
+            raise SystemExit(
+                f"distribution acceptance: {name} {tier} must forward only to "
+                + ", ".join(sorted(expected))
+            )
+
+
 def validate(
     root_source: dict,
     root_packaged: dict,
+    code_index_source: dict,
+    code_index_packaged: dict,
+    extraction_source: dict,
+    extraction_packaged: dict,
     semantic_source: dict,
     semantic_packaged: dict,
 ) -> None:
@@ -121,6 +184,35 @@ def validate(
             "semantic and usecases owners"
         )
     require_optional_dependencies_wired("root", root_packaged, root_features)
+
+    code_index_features = require_matching_features(
+        "tracedecay-code-index", code_index_source, code_index_packaged
+    )
+    extraction_features = require_matching_features(
+        "tracedecay-code-extraction", extraction_source, extraction_packaged
+    )
+    language_features = language_feature_names(extraction_features)
+    require_language_forwarding(
+        "root", root_features, language_features, "tracedecay-code-index"
+    )
+    require_language_forwarding(
+        "code-index",
+        code_index_features,
+        language_features,
+        "tracedecay-code-extraction",
+    )
+    require_tier_forwarding(
+        "root", root_features, "tracedecay-code-index", {}
+    )
+    require_tier_forwarding(
+        "code-index",
+        code_index_features,
+        "tracedecay-code-extraction",
+        CODE_INDEX_LOCAL_TIER_MEMBERS,
+    )
+    require_optional_dependencies_wired(
+        "tracedecay-code-extraction", extraction_packaged, extraction_features
+    )
 
     semantic_features = require_matching_features(
         "tracedecay-semantic", semantic_source, semantic_packaged
@@ -152,12 +244,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root-source", type=Path, required=True)
     parser.add_argument("--root-packaged", type=Path, required=True)
+    parser.add_argument("--code-index-source", type=Path, required=True)
+    parser.add_argument("--code-index-packaged", type=Path, required=True)
+    parser.add_argument("--extraction-source", type=Path, required=True)
+    parser.add_argument("--extraction-packaged", type=Path, required=True)
     parser.add_argument("--semantic-source", type=Path, required=True)
     parser.add_argument("--semantic-packaged", type=Path, required=True)
     arguments = parser.parse_args()
     validate(
         load(arguments.root_source),
         load(arguments.root_packaged),
+        load(arguments.code_index_source),
+        load(arguments.code_index_packaged),
+        load(arguments.extraction_source),
+        load(arguments.extraction_packaged),
         load(arguments.semantic_source),
         load(arguments.semantic_packaged),
     )

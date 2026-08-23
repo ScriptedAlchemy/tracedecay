@@ -17,17 +17,49 @@ name = "tracedecay"
 version = "0.1.0-beta.34"
 
 [dependencies]
+tracedecay-code-index = { version = "0.1.0" }
 tracedecay-semantic = { version = "0.1.0" }
 tracedecay-usecases = { version = "0.1.0" }
 
 [features]
-full = []
+lite = ["tracedecay-code-index/lite"]
+medium = ["tracedecay-code-index/medium"]
+full = ["tracedecay-code-index/full"]
+lang-dart = ["tracedecay-code-index/lang-dart"]
+lang-markdown = ["tracedecay-code-index/lang-markdown"]
 token-counting = []
 test-transport = []
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
 ]
+"""
+
+CODE_INDEX_MANIFEST = """[package]
+name = "tracedecay-code-index"
+version = "0.1.0"
+
+[dependencies]
+tracedecay-code-extraction = { version = "0.1.0" }
+
+[features]
+lite = ["tracedecay-code-extraction/lite", "lang-markdown"]
+medium = ["tracedecay-code-extraction/medium"]
+full = ["tracedecay-code-extraction/full", "lang-markdown"]
+lang-dart = ["tracedecay-code-extraction/lang-dart"]
+lang-markdown = ["tracedecay-code-extraction/lang-markdown"]
+"""
+
+EXTRACTION_MANIFEST = """[package]
+name = "tracedecay-code-extraction"
+version = "0.1.0"
+
+[features]
+lite = ["lang-markdown"]
+medium = ["lang-dart"]
+full = ["medium", "lang-markdown"]
+lang-dart = []
+lang-markdown = []
 """
 
 SEMANTIC_MANIFEST = """[package]
@@ -58,6 +90,10 @@ class FixtureResult:
 def run_fixture(
     root_source: str = ROOT_MANIFEST,
     root_packaged: str = ROOT_MANIFEST,
+    code_index_source: str = CODE_INDEX_MANIFEST,
+    code_index_packaged: str = CODE_INDEX_MANIFEST,
+    extraction_source: str = EXTRACTION_MANIFEST,
+    extraction_packaged: str = EXTRACTION_MANIFEST,
     semantic_source: str = SEMANTIC_MANIFEST,
     semantic_packaged: str = SEMANTIC_MANIFEST,
 ) -> FixtureResult:
@@ -66,6 +102,10 @@ def run_fixture(
         manifests = {
             "root-source.toml": root_source,
             "root-packaged.toml": root_packaged,
+            "code-index-source.toml": code_index_source,
+            "code-index-packaged.toml": code_index_packaged,
+            "extraction-source.toml": extraction_source,
+            "extraction-packaged.toml": extraction_packaged,
             "semantic-source.toml": semantic_source,
             "semantic-packaged.toml": semantic_packaged,
         }
@@ -79,6 +119,14 @@ def run_fixture(
                 str(root / "root-source.toml"),
                 "--root-packaged",
                 str(root / "root-packaged.toml"),
+                "--code-index-source",
+                str(root / "code-index-source.toml"),
+                "--code-index-packaged",
+                str(root / "code-index-packaged.toml"),
+                "--extraction-source",
+                str(root / "extraction-source.toml"),
+                "--extraction-packaged",
+                str(root / "extraction-packaged.toml"),
                 "--semantic-source",
                 str(root / "semantic-source.toml"),
                 "--semantic-packaged",
@@ -95,6 +143,43 @@ def main() -> int:
     extracted_owner = run_fixture()
     if extracted_owner.returncode != 0:
         raise SystemExit(extracted_owner.stderr)
+
+    root_with_local_tier_members = ROOT_MANIFEST.replace(
+        'full = ["tracedecay-code-index/full"]',
+        'full = ["tracedecay-code-index/full", "lang-markdown"]',
+    )
+    duplicated_tier = run_fixture(
+        root_source=root_with_local_tier_members,
+        root_packaged=root_with_local_tier_members,
+    )
+    if duplicated_tier.returncode == 0:
+        raise SystemExit("root package duplicating extraction tier membership was accepted")
+    if "root full must forward only" not in duplicated_tier.stderr:
+        raise SystemExit("duplicated tier membership failed for an unexpected reason")
+
+    code_index_with_missing_alias = CODE_INDEX_MANIFEST.replace(
+        'lang-dart = ["tracedecay-code-extraction/lang-dart"]\n', ""
+    )
+    missing_alias = run_fixture(
+        code_index_source=code_index_with_missing_alias,
+        code_index_packaged=code_index_with_missing_alias,
+    )
+    if missing_alias.returncode == 0:
+        raise SystemExit("code-index package missing a language alias was accepted")
+    if "code-index language features differ" not in missing_alias.stderr:
+        raise SystemExit("missing language alias failed for an unexpected reason")
+
+    extraction_with_new_language = EXTRACTION_MANIFEST.replace(
+        "lang-markdown = []\n", "lang-markdown = []\nlang-rustdoc = []\n"
+    )
+    unforwarded_language = run_fixture(
+        extraction_source=extraction_with_new_language,
+        extraction_packaged=extraction_with_new_language,
+    )
+    if unforwarded_language.returncode == 0:
+        raise SystemExit("new extraction language without public aliases was accepted")
+    if "root language features differ" not in unforwarded_language.stderr:
+        raise SystemExit("unforwarded language failed for an unexpected reason")
 
     semantic_without_runtime = SEMANTIC_MANIFEST.replace(
         '    "fastembed/ort-download-binaries-rustls-tls",\n', ""
