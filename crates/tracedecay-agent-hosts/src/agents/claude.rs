@@ -19,6 +19,7 @@ use serde_json::json;
 
 use crate::errors::{Result, TraceDecayError};
 
+pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
     NonInteractiveInstallOutcome, UpdatePluginOutcome, backup_config_file, expected_tool_perms,
@@ -481,10 +482,6 @@ fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Val
 const MARKETPLACE_NAME: &str = "tracedecay";
 const PLUGIN_IDENTIFIER: &str = "tracedecay@tracedecay";
 
-/// Placeholder in `hooks/hooks.json` replaced with the resolved absolute
-/// tracedecay binary path at deploy time.
-const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
-
 /// Compose the MCP-free core and optional MCP companion for native staging and
 /// catalog rendering. Signed lifecycle callers can consume either inventory
 /// independently through `plugin_bundle`.
@@ -632,7 +629,9 @@ fn set_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> {
             }
         }
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&hooks)?);
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "Claude hooks")?;
+    Ok(rendered)
 }
 
 /// Set `value["command"]` to `tracedecay_bin` when it is exactly the

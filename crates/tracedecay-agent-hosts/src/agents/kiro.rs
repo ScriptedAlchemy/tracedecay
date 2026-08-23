@@ -36,7 +36,6 @@ use super::{
     uninstall_mcp_server_entry,
 };
 
-/// Kiro agent.
 pub struct KiroIntegration;
 
 const PROMPT_MARKER: &str = "## TraceDecay: mandatory tool routing";

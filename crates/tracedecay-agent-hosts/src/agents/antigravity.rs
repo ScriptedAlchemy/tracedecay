@@ -27,7 +27,6 @@ use super::{
     doctor_check_mcp_registration, load_json_file,
 };
 
-/// Google Antigravity agent.
 pub struct AntigravityIntegration;
 
 fn mcp_config_path(home: &Path) -> std::path::PathBuf {

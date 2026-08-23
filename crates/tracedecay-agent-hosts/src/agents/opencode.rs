@@ -562,10 +562,12 @@ fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
 /// receipt-backed first-party catalog and explicit artifact refresh.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     let encoded = serde_json::to_string(tracedecay_bin)?;
-    Ok(vec![(
-        OPENCODE_PLUGIN_RELATIVE,
-        OPENCODE_PLUGIN_SOURCE.replace("\"__TRACEDECAY_BIN__\"", &encoded),
-    )])
+    let rendered = OPENCODE_PLUGIN_SOURCE.replace(
+        &format!("\"{}\"", super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER),
+        &encoded,
+    );
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "OpenCode plugin")?;
+    Ok(vec![(OPENCODE_PLUGIN_RELATIVE, rendered)])
 }
 
 /// Deploy the managed plugin to a path `OpenCode`'s own loader discovers.
@@ -956,21 +958,12 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
 }
 
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
-    let prompt_path = opencode_prompt_path(home);
-    if prompt_path.exists() {
-        let has_rules = std::fs::read_to_string(&prompt_path)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass("AGENTS.md contains tracedecay rules");
-        } else {
-            dc.fail(
-                "AGENTS.md missing tracedecay rules — run `tracedecay install --agent opencode`",
-            );
-        }
-    } else {
-        dc.warn("AGENTS.md does not exist");
-    }
+    super::doctor_check_prompt_contains_tracedecay(
+        dc,
+        &opencode_prompt_path(home),
+        "AGENTS.md",
+        "opencode",
+    );
 }
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {

@@ -18,10 +18,8 @@ use super::{
     doctor_check_mcp_registration, load_jsonc_file,
 };
 
-/// Zed agent.
 pub struct ZedIntegration;
 
-/// Returns the Zed config directory, platform-specific.
 fn zed_config_dir(home: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -72,7 +70,6 @@ fn zed_settings_path(home: &Path) -> PathBuf {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Zed settings.json has tracedecay context server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = zed_settings_path(home);
     doctor_check_mcp_registration(

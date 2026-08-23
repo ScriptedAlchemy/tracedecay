@@ -53,7 +53,6 @@ const COPILOT_MCP_SERVER_NAME: &str = "tracedecay";
 /// must source its `args` array from here for the same reason.
 const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
-/// GitHub Copilot agent.
 pub struct CopilotIntegration;
 
 impl AgentIntegration for CopilotIntegration {
@@ -330,62 +329,54 @@ fn server_args_are_current(server: &serde_json::Map<String, serde_json::Value>) 
         .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
 }
 
-/// Check VS Code (or VS Code Insiders) settings.json has tracedecay MCP server registered.
 fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, label: &str) {
     let settings_path = vscode_dir.join("User/settings.json");
-
-    if !settings_path.exists() {
-        dc.warn(&format!(
+    doctor_check_mcp_document(
+        dc,
+        &settings_path,
+        load_jsonc_file,
+        |settings| {
+            settings
+                .get("mcp")
+                .and_then(|mcp| mcp.get("servers"))
+                .and_then(|servers| servers.get("tracedecay"))
+        },
+        &format!(
             "{} not found — run `tracedecay install --agent copilot` if you use GitHub Copilot in {label}",
             settings_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_jsonc_file(&settings_path);
-    let server = settings
-        .get("mcp")
-        .and_then(|v| v.get("servers"))
-        .and_then(|v| v.get("tracedecay"));
-
-    let Some(server) = server.and_then(|v| v.as_object()) else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
-            settings_path.display()
-        ));
-        return;
-    };
-    dc.pass(&format!(
-        "MCP server registered in {}",
-        settings_path.display()
-    ));
-
-    // Check args carry the shared launch arguments (currently "serve").
-    if server_args_are_current(server) {
-        dc.pass("MCP server args include \"serve\"");
-    } else {
-        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent copilot`");
-    }
+        ),
+    );
 }
 
-/// Check Copilot CLI mcp-config.json has tracedecay MCP server registered.
-///
 /// Read-only: this document is written by `copilot mcp`, never by TraceDecay.
 fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = copilot_cli_mcp_config_path(home);
-
-    if !settings_path.exists() {
-        dc.warn(&format!(
+    doctor_check_mcp_document(
+        dc,
+        &settings_path,
+        load_json_file,
+        |settings| settings.get("mcpServers").and_then(|servers| servers.get("tracedecay")),
+        &format!(
             "{} not found — run `tracedecay install --agent copilot` if you use Copilot CLI",
             settings_path.display()
-        ));
+        ),
+    );
+}
+
+fn doctor_check_mcp_document(
+    dc: &mut DoctorCounters,
+    settings_path: &Path,
+    load: impl FnOnce(&Path) -> serde_json::Value,
+    lookup: impl FnOnce(&serde_json::Value) -> Option<&serde_json::Value>,
+    missing_file_warn: &str,
+) {
+    if !settings_path.exists() {
+        dc.warn(missing_file_warn);
         return;
     }
 
-    let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    let Some(server) = server.and_then(|v| v.as_object()) else {
+    let settings = load(settings_path);
+    let Some(server) = lookup(&settings).and_then(serde_json::Value::as_object) else {
         dc.fail(&format!(
             "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
             settings_path.display()

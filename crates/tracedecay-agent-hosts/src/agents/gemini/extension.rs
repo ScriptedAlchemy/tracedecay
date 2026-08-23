@@ -64,7 +64,7 @@ pub(super) const EXTENSION_CONTEXT_FILE: &str = "GEMINI.md";
 /// Placeholder in the manifest replaced with the resolved absolute tracedecay
 /// binary path at staging time. Substituted through serde so a path carrying a
 /// JSON-special character is escaped instead of corrupting the manifest.
-pub(super) const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
+pub(super) use crate::agents::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 
 /// The staged manifest template.
 ///
@@ -185,7 +185,7 @@ fn render_extension_file(relative: &str, contents: &str, tracedecay_bin: &str) -
 /// serialize round-trip. Assigning a `serde_json::Value` escapes any
 /// JSON-special character in the path, which a raw string replace would not.
 fn render_manifest(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    crate::agents::plugin_bundle::stamp_manifest_version_with(raw, |manifest| {
+    let rendered = crate::agents::plugin_bundle::stamp_manifest_version_with(raw, |manifest| {
         if let Some(server) = manifest
             .pointer_mut("/mcpServers/tracedecay")
             .and_then(serde_json::Value::as_object_mut)
@@ -194,7 +194,12 @@ fn render_manifest(raw: &str, tracedecay_bin: &str) -> Result<String> {
         {
             server.insert("command".to_string(), json!(tracedecay_bin));
         }
-    })
+    })?;
+    crate::agents::plugin_bundle::reject_unresolved_placeholders(
+        &rendered,
+        "Gemini extension manifest",
+    )?;
+    Ok(rendered)
 }
 
 /// The extension's context file: the shared tracedecay routing rules every

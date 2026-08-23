@@ -122,7 +122,10 @@ fn require_host_cli_from(
 }
 
 /// First executable match for `program` across `path_var`.
-fn resolve_on_path(program: &str, path_var: Option<&std::ffi::OsStr>) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_on_path(
+    program: &str,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Result<Option<PathBuf>> {
     let Some(path_var) = path_var else {
         return Ok(None);
     };

@@ -1593,6 +1593,33 @@ pub fn doctor_check_mcp_registration(
     server
 }
 
+/// Shared doctor for host prompt files that must contain the word `tracedecay`.
+///
+/// Vibe (`prompts/cli.md`) and OpenCode (`AGENTS.md`) use the same
+/// exists → contains → pass/fail/warn shape. Gemini's prompt check is the
+/// opposite polarity (legacy block must be absent) and stays host-local.
+pub(crate) fn doctor_check_prompt_contains_tracedecay(
+    dc: &mut DoctorCounters,
+    prompt_path: &Path,
+    subject: &str,
+    agent_id: &str,
+) {
+    if !prompt_path.exists() {
+        dc.warn(&format!("{subject} does not exist"));
+        return;
+    }
+    let has_rules = std::fs::read_to_string(prompt_path)
+        .unwrap_or_default()
+        .contains("tracedecay");
+    if has_rules {
+        dc.pass(&format!("{subject} contains tracedecay rules"));
+    } else {
+        dc.fail(&format!(
+            "{subject} missing tracedecay rules — run `tracedecay install --agent {agent_id}`"
+        ));
+    }
+}
+
 /// Finds the tracedecay binary path.
 ///
 /// On Windows the returned path uses forward slashes so it can be safely

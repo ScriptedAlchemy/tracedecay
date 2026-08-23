@@ -18,10 +18,8 @@ use super::{
     mcp_servers_registration_state, uninstall_mcp_server_entry,
 };
 
-/// Roo Code agent.
 pub struct RooCodeIntegration;
 
-/// Returns the Roo Code VS Code extension global storage directory.
 fn roo_ext_dir(home: &Path) -> PathBuf {
     super::vscode_data_dir(home).join("User/globalStorage/rooveterinaryinc.roo-cline")
 }
@@ -124,7 +122,6 @@ impl AgentIntegration for RooCodeIntegration {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Roo Code's `cline_mcp_settings.json` has tracedecay MCP server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = roo_settings_path(home);
     doctor_check_mcp_registration(

@@ -96,6 +96,36 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
+/// Hook/plugin template token replaced with the resolved tracedecay binary.
+pub(crate) const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
+/// Hook template token replaced with the host's sync/event hook command.
+pub(crate) const TRACEDECAY_SYNC_PLACEHOLDER: &str = "__TRACEDECAY_SYNC__";
+/// Hook template token replaced with the host's stop hook command.
+pub(crate) const TRACEDECAY_STOP_PLACEHOLDER: &str = "__TRACEDECAY_STOP__";
+
+const TRACEDECAY_COMMAND_PLACEHOLDERS: &[&str] = &[
+    TRACEDECAY_BIN_PLACEHOLDER,
+    TRACEDECAY_SYNC_PLACEHOLDER,
+    TRACEDECAY_STOP_PLACEHOLDER,
+];
+
+/// Fail closed when a rendered host file still carries a TraceDecay placeholder.
+///
+/// Claude, Cursor, OpenCode, and Gemini used to substitute and ship; only Kimi
+/// rejected leftovers. One residual check keeps an unresolved token from
+/// reaching a host config.
+pub(crate) fn reject_unresolved_placeholders(rendered: &str, host: &str) -> Result<()> {
+    if TRACEDECAY_COMMAND_PLACEHOLDERS
+        .iter()
+        .any(|placeholder| rendered.contains(*placeholder))
+    {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!("{host} retained an unresolved TraceDecay placeholder"),
+        });
+    }
+    Ok(())
+}
+
 /// One embedded plugin file: `relative` is its deploy path; `contents` may come
 /// from a different source path in the shared `plugin/` tree.
 #[derive(Clone, Copy)]

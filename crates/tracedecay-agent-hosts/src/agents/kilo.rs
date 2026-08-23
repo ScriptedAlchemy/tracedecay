@@ -19,7 +19,6 @@ use super::{
     install_mcp_server_entry, load_jsonc_file, load_jsonc_file_strict, uninstall_mcp_server_entry,
 };
 
-/// Kilo CLI agent.
 pub struct KiloIntegration;
 
 fn kilo_config_dir(home: &Path) -> std::path::PathBuf {

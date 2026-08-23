@@ -18,7 +18,6 @@ use super::{
     uninstall_mcp_server_entry,
 };
 
-/// Cline agent.
 pub struct ClineIntegration;
 
 /// Current Cline CLI/IDE user MCP settings path documented by Cline.
@@ -145,9 +144,6 @@ impl AgentIntegration for ClineIntegration {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Cline's primary `.cline/mcp.json` has the tracedecay MCP server
-/// registered, falling back to the legacy VS Code `cline_mcp_settings.json`.
-///
 /// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
 /// primary settings file is not a warning on its own: Cline falls through to
 /// the legacy VS Code extension path first and only then reports a failure.

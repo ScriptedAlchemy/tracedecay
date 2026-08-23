@@ -173,17 +173,10 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
 }
 
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
-    let prompt_path = vibe_prompt_path(home);
-    if prompt_path.exists() {
-        let has_rules = std::fs::read_to_string(&prompt_path)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass("Vibe prompt contains tracedecay rules");
-        } else {
-            dc.fail("Vibe prompt missing tracedecay rules — run `tracedecay install --agent vibe`");
-        }
-    } else {
-        dc.warn("Vibe prompt does not exist");
-    }
+    super::doctor_check_prompt_contains_tracedecay(
+        dc,
+        &vibe_prompt_path(home),
+        "Vibe prompt",
+        "vibe",
+    );
 }

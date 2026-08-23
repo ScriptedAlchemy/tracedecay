@@ -204,23 +204,10 @@ impl AgentIntegration for KimiIntegration {
         let Some(entry) = kimi_installed_entry(&installed) else {
             return State::Missing;
         };
-        let staged_dir = kimi_staged_plugin_dir(&ctx.home);
-        let expected_root = staged_dir
-            .canonicalize()
-            .unwrap_or_else(|_| staged_dir.clone());
-        let manager_state_current = entry.get("enabled").and_then(serde_json::Value::as_bool)
-            != Some(false)
-            && entry.get("source").and_then(serde_json::Value::as_str) == Some("local-path")
-            && entry
-                .get("root")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|root| {
-                    let root = Path::new(root);
-                    root.canonicalize().unwrap_or_else(|_| root.to_path_buf()) == expected_root
-                });
-        if !manager_state_current {
+        if !kimi_manager_points_at_staged_source(entry, &ctx.home) {
             return State::Repairable;
         }
+        let staged_dir = kimi_staged_plugin_dir(&ctx.home);
         let manifest_path = staged_dir.join(KIMI_PLUGIN_MANIFEST_RELATIVE);
         let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
             return State::Repairable;
@@ -362,22 +349,26 @@ fn kimi_plugin_is_natively_active(home: &Path, code_home: &Path) -> Result<bool>
                 installed_path.display()
             ),
         })?;
-    let Some(entry) = kimi_installed_entry(&installed) else {
-        return Ok(false);
-    };
+    Ok(kimi_installed_entry(&installed)
+        .is_some_and(|entry| kimi_manager_points_at_staged_source(entry, home)))
+}
+
+/// True when Kimi's `installed.json` entry is enabled, sourced from a local
+/// path, and that path is the TraceDecay-staged plugin directory.
+fn kimi_manager_points_at_staged_source(entry: &serde_json::Value, home: &Path) -> bool {
     let staged_dir = kimi_staged_plugin_dir(home);
-    let expected_root = staged_dir.canonicalize().unwrap_or(staged_dir);
-    Ok(
-        entry.get("enabled").and_then(serde_json::Value::as_bool) != Some(false)
-            && entry.get("source").and_then(serde_json::Value::as_str) == Some("local-path")
-            && entry
-                .get("root")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|root| {
-                    let root = Path::new(root);
-                    root.canonicalize().unwrap_or_else(|_| root.to_path_buf()) == expected_root
-                }),
-    )
+    let expected_root = staged_dir
+        .canonicalize()
+        .unwrap_or_else(|_| staged_dir.clone());
+    entry.get("enabled").and_then(serde_json::Value::as_bool) != Some(false)
+        && entry.get("source").and_then(serde_json::Value::as_str) == Some("local-path")
+        && entry
+            .get("root")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|root| {
+                let root = Path::new(root);
+                root.canonicalize().unwrap_or_else(|_| root.to_path_buf()) == expected_root
+            })
 }
 
 /// Canonical rendered Kimi Code plugin inventory shared by native-activation
@@ -455,16 +446,13 @@ fn render_kimi_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> 
             continue;
         };
         match command.as_str() {
-            Some("__TRACEDECAY_BIN__") => {
+            Some(super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER) => {
                 *command = serde_json::Value::String(tracedecay_bin.to_string());
             }
-            Some("__TRACEDECAY_SYNC__") => {
-                *command = serde_json::Value::String(super::hook_command(
-                    tracedecay_bin,
-                    "hook-kimi-event",
-                ));
-            }
-            Some("__TRACEDECAY_STOP__") => {
+            Some(
+                super::plugin_bundle::TRACEDECAY_SYNC_PLACEHOLDER
+                | super::plugin_bundle::TRACEDECAY_STOP_PLACEHOLDER,
+            ) => {
                 *command = serde_json::Value::String(super::hook_command(
                     tracedecay_bin,
                     "hook-kimi-event",
@@ -474,19 +462,7 @@ fn render_kimi_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> 
         }
     }
     let rendered = format!("{}\n", serde_json::to_string_pretty(&manifest)?);
-    if [
-        "__TRACEDECAY_BIN__",
-        "__TRACEDECAY_SYNC__",
-        "__TRACEDECAY_STOP__",
-    ]
-    .iter()
-    .any(|placeholder| rendered.contains(placeholder))
-    {
-        return Err(TraceDecayError::Config {
-            message: "Kimi Hook V2 manifest retained an unresolved TraceDecay placeholder"
-                .to_string(),
-        });
-    }
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "Kimi Hook V2 manifest")?;
     Ok(rendered)
 }
 

@@ -421,7 +421,9 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
             }
         }
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&hooks)?);
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "Cursor hooks")?;
+    Ok(rendered)
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
