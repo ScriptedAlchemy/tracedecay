@@ -6,7 +6,9 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::source::{HostProviderCoverage, persist_host_provider_coverage};
+use crate::runtime::source::{
+    HostProviderCoverage, persist_host_provider_coverage, read_host_provider_coverage,
+};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{
     SessionProvider, claude_observation, cline_like, hermes, kimi, kiro, opencode, vibe,
@@ -152,10 +154,20 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
     async fn run_codex(self) -> ProviderRunOutcome {
         // Recent-first with a durable historical rotation: the frontier picks
         // which older discovery buckets this pass covers. A missing frontier
-        // (fresh store) truthfully starts the rotation at zero.
-        let rotation = read_ingest_frontier(self.store, USER_INGEST_CODEX_HISTORY_FRONTIER_KEY)
+        // (fresh store) truthfully starts the rotation at zero. Incomplete
+        // coverage strips the sweep-complete bit so uningested history is
+        // not dropped by an idle recent-only pass.
+        let stored = read_ingest_frontier(self.store, USER_INGEST_CODEX_HISTORY_FRONTIER_KEY)
             .await
             .unwrap_or(0);
+        let coverage_complete = matches!(
+            read_host_provider_coverage(self.facade, &ObservationScopeV1::Profile, "codex")
+                .await
+                .ok()
+                .flatten(),
+            Some(HostProviderCoverage::Complete)
+        );
+        let rotation = crate::runtime::codex::effective_history_rotation(stored, coverage_complete);
         match try_ingest_user_codex_sessions_rotated(
             self.profile_root,
             None,
@@ -178,12 +190,34 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     usize::try_from(advance).unwrap_or(usize::MAX),
                 )
                 .await;
-                crate::runtime::hotpath::record_historical_ingest(!outcome.deferred_by_byte_cap);
-                ProviderRunOutcome::bounded(
+                let coverage = if outcome.deferred_by_byte_cap {
+                    HostProviderCoverage::Partial
+                } else {
+                    HostProviderCoverage::Complete
+                };
+                let mut run = ProviderRunOutcome::bounded(
                     outcome.stats,
                     outcome.bytes_consumed,
                     outcome.deferred_by_byte_cap,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    &ObservationScopeV1::Profile,
+                    "codex",
+                    coverage,
+                    u64::from(outcome.deferred_by_byte_cap),
                 )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "codex",
+                        "coverage",
+                        &coverage_error,
+                        "user Codex coverage persistence failed",
+                    ));
+                }
+                crate::runtime::hotpath::record_historical_ingest(!outcome.deferred_by_byte_cap);
+                run
             }
             Err(error) => {
                 if let Some(cancelled) = cancelled_provider_outcome(&error) {

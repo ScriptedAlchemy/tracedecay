@@ -160,7 +160,9 @@ impl CodexSource {
     /// instead of starving its tail or pinning the rotation. The caller
     /// persists [`CodexDiscoveryPass::next_history_rotation`] through the
     /// durable ingest frontier so consecutive passes cover the whole backlog
-    /// as bounded background catch-up.
+    /// as bounded background catch-up. After a full wrap the packed frontier
+    /// carries a sweep-complete watermark so idle polls stay complete instead
+    /// of restarting as truncated-from-zero.
     #[hotpath::measure]
     pub fn discover_transcript_paths_with_rotation(
         &self,
@@ -185,6 +187,20 @@ impl CodexSource {
 
         let history_units = (bounds.max_files / 8).min(HISTORY_CATCH_UP_UNITS);
         let recent_units = bounds.max_files.saturating_sub(history_units);
+        let total_files = count_jsonl_files_in_buckets(&buckets);
+        let incoming_complete = history_rotation_sweep_complete(history_rotation);
+        let incoming_count = history_rotation_file_count(history_rotation).unwrap_or(0);
+        // A Complete watermark stays valid only while the tree has not grown.
+        // New files clear it so history rotation starts over — at-least-once.
+        let idle_complete = incoming_complete && total_files <= incoming_count;
+        let (mut bucket_rotation, mut intra_offset) = if incoming_complete && !idle_complete {
+            (0, 0)
+        } else {
+            (
+                history_rotation_bucket(history_rotation),
+                history_rotation_intra(history_rotation),
+            )
+        };
 
         let mut pass = BucketScanState::new(bounds);
         // Phase 1 — the present: fill newest-first up to the recent budget.
@@ -198,13 +214,20 @@ impl CodexSource {
 
         // Phase 2 — bounded background history: rotate through the buckets
         // the recent fill did not finish, starting at the durable frontier.
-        let bucket_rotation = history_rotation >> HISTORY_INTRA_BITS;
-        let intra_offset = history_rotation & HISTORY_INTRA_MASK;
-        let mut next_history_rotation = history_rotation;
+        let mut next_history_rotation = if idle_complete {
+            pack_history_rotation(bucket_rotation, intra_offset, Some(total_files))
+        } else {
+            pack_history_rotation(bucket_rotation, intra_offset, None)
+        };
         let older = &buckets[first_unfinished_bucket..];
         #[cfg(feature = "hotpath")]
         let recent_selected = u64::try_from(pass.paths.len()).unwrap_or(u64::MAX);
-        if !older.is_empty() && history_units > 0 && pass.truncated_by_recent_budget() {
+        let mut sweep_complete = idle_complete || older.is_empty();
+        if !idle_complete
+            && !older.is_empty()
+            && history_units > 0
+            && pass.truncated_by_recent_budget()
+        {
             pass.enter_history_phase();
             let start = usize::try_from(bucket_rotation % older.len() as u64).unwrap_or(0);
             let mut completed_buckets = 0u64;
@@ -238,21 +261,34 @@ impl CodexSource {
                 }
             }
             if completed_buckets > 0 || partial_intra > intra_offset {
-                next_history_rotation = bucket_rotation
-                    .saturating_add(completed_buckets)
-                    .saturating_mul(1 << HISTORY_INTRA_BITS)
-                    | if completed_buckets == 0 {
-                        partial_intra
-                    } else {
-                        // Completed buckets reset the intra offset; a trailing
-                        // partial bucket after completions restarts at zero on
-                        // the next pass (its head files dedupe cheaply).
-                        0
-                    };
+                bucket_rotation = bucket_rotation.saturating_add(completed_buckets);
+                intra_offset = if completed_buckets == 0 {
+                    partial_intra
+                } else {
+                    // Completed buckets reset the intra offset; a trailing
+                    // partial bucket after completions restarts at zero on
+                    // the next pass (its head files dedupe cheaply).
+                    0
+                };
+                // Empty parent dirs (sessions/YYYY, …) still occupy older
+                // slots. A file-cap stop can leave those unwalked after the
+                // last jsonl is visited; complete when no jsonl remains in
+                // the unvisited remainder of this wrap, not when every
+                // directory slot has been counted.
+                let remaining_jsonl =
+                    remaining_older_jsonl(older, start, completed_buckets, intra_offset);
+                let wrapped = pass.truncated.is_none()
+                    && (bucket_rotation >= older.len() as u64 || remaining_jsonl == 0);
+                sweep_complete = wrapped;
+                next_history_rotation = pack_history_rotation(
+                    bucket_rotation,
+                    intra_offset,
+                    wrapped.then_some(total_files),
+                );
             }
         }
 
-        let report = pass.into_report();
+        let report = pass.into_report(sweep_complete);
         #[cfg(feature = "hotpath")]
         {
             let history_selected = u64::try_from(report.paths.len())
@@ -272,16 +308,139 @@ impl CodexSource {
 /// inside the bucket the rotation currently points at; the high bits count
 /// fully covered buckets. Packing keeps the durable frontier a single
 /// monotonically increasing counter (the ingest frontier store only advances).
+///
+/// Bit 63 is the sweep-complete watermark: after history rotation has visited
+/// every backlog bucket, subsequent idle polls keep this bit and do not
+/// restart as truncated-from-zero. Bits 43–62 then store the jsonl file count
+/// so tree growth can clear the watermark. Existing frontiers never have bit
+/// 63 set, so they unpack as in-progress rotations.
 pub const HISTORY_INTRA_BITS: u32 = 20;
 const HISTORY_INTRA_MASK: u64 = (1 << HISTORY_INTRA_BITS) - 1;
+const SWEEP_COMPLETE_BIT: u64 = 1 << 63;
+const HISTORY_FILE_COUNT_SHIFT: u32 = 43;
+const HISTORY_FILE_COUNT_BITS: u32 = 20;
+const HISTORY_FILE_COUNT_MASK: u64 = (1 << HISTORY_FILE_COUNT_BITS) - 1;
+const HISTORY_COMPLETE_BUCKET_BITS: u32 = HISTORY_FILE_COUNT_SHIFT - HISTORY_INTRA_BITS;
+const HISTORY_COMPLETE_BUCKET_MASK: u64 = (1 << HISTORY_COMPLETE_BUCKET_BITS) - 1;
+
+pub(crate) fn history_rotation_sweep_complete(rotation: u64) -> bool {
+    rotation & SWEEP_COMPLETE_BIT != 0
+}
+
+pub(crate) fn history_rotation_intra(rotation: u64) -> u64 {
+    rotation & HISTORY_INTRA_MASK
+}
+
+pub(crate) fn history_rotation_bucket(rotation: u64) -> u64 {
+    if history_rotation_sweep_complete(rotation) {
+        (rotation >> HISTORY_INTRA_BITS) & HISTORY_COMPLETE_BUCKET_MASK
+    } else {
+        rotation >> HISTORY_INTRA_BITS
+    }
+}
+
+pub(crate) fn history_rotation_file_count(rotation: u64) -> Option<u64> {
+    history_rotation_sweep_complete(rotation)
+        .then_some((rotation >> HISTORY_FILE_COUNT_SHIFT) & HISTORY_FILE_COUNT_MASK)
+}
+
+pub(crate) fn pack_history_rotation(bucket: u64, intra: u64, complete_files: Option<u64>) -> u64 {
+    let intra = intra & HISTORY_INTRA_MASK;
+    match complete_files {
+        Some(count) => {
+            SWEEP_COMPLETE_BIT
+                | ((count & HISTORY_FILE_COUNT_MASK) << HISTORY_FILE_COUNT_SHIFT)
+                | ((bucket & HISTORY_COMPLETE_BUCKET_MASK) << HISTORY_INTRA_BITS)
+                | intra
+        }
+        None => bucket
+            .saturating_mul(1 << HISTORY_INTRA_BITS)
+            .saturating_add(intra),
+    }
+}
+
+/// Drop the sweep-complete bit while keeping bucket/intra, so a Partial
+/// coverage watermark can keep walking history instead of idling.
+pub(crate) fn strip_sweep_complete(rotation: u64) -> u64 {
+    if !history_rotation_sweep_complete(rotation) {
+        return rotation;
+    }
+    pack_history_rotation(
+        history_rotation_bucket(rotation),
+        history_rotation_intra(rotation),
+        None,
+    )
+}
+
+/// Resume rotation from a durable store: idle only when coverage is Complete.
+pub(crate) fn effective_history_rotation(stored: u64, coverage_complete: bool) -> u64 {
+    if coverage_complete {
+        stored
+    } else {
+        strip_sweep_complete(stored)
+    }
+}
 
 /// Outcome of one recent-first Codex discovery pass.
 pub struct CodexDiscoveryPass {
     pub report: FileDiscoveryReport,
     /// Packed rotation frontier after this pass; the caller persists it (the
     /// value never decreases) so the next pass resumes historical coverage
-    /// where this one stopped.
+    /// where this one stopped. Bit 63 plus the packed file count are the
+    /// durable sweep-complete watermark once every backlog file has been
+    /// visited.
     pub next_history_rotation: u64,
+}
+
+fn count_jsonl_in_dir(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if path.is_file() {
+            total = total.saturating_add(1);
+        }
+    }
+    total
+}
+
+fn count_jsonl_files_in_buckets(buckets: &[PathBuf]) -> u64 {
+    buckets.iter().fold(0u64, |total, bucket| {
+        total.saturating_add(count_jsonl_in_dir(bucket))
+    })
+}
+
+/// jsonl files still ahead of the history frontier on this wrap — the
+/// remainder of an incomplete current bucket plus later older buckets
+/// before the slice ends. Already-visited buckets earlier in `older` are
+/// not recounted (modulo wrap-around would treat them as still pending).
+fn remaining_older_jsonl(
+    older: &[PathBuf],
+    start: usize,
+    completed_buckets: u64,
+    intra_offset: u64,
+) -> u64 {
+    if older.is_empty() || start >= older.len() {
+        return 0;
+    }
+    let completed = usize::try_from(completed_buckets).unwrap_or(older.len());
+    let mut total = 0u64;
+    let first_idx = if completed == 0 {
+        total =
+            total.saturating_add(count_jsonl_in_dir(&older[start]).saturating_sub(intra_offset));
+        start.saturating_add(1)
+    } else {
+        start.saturating_add(completed)
+    };
+    for bucket in older.iter().skip(first_idx) {
+        total = total.saturating_add(count_jsonl_in_dir(bucket));
+    }
+    total
 }
 
 /// Bounded breadth-first enumeration of transcript directories. Directory
@@ -455,11 +614,15 @@ impl BucketScanState {
         self.truncated = None;
     }
 
-    fn into_report(self) -> FileDiscoveryReport {
-        let truncated = self.truncated.or_else(|| {
-            self.recent_phase_truncated
-                .then_some(crate::runtime::source::FileDiscoveryLimit::FileCount)
-        });
+    fn into_report(self, sweep_complete: bool) -> FileDiscoveryReport {
+        let truncated = if sweep_complete {
+            None
+        } else {
+            self.truncated.or_else(|| {
+                self.recent_phase_truncated
+                    .then_some(crate::runtime::source::FileDiscoveryLimit::FileCount)
+            })
+        };
         FileDiscoveryReport {
             paths: self.paths,
             truncated,

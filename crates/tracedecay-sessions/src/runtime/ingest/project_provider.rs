@@ -9,8 +9,8 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
-    HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptSource,
-    persist_host_provider_coverage,
+    HostProviderCoverage, TranscriptDiscoveryBounds, persist_codex_history_frontier,
+    persist_host_provider_coverage, read_codex_history_frontier, read_host_provider_coverage,
 };
 use crate::runtime::{
     SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
@@ -179,10 +179,23 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = codex::CodexSource::new() else {
             return ProviderRunOutcome::skipped();
         };
-        let discovery = source.discover_transcript_paths(
-            self.project_root,
-            TranscriptDiscoveryBounds::default_walk(),
+        let stored = read_codex_history_frontier(self.facade, self.scope)
+            .await
+            .unwrap_or(0);
+        let coverage_complete = matches!(
+            read_host_provider_coverage(self.facade, self.scope, "codex")
+                .await
+                .ok()
+                .flatten(),
+            Some(HostProviderCoverage::Complete)
         );
+        let rotation = crate::runtime::codex::effective_history_rotation(stored, coverage_complete);
+        let pass = source.discover_transcript_paths_with_rotation(
+            TranscriptDiscoveryBounds::default_walk(),
+            rotation,
+        );
+        let next_history_rotation = pass.next_history_rotation;
+        let discovery = pass.report;
         let mut remaining = self.max_new_bytes;
         let mut deferred = discovery.is_truncated();
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
@@ -230,6 +243,37 @@ impl<'a> ProjectProviderRun<'a> {
         }
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
         outcome.add_deferred_units(u64::from(deferred));
+        if let Err(error) =
+            persist_codex_history_frontier(self.facade, self.scope, next_history_rotation).await
+        {
+            outcome.add_failure(warn_transcript_catch_up_failure(
+                "codex",
+                "frontier",
+                &error,
+                "project Codex history frontier persistence failed",
+            ));
+        }
+        let coverage = if deferred {
+            HostProviderCoverage::Partial
+        } else {
+            HostProviderCoverage::Complete
+        };
+        if let Err(error) = persist_host_provider_coverage(
+            self.facade,
+            self.scope,
+            "codex",
+            coverage,
+            u64::from(deferred),
+        )
+        .await
+        {
+            outcome.add_failure(warn_transcript_catch_up_failure(
+                "codex",
+                "coverage",
+                &error,
+                "project Codex coverage persistence failed",
+            ));
+        }
         crate::runtime::hotpath::record_historical_ingest(!deferred);
         outcome
     }

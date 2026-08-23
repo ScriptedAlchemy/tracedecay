@@ -66,6 +66,79 @@ pub(super) enum HostProviderCoverage {
     Unavailable = 3,
 }
 
+impl HostProviderCoverage {
+    pub(super) fn from_file_id(file_id: u64) -> Option<Self> {
+        match file_id {
+            1 => Some(Self::Complete),
+            2 => Some(Self::Partial),
+            3 => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+/// Durable Codex history-rotation cursor (project admission and the
+/// sweep-complete watermark share this key; user ingest keeps its own
+/// profile-store frontier and writes the same packed value).
+pub(super) const CODEX_HISTORY_FRONTIER_KEY: &str = "tracedecay-internal:codex-history-frontier:v1";
+
+pub(super) async fn read_host_provider_coverage(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    provider: &'static str,
+) -> TranscriptIngestResult<Option<HostProviderCoverage>> {
+    let key = format!("host-coverage://{provider}/v1");
+    let offset = admission
+        .get_parse_offset(scope, &key)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
+        })?;
+    Ok(offset.and_then(|stored| HostProviderCoverage::from_file_id(stored.file_id)))
+}
+
+pub(super) async fn read_codex_history_frontier(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+) -> TranscriptIngestResult<u64> {
+    Ok(admission
+        .get_parse_offset(scope, CODEX_HISTORY_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })?
+        .map(|offset| offset.byte_offset)
+        .unwrap_or(0))
+}
+
+pub(super) async fn persist_codex_history_frontier(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    rotation: u64,
+) -> TranscriptIngestResult<()> {
+    let current = admission
+        .get_parse_offset(scope, CODEX_HISTORY_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })?
+        .unwrap_or_default();
+    admission
+        .advance_parse_offset(
+            scope,
+            CODEX_HISTORY_FRONTIER_KEY,
+            ParseOffset {
+                byte_offset: rotation,
+                mtime: current.mtime.saturating_add(1).max(1),
+                file_id: current.file_id.max(1),
+            },
+        )
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })
+}
+
 pub(super) async fn persist_host_provider_coverage(
     admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
@@ -670,9 +743,9 @@ pub use discovery::{
     bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
 };
 
+pub use crate::runtime::hotpath::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 pub use jsonl::try_stream_new_jsonl_raw_strict;
-pub use crate::runtime::hotpath::{JsonlChangeKind, JsonlIoAccounting};
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
     RawJsonlFrameReader, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,

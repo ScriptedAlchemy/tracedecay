@@ -967,7 +967,12 @@ mod recent_first_discovery_tests {
     use tempfile::TempDir;
 
     use super::CodexSource;
-    use crate::runtime::source::TranscriptDiscoveryBounds;
+    use crate::admission::test_support::MemoryHostAdmission;
+    use crate::runtime::codex::{effective_history_rotation, history_rotation_sweep_complete};
+    use crate::runtime::source::{
+        HostProviderCoverage, TranscriptDiscoveryBounds, persist_codex_history_frontier,
+        persist_host_provider_coverage, read_codex_history_frontier, read_host_provider_coverage,
+    };
 
     /// Creates `sessions/YYYY/MM/DD/rollout-<name>.jsonl` under the Codex home.
     fn write_dated_rollout(home: &Path, date: (&str, &str, &str), name: &str) -> PathBuf {
@@ -1062,10 +1067,29 @@ mod recent_first_discovery_tests {
             covered, all,
             "rotating passes must cover the entire backlog, no skipped-and-forgotten range"
         );
+        assert!(
+            history_rotation_sweep_complete(rotation),
+            "covering every backlog file must persist the sweep-complete watermark on the frontier"
+        );
         let settled = source.discover_transcript_paths_with_rotation(bounds, rotation);
         assert!(
-            settled.report.is_truncated(),
-            "HEAD still marks a recent-cap pass truncated after history coverage; Codex does not persist a Complete sweep watermark"
+            !settled.report.is_truncated(),
+            "after history rotation visits every file, idle polls must report complete"
+        );
+        assert_eq!(
+            settled.next_history_rotation, rotation,
+            "an idle complete pass must keep the durable watermark, not restart from zero"
+        );
+
+        write_dated_rollout(home, ("2026", "08", "18"), "newer");
+        let grown = source.discover_transcript_paths_with_rotation(bounds, rotation);
+        assert!(
+            grown.report.is_truncated(),
+            "new files must clear the complete watermark so history is walked again"
+        );
+        assert!(
+            !history_rotation_sweep_complete(grown.next_history_rotation),
+            "growth must strip the complete bit until the new tree is covered"
         );
     }
 
@@ -1128,5 +1152,81 @@ mod recent_first_discovery_tests {
             covered, all,
             "an oversized bucket's tail must be reached across passes"
         );
+    }
+
+    /// Sweep-complete is store-durable: a fresh source reading only admission
+    /// parse offsets (the production persist path) idles instead of restarting
+    /// truncated-from-zero. MemoryHostAdmission is the same offset table a
+    /// process restart would reopen — not a process-local memo.
+    #[tokio::test]
+    async fn codex_sweep_complete_watermark_survives_admission_restart() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let mut all: BTreeSet<PathBuf> = BTreeSet::new();
+        for day in 1..=12 {
+            for item in 0..2 {
+                all.insert(write_dated_rollout(
+                    home,
+                    ("2025", "11", &format!("{day:02}")),
+                    &format!("old-{day:02}-{item}"),
+                ));
+            }
+        }
+        all.insert(write_dated_rollout(home, ("2026", "08", "17"), "today"));
+
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let source = CodexSource::with_home(home);
+        let admission = MemoryHostAdmission::default();
+        let scope = tracedecay_domain::ObservationScopeV1::Profile;
+
+        let mut rotation = 0u64;
+        let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
+        for _pass in 0..64 {
+            let pass = source.discover_transcript_paths_with_rotation(bounds, rotation);
+            covered.extend(pass.report.paths.iter().cloned());
+            persist_codex_history_frontier(&admission, &scope, pass.next_history_rotation)
+                .await
+                .unwrap();
+            let coverage = if pass.report.is_truncated() {
+                HostProviderCoverage::Partial
+            } else {
+                HostProviderCoverage::Complete
+            };
+            persist_host_provider_coverage(
+                &admission,
+                &scope,
+                "codex",
+                coverage,
+                u64::from(pass.report.is_truncated()),
+            )
+            .await
+            .unwrap();
+            rotation = pass.next_history_rotation;
+            if covered.len() == all.len() && !pass.report.is_truncated() {
+                break;
+            }
+        }
+        assert_eq!(covered, all);
+        assert!(history_rotation_sweep_complete(rotation));
+
+        let stored = read_codex_history_frontier(&admission, &scope)
+            .await
+            .unwrap();
+        let coverage = read_host_provider_coverage(&admission, &scope, "codex")
+            .await
+            .unwrap();
+        assert_eq!(coverage, Some(HostProviderCoverage::Complete));
+        assert_eq!(stored, rotation);
+        assert!(history_rotation_sweep_complete(stored));
+
+        let restarted = CodexSource::with_home(home).discover_transcript_paths_with_rotation(
+            bounds,
+            effective_history_rotation(stored, true),
+        );
+        assert!(
+            !restarted.report.is_truncated(),
+            "a process that only reloads admission offsets must idle complete"
+        );
+        assert_eq!(restarted.next_history_rotation, stored);
     }
 }
