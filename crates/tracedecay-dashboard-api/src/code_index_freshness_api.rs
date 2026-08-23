@@ -30,7 +30,7 @@ use super::read_model::{
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
 /// exactly this type back out of the daemon's `tracedecay_status` response,
 /// keeping one authority for the freshness shape.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CodeIndexWorktreeFreshnessV1 {
     /// Display path of the mounted worktree root.
     pub worktree_root: String,

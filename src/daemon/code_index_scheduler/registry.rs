@@ -444,43 +444,37 @@ pub(super) fn unique_mounted_for_scope<'a>(
     }
 }
 
-/// Repository, worktree, branch, commit, generation and index identities, plus
-/// the sealed-at stamp — every field absent when no complete index exists.
-type DashboardFreshnessIdentity = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-);
-
+/// The sealed-generation identity half of a freshness reading. Every other
+/// field is left at its default so callers can fill in the observation half
+/// with struct-update syntax, which keeps these seven — six of them
+/// `Option<String>` — matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
-) -> DashboardFreshnessIdentity {
-    latest.map_or((None, None, None, None, None, None, None), |latest| {
+) -> crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+    let mut identity =
+        crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
+    if let Some(latest) = latest {
         let generation = &latest.generation;
         let snapshot = generation.snapshot();
-        (
-            Some(snapshot.repository.as_str().to_owned()),
-            snapshot
-                .worktree
-                .as_ref()
-                .map(|worktree| worktree.as_str().to_owned()),
-            snapshot
-                .reference
-                .as_ref()
-                .map(|reference| reference.as_str().to_owned()),
-            snapshot
-                .source_revision
-                .as_ref()
-                .map(|revision| revision.as_str().to_owned()),
-            Some(generation.manifest().generation_id.as_str().to_owned()),
-            Some(snapshot.content_identity.as_str().to_owned()),
-            Some(generation.manifest().seal.sealed_at.0),
-        )
-    })
+        identity.repository_id = Some(snapshot.repository.as_str().to_owned());
+        identity.worktree_id = snapshot
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.as_str().to_owned());
+        identity.source_reference = snapshot
+            .reference
+            .as_ref()
+            .map(|reference| reference.as_str().to_owned());
+        identity.source_revision = snapshot
+            .source_revision
+            .as_ref()
+            .map(|revision| revision.as_str().to_owned());
+        identity.latest_generation_id =
+            Some(generation.manifest().generation_id.as_str().to_owned());
+        identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
+        identity.sealed_at_micros = Some(generation.manifest().seal.sealed_at.0);
+    }
+    identity
 }
 
 pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
@@ -3320,24 +3314,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    let (
-                        repository_id,
-                        worktree_id,
-                        source_reference,
-                        source_revision,
-                        generation_id,
-                        content_identity,
-                        sealed,
-                    ) = dashboard_freshness_identity(latest.as_ref());
                     return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
-                        repository_id,
-                        worktree_id,
-                        source_reference,
-                        source_revision,
-                        latest_generation_id: generation_id,
-                        snapshot_content_identity: content_identity,
-                        sealed_at_micros: sealed,
                         last_reconcile_micros: None,
                         staleness_state: Some(
                             if latest.is_some() {
@@ -3349,6 +3327,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         hook_hint_count: None,
                         coverage: "partial_refresh_in_progress".to_owned(),
+                        ..dashboard_freshness_identity(latest.as_ref())
                     };
                 }
             };
@@ -3359,15 +3338,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let hook_hint_count = scheduler.pending_hint_count();
-            let (
-                repository_id,
-                worktree_id,
-                source_reference,
-                source_revision,
-                generation_id,
-                content_identity,
-                sealed,
-            ) = dashboard_freshness_identity(latest.as_ref());
             let staleness_state = if refreshing {
                 if latest.is_some() {
                     "refreshing"
@@ -3387,13 +3357,6 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
-                repository_id,
-                worktree_id,
-                source_reference,
-                source_revision,
-                latest_generation_id: generation_id,
-                snapshot_content_identity: content_identity,
-                sealed_at_micros: sealed,
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
@@ -3405,6 +3368,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     "partial_hook_hint_overflow"
                 }
                 .to_owned(),
+                ..dashboard_freshness_identity(latest.as_ref())
             }
         })
         .await
