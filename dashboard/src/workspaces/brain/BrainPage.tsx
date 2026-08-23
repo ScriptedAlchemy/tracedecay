@@ -7,7 +7,7 @@ import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.t
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
-import { relativeAge } from '../../ui/time.ts';
+import { freshnessTier, relativeAge } from '../../ui/time.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -606,15 +606,26 @@ export function RecencyDot({
   lastSeenAt: number;
   className?: string;
 }) {
-  const ageDays = (Date.now() / 1000 - lastSeenAt) / 86_400;
-  const style =
-    ageDays < 1
-      ? 'bg-accent'
-      : ageDays < 7
-        ? 'bg-accent/60'
-        : ageDays < 30
-          ? 'bg-accent/30'
-          : 'border border-edge-strong bg-transparent';
+  const tier = freshnessTier(Math.max(0, Date.now() / 1000 - lastSeenAt));
+  let style: string;
+  switch (tier) {
+    case 'live':
+      style = 'bg-accent';
+      break;
+    case 'recent':
+      style = 'bg-accent/60';
+      break;
+    case 'aging':
+      style = 'bg-accent/30';
+      break;
+    case 'dormant':
+      style = 'border border-edge-strong bg-transparent';
+      break;
+    default: {
+      const unhandled: never = tier;
+      return unhandled;
+    }
+  }
   return (
     <span
       aria-hidden

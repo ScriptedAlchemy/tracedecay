@@ -11,6 +11,7 @@ import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   connectEvents,
+  eventProjectId,
   type LiveActivityPulse,
   type SseConnection,
   type SseConnectionState,
@@ -198,7 +199,7 @@ export function targetedInvalidationKeys(
     if (event.payload['family'] === 'storage_telemetry_invalidated') storage = true;
     if (event.payload['family'] === 'project_registry_changed') projects = true;
     if (event.payload['family'] === 'task_activity') {
-      const projectId = exactProjectId(event.scope);
+      const projectId = eventProjectId(event);
       if (projectId !== null) workProjects.add(projectId);
     }
   }
@@ -217,17 +218,6 @@ export function targetedInvalidationKeys(
     }
   }
   return keys;
-}
-
-function exactProjectId(scope: string): string | null {
-  try {
-    const parsed: unknown = JSON.parse(scope);
-    if (!isRecord(parsed)) return null;
-    const projectId = parsed['project_id'];
-    return typeof projectId === 'string' && projectId.length > 0 ? projectId : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

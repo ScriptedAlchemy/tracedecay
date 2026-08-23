@@ -439,6 +439,10 @@ function projectionValue<P extends DeliveryProjection>(
     case 'denied':
     case 'not_published':
       return null;
+    default: {
+      const unhandled: never = projection.state;
+      return unhandled;
+    }
   }
 }
 
@@ -484,6 +488,10 @@ function ProjectionState({ projection }: { projection: DeliveryProjection }) {
           detail={parts.length > 0 ? parts.join(' · ') : undefined}
         />
       );
+    }
+    default: {
+      const unhandled: never = projection.state;
+      return unhandled;
     }
   }
 }
@@ -684,7 +692,11 @@ function threadLocation(thread: ReviewThread): string {
 }
 
 function renderReviews(timeline: DeliveryReviewTimelineV1) {
-  const threads = groupReviewThreads(timeline.items);
+  return <ReviewTimeline timeline={timeline} />;
+}
+
+function ReviewTimeline({ timeline }: { timeline: DeliveryReviewTimelineV1 }) {
+  const threads = useMemo(() => groupReviewThreads(timeline.items), [timeline.items]);
   return (
     <div className="flex flex-col gap-1.5">
       <HeadComparison

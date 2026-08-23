@@ -79,15 +79,15 @@ export function connectEvents(url = '/api/events'): SseConnection {
   /** Record an accepted event as a pulse. Only newly accepted events pulse —
    * duplicates, stale generations, and superseded revisions must not light the
    * visualization twice for one real occurrence. */
-  const recordActivity = (raw: unknown, streamId: string) => {
-    const scope = isRecord(raw) && isRecord(raw.scope) ? raw.scope : null;
-    const kind = isRecord(raw) && isRecord(raw.kind) ? raw.kind : null;
+  const recordActivity = (event: DecodedSseEvent) => {
+    const payload = event.payload;
     activity = [
       ...activity,
       {
-        projectId: typeof scope?.project_id === 'string' ? scope.project_id : null,
-        family: typeof kind?.family === 'string' ? kind.family : streamId,
-        streamId,
+        projectId: event.projectId,
+        family:
+          isRecord(payload) && typeof payload.family === 'string' ? payload.family : event.stream.stream_id,
+        streamId: event.stream.stream_id,
         at: Date.now(),
       },
     ].slice(-MAX_ACTIVITY_PULSES);
@@ -104,12 +104,12 @@ export function connectEvents(url = '/api/events'): SseConnection {
     setState('live');
     try {
       const raw: unknown = JSON.parse(event.data);
-      const parsed = decodeDashboardEvent(raw);
+      const parsed = decodeDashboardEvent(raw, event.data.length);
       if (!parsed) return;
       if (isRecord(raw) && typeof raw.delivery_receipt === 'string') {
         void acknowledgeDelivery(deliveryAckUrl, raw.delivery_receipt);
       }
-      if (reducer.ingest(parsed)) recordActivity(raw, parsed.stream.stream_id);
+      if (reducer.ingest(parsed)) recordActivity(parsed);
       notify();
     } catch {
       // Malformed frames are dropped; gap detection triggers a canonical
@@ -159,7 +159,15 @@ async function acknowledgeDelivery(url: string, receipt: string): Promise<void> 
   // retry the token; the server owns its exact deadline and terminal state.
 }
 
-function decodeDashboardEvent(value: unknown): SseEventEnvelope | null {
+/** Decode-time extras the reducer and activity ring read without re-walking
+ * the raw frame. `SseEventEnvelope` stays the monotone contract; these fields
+ * ride alongside it from this decoder only. */
+interface DecodedSseEvent extends SseEventEnvelope {
+  readonly projectId: string | null;
+  readonly frameBytes: number;
+}
+
+function decodeDashboardEvent(value: unknown, frameBytes: number): DecodedSseEvent | null {
   if (!isRecord(value) || !isRecord(value.scope) || !isRecord(value.kind)) return null;
   if (
     typeof value.stream !== 'string'
@@ -183,6 +191,9 @@ function decodeDashboardEvent(value: unknown): SseEventEnvelope | null {
   if (watermark !== null && typeof watermark.watermark === 'string') {
     watermarkValue = watermark.watermark;
   }
+  const rawProjectId = value.scope.project_id;
+  const projectId =
+    typeof rawProjectId === 'string' && rawProjectId.length > 0 ? rawProjectId : null;
   return {
     stream: {
       stream_id: value.stream,
@@ -198,7 +209,30 @@ function decodeDashboardEvent(value: unknown): SseEventEnvelope | null {
     watermark: watermarkValue,
     coverage: value.coverage,
     payload: value.kind,
+    projectId,
+    frameBytes,
   };
+}
+
+/** Project id extracted at decode, or parsed from a hand-built envelope's
+ * opaque scope string (tests construct those without going through decode). */
+export function eventProjectId(event: SseEventEnvelope): string | null {
+  if ('projectId' in event) {
+    const id = (event as DecodedSseEvent).projectId;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  }
+  return parseScopeProjectId(event.scope);
+}
+
+function parseScopeProjectId(scope: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(scope);
+    if (!isRecord(parsed)) return null;
+    const projectId = parsed['project_id'];
+    return typeof projectId === 'string' && projectId.length > 0 ? projectId : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -146,19 +146,27 @@ function blob(
  * several channels sharing a trunk read as one braided river rather than as
  * parallel arrows.
  */
-function traceCurve(ctx: CanvasRenderingContext2D, points: readonly Point[], move: boolean): void {
-  if (points.length === 0) return;
-  const first = points[0]!;
-  const last = points[points.length - 1]!;
-  const p: Point[] = [first, ...points, last];
-  const start = p[1]!;
+function curvePoint(points: readonly Point[], count: number, index: number): Point {
+  if (index <= 0) return points[0]!;
+  if (index >= count + 1) return points[count - 1]!;
+  return points[index - 1]!;
+}
+
+function traceCurve(
+  ctx: CanvasRenderingContext2D,
+  points: readonly Point[],
+  move: boolean,
+  count = points.length,
+): void {
+  if (count === 0) return;
+  const start = points[0]!;
   if (move) ctx.moveTo(start[0], start[1]);
   else ctx.lineTo(start[0], start[1]);
-  for (let i = 1; i < p.length - 2; i += 1) {
-    const [x0, y0] = p[i - 1]!;
-    const [x1, y1] = p[i]!;
-    const [x2, y2] = p[i + 1]!;
-    const [x3, y3] = p[i + 2]!;
+  for (let i = 1; i < count; i += 1) {
+    const [x0, y0] = curvePoint(points, count, i - 1);
+    const [x1, y1] = curvePoint(points, count, i);
+    const [x2, y2] = curvePoint(points, count, i + 1);
+    const [x3, y3] = curvePoint(points, count, i + 2);
     ctx.bezierCurveTo(
       x1 + (x2 - x0) / 6,
       y1 + (y2 - y0) / 6,
@@ -178,6 +186,16 @@ function traceCurve(ctx: CanvasRenderingContext2D, points: readonly Point[], mov
  * converging on the focus and a downstream distributary fanning away from it
  * are the same curve read in opposite directions rather than two shapes.
  */
+/** Per-draw scratch. Draw is synchronous on the main thread, so one ribbon at
+ * a time reuses these instead of allocating three arrays per channel. */
+const ribbonNormals: Point[] = [];
+const ribbonUpper: Point[] = [];
+const ribbonLower: Point[] = [];
+
+function growScratch(buffer: Point[], n: number): void {
+  while (buffer.length < n) buffer.push([0, 0]);
+}
+
 function ribbon(
   ctx: CanvasRenderingContext2D,
   points: readonly Point[],
@@ -186,14 +204,17 @@ function ribbon(
 ): void {
   const n = points.length;
   if (n < 2) return;
-  const normals = points.map((_, i) => {
+  growScratch(ribbonNormals, n);
+  growScratch(ribbonUpper, n);
+  growScratch(ribbonLower, n);
+  for (let i = 0; i < n; i += 1) {
     const a = points[Math.max(0, i - 1)]!;
     const b = points[Math.min(n - 1, i + 1)]!;
     const dx = b[0] - a[0];
     const dy = b[1] - a[1];
     const len = Math.hypot(dx, dy) || 1;
-    return [-dy / len, dx / len] as const;
-  });
+    ribbonNormals[i] = [-dy / len, dx / len];
+  }
   const mouthWidth = Math.max(widthStart, widthEnd);
   const headWidth = Math.min(widthStart, widthEnd);
   // Which end the mouth is on. `t` always runs head → mouth so the profile is
@@ -204,18 +225,17 @@ function ribbon(
     const along = i / (n - 1);
     return (mouthWidth * taperAt(mouthAtEnd ? along : 1 - along, headFraction)) / 2;
   };
-  const upper: Point[] = points.map((pt, i) => [
-    pt[0] + normals[i]![0] * half(i),
-    pt[1] + normals[i]![1] * half(i),
-  ]);
-  const lower: Point[] = points
-    .map(
-      (pt, i): Point => [pt[0] - normals[i]![0] * half(i), pt[1] - normals[i]![1] * half(i)],
-    )
-    .reverse();
+  for (let i = 0; i < n; i += 1) {
+    const pt = points[i]!;
+    const nx = ribbonNormals[i]![0];
+    const ny = ribbonNormals[i]![1];
+    const offset = half(i);
+    ribbonUpper[i] = [pt[0] + nx * offset, pt[1] + ny * offset];
+    ribbonLower[n - 1 - i] = [pt[0] - nx * offset, pt[1] - ny * offset];
+  }
   ctx.beginPath();
-  traceCurve(ctx, upper, true);
-  traceCurve(ctx, lower, false);
+  traceCurve(ctx, ribbonUpper, true, n);
+  traceCurve(ctx, ribbonLower, false, n);
   ctx.closePath();
 }
 

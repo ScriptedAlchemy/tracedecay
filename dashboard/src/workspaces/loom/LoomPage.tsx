@@ -157,27 +157,41 @@ function TemporalBody({
     );
   }
 
-  const selected =
-    weave.threads.find((thread) => thread.id === selectedId) ?? null;
-  const selectedCommits = selected
-    ? data.commits.filter(
-        (commit) =>
-          commit.provider === selected.host &&
-          commit.session_id === selected.sessionId,
-      )
-    : [];
-  const selectedFiles = selected
-    ? data.edited_files.filter(
-        (file) =>
-          file.provider === selected.host && file.session_id === selected.sessionId,
-      )
-    : [];
-  const selectedSpans = selected
-    ? data.branch_spans.filter(
-        (span) =>
-          span.provider === selected.host && span.session_id === selected.sessionId,
-      )
-    : [];
+  const selected = useMemo(
+    () => weave.threads.find((thread) => thread.id === selectedId) ?? null,
+    [selectedId, weave.threads],
+  );
+  const selectedCommits = useMemo(
+    () =>
+      selected
+        ? data.commits.filter(
+            (commit) =>
+              commit.provider === selected.host &&
+              commit.session_id === selected.sessionId,
+          )
+        : [],
+    [data.commits, selected],
+  );
+  const selectedFiles = useMemo(
+    () =>
+      selected
+        ? data.edited_files.filter(
+            (file) =>
+              file.provider === selected.host && file.session_id === selected.sessionId,
+          )
+        : [],
+    [data.edited_files, selected],
+  );
+  const selectedSpans = useMemo(
+    () =>
+      selected
+        ? data.branch_spans.filter(
+            (span) =>
+              span.provider === selected.host && span.session_id === selected.sessionId,
+          )
+        : [],
+    [data.branch_spans, selected],
+  );
   const commitStatus =
     data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
   const branchStatus =
