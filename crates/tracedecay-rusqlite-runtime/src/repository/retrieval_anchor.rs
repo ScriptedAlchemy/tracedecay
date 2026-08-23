@@ -122,7 +122,8 @@ impl RetrievalAnchorExecutor {
                 read_anchor(snapshot, anchor_id, owner).map(RetrievalAnchorReadResultV1::Anchor)
             }
             RetrievalAnchorReadOperationV1::CurrentDisposition { anchor_id, owner } => {
-                current_record(snapshot, anchor_id, owner, &encode(owner)?)
+                let owner_json = encode(owner)?;
+                current_record(snapshot, anchor_id, owner, &owner_json)
                     .map(RetrievalAnchorReadResultV1::CurrentDisposition)
             }
             RetrievalAnchorReadOperationV1::Derivatives { anchor_id, owner } => {
@@ -130,7 +131,8 @@ impl RetrievalAnchorExecutor {
                     .map(RetrievalAnchorReadResultV1::Derivatives)
             }
             RetrievalAnchorReadOperationV1::Tombstone { anchor_id, owner } => {
-                let tombstone = current_record(snapshot, anchor_id, owner, &encode(owner)?)?
+                let owner_json = encode(owner)?;
+                let tombstone = current_record(snapshot, anchor_id, owner, &owner_json)?
                     .filter(|record| {
                         matches!(
                             record.state(),

@@ -19,6 +19,13 @@ use sha2::{Digest, Sha256};
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 
+/// Writer and reader connections are single-threaded actors, so rusqlite's
+/// per-connection statement cache is the reuse path for exact-SQL execute
+/// and query. Sixteen (the rusqlite default) is too small for the distinct
+/// statements a store issues; 128 covers the repeated catalog without
+/// holding an unbounded compile cache.
+const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
+
 /// Pins and identifies the exact regular file that an attachment is about to
 /// open. The descriptor stays alive until every SQLite worker has reported
 /// startup, after which `verify_current_path` proves the pathname still names
@@ -502,6 +509,7 @@ fn finish_open(
     apply_pragmas(&connection, mode, fresh_writer)?;
     assert_compile_options(&connection)?;
     apply_limits(&connection, mode)?;
+    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
     install_authorizer(&connection, mode)?;
     Ok(connection)
 }
@@ -524,6 +532,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     apply_pragmas(&connection, ConnectionMode::Reader, false)?;
     assert_compile_options(&connection)?;
     apply_limits(&connection, ConnectionMode::Reader)?;
+    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
     install_authorizer(&connection, ConnectionMode::Reader)?;
     Ok(connection)
 }

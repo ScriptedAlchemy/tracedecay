@@ -694,7 +694,7 @@ fn execute_request(
         Some(Arc::clone(&insert_tracker)),
         || match request {
             SqlRequest::Validate(statement) => connection
-                .prepare(&statement.sql)
+                .prepare_cached(&statement.sql)
                 .map(|_| SqlResult::Validated)
                 .map_err(|error| sqlite_error("validate statement", error)),
             SqlRequest::Execute(statement) => {
@@ -785,7 +785,7 @@ fn execute_statement(
         .into_iter()
         .map(ExactSqlValue::into_rusqlite);
     let mut prepared = connection
-        .prepare(&statement.sql)
+        .prepare_cached(&statement.sql)
         .map_err(|error| sqlite_error("prepare execute", error))?;
     let changed_rows = prepared
         .execute(params_from_iter(values))
@@ -888,7 +888,7 @@ fn execute_query_unchecked(
     request: ExactSqlStatement,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     let mut statement = connection
-        .prepare(&request.sql)
+        .prepare_cached(&request.sql)
         .map_err(|error| sqlite_error("prepare query", error))?;
     let columns = statement
         .column_names()

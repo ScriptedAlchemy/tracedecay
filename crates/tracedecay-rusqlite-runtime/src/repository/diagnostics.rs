@@ -241,7 +241,7 @@ fn read_logical_successor(
          AND span_start = ?6 AND span_end = ?7 AND message_digest = ?8 \
          ORDER BY diagnostic_anchor"
     );
-    let mut statement = connection.prepare(&sql)?;
+    let mut statement = connection.prepare_cached(&sql)?;
     let mut records = statement
         .query_map(
             params![
@@ -328,7 +328,8 @@ fn read_record_by_anchor(
 ) -> rusqlite::Result<Option<GenerationDiagnosticV1>> {
     let sql = format!("{SELECT_RECORDS} WHERE diagnostic_anchor = ?1");
     connection
-        .query_row(&sql, [anchor.as_str()], record_from_row)
+        .prepare_cached(&sql)?
+        .query_row([anchor.as_str()], record_from_row)
         .optional()
 }
 
@@ -338,7 +339,7 @@ fn read_records<const N: usize>(
     parameters: [&str; N],
 ) -> rusqlite::Result<Vec<GenerationDiagnosticV1>> {
     let sql = format!("{SELECT_RECORDS} {clause}");
-    let mut statement = connection.prepare(&sql)?;
+    let mut statement = connection.prepare_cached(&sql)?;
     statement
         .query_map(rusqlite::params_from_iter(parameters), record_from_row)?
         .collect()

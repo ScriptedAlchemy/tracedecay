@@ -4,7 +4,7 @@
 //! in `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`
 //! as well, so this module only ever reads them.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use tracedecay_domain::RetrievalAnchorRecordV3;
@@ -121,13 +121,17 @@ pub(super) struct AnchorLivenessCache {
 
 /// Loads every anchor row and latest disposition for `anchor_ids` in two
 /// batched statements, regardless of how many occurrences reference them.
-pub(super) fn load_anchor_liveness(
+pub(super) fn load_anchor_liveness<'a, I>(
     connection: &rusqlite::Connection,
-    anchor_ids: &BTreeSet<String>,
-) -> rusqlite::Result<AnchorLivenessCache> {
+    anchor_ids: I,
+) -> rusqlite::Result<AnchorLivenessCache>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut anchors: HashMap<String, AnchorRow> = HashMap::new();
     let mut latest: HashMap<(String, String), (i64, String)> = HashMap::new();
-    let ids: Vec<&str> = anchor_ids.iter().map(String::as_str).collect();
+    let unique: BTreeSet<&str> = anchor_ids.into_iter().collect();
+    let ids: Vec<&str> = unique.into_iter().collect();
     for chunk in ids.chunks(ANCHOR_LIVENESS_BATCH) {
         let placeholders = (1..=chunk.len())
             .map(|index| format!("?{index}"))
@@ -171,14 +175,16 @@ pub(super) fn load_anchor_liveness(
             })?;
         for row in disposition_rows {
             let (anchor_id, owner_json, state, sequence) = row?;
-            latest
-                .entry((anchor_id, owner_json))
-                .and_modify(|current| {
-                    if sequence >= current.0 {
-                        *current = (sequence, state.clone());
+            match latest.entry((anchor_id, owner_json)) {
+                Entry::Occupied(mut occupied) => {
+                    if sequence >= occupied.get().0 {
+                        *occupied.get_mut() = (sequence, state);
                     }
-                })
-                .or_insert((sequence, state));
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert((sequence, state));
+                }
+            }
         }
     }
     let dispositions = latest

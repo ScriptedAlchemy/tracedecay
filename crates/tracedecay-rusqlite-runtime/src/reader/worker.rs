@@ -528,7 +528,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
             }
             SnapshotCommand::TableSizes { reply } => {
                 let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
-                    let mut statement = transaction.prepare(
+                    let mut statement = transaction.prepare_cached(
                         "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
                          FROM sqlite_schema AS schema_entry \
                          LEFT JOIN dbstat ON dbstat.name = schema_entry.name \

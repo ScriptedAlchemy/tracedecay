@@ -262,7 +262,7 @@ impl ExternalSourceExecutor {
     ) -> rusqlite::Result<()> {
         command.validate().map_err(invalid)?;
         let current_digest = savepoint
-            .prepare(
+            .prepare_cached(
                 "SELECT state_digest
                  FROM external_source_acquisition_queue_v1
                  WHERE binding_id = ?1",
@@ -369,7 +369,7 @@ fn load_acquisition_state(
     binding: &SourceBindingIdentityV1,
 ) -> rusqlite::Result<Option<SourceAcquisitionQueueStateV1>> {
     let state = connection
-        .prepare(
+        .prepare_cached(
             "SELECT state_json
              FROM external_source_acquisition_queue_v1
              WHERE binding_id = ?1",
@@ -398,7 +398,7 @@ fn load_next_ready_acquisition(
     now: tracedecay_domain::UtcMicros,
 ) -> rusqlite::Result<Option<SourceAcquisitionQueueStateV1>> {
     let state = connection
-        .prepare(
+        .prepare_cached(
             "SELECT state_json
              FROM external_source_acquisition_queue_v1
              WHERE not_before_micros IS NOT NULL
@@ -422,7 +422,7 @@ fn load_state(
     binding: &SourceBindingIdentityV1,
 ) -> rusqlite::Result<Option<SourceStoreStateV1>> {
     let row = connection
-        .prepare(
+        .prepare_cached(
             "SELECT source_id, definition_revision, binding_revision,
                     source_frontier_json, latest_source_receipt_digest,
                     latest_projection_receipt_digest
@@ -533,7 +533,7 @@ fn load_current_mutations(
         }
         _ => return Err(invalid("unknown external source current-object table")),
     };
-    let mut statement = connection.prepare(sql)?;
+    let mut statement = connection.prepare_cached(sql)?;
     statement
         .query_map([binding_id], |row| decode(row.get::<_, String>(0)?))?
         .collect()
