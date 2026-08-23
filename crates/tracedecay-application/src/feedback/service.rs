@@ -270,7 +270,10 @@ struct FeedbackCycleTerminal {
 enum FeedbackCycleFinishPath {
     Immediate,
     AfterRuntime {
-        runtime: Option<FeedbackRuntimeStateV1>,
+        /// Boxed so this variant does not widen the enum — and every
+        /// `FeedbackCycleTerminal` that carries it — by the whole runtime
+        /// state, which is ~441 bytes against a unit `Immediate`.
+        runtime: Option<Box<FeedbackRuntimeStateV1>>,
         stage_emission: FeedbackCycleStageEmission,
     },
 }
@@ -1005,7 +1008,7 @@ where
                     context,
                     request,
                     admission,
-                    runtime.as_ref(),
+                    runtime.as_deref(),
                     terminal.dedupe_key,
                     terminal.termination,
                     terminal.provider_states,
@@ -1890,7 +1893,7 @@ fn after_runtime_terminal(
         termination,
         provider_states,
         FeedbackCycleFinishPath::AfterRuntime {
-            runtime,
+            runtime: runtime.map(Box::new),
             stage_emission,
         },
     )
@@ -1909,7 +1912,7 @@ fn after_runtime_terminal_with_baselines(
             termination,
             provider_states,
             FeedbackCycleFinishPath::AfterRuntime {
-                runtime,
+                runtime: runtime.map(Box::new),
                 stage_emission,
             },
         )
@@ -1929,7 +1932,7 @@ fn after_runtime_terminal_with_dedupe(
             termination,
             provider_states,
             FeedbackCycleFinishPath::AfterRuntime {
-                runtime,
+                runtime: runtime.map(Box::new),
                 stage_emission,
             },
         )
