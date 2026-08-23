@@ -1,5 +1,7 @@
 //! Current/as-of/lineage read paths and the commit-batch entry point.
 
+use std::collections::BTreeMap;
+
 use super::super::DatabaseFactStore;
 use super::super::primitives::{
     COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, ensure_project_memory_read_active, from_json,
@@ -8,7 +10,8 @@ use super::super::primitives::{
 };
 use super::{Projection, anchor_matches, commit_fact_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
+use crate::db::build_qmark_placeholders;
+use crate::db::engine::{Value, params};
 use tracedecay_domain::{
     Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
     FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState, RetrievalAnchorRecordV2,
@@ -21,6 +24,9 @@ use tracedecay_store::{
     FactWriteBatch, FactWriteControl, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
     StoredFactV1,
 };
+
+const CURRENT_FACTS_BATCH_SIZE: usize = 400;
+
 pub(in crate::store::memory) async fn query_current_facts_tx(
     snapshot: &Transaction<'_>,
     query: &CurrentFactsQuery,
@@ -66,13 +72,68 @@ pub(in crate::store::memory) async fn query_current_facts_tx(
     }
     drop(rows);
 
+    if fact_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut loaded = BTreeMap::new();
+    for batch in fact_ids.chunks(CURRENT_FACTS_BATCH_SIZE) {
+        let mut values = vec![
+            Value::Text(owner.kind.to_string()),
+            Value::Text(owner.project_id.clone()),
+            Value::Text(owner.json.clone()),
+        ];
+        values.extend(
+            batch
+                .iter()
+                .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
+        );
+        let sql = format!(
+            "SELECT facts.fact_id, current_facts.payload_access, current_facts.trust_score,
+                    current_facts.active_assertion_id, current_facts.last_event_id,
+                    current_facts.updated_at, payloads.payload_json
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             LEFT JOIN memory_v2_assertion_payloads AS payloads
+               ON payloads.assertion_id = current_facts.active_assertion_id
+              AND payloads.fact_id = current_facts.fact_id
+              AND payloads.owner_kind = current_facts.owner_kind
+              AND payloads.project_id = current_facts.project_id
+              AND current_facts.payload_access = 'eligible'
+             WHERE current_facts.owner_kind = ?
+               AND current_facts.project_id = ?
+               AND facts.owner_json = ?
+               AND current_facts.fact_id IN ({})",
+            build_qmark_placeholders(batch.len())
+        );
+        let mut batch_rows = snapshot
+            .query(&sql, values)
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        while let Some(row) = batch_rows
+            .next()
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?
+        {
+            let Some(fact) = stored_fact_from_current_row(&row, query.owner())? else {
+                return Err(storage_message(
+                    QUERY_OPERATION,
+                    "current fact disappeared in snapshot",
+                ));
+            };
+            loaded.insert(fact.fact_id().clone(), fact);
+        }
+        drop(batch_rows);
+    }
+
     let mut facts = Vec::with_capacity(fact_ids.len());
     for fact_id in fact_ids {
-        let fact = load_current_fact_tx(snapshot, &owner, query.owner(), &fact_id)
-            .await?
-            .ok_or_else(|| {
-                storage_message(QUERY_OPERATION, "current fact disappeared in snapshot")
-            })?;
+        let fact = loaded.remove(&fact_id).ok_or_else(|| {
+            storage_message(QUERY_OPERATION, "current fact disappeared in snapshot")
+        })?;
         facts.push(fact);
     }
     Ok(facts)
@@ -149,29 +210,39 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
     else {
         return Ok(None);
     };
-    let stored_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
-    if &stored_id != fact_id {
+    let Some(fact) = stored_fact_from_current_row(&row, typed_owner)? else {
+        return Ok(None);
+    };
+    if fact.fact_id() != fact_id {
         return Err(storage_message(
             QUERY_OPERATION,
             "current fact identity mismatch",
         ));
     }
-    let access = parse_payload_access(&row_string(&row, 1, QUERY_OPERATION)?)?;
-    let trust = Confidence::new(row_optional_f64(&row, 2, QUERY_OPERATION)?.ok_or_else(|| {
+    Ok(Some(fact))
+}
+
+fn stored_fact_from_current_row(
+    row: &crate::db::engine::Row,
+    typed_owner: &FactOwnerV1,
+) -> FactStoreResult<Option<StoredFactV1>> {
+    let stored_id = FactId::new(row_string(row, 0, QUERY_OPERATION)?)?;
+    let access = parse_payload_access(&row_string(row, 1, QUERY_OPERATION)?)?;
+    let trust = Confidence::new(row_optional_f64(row, 2, QUERY_OPERATION)?.ok_or_else(|| {
         storage_message(
             QUERY_OPERATION,
             "current fact trust score is unexpectedly null",
         )
     })?)?;
-    let Some(active_assertion_id) = row_optional_string(&row, 3, QUERY_OPERATION)? else {
+    let Some(active_assertion_id) = row_optional_string(row, 3, QUERY_OPERATION)? else {
         return Ok(None);
     };
     let active_assertion_id = FactAssertionId::new(active_assertion_id)?;
-    let last_event_id = FactEventId::new(row_string(&row, 4, QUERY_OPERATION)?)?;
-    let projected_as_of = UtcMicros(row_i64(&row, 5, QUERY_OPERATION)?);
+    let last_event_id = FactEventId::new(row_string(row, 4, QUERY_OPERATION)?)?;
+    let projected_as_of = UtcMicros(row_i64(row, 5, QUERY_OPERATION)?);
     let payload = match access {
         PayloadAccessState::Eligible => {
-            let payload_json = row_optional_string(&row, 6, QUERY_OPERATION)?
+            let payload_json = row_optional_string(row, 6, QUERY_OPERATION)?
                 .ok_or(FactStoreError::PayloadAccessMismatch)?;
             Some(from_json::<FactPayloadV1>(&payload_json, QUERY_OPERATION)?)
         }

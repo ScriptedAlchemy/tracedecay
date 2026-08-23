@@ -300,6 +300,17 @@ impl LocalStoreRuntimeResolverV1 {
     /// [`StoreRuntimeResolver`] adapts it to the registry's current generic
     /// infrastructure-failure channel without ever falling back to a locator.
     pub fn resolve_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
+        #[cfg(target_os = "linux")]
+        {
+            let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok();
+            return self.resolve_key_with_filesystem_safety(key, &|path| {
+                match mountinfo.as_deref() {
+                    Some(text) => filesystem_safety_from_linux_mountinfo(path, text),
+                    None => undetectable_filesystem(),
+                }
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
         self.resolve_key_with_filesystem_safety(key, &local_filesystem_safety)
     }
 

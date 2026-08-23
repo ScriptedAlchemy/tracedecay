@@ -6,7 +6,7 @@
 //! names remain stable; the shared retained-document owner merges the returned
 //! delta with its prior canonical rows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use tracedecay_domain::{ExtractionResult, NodeKind};
 use tree_sitter::{Node as TreeSitterNode, Tree};
@@ -209,45 +209,46 @@ pub(crate) fn merge_changed_extraction(
         .nodes
         .iter()
         .filter(|node| node.kind != NodeKind::File)
-        .map(|node| node.id.clone())
-        .collect::<BTreeSet<_>>();
-    let prior_roots = previous
-        .nodes
-        .iter()
-        .filter(|node| node.kind != NodeKind::File)
-        .filter(|node| {
-            node_intersects_edit(node, edit_start, old_edit_end) || delta_ids.contains(&node.id)
-        })
-        .map(|node| node.id.clone())
-        .collect::<Vec<_>>();
-    let mut removed = prior_roots.into_iter().collect::<BTreeSet<_>>();
-    loop {
-        let descendants = previous
-            .nodes
-            .iter()
-            .filter_map(|node| {
-                node.parent_id
-                    .as_ref()
-                    .filter(|parent| removed.contains(*parent) && !removed.contains(&node.id))
-                    .map(|_| node.id.clone())
-            })
-            .collect::<Vec<_>>();
-        if descendants.is_empty() {
-            break;
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut children_by_parent = HashMap::<&str, Vec<&str>>::new();
+    let mut removed = HashSet::<&str>::new();
+    for node in &previous.nodes {
+        if let Some(parent) = node.parent_id.as_deref() {
+            children_by_parent
+                .entry(parent)
+                .or_default()
+                .push(node.id.as_str());
         }
-        removed.extend(descendants);
+        if node.kind != NodeKind::File
+            && (node_intersects_edit(node, edit_start, old_edit_end)
+                || delta_ids.contains(node.id.as_str()))
+        {
+            removed.insert(node.id.as_str());
+        }
+    }
+    let mut pending = removed.iter().copied().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        let Some(children) = children_by_parent.get(id) else {
+            continue;
+        };
+        for child in children {
+            if removed.insert(*child) {
+                pending.push(*child);
+            }
+        }
     }
 
     let mut merged = previous.clone();
     merged
         .nodes
-        .retain(|node| node.kind != NodeKind::File && !removed.contains(&node.id));
-    merged
-        .edges
-        .retain(|edge| !removed.contains(&edge.source) && !removed.contains(&edge.target));
+        .retain(|node| node.kind != NodeKind::File && !removed.contains(node.id.as_str()));
+    merged.edges.retain(|edge| {
+        !removed.contains(edge.source.as_str()) && !removed.contains(edge.target.as_str())
+    });
     merged
         .unresolved_refs
-        .retain(|reference| !removed.contains(&reference.from_node_id));
+        .retain(|reference| !removed.contains(reference.from_node_id.as_str()));
     merged.errors.clear();
 
     merged.nodes.append(&mut delta.nodes);

@@ -264,7 +264,6 @@ pub trait LanguageExtractor: Send + Sync {
     /// Extract nodes, edges, and unresolved refs from source code.
     ///
     /// `file_path` is the relative path used for qualified names and node IDs.
-    /// `source` is the source code to parse.
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult;
 
     /// Extract the legacy graph and any structured evidence supported by this

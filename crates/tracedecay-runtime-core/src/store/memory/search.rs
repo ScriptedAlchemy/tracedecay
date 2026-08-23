@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use crate::memory::entities::normalize_entity;
 
-use crate::db::engine::params;
+use crate::db::build_qmark_placeholders;
+use crate::db::engine::Value;
 use crate::db::{Database, DatabaseMemoryTransaction as Transaction};
 use serde::{Deserialize, Serialize};
 
@@ -610,34 +611,44 @@ pub(super) async fn find_project_memory_contradictions_tx(
 async fn project_memory_update_retrieval_projection_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    fact_id: &FactId,
+    fact_ids: &[FactId],
     recall: bool,
     timestamp: UtcMicros,
 ) -> FactStoreResult<()> {
+    debug_assert!(!fact_ids.is_empty());
     let key = OwnerKey::new(owner)?;
-    let changed = transaction
-        .execute(
-            "UPDATE memory_v2_current_facts SET
+    let recall = i64::from(recall);
+    let mut values = vec![
+        Value::Integer(recall),
+        Value::Integer(timestamp.0),
+        Value::Integer(recall),
+        Value::Integer(timestamp.0),
+        Value::Text(key.kind.to_string()),
+        Value::Text(key.project_id.clone()),
+    ];
+    values.extend(
+        fact_ids
+            .iter()
+            .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
+    );
+    let sql = format!(
+        "UPDATE memory_v2_current_facts SET
                 retrieval_count = retrieval_count + 1,
-                access_count = access_count + ?1,
-                last_retrieved_at = ?2,
-                last_recalled_at = CASE WHEN ?1 = 1 THEN ?2 ELSE last_recalled_at END
-             WHERE fact_id = ?3
-               AND owner_kind = ?4
-               AND project_id = ?5
+                access_count = access_count + ?,
+                last_retrieved_at = ?,
+                last_recalled_at = CASE WHEN ? = 1 THEN ? ELSE last_recalled_at END
+             WHERE owner_kind = ?
+               AND project_id = ?
                AND payload_access = 'eligible'
-               AND active_assertion_id IS NOT NULL",
-            params![
-                i64::from(recall),
-                timestamp.0,
-                fact_id.as_str(),
-                key.kind,
-                key.project_id.as_str(),
-            ],
-        )
+               AND active_assertion_id IS NOT NULL
+               AND fact_id IN ({})",
+        build_qmark_placeholders(fact_ids.len())
+    );
+    let changed = transaction
+        .execute(&sql, values)
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    if changed != 1 {
+    if changed != fact_ids.len() as u64 {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
             "retrieval target has no current projection",
@@ -751,11 +762,11 @@ pub(super) async fn record_project_memory_fact_retrieval_tx(
         .collect::<Vec<_>>();
 
     let now = project_memory_now()?;
-    for fact_id in &fact_ids {
+    if !fact_ids.is_empty() {
         project_memory_update_retrieval_projection_tx(
             transaction,
             request.owner(),
-            fact_id,
+            &fact_ids,
             request.recall(),
             now,
         )

@@ -1145,23 +1145,7 @@ impl StoreRuntimeClientLease {
         &self,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
-        // File identity is read authority, not write authority. Writable entry
-        // points revalidate the retained capability in
-        // `validate_database_write_authority`; read-only facades must remain
-        // usable after that writer scope is revoked.
-        let current_file_identity = crate::db::sqlite_generation_identity(self.locator().path())
-            .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: "could not verify the registered SQLite file identity".to_owned(),
-            })?;
-        let opened_file_identity = self.inner.opened_file_identity;
-        if current_file_identity != opened_file_identity {
-            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: "database file identity changed after registry attachment".to_owned(),
-            });
-        }
-        Ok(opened_file_identity)
+        self.inner.validate_opened_file_identity(operation)
     }
 
     pub fn dispatch_read(

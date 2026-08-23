@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::build_qmark_placeholders;
 use crate::db::engine::{Value, params};
 
 use tracedecay_domain::{
@@ -201,11 +202,11 @@ async fn load_project_memory_projections_inner_tx(
             Value::Text(key.project_id.clone()),
             Value::Text(key.json.clone()),
         ];
-        let mut placeholders = Vec::with_capacity(batch.len());
-        for fact_id in batch {
-            placeholders.push(format!("?{}", values.len() + 1));
-            values.push(Value::Text(fact_id.as_str().to_owned()));
-        }
+        values.extend(
+            batch
+                .iter()
+                .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
+        );
         let sql = format!(
             "SELECT facts.fact_id,
                     current_facts.payload_access,
@@ -235,11 +236,11 @@ async fn load_project_memory_projections_inner_tx(
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
               AND current_facts.payload_access = 'eligible'
-             WHERE current_facts.owner_kind = ?1
-               AND current_facts.project_id = ?2
-               AND facts.owner_json = ?3
+             WHERE current_facts.owner_kind = ?
+               AND current_facts.project_id = ?
+               AND facts.owner_json = ?
                AND current_facts.fact_id IN ({})",
-            placeholders.join(", ")
+            build_qmark_placeholders(batch.len())
         );
         let mut rows = transaction
             .query(&sql, values)
@@ -330,7 +331,7 @@ async fn load_project_memory_projections_inner_tx(
     ensure_active()?;
     let ordered = fact_ids
         .iter()
-        .filter_map(|fact_id| projections.get(fact_id).cloned())
+        .filter_map(|fact_id| projections.remove(fact_id))
         .collect();
     ensure_active()?;
     Ok(ordered)
