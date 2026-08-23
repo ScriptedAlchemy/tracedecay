@@ -20,11 +20,6 @@ fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
     crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
     let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
-    // Hook telemetry is fail-closed: the timing span only records a
-    // `hook_completed` row once a runtime configuration snapshot is published.
-    // Bootstrap the default snapshot so these disposition rows are observable.
-    crate::config::bootstrap_runtime_configuration(project_root, &layout)
-        .expect("publish hook test runtime configuration");
     layout.data_root
 }
 

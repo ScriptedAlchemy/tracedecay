@@ -528,7 +528,7 @@ fn opencode_event_uses_nested_properties_identity() {
 
 fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
+        "../../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
     ))
     .unwrap();
     let event = fixture["events"]
@@ -771,7 +771,9 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
     let binding = spool_binding(host, [family]);
     let decoded = tracedecay_hooks::decode_native_hook_event(
         host,
-        include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
+        include_bytes!(
+            "../../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+        ),
     )
     .unwrap();
     let first_envelope = decoded.into_envelope(&binding, first).unwrap();
@@ -868,10 +870,11 @@ fn cursor_saved_edits_preserve_exact_file_identity() {
 
 #[test]
 fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
-    let fixture =
-        include_str!("../../../tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json")
-            .replace("<SESSION_ID>", "session.kimi.native")
-            .replace("<TOOL_CALL_ID>", "call.kimi.native");
+    let fixture = include_str!(
+        "../../../../../tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
+    )
+    .replace("<SESSION_ID>", "session.kimi.native")
+    .replace("<TOOL_CALL_ID>", "call.kimi.native");
     let fields = serde_json::from_str::<NativeIdentityFields>(&fixture).unwrap();
     let material = native_material(
         &fixture,
@@ -891,7 +894,7 @@ fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
 #[test]
 fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
     let fixture =
-        include_str!("../../../tests/fixtures/packaged_host_events/hermes/saved-edit.json");
+        include_str!("../../../../../tests/fixtures/packaged_host_events/hermes/saved-edit.json");
     let material = native_material(
         fixture,
         tracedecay_hooks::HookEventFamily::ToolLifecycle,
@@ -908,8 +911,9 @@ fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
 
 #[test]
 fn hermes_adapter_fixture_preserves_native_terminal_identity() {
-    let fixture =
-        include_str!("../../../tests/fixtures/packaged_host_events/hermes/terminal-receipt.json");
+    let fixture = include_str!(
+        "../../../../../tests/fixtures/packaged_host_events/hermes/terminal-receipt.json"
+    );
     let material = native_material(
         fixture,
         tracedecay_hooks::HookEventFamily::ToolLifecycle,
@@ -927,7 +931,7 @@ fn hermes_adapter_fixture_preserves_native_terminal_identity() {
 #[test]
 fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
+        "../../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
     ))
     .unwrap();
     let tool_after = fixture["events"]

@@ -25,7 +25,7 @@ pub(crate) fn register_github_stack_hook_runtime(
     scope: &ResolvedScope,
     runtime: &Arc<DaemonGitHubStackRuntimeV1>,
 ) {
-    let (project_id, worktree_id) = crate::hooks::hook_scope_locators(scope);
+    let (project_id, worktree_id) = tracedecay_agent_hosts::hooks::hook_scope_locators(scope);
     if let Ok(mut registry) = runtime_registry().lock() {
         registry.insert((project_id, worktree_id), Arc::downgrade(runtime));
     }

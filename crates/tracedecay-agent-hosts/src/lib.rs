@@ -15,8 +15,8 @@
 //! ## Registered ports
 //!
 //! A handful of root-owned runtimes cannot become a dependency edge (the MCP
-//! tool catalog, the hook runtime, the Codex app-server backend, and the
-//! registered database's canonical project key). Each is a
+//! tool catalog, Hook daemon/identity composition, the Codex app-server
+//! backend, and the registered database's canonical project key). Each is a
 //! [`crate::ports`] slot the root registers at startup
 //! (`src/agents.rs::register_mcp_tool_catalog_ports`,
 //! `src/runtime_ports.rs`); every port degrades to a documented inert answer
@@ -59,13 +59,16 @@ pub(crate) fn register_test_schema_installer() {
 pub mod agents;
 pub mod analytics;
 pub mod automation;
+pub mod hooks;
 pub mod ports;
 pub mod product_version;
+pub mod shell;
 pub mod tool_name;
 
 pub use product_version::PRODUCT_VERSION;
 pub(crate) use tracedecay_usecases as application;
 pub(crate) use tracedecay_usecases::request_identity;
+pub(crate) use tracedecay_usecases::user_config;
 
 // Kernel shims. `tracedecay-runtime-core` owns the substrate these two
 // subsystems were extracted alongside; aliasing the kernel modules into this
@@ -73,7 +76,7 @@ pub(crate) use tracedecay_usecases::request_identity;
 // code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
 // do on the other side of the split.
 pub(crate) use tracedecay_runtime_core::{
-    config, db, errors, memory, privacy, runtime_identity, storage, store, worktree,
+    branch, config, db, errors, memory, privacy, runtime_identity, storage, store, worktree,
 };
 
 /// Kernel-owned slice of the former root `tracedecay` façade module.

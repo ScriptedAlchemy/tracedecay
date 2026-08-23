@@ -456,7 +456,6 @@ crossterm = "0.28"
 fs2 = "0.4"
 same-file = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-shell-words = "1.1"
 open = "5.3"
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce

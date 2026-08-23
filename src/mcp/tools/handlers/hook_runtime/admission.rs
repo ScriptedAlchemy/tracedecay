@@ -271,7 +271,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     native_session_id: Option<SessionId>,
-    native_lifecycle: Option<crate::hooks::NativeContextScoutLifecycleV1>,
+    native_lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
     project_sessions: Option<&RegisteredGlobalDb>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {

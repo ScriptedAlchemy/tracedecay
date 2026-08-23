@@ -2,9 +2,9 @@ use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
-#[cfg(unix)]
-use tracedecay::hooks::cursor_pre_compact_via_daemon;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(unix)]
+use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
 use tracedecay_sessions::runtime::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,

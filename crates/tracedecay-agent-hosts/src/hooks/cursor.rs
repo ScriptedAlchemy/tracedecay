@@ -496,7 +496,7 @@ fn cursor_hint_root(
 
 fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
     let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+    if !crate::ports::hook_runtime::is_project_initialized(&root) {
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",
@@ -542,13 +542,15 @@ pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<Pa
 async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
     let mut resolved = None;
     for candidate in cursor_hook_root_candidates(parsed) {
-        if let Some(root) = crate::config::discover_project_root_with_identity(&candidate).await {
+        if let Some(root) =
+            crate::ports::hook_runtime::resolve_project_root_with_identity(&candidate).await
+        {
             resolved = Some(root);
             break;
         }
     }
     let cwd_root = match cursor_hook_cwd(parsed) {
-        Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
+        Some(cwd) => crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await,
         None => None,
     };
     match (cwd_root, resolved) {
@@ -568,7 +570,7 @@ fn cursor_hook_root_candidates(event: &Value) -> Vec<PathBuf> {
     if let Some(cwd) = cursor_hook_cwd(event) {
         push_unique(cwd);
     }
-    if let Some(project_root) = crate::config::brand_env("PROJECT_ROOT") {
+    if let Ok(project_root) = std::env::var("TRACEDECAY_PROJECT_ROOT") {
         push_unique(PathBuf::from(project_root));
     }
     if let Some(file_path) = event
@@ -697,7 +699,7 @@ async fn notify_cursor_after_shell_event(
     let Some(root) = root else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(root) {
+    if !crate::ports::hook_runtime::is_project_initialized(root) {
         return;
     }
     let cwd = cursor_hook_cwd(parsed).unwrap_or_else(|| root.to_path_buf());
@@ -719,7 +721,7 @@ async fn notify_cursor_workspace_open(
     let Some(root) = root else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(root) {
+    if !crate::ports::hook_runtime::is_project_initialized(root) {
         return;
     }
     super::notify_hook_event_with_telemetry(
@@ -912,66 +914,6 @@ mod tests {
         assert_eq!(outcome.messages_upserted, 0);
     }
 
-    #[tokio::test]
-    async fn cursor_root_uses_identity_resolver_for_global_only_store() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::storage::default_profile_root().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let project_root = project.path().canonicalize().unwrap();
-        let status = std::process::Command::new("git")
-            .arg("init")
-            .arg(&project_root)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git init failed");
-
-        let project_id = "proj_cursor_identity";
-        let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-            &profile_root,
-            &project_root,
-            tracedecay_domain::ProjectId::new(project_id).unwrap(),
-        )
-        .await
-        .unwrap();
-        let graph = gdb
-            .initialize_project_graph_for_test(
-                &project_root,
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .unwrap();
-        drop(graph);
-        // Nothing lives in the working tree: the project's durable anchors
-        // are the `.git/` repository identity marker and the registry row
-        // that initialization published.
-        assert!(
-            !project_root.join(".tracedecay").exists(),
-            "initialization must not create working-tree project state"
-        );
-
-        let nested = project_root.join("src/deep");
-        std::fs::create_dir_all(&nested).unwrap();
-        let parsed = serde_json::json!({
-            "cwd": nested,
-            "workspace_roots": [project_root.clone()],
-        });
-
-        // Both the synchronous walk and the identity resolver answer through
-        // the `.git/` repository identity marker.
-        assert_eq!(
-            cursor_project_root_from_parsed_event(&parsed),
-            Some(project_root.clone())
-        );
-        assert_eq!(
-            cursor_project_root_from_parsed_event_with_identity(&parsed).await,
-            Some(project_root)
-        );
-    }
-
-    /// A qualifying `afterFileEdit` (a new function-sized body written to a
-    /// source file) must fire the edit-redundancy nudge on the Cursor surface,
-    /// mirroring Claude's `PostToolUse`. The applied text arrives as
-    /// `edits[].new_string`, which the handler joins into `edit_text`.
     #[test]
     fn cursor_after_file_edit_nudges_redundancy_for_new_function_body() {
         let body = [

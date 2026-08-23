@@ -56,7 +56,7 @@ fn schedule_user_session_review<'a>(
     provider: &'a str,
     session_id: Option<&'a str>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(crate::hooks::schedule_user_session_review(
+    Box::pin(tracedecay_agent_hosts::hooks::schedule_user_session_review(
         provider, session_id,
     ))
 }
@@ -93,8 +93,16 @@ fn register_agent_host_ports() {
         crate::global_db::RegisteredGlobalDb::canonical_project_key,
     );
     ports::hook_runtime::register_daemon_tool_invoker(daemon_tool_json);
+    ports::hook_runtime::register_project_root_resolver(resolve_project_root_with_identity);
+    ports::hook_runtime::register_hook_scope_resolver(resolve_hook_scope);
+    ports::hook_runtime::register_hook_event_notifier(notify_hook_event);
+    ports::hook_runtime::register_hook_timing_gate(hook_timings_enabled);
+    ports::hook_runtime::register_project_initialization_gate(
+        crate::tracedecay::TraceDecay::is_initialized,
+    );
+    ports::hook_runtime::register_store_layout_resolver(resolve_hook_store_layout);
     ports::hook_runtime::register_memory_injection_gate(
-        crate::hooks::memory_inject::memory_injection_enabled,
+        tracedecay_agent_hosts::hooks::memory_inject::memory_injection_enabled,
     );
     ports::hook_runtime::register_cursor_catch_up_ingest_max_bytes(
         cursor_catch_up_ingest_max_bytes,
@@ -133,16 +141,57 @@ fn daemon_tool_json<'a>(
     project_root: Option<&'a Path>,
     tool_name: &'a str,
     arguments: Value,
+    require_project_identity: bool,
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
-    Box::pin(crate::hooks::daemon_tool_json(
-        project_root,
-        tool_name,
-        arguments,
-    ))
+    Box::pin(async move {
+        let handshake = crate::daemon::DaemonHandshake::for_current_client(
+            project_root.map(Path::to_path_buf),
+            None,
+            false,
+            require_project_identity,
+        )?;
+        let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
+        crate::daemon::tool_json_payload(&result, tool_name)
+    })
+}
+
+fn resolve_project_root_with_identity(
+    start: &Path,
+) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + '_>> {
+    Box::pin(crate::config::discover_project_root_with_identity(start))
+}
+
+fn resolve_hook_scope(
+    project_root: &Path,
+    project_id: &tracedecay_domain::ProjectId,
+) -> std::result::Result<tracedecay_application::ResolvedScope, String> {
+    crate::daemon::project_open_owners::resolved_scope_for_project(project_root, project_id)
+        .map_err(|error| error.to_string())
+}
+
+fn notify_hook_event(
+    project_root: &Path,
+    event: tracedecay_hooks::DaemonHookEvent,
+) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    Box::pin(async move {
+        let _ = crate::daemon::notify_hook_event(project_root, event).await;
+    })
+}
+
+fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
+    crate::config::cached_telemetry_config(project_root)
+        .ok()
+        .map(|telemetry| telemetry.timings)
+}
+
+fn resolve_hook_store_layout(
+    project_root: &Path,
+) -> Pin<Box<dyn Future<Output = Result<crate::storage::StoreLayout>> + Send + '_>> {
+    Box::pin(crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root))
 }
 
 fn cursor_catch_up_ingest_max_bytes() -> u64 {
-    crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+    tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
 }
 
 #[cfg(test)]
@@ -211,7 +260,7 @@ mod tests {
         let _pinned = registered();
         assert_eq!(
             tracedecay_agent_hosts::ports::hook_runtime::memory_injection_enabled(),
-            crate::hooks::memory_inject::memory_injection_enabled(),
+            tracedecay_agent_hosts::hooks::memory_inject::memory_injection_enabled(),
             "registered gate must back the memory-injection port"
         );
     }
@@ -226,7 +275,10 @@ mod tests {
             u64::MAX,
             "an unwired ceiling reads as u64::MAX and silences the doctor check"
         );
-        assert_eq!(ceiling, crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES);
+        assert_eq!(
+            ceiling,
+            tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+        );
     }
 
     #[test]

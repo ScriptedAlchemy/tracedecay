@@ -378,21 +378,24 @@ fn advisory_hook_notice_dispatch(
     hook_config_root: &Path,
     now: UtcMicros,
 ) -> Option<(HostKindV1, HookFeedbackRollbackSwitchV1)> {
-    crate::hooks::NATIVE_HOOK_HOSTS.iter().find_map(|host| {
-        let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-            hook_configuration_path(hook_config_root, *host),
-        ));
-        match subscriber.load_current(*host, now) {
-            HookConfigurationReadOutcomeV1::Bound(snapshot) => Some((
-                host.host_kind(),
-                HookFeedbackRollbackSwitchV1 {
-                    configuration_revision: snapshot.revision,
-                    route: HookFeedbackDeliveryRouteV1::HookV2,
-                },
-            )),
-            _ => None,
-        }
-    })
+    tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS
+        .iter()
+        .find_map(|host| {
+            let subscriber =
+                HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
+                    hook_configuration_path(hook_config_root, *host),
+                ));
+            match subscriber.load_current(*host, now) {
+                HookConfigurationReadOutcomeV1::Bound(snapshot) => Some((
+                    host.host_kind(),
+                    HookFeedbackRollbackSwitchV1 {
+                        configuration_revision: snapshot.revision,
+                        route: HookFeedbackDeliveryRouteV1::HookV2,
+                    },
+                )),
+                _ => None,
+            }
+        })
 }
 
 impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -1225,7 +1228,8 @@ async fn register_production_advisory_owner(
         })?,
     ) as _;
     let hook_notices = AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
-    let (hook_project_id, hook_worktree_id) = crate::hooks::hook_scope_locators(&state.scope);
+    let (hook_project_id, hook_worktree_id) =
+        tracedecay_agent_hosts::hooks::hook_scope_locators(&state.scope);
     if !register_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
         return Err(TraceDecayError::Config {
             message: "project-open advisory hook notice authority is unavailable".to_owned(),
