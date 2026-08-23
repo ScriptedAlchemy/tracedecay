@@ -4,7 +4,7 @@
 //! that genuinely needs the root binary stays here: resolving the authoritative
 //! repository identity of the checkout under evaluation, which reads the
 //! repository identity marker (`crate::storage`) and the provenance admission
-//! context (`crate::repository_provenance`). Everything else is re-exported so
+//! context (`tracedecay_sessions::repository_provenance`). Everything else is re-exported so
 //! extraction does not change the root's public surface.
 
 use std::path::Path;
@@ -38,7 +38,7 @@ pub fn root_admitted_corpus_scope(
         .flatten()?;
     let project_id = tracedecay_domain::ProjectId::new(marker.project_id.clone()).ok()?;
     let (project_id, repository_id, worktree_id) =
-        crate::repository_provenance::RepositoryProvenanceAdmissionContext::
+        tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext::
             from_authoritative_project_marker(repo_root, &project_id, &marker)
             .and_then(|context| context.admitted_identity())?;
     tracedecay_application::ResolvedScope::new(project_id, repository_id, worktree_id, None).ok()

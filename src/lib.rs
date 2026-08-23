@@ -96,7 +96,6 @@ pub mod profile_backup;
 pub mod profile_registry_maintenance;
 pub mod project_registry;
 pub mod redundancy;
-mod repository_provenance;
 pub mod request_identity;
 pub mod resolution;
 pub mod retention;

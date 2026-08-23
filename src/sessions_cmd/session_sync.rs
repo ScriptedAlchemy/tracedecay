@@ -224,7 +224,7 @@ fn resolve_git_sync_since(since: Option<&str>) -> tracedecay::errors::Result<i64
             message: "--since must be >= 0".to_string(),
         });
     }
-    tracedecay::timeutil::parse_rfc3339_timestamp(raw).ok_or_else(|| {
+    tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp(raw).ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: format!(
                 "--since must be a non-negative Unix timestamp or ISO/RFC3339 string (got `{raw}`)"

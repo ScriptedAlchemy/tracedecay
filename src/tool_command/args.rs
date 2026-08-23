@@ -587,19 +587,23 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
 
     match ty {
         "string" => Ok(Value::String(raw.to_string())),
-        "boolean" => match raw {
-            "true" | "1" | "yes" | "on" => Ok(Value::Bool(true)),
-            "false" | "0" | "no" | "off" => Ok(Value::Bool(false)),
-            other => {
-                let flag = key.replace('_', "-");
-                Err(TraceDecayError::Config {
-                    message: format!(
-                        "--{flag}: expected a boolean (true/false), got `{other}` — \
-                         pass `--{flag} true` or `--{flag} false`"
-                    ),
-                })
+        "boolean" => {
+            if tracedecay_global_db::env_value_truthy(raw) {
+                return Ok(Value::Bool(true));
             }
-        },
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "false" | "0" | "no" | "off" => Ok(Value::Bool(false)),
+                other => {
+                    let flag = key.replace('_', "-");
+                    Err(TraceDecayError::Config {
+                        message: format!(
+                            "--{flag}: expected a boolean (true/false), got `{other}` — \
+                             pass `--{flag} true` or `--{flag} false`"
+                        ),
+                    })
+                }
+            }
+        }
         "integer" => raw
             .parse::<i64>()
             .map(Value::from)

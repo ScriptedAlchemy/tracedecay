@@ -256,6 +256,10 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// Builds the report by reading `global.db`'s `code_projects` table and every
 /// registered project's graph database, then scanning `projects/` bottom-up
 /// for directories with no matching registry row. Read-only throughout.
+///
+/// Filesystem sizing, SQLite family copy, and per-store probes run on the
+/// blocking pool so this CLI path matches the daemon-paged sibling and does
+/// not stall the async runtime.
 pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // Capture the profile's physical footprint before opening any SQLite
@@ -267,15 +271,52 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         tokio::task::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
             .await
             .map_err(|error| report_error("join full profile size scan", error))?;
-    let mut registered_ids = HashSet::new();
-    let mut stores = Vec::new();
-    let mut code_generation_retention = Vec::new();
-    let mut code_generation_retention_availability = Vec::new();
+    let registered_projects = if global_db_path.exists() {
+        load_registered_project_rows(profile_root, &global_db_path).await?
+    } else {
+        Vec::new()
+    };
+    let profile_root_buf = profile_root.to_path_buf();
+    let sampled = tokio::task::spawn_blocking(move || {
+        sample_registered_storage(&profile_root_buf, &global_db_path, registered_projects)
+    })
+    .await
+    .map_err(|error| report_error("join storage report sample", error))??;
 
-    if global_db_path.exists() {
+    Ok(StorageReport {
+        profile_root: profile_root.display().to_string(),
+        stores: sampled.stores,
+        code_generation_retention: sampled.code_generation_retention,
+        code_generation_retention_availability: sampled.code_generation_retention_availability,
+        unregistered_dir_count: sampled.unregistered_dir_count,
+        unregistered_bytes: sampled.unregistered_bytes,
+        global_db_bytes: sampled.global_db_bytes,
+        full_profile_size: Some(full_profile_size),
+        coverage: StorageReportCoverage::default(),
+    })
+}
+
+struct SampledRegisteredStorage {
+    stores: Vec<StoreSizeReportEntry>,
+    code_generation_retention: Vec<CodeGenerationRetentionDryRunEntry>,
+    code_generation_retention_availability: Vec<CodeGenerationRetentionAvailabilityEntry>,
+    unregistered_dir_count: usize,
+    unregistered_bytes: u64,
+    global_db_bytes: u64,
+}
+
+/// Copies `global.db` off-profile on the blocking pool, then lists registered
+/// project rows over the async snapshot reader.
+async fn load_registered_project_rows(
+    profile_root: &Path,
+    global_db_path: &Path,
+) -> crate::errors::Result<Vec<(String, String)>> {
+    let profile_root = profile_root.to_path_buf();
+    let global_db_path = global_db_path.to_path_buf();
+    let (scratch, snapshot_source) = tokio::task::spawn_blocking(move || {
         let scratch = tempfile::tempdir()
             .map_err(|error| report_error("create external read-snapshot scratch", error))?;
-        validate_external_scratch(profile_root, scratch.path())
+        validate_external_scratch(&profile_root, scratch.path())
             .map_err(|error| report_error("validate read-snapshot scratch placement", error))?;
         // The live family stays untouched: a read-only SQLite open against a
         // WAL database can still materialize a missing SHM sidecar, and any
@@ -287,62 +328,74 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
         copy_sqlite_family(&global_db_path, &snapshot_source)
             .map_err(|error| report_error("copy global.db family for read-only report", error))?;
-        let snapshot = crate::sqlite_read_snapshot::open_foreign_in(
-            &snapshot_source,
-            scratch.path(),
-            crate::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
+        Ok::<_, crate::errors::TraceDecayError>((scratch, snapshot_source))
+    })
+    .await
+    .map_err(|error| report_error("join global.db family copy", error))??;
+    let snapshot = crate::sqlite_read_snapshot::open_foreign_in(
+        &snapshot_source,
+        scratch.path(),
+        crate::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
+    )
+    .await
+    .map_err(|error| report_error("open global.db read snapshot", error))?;
+    let connection = snapshot.connection();
+    let mut rows = connection
+        .query(
+            "SELECT project_id, canonical_root FROM code_projects ORDER BY project_id",
+            (),
         )
         .await
-        .map_err(|error| report_error("open global.db read snapshot", error))?;
-        let connection = snapshot.connection();
-        let mut rows = connection
-            .query(
-                "SELECT project_id, canonical_root FROM code_projects ORDER BY project_id",
-                (),
-            )
-            .await
-            .map_err(|error| report_error("list registered projects", error))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| report_error("read registered project row", error))?
-        {
-            let project_id: String = row
-                .get::<String>(0)
-                .map_err(|error| report_error("decode project id", error))?;
-            let canonical_root: String = row
-                .get::<String>(1)
-                .map_err(|error| report_error("decode canonical root", error))?;
-            registered_ids.insert(project_id.clone());
-            // Offline reports have no mounted scheduler identity authority, so
-            // vector pins are unavailable rather than inferred from a path.
-            let vector_readable_sources = None;
-            append_project_report(
-                profile_root,
-                &project_id,
-                &canonical_root,
-                vector_readable_sources,
-                &mut stores,
-                &mut code_generation_retention,
-                &mut code_generation_retention_availability,
-            )?;
-        }
+        .map_err(|error| report_error("list registered projects", error))?;
+    let mut projects = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| report_error("read registered project row", error))?
+    {
+        let project_id: String = row
+            .get::<String>(0)
+            .map_err(|error| report_error("decode project id", error))?;
+        let canonical_root: String = row
+            .get::<String>(1)
+            .map_err(|error| report_error("decode canonical root", error))?;
+        projects.push((project_id, canonical_root));
     }
+    Ok(projects)
+}
 
+fn sample_registered_storage(
+    profile_root: &Path,
+    global_db_path: &Path,
+    registered_projects: Vec<(String, String)>,
+) -> crate::errors::Result<SampledRegisteredStorage> {
+    let mut registered_ids = HashSet::new();
+    let mut stores = Vec::new();
+    let mut code_generation_retention = Vec::new();
+    let mut code_generation_retention_availability = Vec::new();
+    for (project_id, canonical_root) in registered_projects {
+        registered_ids.insert(project_id.clone());
+        // Offline reports have no mounted scheduler identity authority, so
+        // vector pins are unavailable rather than inferred from a path.
+        append_project_report(
+            profile_root,
+            &project_id,
+            &canonical_root,
+            None,
+            &mut stores,
+            &mut code_generation_retention,
+            &mut code_generation_retention_availability,
+        )?;
+    }
     let (unregistered_dir_count, unregistered_bytes) =
         scan_unregistered_dirs(profile_root, &registered_ids);
-    let global_db_bytes = database_family_bytes(&global_db_path);
-
-    Ok(StorageReport {
-        profile_root: profile_root.display().to_string(),
+    Ok(SampledRegisteredStorage {
         stores,
         code_generation_retention,
         code_generation_retention_availability,
         unregistered_dir_count,
         unregistered_bytes,
-        global_db_bytes,
-        full_profile_size: Some(full_profile_size),
-        coverage: StorageReportCoverage::default(),
+        global_db_bytes: database_family_bytes(global_db_path),
     })
 }
 
@@ -506,6 +559,13 @@ fn list_project_directories_page(
 
 /// Builds one project-scoped report on the daemon's blocking pool so bounded
 /// read-only `SQLite` samples cannot stall the async authority loop.
+///
+/// This admin-CLI wrapper is inventory-less: it has no mounted code-index
+/// scheduler, so it cannot call `project_vector_readable_sources`. The
+/// retention dry run therefore reports
+/// `generation_retention_graph_inventory_unavailable` rather than planning
+/// against an unproven protection set. Callers that already hold a resolved
+/// set must use [`build_project_storage_report`] directly.
 pub async fn build_project_storage_report_from_daemon(
     profile_root: &Path,
     project_id: &str,
@@ -513,15 +573,9 @@ pub async fn build_project_storage_report_from_daemon(
 ) -> crate::errors::Result<StorageReport> {
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
-    let vector_readable_sources = None;
     let canonical_root = canonical_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        build_project_storage_report(
-            &profile_root,
-            &project_id,
-            &canonical_root,
-            vector_readable_sources,
-        )
+        build_project_storage_report(&profile_root, &project_id, &canonical_root, None)
     })
     .await
     .map_err(|error| report_error("join daemon-backed project storage report", error))?
@@ -530,8 +584,10 @@ pub async fn build_project_storage_report_from_daemon(
 /// Build the same read-only report for one explicitly identified shard without
 /// opening `global.db`. This is the daemon-independent path for maintenance
 /// when the global registry's exclusive-maintenance authority is unavailable.
-/// Vector liveness lives in the mounted code graph, so daemon callers resolve
-/// `vector_readable_sources` first; offline callers pass `None` and the
+/// Vector liveness lives in the mounted code graph: callers that have already
+/// resolved `vector_readable_sources` (doctor / store-maintenance) pass that
+/// set here. Inventory-less surfaces — including
+/// [`build_project_storage_report_from_daemon`] — pass `None` and the
 /// retention dry run reports itself unavailable rather than planning against
 /// an unproven protection set.
 pub fn build_project_storage_report(

@@ -51,8 +51,7 @@ struct ArtifactEnvelope {
 }
 
 pub(super) fn assert_repository_evidence() {
-    let strict = std::env::var_os("TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE")
-        .is_some_and(|value| value == "1");
+    let strict = tracedecay_global_db::env_flag("TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE");
     let directory = std::env::var_os("TRACEDECAY_BENCHMARK_EVIDENCE_DIR").map_or_else(
         || repository_root().join("benchmarks/claude-observation"),
         PathBuf::from,

@@ -519,11 +519,14 @@ impl Default for SyncConfig {
     }
 }
 
-/// Parses a boolean env value: `1`/`true` => true, `0`/`false` => false
-/// (case-insensitive). Any other value is ignored (returns `None`).
+/// Parses a boolean env value. Truthy spellings (`1`/`true`/`yes`/`on`) share
+/// [`tracedecay_global_db::env_value_truthy`]; `0`/`false` are false. Any
+/// other value is ignored (returns `None`) so an override is not applied.
 fn parse_env_bool(raw: &str) -> Option<bool> {
+    if tracedecay_global_db::env_value_truthy(raw) {
+        return Some(true);
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,
     }

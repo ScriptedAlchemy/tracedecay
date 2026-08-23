@@ -735,14 +735,7 @@ async fn call_daemon_tool_for_scope(
     tool_name: &str,
     arguments: Value,
 ) -> tracedecay::errors::Result<Value> {
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
-        project_root.map(Path::to_path_buf),
-        None,
-        false,
-        false,
-    )?;
-    let result = tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
-    tracedecay::daemon::tool_json_payload(&result, tool_name)
+    crate::commands::daemon_tool_json(project_root, tool_name, arguments).await
 }
 
 type SessionRefreshDaemonFuture<'a> =
