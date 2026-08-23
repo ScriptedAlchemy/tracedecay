@@ -11,10 +11,10 @@ pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_c
 #[doc(hidden)]
 pub mod exact_sql;
 pub mod handoff;
+mod hotpath_observe;
 mod ledger;
 pub mod maintenance;
 mod operation;
-mod hotpath_observe;
 mod persistence;
 mod profiled_lock;
 pub mod read_consistency;
