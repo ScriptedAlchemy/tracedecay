@@ -621,16 +621,16 @@ pub async fn run_payload_gc_in_transaction(
     // Reusing the phase-A/B/C reference set is exact here: any ref those
     // phases tombstoned out of the live reference set is a member of
     // `all_metadata_refs`, which this phase subtracts anyway.
-    rewrite_dangling_placeholders(
+    rewrite_dangling_placeholders(RewriteDanglingPlaceholdersRequest {
         conn,
-        dir.as_deref(),
-        &all_metadata_refs,
-        &referenced,
+        dir: dir.as_deref(),
+        metadata_refs: &all_metadata_refs,
+        referenced: &referenced,
         provider,
         session_id,
         apply,
-        &mut report,
-    )
+        report: &mut report,
+    })
     .await?;
 
     report.ended_at = now;
@@ -993,22 +993,30 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     Ok(())
 }
 
-// Each parameter is a distinct authority for this rewrite — the connection,
-// the payload directory, the two reference sets it compares, the provider and
-// session it is scoped to, whether to apply or only report, and the report it
-// accumulates into. Grouping them would hide which of them the caller is
-// actually choosing.
-#[allow(clippy::too_many_arguments)]
-pub async fn rewrite_dangling_placeholders(
-    conn: &(impl Executor + ?Sized),
-    dir: Option<&Path>,
-    metadata_refs: &BTreeSet<String>,
-    referenced: &BTreeSet<String>,
-    provider: &str,
-    session_id: Option<&str>,
-    apply: bool,
-    report: &mut LcmGcReport,
+pub struct RewriteDanglingPlaceholdersRequest<'a, E: Executor + ?Sized> {
+    pub conn: &'a E,
+    pub dir: Option<&'a Path>,
+    pub metadata_refs: &'a BTreeSet<String>,
+    pub referenced: &'a BTreeSet<String>,
+    pub provider: &'a str,
+    pub session_id: Option<&'a str>,
+    pub apply: bool,
+    pub report: &'a mut LcmGcReport,
+}
+
+pub async fn rewrite_dangling_placeholders<E: Executor + ?Sized>(
+    request: RewriteDanglingPlaceholdersRequest<'_, E>,
 ) -> Result<(), LcmError> {
+    let RewriteDanglingPlaceholdersRequest {
+        conn,
+        dir,
+        metadata_refs,
+        referenced,
+        provider,
+        session_id,
+        apply,
+        report,
+    } = request;
     let mut dangling = BTreeSet::new();
     for payload_ref in referenced.difference(metadata_refs) {
         match payload_file_present(dir, payload_ref) {
