@@ -6,7 +6,7 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor, Row, params};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -1177,13 +1177,34 @@ fn decode_generation_i64(
     SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
 }
 
-fn map_begin_conflict(error: tracedecay_runtime_core::db::engine::Error) -> SessionStoreError {
+const SQLITE_CONSTRAINT: i32 = 19;
+const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
+
+fn is_refresh_busy_constraint(error: &EngineError) -> bool {
+    let refresh_related = match error {
+        EngineError::Sqlite { message, .. } => {
+            message.contains("session_refresh_operations")
+                || message.contains("idx_session_refresh_operations_one_running")
+        }
+        _ => false,
+    };
+    let typed_constraint = matches!(
+        error.sqlite_extended_code(),
+        Some(SQLITE_CONSTRAINT_UNIQUE | SQLITE_CONSTRAINT_PRIMARYKEY)
+    ) || error.sqlite_code() == Some(SQLITE_CONSTRAINT);
+    if typed_constraint && refresh_related {
+        return true;
+    }
     let message = error.to_string();
-    if message.contains("idx_session_refresh_operations_one_running")
+    message.contains("idx_session_refresh_operations_one_running")
         || message.contains("UNIQUE constraint failed: session_refresh_operations.session_id")
         || message.contains("UNIQUE constraint failed: session_refresh_operations.operation_id")
         || message.contains("PRIMARY KEY constraint failed: session_refresh_operations")
-    {
+}
+
+fn map_begin_conflict(error: EngineError) -> SessionStoreError {
+    if is_refresh_busy_constraint(&error) {
         SessionStoreError::IdempotencyConflict {
             context: "session refresh busy",
         }

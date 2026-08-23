@@ -474,11 +474,21 @@ impl RegisteredGlobalDb {
 
         let mut transcript_results = Vec::new();
         if let Ok(mut rows) = snapshot.query(&sql, query_params).await {
-            while let Ok(Some(row)) = rows.next().await {
+            loop {
+                let row = match rows.next().await {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "session message search row iteration failed");
+                        break;
+                    }
+                };
                 let Some(session) = row_to_session(&row) else {
+                    tracing::warn!("session message search dropped a row with an unreadable session");
                     continue;
                 };
                 let Some(message) = row_to_message(&row, 13) else {
+                    tracing::warn!("session message search dropped a row with an unreadable message");
                     continue;
                 };
                 let score = row.get::<f64>(26).map_or(0.0, |rank| -rank);
@@ -565,11 +575,21 @@ impl RegisteredGlobalDb {
 
         let mut results = Vec::new();
         if let Ok(mut rows) = snapshot.query(&sql, query_params).await {
-            while let Ok(Some(row)) = rows.next().await {
+            loop {
+                let row = match rows.next().await {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "workflow fact search row iteration failed");
+                        break;
+                    }
+                };
                 let Some(session) = row_to_session(&row) else {
+                    tracing::warn!("workflow fact search dropped a row with an unreadable session");
                     continue;
                 };
                 let Some(message) = row_to_workflow_message(&row, 13) else {
+                    tracing::warn!("workflow fact search dropped a row with an unreadable message");
                     continue;
                 };
                 results.push(SessionMessageSearchResult {
@@ -619,11 +639,21 @@ impl RegisteredGlobalDb {
             legacy_params.len()
         );
         if let Ok(mut rows) = snapshot.query(&legacy_sql, legacy_params).await {
-            while let Ok(Some(row)) = rows.next().await {
+            loop {
+                let row = match rows.next().await {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "legacy session search row iteration failed");
+                        break;
+                    }
+                };
                 let Some(session) = row_to_session(&row) else {
+                    tracing::warn!("legacy session search dropped a row with an unreadable session");
                     continue;
                 };
                 let Some(message) = row_to_message(&row, 13) else {
+                    tracing::warn!("legacy session search dropped a row with an unreadable message");
                     continue;
                 };
                 results.push(SessionMessageSearchResult {
@@ -770,11 +800,21 @@ async fn search_workflow_facts(
         return Vec::new();
     };
     let mut results = Vec::new();
-    while let Ok(Some(row)) = rows.next().await {
+    loop {
+        let row = match rows.next().await {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(error = %error, "workflow fact helper row iteration failed");
+                break;
+            }
+        };
         let Some(session) = row_to_session(&row) else {
+            tracing::warn!("workflow fact helper dropped a row with an unreadable session");
             continue;
         };
         let Some(message) = row_to_workflow_message(&row, 13) else {
+            tracing::warn!("workflow fact helper dropped a row with an unreadable message");
             continue;
         };
         results.push(SessionMessageSearchResult {

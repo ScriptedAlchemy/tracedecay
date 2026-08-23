@@ -125,38 +125,53 @@ fn permits_synchronous_session_temporal_health(database_path: &Path) -> bool {
         .is_ok_and(|bytes| bytes <= MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
 }
 
-const OCCURRENCE_FTS_CHECK_SQL: &str = "SELECT
+// Occurrence and summary FTS integrity share the same content/docsize
+// EXCEPT + probe-token shape; only the table names differ.
+macro_rules! fts_integrity_check_sql {
+    ($content:literal, $fts:literal, $docsize:literal) => {
+        concat!(
+            "SELECT
     (SELECT COUNT(*) FROM (
-        SELECT rowid AS id FROM session_occurrences
-        EXCEPT SELECT id FROM session_occurrences_fts_docsize
+        SELECT rowid AS id FROM ",
+            $content,
+            "
+        EXCEPT SELECT id FROM ",
+            $docsize,
+            "
         LIMIT 1000001
     ))
     + (SELECT COUNT(*) FROM (
-        SELECT id FROM session_occurrences_fts_docsize
-        EXCEPT SELECT rowid AS id FROM session_occurrences
+        SELECT id FROM ",
+            $docsize,
+            "
+        EXCEPT SELECT rowid AS id FROM ",
+            $content,
+            "
         LIMIT 1000001
     ))
     + COALESCE((
-        SELECT 0 FROM session_occurrences_fts
-        WHERE session_occurrences_fts MATCH 'tracedecay_health_probe_token'
+        SELECT 0 FROM ",
+            $fts,
+            "
+        WHERE ",
+            $fts,
+            " MATCH 'tracedecay_health_probe_token'
         LIMIT 1
-    ), 0)";
-const SUMMARY_FTS_CHECK_SQL: &str = "SELECT
-    (SELECT COUNT(*) FROM (
-        SELECT rowid AS id FROM session_summary_nodes
-        EXCEPT SELECT id FROM session_summary_nodes_fts_docsize
-        LIMIT 1000001
-    ))
-    + (SELECT COUNT(*) FROM (
-        SELECT id FROM session_summary_nodes_fts_docsize
-        EXCEPT SELECT rowid AS id FROM session_summary_nodes
-        LIMIT 1000001
-    ))
-    + COALESCE((
-        SELECT 0 FROM session_summary_nodes_fts
-        WHERE session_summary_nodes_fts MATCH 'tracedecay_health_probe_token'
-        LIMIT 1
-    ), 0)";
+    ), 0)"
+        )
+    };
+}
+
+const OCCURRENCE_FTS_CHECK_SQL: &str = fts_integrity_check_sql!(
+    "session_occurrences",
+    "session_occurrences_fts",
+    "session_occurrences_fts_docsize"
+);
+const SUMMARY_FTS_CHECK_SQL: &str = fts_integrity_check_sql!(
+    "session_summary_nodes",
+    "session_summary_nodes_fts",
+    "session_summary_nodes_fts_docsize"
+);
 
 const REQUIRED_BASE_TABLES: &[&str] = &[
     "lcm_summary_nodes",

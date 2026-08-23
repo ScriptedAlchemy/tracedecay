@@ -4,15 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
-    LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorId, SessionCursorKeyIdV1,
-    SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1, SessionSummaryIdV1,
-    SessionSummaryRecordV1, SignedCursorKeyRefV1, SummaryPublicationMetadataV1,
-    SummarySourceHorizonV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
-    UtcMicros,
+    LogicalCopyRecordV1, MessageOccurrenceRecordV1, ProjectionOutputOrdinalV1, RetrievalAnchorId,
+    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
+    SessionSummaryIdV1, SessionSummaryRecordV1, SignedCursorKeyRefV1,
+    SummaryPublicationMetadataV1, SummarySourceHorizonV1, TemporalAssertionRecordV1,
+    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
-    engine::{Row, params},
+    engine::{FromValue, Row, params},
 };
 use tracedecay_store::{
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1, SessionRetrievalPageV1,
@@ -469,9 +469,7 @@ async fn assertions_for_anchors(
             .await
             .map_err(|error| storage(EXPAND_OPERATION, error))?
     {
-        let assertion_id = row
-            .get::<String>(0)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
+        let assertion_id = row_get::<String>(&row, 0)?;
         if seen_assertions.insert(assertion_id.clone()) {
             assertions.push(assertion_from_row(&row, assertion_id)?);
             remaining -= 1;
@@ -506,13 +504,8 @@ async fn summary_anchors_for(
         .await
         .map_err(|error| storage(EXPAND_OPERATION, error))?
     {
-        let summary_id = row
-            .get::<String>(0)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let anchor_id = decode_text(
-            row.get::<String>(1)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        )?;
+        let summary_id = row_get::<String>(&row, 0)?;
+        let anchor_id = decode_text(row_get::<String>(&row, 1)?)?;
         if anchors.insert(summary_id, anchor_id).is_some() {
             return Err(map_session_relation_error(SessionRelationError::Corrupt));
         }
@@ -578,25 +571,11 @@ async fn retrieve_summary_page(
                 "summary page exceeds the transitional store cursor capacity",
             ));
         }
-        let summary_id = decode_text::<SessionSummaryIdV1>(
-            row.get::<String>(0)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        )?;
-        let summary_anchor_id = decode_text::<RetrievalAnchorId>(
-            row.get::<String>(1)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        )?;
-        let source_horizon = decode_json_value::<SummarySourceHorizonV1>(parse_json_value(
-            row.get::<String>(2)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        )?)?;
-        let created_at = UtcMicros(
-            row.get::<i64>(3)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        );
-        let publication = row
-            .get::<Option<String>>(4)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
+        let summary_id = decode_text::<SessionSummaryIdV1>(row_get(row, 0)?)?;
+        let summary_anchor_id = decode_text::<RetrievalAnchorId>(row_get(row, 1)?)?;
+        let source_horizon = decode_json_str::<SummarySourceHorizonV1>(row_get(row, 2)?)?;
+        let created_at = UtcMicros(row_get(row, 3)?);
+        let publication = row_get::<Option<String>>(row, 4)?;
         summary_seeds.push(SummarySeed {
             summary_id,
             summary_anchor_id,
@@ -735,79 +714,78 @@ fn occurrence_from_row(
     row: &Row,
     session_id: &SessionId,
 ) -> SessionStoreResult<MessageOccurrenceRecordV1> {
-    let thread_grouping = optional_json(
-        row.get::<Option<String>>(5)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-    )?;
-    let turn_grouping = optional_json(
-        row.get::<Option<String>>(7)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-    )?;
-    decode_json_value(serde_json::json!({
-        "occurrence_id": row.get::<String>(0)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "source_observation_id": row.get::<String>(1)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "projection_output_ordinal": row.get::<i64>(2)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "retrieval_anchor_id": row.get::<String>(3)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "session_id": session_id,
-        "thread_id": row.get::<Option<String>>(4)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "thread_grouping": thread_grouping,
-        "turn_id": row.get::<Option<String>>(6)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "turn_grouping": turn_grouping,
-        "message_id": row.get::<Option<String>>(8)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "agent_id": row.get::<Option<String>>(9)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "role": row.get::<String>(10)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "knowledge_at": row.get::<i64>(11)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "valid_time": parse_json_value(
-            row.get::<String>(12)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-        "evidence": parse_json_value(
-            row.get::<String>(13)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-    }))
+    let projection_output_ordinal = u32::try_from(row_get::<i64>(row, 2)?)
+        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let record = MessageOccurrenceRecordV1 {
+        occurrence_id: decode_text(row_get(row, 0)?)?,
+        source_observation_id: decode_text(row_get(row, 1)?)?,
+        projection_output_ordinal: ProjectionOutputOrdinalV1::new(projection_output_ordinal),
+        retrieval_anchor_id: decode_text(row_get(row, 3)?)?,
+        session_id: session_id.clone(),
+        thread_id: decode_optional_text(row_get(row, 4)?)?,
+        thread_grouping: decode_optional_json(row_get(row, 5)?)?,
+        turn_id: decode_optional_text(row_get(row, 6)?)?,
+        turn_grouping: decode_optional_json(row_get(row, 7)?)?,
+        message_id: decode_optional_text(row_get(row, 8)?)?,
+        agent_id: decode_optional_text(row_get(row, 9)?)?,
+        role: decode_text(row_get(row, 10)?)?,
+        knowledge_at: UtcMicros(row_get(row, 11)?),
+        valid_time: decode_json_str(row_get(row, 12)?)?,
+        evidence: decode_json_str(row_get(row, 13)?)?,
+    };
+    record.validate()?;
+    Ok(record)
 }
 
 fn assertion_from_row(
     row: &Row,
     assertion_id: String,
 ) -> SessionStoreResult<TemporalAssertionRecordV1> {
-    decode_json_value(serde_json::json!({
-        "assertion_id": assertion_id,
-        "kind": row.get::<String>(1)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "subject_anchor_id": row.get::<String>(2)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "object_anchor_id": row.get::<String>(3)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "knowledge_at": row.get::<i64>(4)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "valid_time": parse_json_value(
-            row.get::<String>(5)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-        "evidence": parse_json_value(
-            row.get::<String>(6)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-    }))
+    let record = TemporalAssertionRecordV1 {
+        assertion_id: decode_text(assertion_id)?,
+        kind: decode_text(row_get(row, 1)?)?,
+        subject_anchor_id: decode_text(row_get(row, 2)?)?,
+        object_anchor_id: decode_text(row_get(row, 3)?)?,
+        knowledge_at: UtcMicros(row_get(row, 4)?),
+        valid_time: decode_json_str(row_get(row, 5)?)?,
+        evidence: decode_json_str(row_get(row, 6)?)?,
+    };
+    record.validate()?;
+    Ok(record)
 }
 
-fn optional_json(encoded: Option<String>) -> SessionStoreResult<serde_json::Value> {
-    encoded.map_or(Ok(serde_json::Value::Null), parse_json_value)
+fn row_get<T: FromValue>(row: &Row, column: i32) -> SessionStoreResult<T> {
+    row.get(column)
+        .map_err(|error| storage(EXPAND_OPERATION, error))
+}
+
+fn decode_optional_text<T: DeserializeOwned>(
+    value: Option<String>,
+) -> SessionStoreResult<Option<T>> {
+    value.map(decode_text).transpose()
+}
+
+fn decode_optional_json<T: DeserializeOwned>(
+    encoded: Option<String>,
+) -> SessionStoreResult<Option<T>> {
+    match encoded {
+        None => Ok(None),
+        Some(encoded) => {
+            let value = parse_json_value(encoded)?;
+            if value.is_null() {
+                Ok(None)
+            } else {
+                decode_json_value(value).map(Some)
+            }
+        }
+    }
 }
 
 fn parse_json_value(encoded: String) -> SessionStoreResult<serde_json::Value> {
+    serde_json::from_str(&encoded).map_err(|error| storage(EXPAND_OPERATION, error))
+}
+
+fn decode_json_str<T: DeserializeOwned>(encoded: String) -> SessionStoreResult<T> {
     serde_json::from_str(&encoded).map_err(|error| storage(EXPAND_OPERATION, error))
 }
 

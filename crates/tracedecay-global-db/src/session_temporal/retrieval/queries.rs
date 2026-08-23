@@ -50,7 +50,62 @@ macro_rules! anchor_owner_authority_predicate {
 
 pub(super) use anchor_owner_authority_predicate;
 
-pub(super) const EXACT_CANDIDATE_QUERY: &str = "
+// Summary nodes have no denormalized provider column. Publication identity
+// stays in `publication_json.provider`; this is not an observations join.
+macro_rules! summary_publication_provider {
+    () => {
+        "json_extract(n.publication_json, '$.provider')"
+    };
+}
+
+// Shared per-row identity byte caps for occurrence candidate listing.
+// `$provider` is `o.source_provider` on session scope and
+// `authority_session.provider` on root queries (join-equality already holds).
+macro_rules! occurrence_row_length_bounds {
+    ($id:literal, $anchor:literal, $text:literal, $sum:literal) => {
+        occurrence_row_length_bounds!($id, $anchor, $text, $sum, "o.source_provider")
+    };
+    ($id:literal, $anchor:literal, $text:literal, $sum:literal, $provider:literal) => {
+        concat!(
+            "AND length(CAST(o.occurrence_id AS BLOB)) <= ",
+            $id,
+            "
+      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ",
+            $anchor,
+            "
+      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(o.session_id AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(o.role AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(",
+            $provider,
+            " AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(o.occurrence_id AS BLOB))
+          + length(CAST(o.retrieval_anchor_id AS BLOB))
+          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
+          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
+          + length(CAST(o.session_id AS BLOB))
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(",
+            $provider,
+            " AS BLOB)) <= ",
+            $sum
+        )
+    };
+}
+
+pub(super) const EXACT_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider,
@@ -60,25 +115,16 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND instr(o.snippet_text, ?4) > 0
       AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
-      AND length(CAST(o.session_id AS BLOB)) <= ?9
-      AND length(CAST(o.role AS BLOB)) <= ?9
-      AND length(CAST(o.source_provider AS BLOB)) <= ?9
+      ",
+    occurrence_row_length_bounds!("?7", "?8", "?9", "?10"),
+    "
       AND length(CAST(o.snippet_text AS BLOB)) <= ?11
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(o.source_provider AS BLOB)) <= ?10
     ORDER BY o.knowledge_at DESC, o.occurrence_id
-    LIMIT ?12";
+    LIMIT ?12"
+);
 
-pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
+pub(super) const SCOPE_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
@@ -86,56 +132,57 @@ pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
     WHERE o.session_id = ?1 AND o.generation = ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND (o.knowledge_at < ?4 OR (o.knowledge_at = ?4 AND o.occurrence_id > ?5))
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?6
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?7
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?8
-      AND length(CAST(o.session_id AS BLOB)) <= ?8
-      AND length(CAST(o.role AS BLOB)) <= ?8
-      AND length(CAST(o.source_provider AS BLOB)) <= ?8
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(o.source_provider AS BLOB)) <= ?9
+      ",
+    occurrence_row_length_bounds!("?6", "?7", "?8", "?9"),
+    "
     ORDER BY o.knowledge_at DESC, o.occurrence_id
-    LIMIT ?10";
+    LIMIT ?10"
+);
 
 // The scope browse's summary listing: the session's published summary nodes
 // in creation order, carried on the Summary channel so hydration routes them
 // through the summary reader. Without this clause an empty-query browse would
 // be summary-blind while the participant's summary frontier says otherwise.
-pub(super) const SUMMARY_BROWSE_CANDIDATE_QUERY: &str = "
+pub(super) const SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
-           json_extract(n.publication_json, '$.provider')
+           ",
+    summary_publication_provider!(),
+    "
     FROM session_summary_nodes AS n
     JOIN session_summary_availability AS a
       ON a.summary_id = n.summary_id
      AND a.session_id = ?1
      AND a.generation = ?2
     WHERE n.session_id = ?1
-      AND (?3 IS NULL OR json_extract(n.publication_json, '$.provider') = ?3)
+      AND (?3 IS NULL OR ",
+    summary_publication_provider!(),
+    " = ?3)
       AND a.availability <> 'unavailable'
       AND (n.created_at < ?4 OR (n.created_at = ?4 AND n.summary_id > ?5))
       AND length(CAST(n.summary_id AS BLOB)) <= ?6
       AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
       AND length(CAST(n.session_id AS BLOB)) <= ?8
       AND length(CAST(COALESCE(
-          json_extract(n.publication_json, '$.provider'), ''
+          ",
+    summary_publication_provider!(),
+    ", ''
       ) AS BLOB)) <= ?8
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.summary_anchor_id AS BLOB))
           + length(CAST(n.session_id AS BLOB))
           + length(CAST(COALESCE(
-              json_extract(n.publication_json, '$.provider'), ''
+              ",
+    summary_publication_provider!(),
+    ", ''
           ) AS BLOB)) <= ?9
     ORDER BY n.created_at DESC, n.summary_id
-    LIMIT ?10";
+    LIMIT ?10"
+);
 
-pub(super) const ANCHOR_CANDIDATE_QUERY: &str = "
+pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT stable_id, anchor_id, knowledge_at, logical_message, turn_id, session_id,
            evidence_role, provider
     FROM (
@@ -149,15 +196,20 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = "
           AND o.retrieval_anchor_id = ?4
         UNION ALL
         SELECT n.summary_id, n.summary_anchor_id, n.created_at, NULL, NULL, n.session_id,
-               'summary', json_extract(n.publication_json, '$.provider')
+               'summary', ",
+    summary_publication_provider!(),
+    "
         FROM session_summary_nodes AS n
         WHERE n.session_id = ?1
-          AND (?3 IS NULL OR json_extract(n.publication_json, '$.provider') = ?3)
+          AND (?3 IS NULL OR ",
+    summary_publication_provider!(),
+    " = ?3)
           AND n.summary_anchor_id = ?4
     )
     WHERE knowledge_at < ?5 OR (knowledge_at = ?5 AND stable_id > ?6)
     ORDER BY knowledge_at DESC, stable_id
-    LIMIT ?7";
+    LIMIT ?7"
+);
 
 pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
     "
@@ -193,7 +245,8 @@ pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?7"
 );
 
-pub(super) const OCCURRENCE_FTS_QUERY: &str = "
+pub(super) const OCCURRENCE_FTS_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
@@ -203,24 +256,15 @@ pub(super) const OCCURRENCE_FTS_QUERY: &str = "
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND session_occurrences_fts MATCH ?4
       AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
-      AND length(CAST(o.session_id AS BLOB)) <= ?9
-      AND length(CAST(o.role AS BLOB)) <= ?9
-      AND length(CAST(o.source_provider AS BLOB)) <= ?9
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(o.source_provider AS BLOB)) <= ?10
+      ",
+    occurrence_row_length_bounds!("?7", "?8", "?9", "?10"),
+    "
     ORDER BY o.knowledge_at DESC, o.occurrence_id
-    LIMIT ?11";
+    LIMIT ?11"
+);
 
-pub(super) const TIME_CANDIDATE_QUERY: &str = "
+pub(super) const TIME_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
@@ -229,27 +273,20 @@ pub(super) const TIME_CANDIDATE_QUERY: &str = "
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND o.knowledge_at >= ?4 AND o.knowledge_at < ?5
       AND (o.knowledge_at < ?6 OR (o.knowledge_at = ?6 AND o.occurrence_id > ?7))
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?8
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?10
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
-      AND length(CAST(o.session_id AS BLOB)) <= ?10
-      AND length(CAST(o.role AS BLOB)) <= ?10
-      AND length(CAST(o.source_provider AS BLOB)) <= ?10
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(o.source_provider AS BLOB)) <= ?11
+      ",
+    occurrence_row_length_bounds!("?8", "?9", "?10", "?11"),
+    "
     ORDER BY o.knowledge_at DESC, o.occurrence_id
-    LIMIT ?12";
+    LIMIT ?12"
+);
 
-pub(super) const SUMMARY_CANDIDATE_QUERY: &str = "
+pub(super) const SUMMARY_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
-           json_extract(n.publication_json, '$.provider')
+           ",
+    summary_publication_provider!(),
+    "
     FROM session_summary_nodes_fts
     JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
     JOIN session_summary_availability AS a
@@ -264,16 +301,21 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = "
       AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
       AND length(CAST(n.session_id AS BLOB)) <= ?8
       AND length(CAST(COALESCE(
-          json_extract(n.publication_json, '$.provider'), ''
+          ",
+    summary_publication_provider!(),
+    ", ''
       ) AS BLOB)) <= ?8
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.summary_anchor_id AS BLOB))
           + length(CAST(n.session_id AS BLOB))
           + length(CAST(COALESCE(
-              json_extract(n.publication_json, '$.provider'), ''
+              ",
+    summary_publication_provider!(),
+    ", ''
           ) AS BLOB)) <= ?9
     ORDER BY n.created_at DESC, n.summary_id
-    LIMIT ?10";
+    LIMIT ?10"
+);
 
 pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     "
@@ -306,21 +348,10 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
               )
           )
       )
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
-      AND length(CAST(o.session_id AS BLOB)) <= ?9
-      AND length(CAST(o.role AS BLOB)) <= ?9
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?9
+      ",
+    occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
+    "
       AND length(CAST(o.snippet_text AS BLOB)) <= ?12
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
@@ -359,20 +390,9 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
               )
           )
       )
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
-      AND length(CAST(o.session_id AS BLOB)) <= ?9
-      AND length(CAST(o.role AS BLOB)) <= ?9
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?9
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?10
+      ",
+    occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
+    "
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
@@ -410,20 +430,9 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
               )
           )
       )
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?8
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?10
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
-      AND length(CAST(o.session_id AS BLOB)) <= ?10
-      AND length(CAST(o.role AS BLOB)) <= ?10
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?10
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?11
+      ",
+    occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
+    "
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?12
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
@@ -448,7 +457,9 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
       ON authority_anchor.anchor_id = n.summary_anchor_id
     JOIN sessions AS authority_session
       ON authority_session.session_id = n.session_id
-     AND authority_session.provider = json_extract(n.publication_json, '$.provider')
+     AND authority_session.provider = ",
+    summary_publication_provider!(),
+    "
      AND authority_session.project_key = ?1
     WHERE ",
     anchor_owner_authority_predicate!(),
@@ -501,7 +512,9 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
       ON authority_anchor.anchor_id = n.summary_anchor_id
     JOIN sessions AS authority_session
       ON authority_session.session_id = n.session_id
-     AND authority_session.provider = json_extract(n.publication_json, '$.provider')
+     AND authority_session.provider = ",
+    summary_publication_provider!(),
+    "
      AND authority_session.project_key = ?1
     WHERE ",
     anchor_owner_authority_predicate!(with_session_owner),
