@@ -538,17 +538,56 @@ async fn dispatch_compatibility_tool(
     };
     reject_tool_result_truncation(&result_value, tool_name)?;
     print_tool_output(&result_value, raw_json);
-    Ok(())
+    // The payload above is the tool's answer and callers parse it, so it is
+    // printed byte-for-byte either way; only the process status changes here.
+    // A tool result the daemon classified as an application failure must not
+    // exit 0 — that made every script and CI gate shelling out to
+    // `tracedecay tool` silently blind to a failing tool.
+    tool_result_process_outcome(&result_value, tool_name)
+}
+
+/// The process outcome for a completed MCP tool result: `Ok` (exit 0) for a
+/// successful call, `Err` (nonzero exit) for one the daemon classified as an
+/// application failure.
+///
+/// `isError` is the daemon's own authoritative classification — set by
+/// `mark_semantic_tool_error` from either a handler's structural
+/// `with_semantic_error` marker or the rendered-payload failure heuristic — and
+/// is the same field an MCP client reads, so the CLI and MCP transports agree
+/// on what "this tool failed" means.
+///
+/// A *degraded but truthful* answer is deliberately not a failure: a partial
+/// coverage report, a warming generation, or an `unavailable` retrieval lane
+/// described inside an otherwise successful payload never carries `isError`, so
+/// it keeps exit 0. Only an outcome the daemon itself marked as failed changes
+/// the status, which mirrors what the typed application-surface path already
+/// does in [`print_cli_application_surface`].
+fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<()> {
+    if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    // `print_tool_output` already wrote the exact daemon payload. The failing
+    // path exits through `process::exit`, which runs no destructors, so flush
+    // stdout before returning the status-only error.
+    std::io::stdout().flush()?;
+    Err(TraceDecayError::Config {
+        message: format!("{tool_name} reported an application failure."),
+    })
 }
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {
+    println!("{}", rendered_tool_output(result_value, raw_json));
+}
+
+/// The bytes `tracedecay tool` writes to stdout for a completed compatibility
+/// result: the exact daemon JSON object when `--json` is set, otherwise the
+/// joined `content[*].text` markdown. Status is decided separately from
+/// top-level `isError`.
+fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
     if raw_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(result_value).unwrap_or_default()
-        );
+        serde_json::to_string_pretty(result_value).unwrap_or_default()
     } else {
-        println!("{}", join_content_text(result_value));
+        join_content_text(result_value)
     }
 }
 

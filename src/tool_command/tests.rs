@@ -815,6 +815,158 @@ fn reject_tool_result_truncation_detects_content_envelope() {
     );
 }
 
+/// `main` maps `Ok` to exit 0 and any `Err` to `process::exit(1)`, so the
+/// outcome these assertions inspect *is* the process exit status.
+#[test]
+fn successful_tool_result_exits_zero() {
+    let markdown = json!({
+        "content": [{ "type": "text", "text": "**success:** true\n**files:** []" }]
+    });
+    let json_success = json!({
+        "content": [{
+            "type": "text",
+            "text": "{\"success\":true,\"files\":[]}"
+        }],
+        "isError": false
+    });
+    assert!(
+        tool_result_process_outcome(&markdown, "tracedecay_str_replace").is_ok(),
+        "a successful markdown tool result must keep exit 0"
+    );
+    assert!(
+        tool_result_process_outcome(&json_success, "tracedecay_str_replace").is_ok(),
+        "an explicit isError:false JSON result must keep exit 0"
+    );
+    assert_eq!(
+        rendered_tool_output(&markdown, false),
+        "**success:** true\n**files:** []"
+    );
+    let json_stdout = rendered_tool_output(&json_success, true);
+    assert!(
+        json_stdout.contains("\"success\":true"),
+        "JSON stdout must keep the exact daemon payload: {json_stdout}"
+    );
+    assert!(
+        json_stdout.contains("\"isError\": false"),
+        "JSON stdout must keep the daemon isError flag: {json_stdout}"
+    );
+}
+
+#[test]
+fn application_error_tool_result_exits_nonzero() {
+    // The exact envelope `tracedecay tool str_replace` returns for an
+    // `old_str` that is not in the file: the payload is a normal result and
+    // the daemon marks the outcome `isError`.
+    let failed = json!({
+        "content": [{
+            "type": "text",
+            "text": "{\"success\":false,\"message\":\"old_str not found in README.md\"}"
+        }],
+        "isError": true
+    });
+    let stdout_json = rendered_tool_output(&failed, true);
+    let stdout_text = rendered_tool_output(&failed, false);
+    assert!(
+        stdout_json.contains("old_str not found in README.md"),
+        "{stdout_json}"
+    );
+    assert!(stdout_json.contains("\"isError\": true"), "{stdout_json}");
+    assert_eq!(
+        stdout_text,
+        "{\"success\":false,\"message\":\"old_str not found in README.md\"}"
+    );
+
+    let error = tool_result_process_outcome(&failed, "tracedecay_str_replace")
+        .expect_err("an application failure must fail the CLI process");
+    let message = error.to_string();
+    assert!(message.contains("tracedecay_str_replace"), "{message}");
+    assert!(message.contains("application failure"), "{message}");
+    assert!(
+        !message.contains("old_str not found in README.md"),
+        "stderr must not scrape a payload that is already on stdout: {message}"
+    );
+}
+
+/// A truthful *degraded* answer is not a failure. Retrieval lanes that report
+/// themselves `unavailable` inside an otherwise successful payload, partial
+/// coverage, and warming generations all keep exit 0 — only an outcome the
+/// daemon itself marked `isError` changes the status.
+#[test]
+fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
+    let markdown = json!({
+        "content": [{
+            "type": "text",
+            "text": "### Coverage\nPartial recall — some retrieval lanes did not answer:\n\
+                     - exact: unavailable (generation_rebuilding)\n\
+                     - semantic: unavailable (generation_rebuilding)"
+        }]
+    });
+    let warming_json = json!({
+        "content": [{
+            "type": "text",
+            "text": "{\"coverage\":\"partial\",\"exact\":\"unavailable\",\"reason\":\"generation_rebuilding\"}"
+        }]
+    });
+    let nested_is_error = json!({
+        "content": [{
+            "type": "text",
+            "text": "{\"isError\":true,\"message\":\"nested marker is not the daemon flag\"}"
+        }]
+    });
+    assert!(
+        tool_result_process_outcome(&markdown, "tracedecay_context").is_ok(),
+        "a degraded but successfully reported answer must not fail the process"
+    );
+    assert!(
+        tool_result_process_outcome(&warming_json, "tracedecay_context").is_ok(),
+        "a JSON warming/partial payload without top-level isError must keep exit 0"
+    );
+    assert!(
+        tool_result_process_outcome(&nested_is_error, "tracedecay_context").is_ok(),
+        "only the daemon's top-level isError flag may change the process status"
+    );
+    assert!(
+        rendered_tool_output(&markdown, false).contains("unavailable (generation_rebuilding)"),
+        "markdown stdout must keep the typed degraded payload"
+    );
+    assert!(
+        rendered_tool_output(&warming_json, true).contains("generation_rebuilding"),
+        "JSON stdout must keep the typed warming payload"
+    );
+}
+
+#[test]
+fn application_error_without_a_json_message_still_exits_nonzero() {
+    // Markdown-rendering handlers have no JSON `message` field; the status
+    // still changes from top-level `isError`, and the rendered payload stays
+    // on stdout instead of being scraped into stderr.
+    let failed = json!({
+        "content": [{ "type": "text", "text": "**success:** false\n**outcome:** failed" }],
+        "isError": true
+    });
+    assert_eq!(
+        rendered_tool_output(&failed, false),
+        "**success:** false\n**outcome:** failed"
+    );
+    assert!(
+        rendered_tool_output(&failed, true).contains("**success:** false"),
+        "JSON stdout must keep the exact markdown daemon payload"
+    );
+
+    let error = tool_result_process_outcome(&failed, "tracedecay_run_affected_tests")
+        .expect_err("an application failure must fail the CLI process");
+    let message = error.to_string();
+    assert!(
+        message.contains("tracedecay_run_affected_tests"),
+        "{message}"
+    );
+    assert!(message.contains("application failure"), "{message}");
+    assert!(
+        !message.contains("**success:** false"),
+        "stderr must not scrape a payload that is already on stdout: {message}"
+    );
+}
+
 #[test]
 fn canonical_problem_markdown_matches_the_golden_contract() {
     let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
