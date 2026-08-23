@@ -7,8 +7,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ParseOffset, ProjectionStoreError, StoreShardScopeV1, build_scope_resolution_authorization_v1,
+    ObservationProjectionStore, ObservationStore, ObservationStoreError, ParseOffset,
+    ProjectionStoreError, StoreShardScopeV1, build_scope_resolution_authorization_v1,
 };
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
@@ -630,11 +630,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .capture_observations(requests)
             .await
             .map_err(|error| classify_error(&error))?;
-        let mut projected = Vec::with_capacity(outcomes.len());
-        for outcome in outcomes {
-            projected.push(project_captured_outcome(database, outcome).await?);
-        }
-        Ok(projected)
+        project_captured_outcomes(database, outcomes).await
     }
 
     pub async fn capture(&self, request: CaptureObservationRequest) -> HostAdmissionOutcome {
@@ -920,6 +916,18 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
     }
 }
 
+fn classify_external_source_error(
+    error: crate::external_source_store::RuntimeExternalSourceErrorV1,
+) -> HostAdmissionOutcome {
+    tracing::warn!(%error, "registered external-source commit failed");
+    match error {
+        crate::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+            HostAdmissionOutcome::retained_unavailable("external_source_runtime_unavailable")
+        }
+        _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
+    }
+}
+
 async fn project_captured_outcome(
     database: &RegisteredGlobalDb,
     outcome: CaptureObservationOutcome,
@@ -934,25 +942,65 @@ async fn project_captured_outcome(
         crate::external_source_store::RuntimeExternalSourceStore::new(database.runtime_client())
             .capture_host_observation(persisted.receipt())
             .await
-            .map_err(|error| {
-                tracing::warn!(%error, "registered external-source commit failed");
-                match error {
-                    crate::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
-                        HostAdmissionOutcome::retained_unavailable(
-                            "external_source_runtime_unavailable",
-                        )
-                    }
-                    _ => {
-                        HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
-                    }
-                }
-            })?;
+            .map_err(classify_external_source_error)?;
     if let crate::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) =
         projection
     {
         return accepted_for_external_source_replay(outcome, receipt);
     }
     Ok(outcome)
+}
+
+async fn project_captured_outcomes(
+    database: &RegisteredGlobalDb,
+    outcomes: Vec<CaptureObservationOutcome>,
+) -> Result<Vec<CaptureObservationOutcome>, HostAdmissionOutcome> {
+    let mut receipts = Vec::new();
+    let mut persisted_slots = Vec::new();
+    for (slot, outcome) in outcomes.iter().enumerate() {
+        if let CaptureObservationOutcome::Persisted {
+            outcome: persisted, ..
+        } = outcome
+        {
+            persisted_slots.push(slot);
+            receipts.push(persisted.receipt().clone());
+        }
+    }
+    if receipts.is_empty() {
+        return Ok(outcomes);
+    }
+    let projections =
+        crate::external_source_store::RuntimeExternalSourceStore::new(database.runtime_client())
+            .capture_host_observations(&receipts)
+            .await
+            .map_err(classify_external_source_error)?;
+    if projections.len() != persisted_slots.len() {
+        return Err(HostAdmissionOutcome::retained_unavailable(
+            "external_source_commit_failed",
+        ));
+    }
+    let mut next = persisted_slots.into_iter().zip(projections);
+    let mut pending = next.next();
+    let mut projected = Vec::with_capacity(outcomes.len());
+    for (slot, outcome) in outcomes.into_iter().enumerate() {
+        if let Some((projected_slot, projection)) = pending.take() {
+            if projected_slot == slot {
+                if let crate::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(
+                    receipt,
+                ) = projection
+                {
+                    projected.push(accepted_for_external_source_replay(outcome, receipt)?);
+                } else {
+                    projected.push(outcome);
+                }
+                pending = next.next();
+                continue;
+            }
+            pending = Some((projected_slot, projection));
+        }
+        projected.push(outcome);
+    }
+    Ok(projected)
 }
 
 fn accepted_for_external_source_replay(

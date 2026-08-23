@@ -161,9 +161,13 @@ async fn mounted_capture_batch_reduces_writer_transactions() {
                 | CaptureObservationOutcome::AcceptedForReplay { .. }
         )
     }));
+    let committed = committed_transactions(database) - before;
+    assert!(
+        committed < BATCH_SIZE as u64,
+        "trait capture_observations must open fewer writer transactions than frames: committed_transactions={committed} frames={BATCH_SIZE}"
+    );
     assert_eq!(
-        committed_transactions(database) - before,
-        BATCH_SIZE as u64 + 1,
-        "one observation batch plus one external-source projection per receipt must commit"
+        committed, 2,
+        "one observation batch plus one external-source batch must commit"
     );
 }

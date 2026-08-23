@@ -129,6 +129,17 @@ impl ProjectExecutor {
         self.external_source.execute_write(savepoint, commit)
     }
 
+    pub fn execute_external_source_batch(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        commits: &[SourceCommitV1],
+    ) -> rusqlite::Result<()> {
+        for commit in commits {
+            self.external_source.execute_write(savepoint, commit)?;
+        }
+        Ok(())
+    }
+
     pub fn execute_external_source_projection_write(
         &mut self,
         savepoint: &Savepoint<'_>,

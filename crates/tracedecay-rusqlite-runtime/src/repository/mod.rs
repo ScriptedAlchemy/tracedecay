@@ -131,6 +131,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::ExternalSource(commit) => self
                 .project
                 .execute_external_source_write(savepoint, commit),
+            RepositoryWritePayloadV1::ExternalSourceBatch(commits) => self
+                .project
+                .execute_external_source_batch(savepoint, commits),
             RepositoryWritePayloadV1::ExternalSourceProjection(projection) => self
                 .project
                 .execute_external_source_projection_write(savepoint, projection),
