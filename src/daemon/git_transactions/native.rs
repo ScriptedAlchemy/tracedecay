@@ -1001,17 +1001,6 @@ fn read_scope_diff(
     String::from_utf8(output.stdout).map_err(|_| GitIndexTransactionPortError::StalePreview)
 }
 
-// Test-only wrapper: production reads the diff itself and calls
-// `extract_patch_from_diff` directly.
-#[cfg(test)]
-fn extract_patch(
-    repository_root: &Path,
-    scope: &GitDiffScopeV1,
-    hunk: &tracedecay_domain::HunkRefV1,
-) -> Result<Vec<u8>, GitIndexTransactionPortError> {
-    extract_patch_from_diff(&read_scope_diff(repository_root, scope)?, hunk)
-}
-
 fn extract_patch_from_diff(
     text: &str,
     hunk: &tracedecay_domain::HunkRefV1,
@@ -1975,8 +1964,9 @@ mod tests {
             Some(GitIndexUnsupportedStateV1::RenameOrCopy),
             "rename/copy hunks remain explicit read-only previews"
         );
-        let patch = extract_patch(directory.path(), &GitDiffScopeV1::WorkingTree, &hunk)
-            .expect("extract exact packet");
+        let diff = read_scope_diff(directory.path(), &GitDiffScopeV1::WorkingTree)
+            .expect("read working-tree diff");
+        let patch = extract_patch_from_diff(&diff, &hunk).expect("extract exact packet");
         let patch = ValidatedIndexPatch::new(hunk, patch).expect("validate exact packet");
         let old_tree = runner.write_tree().expect("old index tree");
         let candidate = runner
