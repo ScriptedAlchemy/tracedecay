@@ -14,8 +14,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -1138,8 +1136,7 @@ fn verify_unreferenced_completed_text_artifact(
         )));
     }
     let file = File::open(path).map_err(storage)?;
-    let opened = file.metadata().map_err(storage)?;
-    if !metadata_identity_matches(&before, &opened) {
+    if !path_still_names_open_file(path, &file, &before)? {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "code text artifact '{}' changed while its identity was being verified",
             path.display()
@@ -2335,8 +2332,7 @@ fn verify_existing_graph_replay_pool_entry(
         return Err(unsafe_entry("does not match the retired generation's size"));
     }
     let entry_file = File::open(pool_entry).map_err(storage)?;
-    let opened = entry_file.metadata().map_err(storage)?;
-    if !metadata_identity_matches(&before, &opened) {
+    if !path_still_names_open_file(pool_entry, &entry_file, &before)? {
         return Err(unsafe_entry(
             "changed while its identity was being verified",
         ));
@@ -2382,17 +2378,45 @@ fn path_still_names_open_file(
     if !current.file_type().is_file() {
         return Ok(false);
     }
-    let opened = opened.metadata().map_err(storage)?;
-    Ok(
-        metadata_identity_matches(admitted, &opened)
-            && metadata_identity_matches(&current, &opened),
-    )
+    let opened_metadata = opened.metadata().map_err(storage)?;
+    if !metadata_identity_matches(admitted, &opened_metadata)
+        || !metadata_identity_matches(&current, &opened_metadata)
+    {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    {
+        let named = match File::open(path) {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(storage(error)),
+        };
+        let named_identity =
+            tracedecay_runtime_core::windows_file::information(&named).map_err(storage)?;
+        let opened_identity =
+            tracedecay_runtime_core::windows_file::information(opened).map_err(storage)?;
+        if named_identity.volume_serial_number != opened_identity.volume_serial_number
+            || named_identity.file_index != opened_identity.file_index
+            || named_identity.number_of_links != opened_identity.number_of_links
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Whether two metadata snapshots name the same stable file identity. On
 /// Unix the device and inode pair is exact; the type, length, and
 /// modification time double as the cross-check that the content did not
-/// change between the snapshots.
+/// change between the snapshots. Windows file-index identity is compared
+/// from retained handles via `windows_file::information`, not MetadataExt.
 fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -2401,16 +2425,6 @@ fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata
             || left.ctime() != right.ctime()
             || left.ctime_nsec() != right.ctime_nsec()
             || left.mode() != right.mode()
-        {
-            return false;
-        }
-    }
-    #[cfg(windows)]
-    {
-        if left.volume_serial_number() != right.volume_serial_number()
-            || left.file_index() != right.file_index()
-            || left.number_of_links() != right.number_of_links()
-            || left.file_attributes() != right.file_attributes()
         {
             return false;
         }
