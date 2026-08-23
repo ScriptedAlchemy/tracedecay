@@ -112,6 +112,58 @@ async fn recover_truncated_payload(
     serde_json::from_str(content).map_err(Into::into)
 }
 
+/// Recover a truncated MCP tool result while keeping the MCP envelope shape
+/// `tracedecay tool` prints. Status unwraps to the inner JSON; this path must
+/// leave `content[*].text` as the recovered payload so `--format json` and
+/// `--json` callers still parse the tool schema rather than a handle envelope.
+pub(crate) async fn recover_truncated_mcp_result(
+    handshake: &tracedecay::daemon::DaemonHandshake,
+    tool_name: &str,
+    result: serde_json::Value,
+    deadline: Option<Instant>,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    let Ok(payload) = tracedecay::daemon::tool_json_payload(&result, tool_name) else {
+        return Ok(result);
+    };
+    if payload
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Ok(result);
+    }
+    let recovered =
+        recover_truncated_payload(handshake, tool_name, result.clone(), deadline).await?;
+    let text = serde_json::to_string(&recovered)?;
+    let mut recovered_result = result;
+    let blocks = recovered_result
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no content blocks"),
+        })?;
+    let mut replaced = false;
+    for block in blocks {
+        let Some(block_text) = block.get("text").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Ok(block_payload) = serde_json::from_str::<serde_json::Value>(block_text) else {
+            continue;
+        };
+        if is_truncation_envelope(&block_payload) {
+            block["text"] = serde_json::Value::String(text.clone());
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} omitted its truncation payload"),
+        });
+    }
+    Ok(recovered_result)
+}
+
 pub(crate) fn is_truncation_envelope(value: &Value) -> bool {
     value.get("truncated").and_then(Value::as_bool) == Some(true)
         && value

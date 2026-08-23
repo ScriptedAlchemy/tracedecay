@@ -67,7 +67,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::cli::dispatch::resolve_cli_application_surface;
-use crate::commands::reject_truncation_envelope;
+use crate::commands::{recover_truncated_mcp_result, reject_truncation_envelope};
 
 mod args;
 use args::{ParsedInvocation, canonical_tool_name, nearest_tool_name, parse_invocation};
@@ -472,7 +472,10 @@ impl DaemonToolDispatch {
         // The interactive CLI wants the tool's answer, not the daemon's typed
         // warming state: ride out a cold project open until the CLI deadline,
         // the same transport behavior as the typed application-surface path.
-        call_default_tool_awaiting_project_open(&handshake, tool_name, tool_args, deadline).await
+        let result =
+            call_default_tool_awaiting_project_open(&handshake, tool_name, tool_args, deadline)
+                .await?;
+        recover_truncated_mcp_result(&handshake, tool_name, result, Some(deadline)).await
     }
 }
 

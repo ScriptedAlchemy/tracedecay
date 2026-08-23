@@ -146,7 +146,11 @@ where
                     let request: Value =
                         serde_json::from_str(request.trim()).expect("decode request");
                     assert_eq!(request["method"], "tools/call");
-                    assert_eq!(request["params"]["name"], "tracedecay_search");
+                    let tool_name = request["params"]["name"].as_str().unwrap_or("");
+                    assert!(
+                        tool_name == "tracedecay_search" || tool_name == "tracedecay_retrieve",
+                        "unexpected scripted daemon tool {tool_name}"
+                    );
                     request_tx.send(request.clone()).expect("publish request");
                     let script = Arc::clone(&script);
                     workers.push(std::thread::spawn(move || script(stream, request)));
@@ -260,7 +264,6 @@ fn generic_tool_rejects_semantic_truncation_envelope_without_output() {
             "original_chars": 16000,
             "preview_chars": 2,
             "preview": "{}",
-            "handle": "tool-trunc-1",
         });
         let mut bytes = serde_json::to_vec(&json!({
             "jsonrpc": "2.0",
@@ -286,8 +289,64 @@ fn generic_tool_rejects_semantic_truncation_envelope_without_output() {
     assert!(result.output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&result.output.stderr);
     assert!(
-        stderr.contains("truncated JSON") && stderr.contains("tracedecay_retrieve"),
+        stderr.contains("truncated JSON") && stderr.contains("without a retrieval handle"),
         "unexpected truncation error: {stderr}"
+    );
+}
+
+#[test]
+fn generic_tool_retrieves_semantic_truncation_envelope() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let (requests, server) = spawn_scripted_daemon(socket.clone(), 2, |mut stream, request| {
+        let tool_name = request["params"]["name"].as_str().unwrap_or("");
+        let text = match tool_name {
+            "tracedecay_search" => json!({
+                "truncated": true,
+                "original_chars": 16000,
+                "preview_chars": 2,
+                "preview": "{}",
+                "handle": "tool-trunc-1",
+            })
+            .to_string(),
+            "tracedecay_retrieve" => {
+                assert_eq!(request["params"]["arguments"]["handle"], "tool-trunc-1");
+                json!({
+                    "content": "{\"recovered\":true,\"marker\":\"tool-ok\"}",
+                })
+                .to_string()
+            }
+            other => panic!("unexpected scripted daemon tool {other}"),
+        };
+        stream
+            .write_all(&response_bytes(&request, &text))
+            .expect("write truncation recovery");
+    });
+    let result = run_command_with_timeout(
+        tool_command(&home, &project, &socket, "envelope"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join fake daemon");
+    assert!(!result.killed_by_harness, "truncation retrieve hung");
+    assert!(
+        result.output.status.success(),
+        "handle-bearing truncation must recover: {}",
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.output.stdout);
+    assert!(
+        stdout.contains("tool-ok") && !stdout.contains("truncated"),
+        "expected recovered payload, got:\n{stdout}"
+    );
+    let seen: Vec<String> = requests
+        .try_iter()
+        .map(|request| request["params"]["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            "tracedecay_search".to_string(),
+            "tracedecay_retrieve".to_string()
+        ]
     );
 }
 
