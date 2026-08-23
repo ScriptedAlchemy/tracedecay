@@ -405,6 +405,7 @@ fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadli
     ))
 }
 
+#[hotpath::measure]
 pub(crate) async fn dispatch(
     host: HookHostV1,
     event_json: &str,
@@ -440,6 +441,7 @@ pub(crate) async fn dispatch(
 /// Dispatches a native event through its exact project binding when one is
 /// known, or through the authenticated daemon profile when the host has no
 /// project identity. Both paths send only the closed event material.
+#[hotpath::measure]
 pub(crate) async fn dispatch_for_scope(
     host: HookHostV1,
     event_json: &str,
@@ -620,6 +622,7 @@ fn prepare_bound_hook(
     })
 }
 
+#[hotpath::measure]
 async fn dispatch_decoded(
     prepared: PreparedBoundHook,
     project_root: &Path,

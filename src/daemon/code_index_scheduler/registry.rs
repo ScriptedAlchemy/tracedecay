@@ -1478,6 +1478,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Atomically marks the exact current serving generation as owned by one
     /// branch publication. A subsequent serving-slot replacement invalidates
     /// this token before rollback can observe it.
+    #[hotpath::measure]
     pub(in crate::daemon) async fn install_exact_serving_generation(
         &self,
         project_root: &Path,
@@ -2835,6 +2836,7 @@ impl CodeIndexSchedulerRegistryV1 {
         })
     }
 
+    #[hotpath::measure]
     pub(in crate::daemon) async fn install_committed_query_authorities(
         &self,
         project_root: &Path,

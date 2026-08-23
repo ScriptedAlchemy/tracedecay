@@ -38,6 +38,7 @@ pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<Path
     tracedecay_sessions::runtime::home_dir()
 }
 
+#[hotpath::measure]
 pub(super) async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,

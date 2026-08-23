@@ -79,6 +79,7 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     .await
 }
 
+#[hotpath::measure]
 pub(super) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
@@ -539,6 +540,7 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,

@@ -390,6 +390,7 @@ impl DaemonEngine {
         ))
     }
 
+    #[hotpath::measure]
     pub(super) async fn begin_project_open(
         &self,
         handshake: DaemonHandshake,
@@ -449,6 +450,7 @@ impl DaemonEngine {
         }
     }
 
+    #[hotpath::measure]
     pub(super) async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,

@@ -496,6 +496,7 @@ pub(super) async fn resolve_multi_root_projects(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub(super) async fn execute_daemon_invocation(
     engine: &DaemonEngine,
     handshake: &DaemonHandshake,
@@ -549,12 +550,15 @@ pub(super) async fn execute_daemon_invocation(
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        let project_server = await_project_open_with_semantic_control(
-            semantic_control.as_ref(),
-            semantic_cancellation.as_ref(),
-            engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
-        )
-        .await;
+        let project_server = hotpath::measure_block!(
+            "execute_daemon_invocation.project_open",
+            await_project_open_with_semantic_control(
+                semantic_control.as_ref(),
+                semantic_cancellation.as_ref(),
+                engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
+            )
+            .await
+        );
         let project_server = match project_server {
             Ok(project_server) => project_server,
             Err(problem) => {

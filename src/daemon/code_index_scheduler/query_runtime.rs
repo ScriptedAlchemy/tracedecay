@@ -356,6 +356,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
+    #[hotpath::measure]
     pub(in crate::daemon) async fn execute_controlled_query<C>(
         &self,
         scope: &ResolvedScope,
