@@ -137,7 +137,7 @@ impl ReadFlightLeader {
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             ReadFlightState::Complete(Arc::clone(&shared));
         self.flight.completed.notify_waiters();
-        (*shared).clone()
+        Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone())
     }
 
     fn remove_registration(&self) {

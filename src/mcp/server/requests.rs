@@ -580,9 +580,7 @@ impl McpServer {
                 current_branch.as_deref(),
                 admitted.seq,
             );
-            dispatch_server
-                .record_hook_span_observation(&event, &hook_route)
-                .await;
+            dispatch_server.record_hook_span_observation(&event, &hook_route);
         }
         Self::report_host_admission_outcome(outcome);
         outcome
@@ -938,8 +936,7 @@ impl McpServer {
             tool_name,
             net_saved_tokens,
             raw_file_tokens,
-        )
-        .await;
+        );
         self.maybe_flush_worldwide().await;
 
         // Append per-call token savings to the response content.

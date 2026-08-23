@@ -502,9 +502,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 tool_name,
                 args,
                 options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
             ))
             .await;
         }
@@ -516,9 +516,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 tool_name,
                 args,
                 options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
             ))
             .await;
         }
@@ -530,9 +530,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 tool_name,
                 args,
                 options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
             ))
             .await;
         }

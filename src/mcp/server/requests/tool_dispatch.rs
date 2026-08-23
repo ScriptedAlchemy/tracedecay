@@ -194,7 +194,7 @@ impl McpServer {
                 server_stats,
                 application_invocation_executor,
                 application_invocation_target,
-                application_request_id.clone(),
+                application_request_id,
                 Some(dispatch_control.deadline()),
                 Some(dispatch_control.cancellation()),
             )

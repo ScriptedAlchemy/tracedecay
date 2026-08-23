@@ -136,7 +136,7 @@ impl McpServer {
     /// ledger-write path so the response never waits on them and tests can
     /// still await durability via [`Self::ledger_writes_settled`]. Shutdown
     /// persists the final counter independently.
-    pub(crate) async fn spawn_token_accounting_persist(
+    pub(crate) fn spawn_token_accounting_persist(
         &self,
         monitor_project_root: &Path,
         tool_name: &str,
@@ -150,12 +150,17 @@ impl McpServer {
                 .tokens_saved
                 .fetch_add(net_saved_tokens, Ordering::Relaxed)
                 + net_saved_tokens;
-            Some((self.cg_snapshot().await, self.ledger_sink(), new_total))
+            Some((
+                std::sync::Arc::clone(&self.cg),
+                self.ledger_sink(),
+                new_total,
+            ))
         };
         let monitor_project_root = monitor_project_root.to_path_buf();
         let tool_name = tool_name.to_owned();
         self.spawn_observed_ledger_write(async move {
-            if let Some((cg, sink, new_total)) = persist {
+            if let Some((cg_lock, sink, new_total)) = persist {
+                let cg = cg_lock.read().await.clone();
                 let _ = cg.set_tokens_saved(new_total).await;
                 let _ = cg.add_local_counter(net_saved_tokens).await;
                 if let LedgerSink::Mounted(gdb) = sink {
@@ -400,14 +405,15 @@ impl McpServer {
     /// itself — the observation always carries the *current* branch.
     ///
     /// This analytics side write is intentionally fail-open: any resolution
-    /// or DB error is dropped. An in-process debounce keyed by
+    /// or DB error is dropped. Graph snapshots, git derivation, debounce, and
+    /// the span write all run on the observed ledger path so the notification
+    /// never waits on them. An in-process debounce keyed by
     /// `(provider, session, branch, worktree)` collapses a burst of tool-use
     /// events to one write per
     /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
-    /// so the notification hot path never blocks on repeated writes (spans
-    /// merge regardless, so a dropped observation only widens a span slightly
-    /// less).
-    pub(crate) async fn record_hook_span_observation(
+    /// (spans merge regardless, so a dropped observation only widens a span
+    /// slightly less).
+    pub(crate) fn record_hook_span_observation(
         self: &Arc<Self>,
         event: &hook_events::HookEvent,
         selected: &crate::mcp::project_route::ResolvedProjectRoute,
@@ -439,17 +445,6 @@ impl McpServer {
         let Ok(selected_server) = selected.retained_server() else {
             return;
         };
-        let project_root = selected_server
-            .cg_snapshot()
-            .await
-            .project_root()
-            .to_path_buf();
-        let active_project_root = self.cg_snapshot().await.project_root().to_path_buf();
-        if RegisteredGlobalDb::canonical_project_key(&project_root)
-            != RegisteredGlobalDb::canonical_project_key(&active_project_root)
-        {
-            return;
-        }
         let Some(db) = self.session_db.clone() else {
             return;
         };
@@ -459,6 +454,17 @@ impl McpServer {
         let cwd = cwd.to_path_buf();
         let server = Arc::clone(self);
         self.spawn_observed_ledger_write(async move {
+            let project_root = selected_server
+                .cg_snapshot()
+                .await
+                .project_root()
+                .to_path_buf();
+            let active_project_root = server.cg_snapshot().await.project_root().to_path_buf();
+            if RegisteredGlobalDb::canonical_project_key(&project_root)
+                != RegisteredGlobalDb::canonical_project_key(&active_project_root)
+            {
+                return;
+            }
             // Derive the worktree and branch from the freshly authorized cwd.
             // Route-provided worktree/branch strings are hints, not authority.
             // The derivation walks the filesystem (gix discovery) and may
