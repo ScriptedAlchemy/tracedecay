@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/resources/logo.png" alt="TraceDecay" width="300">
+  <img src="crates/tracedecay-cli/src/resources/logo.png" alt="TraceDecay" width="300">
 </p>
 
 <h3 align="center">Semantic code intelligence for AI coding agents</h3>

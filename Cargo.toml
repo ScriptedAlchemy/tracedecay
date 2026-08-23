@@ -5,6 +5,7 @@ members = [
     "crates/tracedecay-application",
     "crates/tracedecay-automation",
     "crates/tracedecay-capture",
+    "crates/tracedecay-cli",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
     "crates/tracedecay-dashboard-api",
@@ -328,10 +329,6 @@ semantic-fastembed = [
 [lib]
 name = "tracedecay"
 
-[[bin]]
-name = "tracedecay"
-path = "src/main.rs"
-
 # Plan 36 portability: symlink-alias snapshot capture (test-transport only).
 [[test]]
 name = "git_index_snapshot_root_canonicalization"
@@ -358,19 +355,6 @@ path = "tests/typed_terminal_restart_acceptance.rs"
 required-features = ["test-transport"]
 
 [[test]]
-name = "host_lifecycle_cli_acceptance"
-path = "tests/host_lifecycle_cli_acceptance.rs"
-required-features = ["test-transport"]
-
-# OpenCode one-analyzer conformance journey (Plans 27/35): drives the real CLI
-# lifecycle with a pre-existing analyzer and the broker's ownership gates; the
-# rollback phase uses the test-transport fault hook.
-[[test]]
-name = "opencode_one_analyzer_journey"
-path = "tests/opencode_one_analyzer_journey.rs"
-required-features = ["test-transport"]
-
-[[test]]
 name = "graph_rebuild_status_test"
 path = "tests/graph_rebuild_status_test.rs"
 required-features = ["test-transport"]
@@ -387,13 +371,6 @@ name = "v2_surface_mount_conformance"
 path = "tests/v2_surface_mount_conformance.rs"
 required-features = ["test-transport"]
 
-# Drives the seven-step production Work loop — create, evidence, proposal,
-# acceptance, admission, a real spawned provider step, receipt, replan —
-# through one live daemon's published HTTP application endpoint.
-[[test]]
-name = "work_loop_journey"
-path = "tests/work_loop_journey.rs"
-required-features = ["test-transport"]
 [dependencies]
 axum = "0.8"
 hotpath.workspace = true
@@ -500,7 +477,6 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [build-dependencies]
-logo-art = "0.2"
 serde_json = "1"
 
 [dev-dependencies]

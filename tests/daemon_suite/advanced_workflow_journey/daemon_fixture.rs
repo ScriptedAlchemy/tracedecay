@@ -73,7 +73,7 @@ pub(super) fn spawn_project_daemon(home: &Path, project: &Path) -> common::Daemo
         .append(true)
         .open(log_path)
         .expect("advanced workflow daemon log");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(crate::common::tracedecay_bin());
     common::apply_tracedecay_home_env(&mut command, home);
     let child = command
         .args(["daemon", "run"])
