@@ -1,6 +1,20 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::*;
+
+#[test]
+fn cloned_arc_lookup_releases_the_mutex_before_downstream_work() {
+    let state = Mutex::new(Some(Arc::new(7_u8)));
+
+    let value = clone_arc_under_lock(&state, |value| value.clone()).expect("pooled value");
+
+    let unlocked = state
+        .try_lock()
+        .expect("pooled lookup must not retain the mutex");
+    assert_eq!(*value, 7);
+    assert_eq!(unlocked.as_deref(), Some(&7));
+}
 
 #[test]
 fn prior_sealed_generation_is_rejected_before_manifest_decode() {
@@ -23,8 +37,8 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
 fn parallel_collection_preserves_input_order() {
     let items = (0..1_024_usize).collect::<Vec<_>>();
 
-    let values =
-        collect_bounded_ordered(&items, |item| Ok::<_, ()>(*item * 2)).expect("infallible mapping");
+    let values = collect_bounded_ordered(&items, |item, _worker| Ok::<_, ()>(*item * 2))
+        .expect("infallible mapping");
 
     assert_eq!(values.len(), items.len());
     assert!(
@@ -41,7 +55,7 @@ fn parallel_collection_returns_the_lowest_index_failure() {
     let visited = AtomicUsize::new(0);
     let items = (0..256_usize).collect::<Vec<_>>();
 
-    let error = collect_bounded_ordered(&items, |item| {
+    let error = collect_bounded_ordered(&items, |item, _worker| {
         visited.fetch_add(1, Ordering::Relaxed);
         if *item == 2 || *item == 200 {
             Err(*item)
@@ -61,10 +75,16 @@ fn parallel_collection_returns_the_lowest_index_failure() {
 #[test]
 fn parallel_and_sequential_collection_agree() {
     let items = (0..2_048_usize).collect::<Vec<_>>();
-    let operation = |item: &usize| Ok::<_, ()>(item.wrapping_mul(2_654_435_761));
+    let sequential_operation = |item: &usize| Ok::<_, ()>(item.wrapping_mul(2_654_435_761));
+    let parallel_operation = |item: &usize, _worker: &crate::hotpath_observe::WorkerBusyGuard| {
+        Ok::<_, ()>(item.wrapping_mul(2_654_435_761))
+    };
 
-    let sequential = items.iter().map(operation).collect::<Result<Vec<_>, ()>>();
-    let parallel = collect_bounded_ordered(&items, operation);
+    let sequential = items
+        .iter()
+        .map(sequential_operation)
+        .collect::<Result<Vec<_>, ()>>();
+    let parallel = collect_bounded_ordered(&items, parallel_operation);
 
     assert_eq!(sequential, parallel);
 }

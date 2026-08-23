@@ -294,21 +294,22 @@ where
     T: Sync,
     R: Send,
     E: Send,
-    F: Fn(&T) -> Result<R, E> + Sync,
+    F: Fn(&T, &crate::hotpath_observe::WorkerBusyGuard) -> Result<R, E> + Sync,
 {
-    crate::hotpath_observe::record_queue_depth(items.len());
+    let queue = crate::hotpath_observe::PendingWorkQueue::new(items.len());
     crate::hotpath_observe::record_files(items.len());
     // Always enter the indexing pool, even when the width is 1: the pool is
     // what keeps the nested chunk-level fan-out inside the reservation
     // instead of spilling onto rayon's global (all-cores) pool.
     crate::parallelism::install(|| {
+        let run = |item| {
+            let worker = queue.start_worker();
+            operation(item, &worker)
+        };
         if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
-            return items.iter().map(&operation).collect();
+            return items.iter().map(&run).collect();
         }
-        let results: Vec<Result<R, E>> = items
-            .par_iter()
-            .map(&operation)
-            .collect::<Vec<Result<R, E>>>();
+        let results: Vec<Result<R, E>> = items.par_iter().map(&run).collect::<Vec<Result<R, E>>>();
         results.into_iter().collect()
     })
 }
@@ -335,20 +336,38 @@ pub struct SharedPhysicalCodeArtifactPoolV1 {
     state: Arc<Mutex<PhysicalCodeArtifactPoolStateV1>>,
 }
 
+#[hotpath::measure]
+fn clone_arc_under_lock<S, T>(
+    state: &Mutex<S>,
+    select: impl FnOnce(&S) -> Option<Arc<T>>,
+) -> Option<Arc<T>> {
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    select(&state)
+}
+
 impl SharedPhysicalCodeArtifactPoolV1 {
     #[hotpath::measure]
     fn reuse(
         &self,
         key: &ManifestDigest,
         file: &ReceiptBoundCodeFileV1,
+        worker: &crate::hotpath_observe::WorkerBusyGuard,
     ) -> Option<FileGenerationArtifactsV1> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let artifact = state.artifacts.get(key)?.clone();
+        let artifact = {
+            let _coordination = worker.pool_coordination();
+            clone_arc_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
+        }?;
         let rebound = artifact.rematerialize_for_file(file).ok()?;
-        state.reused = state.reused.saturating_add(1);
+        {
+            let _coordination = worker.pool_coordination();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.reused = state.reused.saturating_add(1);
+        }
         Some(rebound)
     }
 
@@ -388,6 +407,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
 }
 
 impl FileGenerationArtifactsV1 {
+    #[hotpath::measure]
     fn rematerialize_for_file(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -944,7 +964,7 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|candidate| (&candidate.file_occurrence_id, candidate))
             .collect::<HashMap<_, _>>();
-        collect_bounded_ordered(&files, |file| {
+        collect_bounded_ordered(&files, |file, _worker| {
             file.artifacts
                 .validate()
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
@@ -1466,8 +1486,8 @@ where
         file: &SanitizedCodeFileV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
+        worker: &crate::hotpath_observe::WorkerBusyGuard,
     ) -> Result<(ManifestDigest, FileGenerationArtifactsV1), CodeIndexProductionErrorV1> {
-        let _worker = crate::hotpath_observe::WorkerBusyGuard::enter();
         Self::checkpoint(control)?;
         let captured = captured_files
             .get(&file.file_occurrence_id)
@@ -1496,7 +1516,8 @@ where
         })?;
         let physical_reuse_key =
             Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-        if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound) {
+        if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound, worker)
+        {
             crate::hotpath_observe::add_reused_parses(1);
             Self::checkpoint(control)?;
             return Ok((physical_reuse_key, reused));
@@ -1632,7 +1653,7 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let extracted = collect_bounded_ordered(&present_files, |file| {
+        let extracted = collect_bounded_ordered(&present_files, |file, worker| {
             Self::extract_file(
                 config,
                 physical_artifacts,
@@ -1646,6 +1667,7 @@ where
                 file,
                 captured_files,
                 control,
+                worker,
             )
         })?;
         // Parallel completion order is intentionally not cache authority.
@@ -1698,7 +1720,9 @@ where
         let retained_parses = &self.retained_parses;
         let file_materializations = collect_bounded_ordered(
             &increment.files,
-            |file_plan| -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
+            |file_plan,
+             worker|
+             -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
                 Self::checkpoint(control)?;
                 match &file_plan.action {
                     FileExtractionActionV1::CarryForward {
@@ -1756,6 +1780,7 @@ where
                                 file,
                                 captured_files,
                                 control,
+                                worker,
                             )?;
                             Ok(IncrementFileMaterializationV1::ReExtracted {
                                 reuse_key,
@@ -1778,6 +1803,7 @@ where
                             file,
                             captured_files,
                             control,
+                            worker,
                         )?;
                         Ok(IncrementFileMaterializationV1::ReExtracted {
                             reuse_key,

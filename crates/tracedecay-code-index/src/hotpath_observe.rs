@@ -6,8 +6,12 @@
 //! is `#[inline(always)]` and compiles to a no-op when the `hotpath` feature
 //! is off — atomics, clocks, and census walks must not run on the default path.
 
+#[cfg(test)]
+use std::cell::Cell;
 #[cfg(feature = "hotpath")]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(any(feature = "hotpath", test))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "hotpath")]
 use std::time::Instant;
 
@@ -15,7 +19,11 @@ use std::time::Instant;
 const HOT_LOOP_SAMPLE_PERIOD: u64 = 32;
 
 #[cfg(feature = "hotpath")]
-static WORKERS_BUSY: AtomicUsize = AtomicUsize::new(0);
+static PENDING_WORK: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hotpath")]
+static WORKERS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hotpath")]
+static WORKERS_POOL_COORDINATION: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
 static GREP_FILE_SAMPLE: AtomicU64 = AtomicU64::new(0);
 
@@ -34,53 +42,163 @@ pub(crate) fn sample_hot_loop() -> bool {
     }
 }
 
-pub(crate) struct WorkerBusyGuard;
+#[cfg(any(feature = "hotpath", test))]
+#[inline(always)]
+fn decrement_if_positive(counter: &AtomicUsize) -> bool {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_sub(1)
+        })
+        .is_ok()
+}
+
+pub(crate) struct PendingWorkQueue {
+    #[cfg(any(feature = "hotpath", test))]
+    remaining: AtomicUsize,
+}
+
+impl PendingWorkQueue {
+    #[inline(always)]
+    pub(crate) fn new(depth: usize) -> Self {
+        #[cfg(feature = "hotpath")]
+        {
+            PENDING_WORK.fetch_add(depth, Ordering::Relaxed);
+            refresh_queue_gauge();
+        }
+        Self {
+            #[cfg(any(feature = "hotpath", test))]
+            remaining: AtomicUsize::new(depth),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn start_worker(&self) -> WorkerBusyGuard {
+        #[cfg(any(feature = "hotpath", test))]
+        let started = decrement_if_positive(&self.remaining);
+        #[cfg(feature = "hotpath")]
+        if started {
+            let _ = decrement_if_positive(&PENDING_WORK);
+            refresh_queue_gauge();
+        }
+        #[cfg(all(test, not(feature = "hotpath")))]
+        let _ = started;
+        WorkerBusyGuard::enter()
+    }
+
+    #[cfg(test)]
+    fn pending_for_test(&self) -> usize {
+        self.remaining.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for PendingWorkQueue {
+    fn drop(&mut self) {
+        #[cfg(feature = "hotpath")]
+        {
+            let abandoned = self.remaining.swap(0, Ordering::Relaxed);
+            let _ = PENDING_WORK.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(abandoned))
+            });
+            refresh_queue_gauge();
+        }
+    }
+}
+
+pub(crate) struct WorkerBusyGuard {
+    #[cfg(test)]
+    coordinating: Cell<bool>,
+}
 
 impl WorkerBusyGuard {
     #[inline(always)]
     pub(crate) fn enter() -> Self {
         #[cfg(feature = "hotpath")]
         {
-            let busy = WORKERS_BUSY
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1);
-            refresh_worker_gauges(busy);
+            WORKERS_ACTIVE.fetch_add(1, Ordering::Relaxed);
+            refresh_worker_gauges();
         }
-        Self
+        Self {
+            #[cfg(test)]
+            coordinating: Cell::new(false),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn pool_coordination(&self) -> WorkerPoolCoordinationGuard<'_> {
+        #[cfg(feature = "hotpath")]
+        {
+            WORKERS_POOL_COORDINATION.fetch_add(1, Ordering::Relaxed);
+            refresh_worker_gauges();
+        }
+        #[cfg(test)]
+        self.coordinating.set(true);
+        WorkerPoolCoordinationGuard {
+            worker: self,
+            #[cfg(feature = "hotpath")]
+            started: Instant::now(),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_coordinating_for_test(&self) -> bool {
+        self.coordinating.get()
     }
 }
 
-#[cfg(feature = "hotpath")]
 impl Drop for WorkerBusyGuard {
     fn drop(&mut self) {
-        let previous = WORKERS_BUSY.fetch_sub(1, Ordering::Relaxed);
-        refresh_worker_gauges(previous.saturating_sub(1));
+        #[cfg(feature = "hotpath")]
+        {
+            let _ = decrement_if_positive(&WORKERS_ACTIVE);
+            refresh_worker_gauges();
+        }
+    }
+}
+
+pub(crate) struct WorkerPoolCoordinationGuard<'a> {
+    worker: &'a WorkerBusyGuard,
+    #[cfg(feature = "hotpath")]
+    started: Instant,
+}
+
+impl Drop for WorkerPoolCoordinationGuard<'_> {
+    fn drop(&mut self) {
+        #[cfg(feature = "hotpath")]
+        {
+            let _ = decrement_if_positive(&WORKERS_POOL_COORDINATION);
+            hotpath::gauge!("code_index_worker_pool_coordination_micros")
+                .inc(u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX));
+            refresh_worker_gauges();
+        }
+        #[cfg(test)]
+        self.worker.coordinating.set(false);
+        #[cfg(not(any(feature = "hotpath", test)))]
+        let _ = self.worker;
     }
 }
 
 #[cfg(feature = "hotpath")]
-fn refresh_worker_gauges(busy: usize) {
+fn refresh_worker_gauges() {
+    let active = WORKERS_ACTIVE.load(Ordering::Relaxed);
+    let coordinating = WORKERS_POOL_COORDINATION.load(Ordering::Relaxed);
+    let cpu = active.saturating_sub(coordinating);
     let workers = crate::parallelism::indexing_workers();
-    hotpath::gauge!("code_index_workers_busy").set(busy);
+    hotpath::gauge!("code_index_workers_busy").set(active);
+    hotpath::gauge!("code_index_workers_cpu").set(cpu);
+    hotpath::gauge!("code_index_workers_pool_coordination").set(coordinating);
     hotpath::gauge!("code_index_worker_count").set(workers);
     let utilization = if workers == 0 {
         0.0
     } else {
-        (busy as f64) * 100.0 / workers as f64
+        (cpu as f64) * 100.0 / workers as f64
     };
     hotpath::gauge!("code_index_worker_utilization_pct").set(utilization);
 }
 
+#[cfg(feature = "hotpath")]
 #[inline(always)]
-pub(crate) fn record_queue_depth(depth: usize) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_queue_depth").set(depth);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = depth;
-    }
+fn refresh_queue_gauge() {
+    hotpath::gauge!("code_index_queue_depth").set(PENDING_WORK.load(Ordering::Relaxed));
 }
 
 #[inline(always)]
@@ -210,5 +328,41 @@ pub(crate) fn record_rebuild_state(state: &'static str) {
     #[cfg(not(feature = "hotpath"))]
     {
         let _ = state;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_queue_decrements_when_each_worker_starts() {
+        let queue = PendingWorkQueue::new(3);
+        assert_eq!(queue.pending_for_test(), 3);
+
+        let first = queue.start_worker();
+        assert_eq!(queue.pending_for_test(), 2);
+        drop(first);
+
+        let second = queue.start_worker();
+        assert_eq!(queue.pending_for_test(), 1);
+        drop(second);
+
+        let third = queue.start_worker();
+        assert_eq!(queue.pending_for_test(), 0);
+        drop(third);
+    }
+
+    #[test]
+    fn pool_coordination_leaves_cpu_stage_until_the_guard_finishes() {
+        let queue = PendingWorkQueue::new(1);
+        let worker = queue.start_worker();
+        assert!(!worker.is_coordinating_for_test());
+
+        let coordinating = worker.pool_coordination();
+        assert!(worker.is_coordinating_for_test());
+
+        drop(coordinating);
+        assert!(!worker.is_coordinating_for_test());
     }
 }
