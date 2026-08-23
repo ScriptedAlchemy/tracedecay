@@ -2366,7 +2366,7 @@ async fn cleanup_pr_worktree_off_runtime(
             &expected_head,
             remove_synthetic_branch,
             &command_control,
-        )
+        );
     })
     .await
     {
@@ -2378,7 +2378,7 @@ async fn cleanup_pr_worktree_off_runtime(
                 ("reason", error.to_string()),
             ],
         );
-    };
+    }
 }
 
 fn cleanup_pr_worktree(
