@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -68,6 +70,38 @@ pub const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 pub const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_HASH_CHUNK_BYTES: usize = 64 * 1024;
+const UNCHANGED_PREFIX_MEMO_CAP: usize = 4096;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct UnchangedPrefixMemoKey {
+    file_identity: u64,
+    size: u64,
+    mtime: u64,
+    fingerprint: u64,
+}
+
+fn unchanged_prefix_memo() -> &'static Mutex<HashMap<UnchangedPrefixMemoKey, ()>> {
+    static MEMO: std::sync::OnceLock<Mutex<HashMap<UnchangedPrefixMemoKey, ()>>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn unchanged_prefix_memo_hit(key: UnchangedPrefixMemoKey) -> bool {
+    unchanged_prefix_memo()
+        .lock()
+        .map(|memo| memo.contains_key(&key))
+        .unwrap_or(false)
+}
+
+fn remember_unchanged_prefix(key: UnchangedPrefixMemoKey) {
+    let Ok(mut memo) = unchanged_prefix_memo().lock() else {
+        return;
+    };
+    if memo.len() >= UNCHANGED_PREFIX_MEMO_CAP {
+        memo.clear();
+    }
+    memo.insert(key, ());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonlResumeState {
@@ -683,23 +717,36 @@ impl PreparedJsonlScan {
         // from it instead of walking the same prefix a second time.
         let mut validated_prefix: Option<(u64, ResumeDigest)> = None;
         let (seek_to, file_id) = if let Some(resume_state) = resume_state {
-            let resume_matches = previous.position > 0
+            let identity_matches = previous.position > 0
                 && previous.file_id == resume_state.generation
                 && file_size >= previous.position
-                && file_identity == resume_state.file_identity
-                && match jsonl_prefix_digest(&mut file, previous.position) {
-                    Ok((digest, hashed)) => {
-                        io.prefix_validation_bytes =
-                            io.prefix_validation_bytes.saturating_add(hashed);
-                        let matched =
-                            digest.fingerprint(previous.position) == resume_state.fingerprint;
-                        if matched {
-                            validated_prefix = Some((previous.position, digest));
+                && file_identity == resume_state.file_identity;
+            let memo_key = UnchangedPrefixMemoKey {
+                file_identity,
+                size: file_size,
+                mtime,
+                fingerprint: resume_state.fingerprint,
+            };
+            // A later unchanged poll with the same identity/size/mtime can skip
+            // the prefix walk: a same-inode rewrite updates mtime and misses.
+            let resume_matches = identity_matches
+                && ((file_size == previous.position && unchanged_prefix_memo_hit(memo_key))
+                    || match jsonl_prefix_digest(&mut file, previous.position) {
+                        Ok((digest, hashed)) => {
+                            io.prefix_validation_bytes =
+                                io.prefix_validation_bytes.saturating_add(hashed);
+                            let matched =
+                                digest.fingerprint(previous.position) == resume_state.fingerprint;
+                            if matched {
+                                validated_prefix = Some((previous.position, digest));
+                                if file_size == previous.position {
+                                    remember_unchanged_prefix(memo_key);
+                                }
+                            }
+                            matched
                         }
-                        matched
-                    }
-                    Err(_) => false,
-                };
+                        Err(_) => false,
+                    });
             if resume_matches {
                 (previous.position, resume_state.generation)
             } else {
@@ -755,8 +802,10 @@ impl PreparedJsonlScan {
         };
         // The fingerprint must be captured before `after_generation_capture`
         // (the seam that simulates concurrent mutation) so revalidation still
-        // rejects same-handle rewrites that race the scan.
-        if seek_to < file_size {
+        // rejects same-handle rewrites that race the scan. Append-only resumes
+        // keep identity + size; hashing the whole file again would re-read the
+        // already-validated prefix.
+        if seek_to == 0 && seek_to < file_size {
             memoized_jsonl_snapshot_fingerprint(
                 &mut snapshot_fingerprint,
                 &mut io.snapshot_hash_bytes,
@@ -1146,19 +1195,26 @@ impl RawJsonlBatchScanner {
         let (final_file_id, identity_window_bytes) =
             stable_jsonl_file_id(&mut file, &final_metadata)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        let (final_snapshot, snapshot_hashed) =
-            bounded_jsonl_snapshot_fingerprint(&mut file, self.generation.file_size)
-                .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
         let mut io = self.io;
         io.identity_window_bytes = io
             .identity_window_bytes
             .saturating_add(identity_window_bytes);
-        io.snapshot_hash_bytes = io.snapshot_hash_bytes.saturating_add(snapshot_hashed);
+        let snapshot_changed = if let Some(expected_snapshot) = self.generation.snapshot_fingerprint
+        {
+            let (final_snapshot, snapshot_hashed) =
+                bounded_jsonl_snapshot_fingerprint(&mut file, self.generation.file_size)
+                    .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            io.snapshot_hash_bytes = io.snapshot_hash_bytes.saturating_add(snapshot_hashed);
+            final_snapshot != expected_snapshot
+        } else {
+            false
+        };
         io.content_bytes = self.read_through.saturating_sub(self.generation.seek_to);
-        // Every scan that reads bytes captured its fingerprint, so a missing
-        // one here fails closed as a generation change.
+        // Full-file scans compare the snapshot they captured. Append-only
+        // resumes compare identity and size so a same-handle rewrite of the
+        // head still fails closed without hashing the validated prefix again.
         if final_file_id != self.generation.file_identity
-            || Some(final_snapshot) != self.generation.snapshot_fingerprint
+            || snapshot_changed
             || final_metadata.len() < self.read_through
         {
             return Err(TranscriptIngestError::ScanGenerationChanged {
@@ -1326,16 +1382,30 @@ mod tests {
         );
         assert_eq!(
             second.io.prefix_validation_bytes, prefix,
-            "HEAD still hashes the stored prefix on an unchanged resume"
+            "the first unchanged poll still verifies the stored prefix"
         );
         assert!(
             second.io.identity_window_bytes > 0,
             "file identity still reads the head window"
         );
+        let third = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            second.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(checkpoint),
+        )
+        .unwrap();
+        assert_eq!(third.io.change, JsonlChangeKind::Unchanged);
+        assert_eq!(third.io.content_bytes, 0);
+        assert_eq!(
+            third.io.prefix_validation_bytes, 0,
+            "a later unchanged poll with the same identity/size/mtime skips the prefix walk"
+        );
     }
 
     #[test]
-    fn one_append_hashes_prefix_and_snapshot_then_reads_appended_bytes() {
+    fn one_append_hashes_prefix_once_and_reads_appended_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("append.jsonl");
         let first_line = b"{\"v\":0}\n";
@@ -1368,19 +1438,17 @@ mod tests {
             Some(checkpoint),
         )
         .unwrap();
-        let file_size = u64::try_from(first_line.len() + appended.len()).unwrap();
         let prefix = u64::try_from(first_line.len()).unwrap();
         let appended_len = u64::try_from(appended.len()).unwrap();
         assert_eq!(second.io.change, JsonlChangeKind::Appended);
         assert_eq!(second.io.content_bytes, appended_len);
         assert_eq!(
             second.io.prefix_validation_bytes, prefix,
-            "HEAD verifies the stored prefix once and reuses that digest to seed the scanner"
+            "one append verifies the stored prefix once and reuses that digest"
         );
         assert_eq!(
-            second.io.snapshot_hash_bytes,
-            file_size.saturating_mul(2),
-            "HEAD still snapshot-hashes the whole file on capture and revalidate"
+            second.io.snapshot_hash_bytes, 0,
+            "append-only resume must not snapshot-hash the already-validated prefix"
         );
     }
 }
