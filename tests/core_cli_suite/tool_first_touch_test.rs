@@ -10,12 +10,8 @@
 use std::path::Path;
 
 use crate::common;
-use crate::common::{canonical_existing_path, tracedecay_command_with_home};
+use crate::common::{canonical_existing_path as canonical_temp_path, tracedecay_command_with_home};
 use tempfile::TempDir;
-
-fn canonical_temp_path(path: &Path) -> std::path::PathBuf {
-    canonical_existing_path(path)
-}
 
 fn run_tool(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
     tracedecay_command_with_home(home)

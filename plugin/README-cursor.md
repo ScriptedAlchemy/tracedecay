@@ -86,7 +86,9 @@ the `sessionStart` adapter does not read a session store itself.
 Slash workflows ship as Cursor-native commands
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
 `/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
-the `tracedecay-` prefix so typing `/tracedecay` lists every command.
+the `tracedecay-` prefix so typing `/tracedecay` lists every command. The
+files in `overlays/cursor/commands/` are independently authored for Cursor
+(skill handoff + approval notes), not generated from `plugin/commands/`.
 
 ## Auto-review and `permissions.json`
 

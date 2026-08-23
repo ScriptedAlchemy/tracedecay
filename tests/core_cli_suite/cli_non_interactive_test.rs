@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::common::{MessageRecordBuilder, create_runtime, global_session};
+use crate::common::{
+    MessageRecordBuilder, canonical_existing_path as canonical_temp_path, create_runtime,
+    global_session,
+};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -20,10 +23,6 @@ use tracedecay_agent_hosts::automation::run_ledger::{
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_usecases::host_admission::HostAdmissionScope;
-
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
 /// that must NOT be classified as "ephemeral" by

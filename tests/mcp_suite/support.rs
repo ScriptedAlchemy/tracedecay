@@ -1031,7 +1031,6 @@ pub(crate) async fn seed_project_registry(
     runtime
 }
 
-// ---------------------------------------------------------------------------
 pub(crate) fn tool_properties<'a>(
     tools: &'a [tracedecay::mcp::ToolDefinition],
     name: &str,

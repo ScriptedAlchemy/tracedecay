@@ -251,7 +251,7 @@ async fn register_observation_store(
     (store_root, database_path)
 }
 
-// --- Repository identity across symlinks / renames / moves (regression) -----
+// Repository identity across symlinks / renames / moves.
 //
 // These pin the resolution semantics for `read_repository_identity_marker` and
 // registered project-store resolution: canonicalized aliases and moved

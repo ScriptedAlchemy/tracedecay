@@ -331,7 +331,7 @@ pub fn canonicalize_test_dir(path: &Path) -> PathBuf {
     })
 }
 
-fn canonicalize_test_db_path(path: &Path) -> PathBuf {
+pub fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path
         .parent()
         .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
@@ -1082,8 +1082,6 @@ impl LcmTestRuntime {
         }
     }
 
-    pub fn close(self) {}
-
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         self.runtime
             .upsert_session_for_test(HostAdmissionScope::Profile, session)
@@ -1241,7 +1239,7 @@ impl LcmTestRuntime {
             .await
     }
 
-    pub fn lcm_store(&self, _storage_root: impl AsRef<Path>) -> LcmTestStore<'_> {
+    pub fn lcm_store(&self) -> LcmTestStore<'_> {
         LcmTestStore {
             runtime: &self.runtime,
         }

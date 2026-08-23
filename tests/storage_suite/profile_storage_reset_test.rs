@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,48 +7,21 @@ use tracedecay::serve;
 use tracedecay::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-use crate::common::canonical_existing_path;
+use crate::common::{EnvVarGuard, canonical_existing_path};
 use crate::home_env_lock::HOME_ENV_LOCK;
 
 struct HomeEnvGuard {
-    previous_home: Option<OsString>,
-    previous_userprofile: Option<OsString>,
-    previous_data_dir: Option<OsString>,
+    _home: EnvVarGuard,
+    _userprofile: EnvVarGuard,
+    _data_dir: EnvVarGuard,
 }
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
-        }
         Self {
-            previous_home,
-            previous_userprofile,
-            previous_data_dir,
-        }
-    }
-}
-
-impl Drop for HomeEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(USER_DATA_DIR_ENV),
-            }
+            _home: EnvVarGuard::set("HOME", home),
+            _userprofile: EnvVarGuard::set("USERPROFILE", home),
+            _data_dir: EnvVarGuard::set(USER_DATA_DIR_ENV, home.join(".tracedecay")),
         }
     }
 }
