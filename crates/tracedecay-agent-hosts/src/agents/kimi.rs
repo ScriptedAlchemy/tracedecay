@@ -388,6 +388,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .collect()
 }
 
+#[hotpath::measure(label = "kimi_plugin_deploy")]
 fn deploy_kimi_plugin_to(managed_dir: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(&managed_dir.join(relative), &rendered, None)?;

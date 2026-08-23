@@ -557,6 +557,7 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
     Ok(install_dir)
 }
 
+#[hotpath::measure(label = "codex_repo_plugin_install")]
 fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
     install_codex_plugin_bundle(

@@ -577,6 +577,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
 /// origin beside this file rather than replace it (see [`plugin_cli`]). The
 /// destination is checked rather than assumed so a future refactor cannot
 /// quietly deploy where the host never scans.
+#[hotpath::measure(label = "opencode_plugin_install")]
 fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
     if !plugin_cli::is_host_discovered_plugin_path(path) {
         return Err(TraceDecayError::Config {

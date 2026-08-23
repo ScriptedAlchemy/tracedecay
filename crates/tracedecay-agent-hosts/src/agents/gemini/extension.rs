@@ -222,6 +222,7 @@ fn context_file_text() -> String {
 /// that directory. A clean replace, so a file a previous version staged but
 /// this one no longer ships cannot linger into the next `gemini extensions
 /// install`.
+#[hotpath::measure(label = "gemini_extension_deploy")]
 pub(super) fn deploy_extension_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let stage_dir = extension_stage_dir(home);
     clean_replace_owned_stage_dir(&stage_dir)?;
