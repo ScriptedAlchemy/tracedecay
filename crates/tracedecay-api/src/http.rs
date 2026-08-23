@@ -981,8 +981,8 @@ fn admit_http_application_request(
     controls: HttpApplicationControls,
     page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
-// The rejection `Response` dwarfs the admitted request, so it is boxed:
-// the allocation lands only on the rejection path, which is the rare one.
+    // The rejection `Response` dwarfs the admitted request, so it is boxed:
+    // the allocation lands only on the rejection path, which is the rare one.
 ) -> Result<HttpApplicationRequest, Box<Response>> {
     let Query(page) = match page {
         Ok(page) => page,
