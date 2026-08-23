@@ -150,7 +150,7 @@ impl TemporalCandidateExport {
                     logical_evidence_id: logical_evidence_id.clone(),
                     source_occurrence_id: source_occurrence.clone(),
                     file_occurrence_id: None,
-                    source_namespace,
+                    source_namespace: source_namespace.clone(),
                     repository_id: Some(request.scope.root.repository.clone()),
                     session_or_thread_id: Some(
                         SessionOrThreadId::try_from(session_id.to_string())
