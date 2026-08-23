@@ -372,6 +372,8 @@ pub fn composer_todos_have_admittable_items(native: &Value) -> bool {
         })
 }
 
+/// Cursor composer composition for one source envelope, not a per-token walk.
+#[hotpath::measure]
 pub fn normalize_cursor_composer_envelope_observation(
     native: &Value,
     composer_id: &str,
