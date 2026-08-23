@@ -508,6 +508,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         anchor_id: &'a RetrievalAnchorId,
     ) -> BackendFuture<'a, HydrationResolution> {
         Box::pin(async move {
+            hotpath::gauge!("session_temporal.hydration").inc(1u32);
             let control = snapshot.request().execution_control();
             control.checkpoint()?;
             let resolution = resolve_current(
@@ -529,6 +530,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         control: &'a ExecutionControl,
     ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
         Box::pin(async move {
+            hotpath::gauge!("session_temporal.hydration").inc(1u32);
             control.checkpoint()?;
             match &descriptor.source {
                 PayloadSource::Occurrence {

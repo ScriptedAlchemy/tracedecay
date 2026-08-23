@@ -822,6 +822,7 @@ impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution
         E: VersionedTokenEstimator + Sync + 'a,
     {
         Box::pin(async move {
+            hotpath::gauge!("session_temporal.execution").inc(1u32);
             let (read_snapshot, snapshot) = self.freeze(&request).await?;
             let authenticator =
                 GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
@@ -880,6 +881,7 @@ impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExe
         E: VersionedTokenEstimator + Sync + 'a,
     {
         Box::pin(async move {
+            hotpath::gauge!("session_temporal.execution").inc(1u32);
             let (read_snapshot, snapshot) = self.freeze(request.temporal()).await?;
             let authenticator =
                 GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)

@@ -102,10 +102,12 @@ fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&s
 /// Projects one queued observation through the guarded registered database
 /// client. The transaction remains bound to that client for its whole life;
 /// no physical engine handle escapes the runtime boundary.
+#[hotpath::measure]
 pub async fn project_observation(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
+    crate::hotpath_observe::record_transaction_rows(1);
     let transaction = database
         .begin_write_transaction("begin projection transaction")
         .await
@@ -390,6 +392,7 @@ async fn persist_projection_rejection_with_engine(
         .map_err(|error| storage("commit projection rejection transaction", error))
 }
 
+#[hotpath::measure]
 pub async fn rebuild_projection(
     database: &Database,
     frontier_sequence: u64,

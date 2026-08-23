@@ -390,6 +390,7 @@ const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advan
 /// `generation` scopes every pass to a single `projection_generation` (`None`
 /// spans all generations). In [`RetentionMode::DryRun`] nothing is mutated and
 /// each phase reports the candidate count and bytes that *would* be reclaimed.
+#[hotpath::measure]
 pub async fn run_observation_retention(
     database: &Database,
     generation: Option<&str>,
@@ -397,11 +398,18 @@ pub async fn run_observation_retention(
     mode: RetentionMode,
     now: i64,
 ) -> Result<ObservationRetentionReport> {
+    crate::hotpath_observe::record_snapshot_admissions(1);
     let reader = database.read_connection();
     let anchor_payloads_before =
         live_payload_count(&reader, &anchor_payload_count_sql(), generation).await?;
     let observation_payloads_before =
         live_payload_count(&reader, &observation_payload_count_sql(), generation).await?;
+    crate::hotpath_observe::record_rows_visited(
+        anchor_payloads_before.saturating_add(observation_payloads_before),
+    );
+    if generation.is_none() {
+        crate::hotpath_observe::record_full_scan_work(1);
+    }
     let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await?;
     let freelist_before = pragma_u64(&reader, "freelist_count").await?;
     let page_count_before = pragma_u64(&reader, "page_count").await?;

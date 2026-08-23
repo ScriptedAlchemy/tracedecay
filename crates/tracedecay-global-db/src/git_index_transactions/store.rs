@@ -543,6 +543,7 @@ where
     Ok(expiry)
 }
 
+#[hotpath::measure]
 async fn commit_outcome<T>(
     transaction: GitMutationWriteTransaction<'_>,
     outcome: GitIndexTransactionStoreResult<T>,

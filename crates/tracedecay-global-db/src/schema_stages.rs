@@ -430,6 +430,7 @@ struct RegisteredSchemaAdmissionClassification {
 /// shared by initialization admission and existing-store attach. Each
 /// authority surfaces its own typed reset state; nothing here mutates the
 /// store.
+#[hotpath::measure]
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
     binding: &tracedecay_store::StoreRuntimeBindingV1,
@@ -566,6 +567,7 @@ pub async fn ensure_registered_schema_for_admission(
 /// Installs (or idempotently re-ensures) every registered schema stage inside
 /// the caller's admission transaction. Callers classify admission first, so
 /// this stage runs only for stores classified fresh or exactly current.
+#[hotpath::measure]
 async fn install_registered_schema_stages(
     transaction: &(impl Executor + Sync),
     configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
@@ -573,6 +575,7 @@ async fn install_registered_schema_stages(
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
+    crate::hotpath_observe::record_transaction_rows(1);
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await
@@ -756,6 +759,7 @@ pub async fn converge_registered_schema(
     transaction.commit().await
 }
 
+#[hotpath::measure]
 async fn converge_registered_schema_on(
     connection: &impl Executor,
     convergence: RegisteredSchemaConvergence,

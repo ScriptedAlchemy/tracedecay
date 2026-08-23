@@ -34,10 +34,12 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         }
     }
 
+    #[hotpath::measure]
     pub async fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
+        crate::hotpath_observe::record_transaction_rows(1);
         preview.validate().map_err(invalid_domain)?;
         let transaction = self.begin_write().await?;
         let outcome = insert_preview_if_absent(&transaction, &preview).await;
@@ -79,10 +81,12 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     }
 
     /// Atomically consumes the approval and inserts the `Prepared` record.
+    #[hotpath::measure]
     pub async fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
+        crate::hotpath_observe::record_transaction_rows(1);
         record.validate().map_err(invalid_domain)?;
         if record.terminal_receipt.is_some()
             || record.status.terminal_outcome.is_some()
@@ -179,12 +183,14 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_receipt_from_transaction(&snapshot, transaction_id).await
     }
 
+    #[hotpath::measure]
     pub async fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         replacement: NativeIntegrationTransactionStatusV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1> {
+        crate::hotpath_observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         replacement.validate().map_err(invalid_domain)?;
         // Terminal states are only reachable through `write_terminal`, which
@@ -216,12 +222,14 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     /// Publishes the terminal status transition and its receipt in one
     /// immediate database transaction, so restart recovery never observes a
     /// terminal phase without its immutable receipt or quarantine fence.
+    #[hotpath::measure]
     pub async fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         receipt: NativeIntegrationReceiptV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
+        crate::hotpath_observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         receipt.validate().map_err(invalid_domain)?;
         let Some(outcome_code) = receipt.status.terminal_outcome.map(terminal_outcome_code) else {

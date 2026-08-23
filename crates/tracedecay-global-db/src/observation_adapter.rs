@@ -238,10 +238,12 @@ impl GlobalDbObservationStore {
 }
 
 impl ObservationStore for GlobalDbObservationStore {
+    #[hotpath::measure]
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let runtime = &self.runtime;
         let observation = write.observation();
         let observation_id = observation.observation_id().clone();

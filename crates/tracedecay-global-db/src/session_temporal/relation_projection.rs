@@ -69,11 +69,13 @@ impl RegisteredGlobalDb {
         Ok((generation, relations))
     }
 
+    #[hotpath::measure]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<GraphWatermark> {
+        crate::hotpath_observe::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -128,6 +130,7 @@ impl RegisteredGlobalDb {
         }))
     }
 
+    #[hotpath::measure]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -144,6 +147,7 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        crate::hotpath_observe::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -236,6 +240,9 @@ impl RegisteredGlobalDb {
             )
             .await?;
         }
+        let recovered = u64::try_from(pending.len()).unwrap_or(u64::MAX);
+        crate::hotpath_observe::record_rows_visited(recovered);
+        crate::hotpath_observe::record_output_sessions(recovered);
         Ok(pending.len())
     }
 
