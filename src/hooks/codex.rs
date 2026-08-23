@@ -97,7 +97,9 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         "UserPromptSubmit",
         &event,
     );
-    reset_counter_for_codex_event(&event, Some(&hook_telemetry)).await;
+    if let Some(root) = root.as_deref() {
+        super::reset_counter_for_project(root, Some(&hook_telemetry)).await;
+    }
     let session_id = serde_json::from_str::<Value>(&event)
         .ok()
         .as_ref()
@@ -366,31 +368,7 @@ async fn retain_codex_stop_in_daemon(
             }
         }
     };
-    await_within_stop_budget(retain, CODEX_STOP_RETENTION_BUDGET, telemetry).await
-}
-
-async fn await_within_stop_budget(
-    capture: impl std::future::Future<Output = bool>,
-    budget: Duration,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> bool {
-    if let Some(telemetry) = telemetry {
-        telemetry.note_timeout_budget(budget);
-    }
-    match tokio::time::timeout(budget, capture).await {
-        Ok(captured) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(false);
-            }
-            captured
-        }
-        Err(_) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(true);
-            }
-            false
-        }
-    }
+    super::await_within_stop_budget(retain, CODEX_STOP_RETENTION_BUDGET, telemetry, || false).await
 }
 
 /// Builds a Codex hook stdout payload with `additionalContext`.
@@ -681,16 +659,6 @@ async fn ingest_user_codex_session(
     super::ingest_user_session("Codex", session_id, telemetry).await
 }
 
-async fn reset_counter_for_codex_event(
-    event_json: &str,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) {
-    let Some(project_root) = event_project_root_with_identity_from_json(event_json).await else {
-        return;
-    };
-    super::reset_counter_for_project(&project_root, telemetry).await;
-}
-
 fn deduped_codex_hint(
     event_json: &str,
     parsed: &Value,
@@ -769,32 +737,6 @@ mod tests {
         assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
     }
 
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_path(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn codex_stop_hands_terminal_receipt_to_daemon() {
@@ -828,7 +770,13 @@ mod tests {
     async fn codex_stop_retention_timeout_is_fail_open() {
         assert_eq!(CODEX_STOP_RETENTION_BUDGET, Duration::from_secs(3));
         assert!(
-            !await_within_stop_budget(std::future::pending(), Duration::ZERO, None).await,
+            !super::super::await_within_stop_budget(
+                std::future::pending(),
+                Duration::ZERO,
+                None,
+                || false,
+            )
+            .await,
             "bounded daemon retention must not prevent Stop guidance from returning"
         );
     }
@@ -840,7 +788,7 @@ mod tests {
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let _profile_env = crate::hooks::EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
         crate::storage::pin_fixture_repository_identity(&project_root, "proj_hook_codex_prompt")
             .unwrap();
         let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();

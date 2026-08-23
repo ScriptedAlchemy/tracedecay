@@ -136,7 +136,7 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// user/project memory relevant to the submitted prompt.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_from_json(&event);
+    let root = kiro_project_root(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
     let dispatch_guidance = if let Some(root) = root.as_deref() {
@@ -151,9 +151,13 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
     } else {
         None
     };
-    reset_counter_for_kiro_event(&event, Some(&hook_telemetry)).await;
-    let ingest = ingest_kiro_transcript_for_event(
+    if let Some(root) = root.as_deref() {
+        super::reset_counter_for_project(root, Some(&hook_telemetry)).await;
+    }
+    let ingest = super::ingest_transcript_for_event(
+        "kiro",
         &event,
+        root.as_deref(),
         Some(KIRO_HOT_INGEST_MAX_BYTES),
         KIRO_HOT_INGEST_BUDGET,
         Some(&hook_telemetry),
@@ -198,90 +202,19 @@ pub async fn hook_kiro_post_tool_use() -> i32 {
         &event,
         &parsed,
     );
-    notify_kiro_post_tool_use(&parsed, &hook_telemetry).await;
+    notify_kiro_post_tool_use(&parsed, root.as_deref(), &hook_telemetry).await;
     0
 }
 
-async fn reset_counter_for_kiro_event(
-    event_json: &str,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
+async fn notify_kiro_post_tool_use(
+    parsed: &Value,
+    project_root: Option<&Path>,
+    telemetry: &super::analytics::HookTimingSpan,
 ) {
-    let Some(project_root) = kiro_project_root(event_json) else {
-        return;
-    };
-    super::reset_counter_for_project(&project_root, telemetry).await;
-}
-
-/// Incrementally ingests Kiro IDE transcripts for the workspace referenced by
-/// `event_json`. Always fails open.
-#[derive(Default)]
-struct KiroIngestOutcome {
-    user_scope: bool,
-    messages_upserted: u64,
-}
-
-async fn ingest_kiro_transcript_for_event(
-    event_json: &str,
-    max_new_bytes: Option<u64>,
-    budget: std::time::Duration,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> KiroIngestOutcome {
-    let project_root = kiro_project_root(event_json);
-    let mut args = serde_json::json!({
-        "action": "ingest_transcript",
-        "provider": "kiro",
-        "user_scope": project_root.is_none(),
-        "event_json": event_json,
-    });
-    if let Some(max_new_bytes) = max_new_bytes {
-        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
-    }
-    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
-    if let Some(telemetry) = telemetry {
-        telemetry.note_timeout_budget(budget);
-    }
-    match tokio::time::timeout(
-        budget,
-        super::daemon_hook_action(project_root.as_deref(), args, telemetry),
-    )
-    .await
-    {
-        Ok(Ok(result)) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(false);
-            }
-            KiroIngestOutcome {
-                user_scope: result
-                    .get("user_scope")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                messages_upserted: result
-                    .get("messages_upserted")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            }
-        }
-        Ok(Err(error)) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(false);
-            }
-            // Fail-open observer: a missing daemon or profile must not print
-            // to the host or fabricate operator state.
-            tracing::warn!(%error, "Kiro transcript ingest daemon call failed");
-            KiroIngestOutcome::default()
-        }
-        Err(_) => {
-            if let Some(telemetry) = telemetry {
-                telemetry.note_timed_out(true);
-            }
-            tracing::warn!("Kiro transcript ingest daemon call timed out");
-            KiroIngestOutcome::default()
-        }
-    }
-}
-
-async fn notify_kiro_post_tool_use(parsed: &Value, telemetry: &super::analytics::HookTimingSpan) {
-    let Some(project_root) = event_project_root_or_process_cwd(parsed) else {
+    let Some(project_root) = project_root
+        .map(Path::to_path_buf)
+        .or_else(|| event_project_root_or_process_cwd(parsed))
+    else {
         return;
     };
     let cwd = event_cwd_from_parsed(parsed);
@@ -381,8 +314,10 @@ mod tests {
         })
         .to_string();
 
-        let outcome = ingest_kiro_transcript_for_event(
+        let outcome = crate::hooks::ingest_transcript_for_event(
+            "kiro",
             &event,
+            None,
             Some(8_192),
             std::time::Duration::from_millis(375),
             None,

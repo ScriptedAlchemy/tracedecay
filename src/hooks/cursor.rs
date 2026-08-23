@@ -841,7 +841,8 @@ mod tests {
         ]);
         let event = serde_json::json!({ "session_id": "cursor-budget" }).to_string();
 
-        let outcome = ingest_cursor_transcript_for_event_inner(
+        let outcome = crate::hooks::ingest_transcript_for_event(
+            "cursor",
             &event,
             None,
             Some(4_096),
@@ -860,32 +861,6 @@ mod tests {
         assert_eq!(calls[0].1["max_new_bytes"], 4_096);
         assert_eq!(calls[0].1["timeout_budget_ms"], 250);
         assert_eq!(calls[0].1["format"], "json");
-    }
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_path(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
     }
 
     #[tokio::test]
@@ -1061,7 +1036,7 @@ mod tests {
         let profile = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let _profile_env = crate::hooks::EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
         crate::storage::pin_fixture_repository_identity(
             &project_root,
             "proj_hook_cursor_after_edit",

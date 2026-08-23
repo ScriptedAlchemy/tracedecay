@@ -178,6 +178,14 @@ pub struct ProductionSemanticRuntimeV1 {
     code_index_store_root: PathBuf,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     resources: SemanticResourceCeilings,
+    vector_read_cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
+}
+
+struct CachedPublishedVectorsV1 {
+    generation: VectorGenerationIdV1,
+    search_index_key: SemanticSearchIndexKeyV1,
+    source_generation: CodeGenerationId,
+    port: Arc<PublishedSemanticVectorReadPortV1>,
 }
 
 /// The handles every stage of one scheduled projection shares.
@@ -332,6 +340,7 @@ impl ProductionSemanticRuntimeV1 {
             code_index_store_root,
             lifecycle,
             resources,
+            vector_read_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1735,6 +1744,35 @@ impl ProductionSemanticRuntimeV1 {
         scheduled
     }
 
+    fn cached_vector_read_port(
+        &self,
+        active: PublishedVectorGenerationV1,
+        search_index_key: SemanticSearchIndexKeyV1,
+        code_generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<Arc<PublishedSemanticVectorReadPortV1>, SemanticQueryServiceError> {
+        if let Ok(guard) = self.vector_read_cache.lock()
+            && let Some(cached) = guard.as_ref()
+            && cached.generation == *active.generation_id()
+            && cached.search_index_key == search_index_key
+            && cached.source_generation == *active.source_generation()
+        {
+            return Ok(Arc::clone(&cached.port));
+        }
+        let port = Arc::new(
+            PublishedSemanticVectorReadPortV1::new(active, search_index_key.clone(), code_generation)
+                .map_err(|_| SemanticQueryServiceError::InvalidFallback)?,
+        );
+        if let Ok(mut guard) = self.vector_read_cache.lock() {
+            *guard = Some(CachedPublishedVectorsV1 {
+                generation: port.generation.clone(),
+                search_index_key,
+                source_generation: port.source_generation.clone(),
+                port: Arc::clone(&port),
+            });
+        }
+        Ok(port)
+    }
+
     /// Real application consumer for the optional semantic lane. The exact
     /// configuration-pinned generation is loaded before composition; indexing/download never
     /// enters this request path.
@@ -1822,18 +1860,17 @@ impl ProductionSemanticRuntimeV1 {
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
-        let vectors = PublishedSemanticVectorReadPortV1::new(
+        let vectors = self.cached_vector_read_port(
             active,
             request.search_index_key.clone(),
             code_generation,
-        )
-        .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        )?;
         compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
             handle: &self.handle,
             request,
             generation: &complete,
             calibration,
-            vectors: &vectors,
+            vectors: vectors.as_ref(),
             control,
             mode,
             fallback,
@@ -2406,7 +2443,7 @@ fn block_on_semantic_evaluation<Output>(
     future: impl Future<Output = Result<Output, SemanticRuntimeScheduleFailureV1>>,
 ) -> Result<Output, SemanticRuntimeScheduleFailureV1> {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(future),
+        Ok(_) => Err(SemanticRuntimeScheduleFailureV1::Runtime),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2645,6 +2682,17 @@ impl PublishedSemanticVectorReadPortV1 {
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
         })
+    }
+}
+
+impl SemanticVectorReadPort for Arc<PublishedSemanticVectorReadPortV1> {
+    fn scan_exact_flat(
+        &self,
+        request: SemanticVectorReadRequestV1<'_>,
+        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
+        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
+    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
+        self.as_ref().scan_exact_flat(request, examine, visit)
     }
 }
 
@@ -2960,26 +3008,13 @@ where
         mode,
         fallback,
     } = parameters;
-    let readiness = semantic_lane_readiness_for_request(handle, request, generation, calibration);
-    match readiness {
-        SemanticLaneReadinessV1::Ready {
-            request,
-            generation,
-            calibration,
-        } => {
-            let Some(factory) = handle.query_factory(
-                &request.code_generation,
-                &request.vector_generation,
-                request.projection.projection_key(),
-            ) else {
-                // Atomically current generation is the only admission path.
-                return execute_calibrated_semantic_query(
-                    &NeverCalledSemanticLane,
-                    SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Incompatible),
-                    mode,
-                    fallback,
-                );
-            };
+    let factory = handle.query_factory(
+        &request.code_generation,
+        &request.vector_generation,
+        request.projection.projection_key(),
+    );
+    match factory {
+        Some(factory) => {
             let embedder = factory.create(control, request.budget.deadline_micros);
             let lane = SemanticCodeRetriever::new(&embedder, vectors, control);
             execute_calibrated_semantic_query(
@@ -2993,9 +3028,12 @@ where
                 fallback,
             )
         }
-        unavailable @ SemanticLaneReadinessV1::Unavailable(_) => {
-            execute_calibrated_semantic_query(&NeverCalledSemanticLane, unavailable, mode, fallback)
-        }
+        None => execute_calibrated_semantic_query(
+            &NeverCalledSemanticLane,
+            SemanticLaneReadinessV1::Unavailable(index_state_from_status(handle.status())),
+            mode,
+            fallback,
+        ),
     }
 }
 
