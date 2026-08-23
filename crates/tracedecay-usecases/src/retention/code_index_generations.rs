@@ -28,13 +28,11 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 #[cfg(test)]
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_code_index::production::sealed_generation_format_revision_is_compatible;
-use tracedecay_domain::canonical_text::{
-    encode_lowercase_hex, is_lowercase_hex, sha256_hex,
-};
 /// Only the generation fixtures build tagged digests; production here works in
 /// untagged hex, so importing this unconditionally is an unused-import error.
 #[cfg(test)]
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
 mod generation_scan;
