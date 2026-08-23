@@ -1091,7 +1091,7 @@ async fn admit_dashboard_http_request(
     });
     let (request, mut cancellation_guard) = match admitted {
         Ok(admitted) => admitted,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let response = hotpath::measure_block!("dashboard.http.handler", next.run(request).await);
     cancellation_guard.completed = true;
@@ -1103,23 +1103,23 @@ fn admit_dashboard_http_control(
     admission: DashboardHttpAdmission,
     headers: HeaderMap,
     mut request: Request<Body>,
-) -> std::result::Result<(Request<Body>, DashboardHttpCancellationGuard), Response> {
+) -> std::result::Result<(Request<Body>, DashboardHttpCancellationGuard), Box<Response>> {
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
     else {
-        return Err(dashboard_request_forbidden("missing Host header"));
+        return Err(Box::new(dashboard_request_forbidden("missing Host header")));
     };
     let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
-        return Err(dashboard_request_forbidden("invalid Host header"));
+        return Err(Box::new(dashboard_request_forbidden("invalid Host header")));
     };
     let authority_host = authority.host().trim_matches(['[', ']']);
     let loopback_host = authority_host.eq_ignore_ascii_case("localhost")
         || matches!(authority_host, "127.0.0.1" | "::1");
     if !loopback_host || authority.port_u16() != Some(admission.port) {
-        return Err(dashboard_request_forbidden(
+        return Err(Box::new(dashboard_request_forbidden(
             "Host must name the bound loopback dashboard",
-        ));
+        )));
     }
 
     if let Some(origin) = headers
@@ -1127,7 +1127,9 @@ fn admit_dashboard_http_control(
         .and_then(|value| value.to_str().ok())
     {
         let Ok(origin_uri) = origin.parse::<Uri>() else {
-            return Err(dashboard_request_forbidden("invalid Origin header"));
+            return Err(Box::new(dashboard_request_forbidden(
+                "invalid Origin header",
+            )));
         };
         let same_origin = origin_uri.scheme_str() == Some("http")
             && origin_uri.authority().is_some_and(|origin_authority| {
@@ -1136,9 +1138,9 @@ fn admit_dashboard_http_control(
                     .eq_ignore_ascii_case(authority.as_str())
             });
         if !same_origin {
-            return Err(dashboard_request_forbidden(
+            return Err(Box::new(dashboard_request_forbidden(
                 "Origin must match the dashboard",
-            ));
+            )));
         }
     }
 
@@ -1147,19 +1149,19 @@ fn admit_dashboard_http_control(
     let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
     let request_id = match tracedecay_application::RequestId::new(format!("request.{identity}")) {
         Ok(request_id) => request_id,
-        Err(error) => return Err(internal_error_response(error)),
+        Err(error) => return Err(Box::new(internal_error_response(error))),
     };
     let cancellation =
         match tracedecay_application::CancellationSignal::active(format!("cancel.{identity}")) {
             Ok(cancellation) => cancellation,
-            Err(error) => return Err(internal_error_response(error)),
+            Err(error) => return Err(Box::new(internal_error_response(error))),
         };
     let request_deadline_micros = dashboard_http_request_deadline_micros(request.uri().path());
     let deadline_at =
         tracedecay_domain::UtcMicros(observed_at.0.saturating_add(request_deadline_micros));
     let deadline = match tracedecay_application::Deadline::new(deadline_at) {
         Ok(deadline) => deadline,
-        Err(error) => return Err(internal_error_response(error)),
+        Err(error) => return Err(Box::new(internal_error_response(error))),
     };
     request
         .extensions_mut()
