@@ -22,8 +22,24 @@ impl DaemonInvocationService {
         &self,
         project_root: &Path,
     ) -> Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1> {
+        self.admit_project_request_resolved(project_root, None)
+    }
+
+    pub(in crate::daemon) fn admit_project_request_resolved(
+        &self,
+        project_root: &Path,
+        canonical_root: Option<&Path>,
+    ) -> Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1> {
+        let resolved;
+        let canonical_root = match canonical_root {
+            Some(canonical_root) => Some(canonical_root),
+            None => {
+                resolved = project_root.canonicalize().ok();
+                resolved.as_deref()
+            }
+        };
         self.project_runtimes
-            .admit_request(project_root, project_root.canonicalize().ok().as_deref())
+            .admit_request(project_root, canonical_root)
     }
 
     /// Executes a closed request after daemon socket authentication.

@@ -546,8 +546,7 @@ fn retrieval_query(
         },
         false,
     )
-    .query()
-    .clone())
+    .into_query())
 }
 
 fn admitted_execution_limits(limit: usize) -> ExecutionLimits {

@@ -1,7 +1,5 @@
 //! Daemon PR-branch auto-tracking (opt-in via `sync.auto_track_pr_branches`).
 //!
-//! # What this does
-//!
 //! When a project enables `sync.auto_track_pr_branches`, a daemon poll loop
 //! discovers the open pull requests on the repo's `origin` remote and activates
 //! each same-repo PR head as a registered linked worktree through the daemon's
@@ -33,7 +31,7 @@
 //! Discovery classifies a PR as a fork when its head SHA matches no `refs/heads/*`
 //! ref on `origin` (or, via `gh`, when `isCrossRepository` is true). Supporting
 //! forks would mean fetching untrusted `refs/pull/N/head` from arbitrary
-//! repositories; that is deliberately out of scope for the first cut.
+//! repositories; that is deliberately out of scope.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -2160,14 +2158,15 @@ async fn cleanup_failed_track(
 ) -> std::result::Result<ManagedPr, String> {
     match remove_pr_store(repo_root, data_root, label, administration).await {
         Ok(()) => {
-            cleanup_pr_worktree(
+            cleanup_pr_worktree_off_runtime(
                 repo_root,
                 data_root,
                 pr,
                 head_sha,
                 true,
-                administration.command_control,
-            );
+                administration.command_control.clone(),
+            )
+            .await;
             Err(original_reason.to_string())
         }
         Err(cleanup_reason) => Err(format!(
@@ -2263,14 +2262,15 @@ async fn untrack_pr(
         return Err("managed PR entry does not own the requested branch artifacts".to_string());
     }
     remove_pr_store(repo_root, data_root, label, administration).await?;
-    cleanup_pr_worktree(
+    cleanup_pr_worktree_off_runtime(
         repo_root,
         data_root,
         managed.pr,
         &managed.head_sha,
         !is_legacy,
-        administration.command_control,
-    );
+        administration.command_control.clone(),
+    )
+    .await;
     Ok(())
 }
 
@@ -2291,13 +2291,25 @@ async fn sweep_orphan_pr_worktrees(
     administration: PrStoreAdministration<'_>,
 ) {
     let worktrees_dir = data_root.join("pr-worktrees");
-    let Ok(entries) = std::fs::read_dir(&worktrees_dir) else {
-        return;
+    let entries = match tokio::task::spawn_blocking({
+        let worktrees_dir = worktrees_dir.clone();
+        move || {
+            std::fs::read_dir(&worktrees_dir).map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name())
+                    .collect::<Vec<_>>()
+            })
+        }
+    })
+    .await
+    {
+        Ok(Ok(entries)) => entries,
+        Ok(Err(_)) | Err(_) => return,
     };
     let managed_prs: std::collections::BTreeSet<u64> =
         state.managed.values().map(|m| m.pr).collect();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for name in entries {
         let Some(number) = name
             .to_str()
             .and_then(|n| n.strip_prefix("pr-"))
@@ -2311,14 +2323,15 @@ async fn sweep_orphan_pr_worktrees(
         let label = pr_label(number);
         match remove_pr_store(repo_root, data_root, &label, administration).await {
             Ok(()) => {
-                cleanup_pr_worktree(
+                cleanup_pr_worktree_off_runtime(
                     repo_root,
                     data_root,
                     number,
                     "",
                     true,
-                    administration.command_control,
-                );
+                    administration.command_control.clone(),
+                )
+                .await;
                 log_daemon_event(
                     "pr_autotrack",
                     &[
@@ -2331,6 +2344,40 @@ async fn sweep_orphan_pr_worktrees(
             }
             Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
         }
+    }
+}
+
+async fn cleanup_pr_worktree_off_runtime(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    expected_head: &str,
+    remove_synthetic_branch: bool,
+    command_control: PrCommandControl,
+) {
+    let repo_root = repo_root.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    let expected_head = expected_head.to_owned();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        cleanup_pr_worktree(
+            &repo_root,
+            &data_root,
+            pr,
+            &expected_head,
+            remove_synthetic_branch,
+            &command_control,
+        )
+    })
+    .await
+    {
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("action", "cleanup_task_failed".to_string()),
+                ("pr", pr.to_string()),
+                ("reason", error.to_string()),
+            ],
+        );
     }
 }
 

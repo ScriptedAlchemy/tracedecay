@@ -4,7 +4,7 @@
 //! expiring durable preview input, so a daemon restart never invalidates an
 //! otherwise current immutable preview.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -817,6 +817,8 @@ fn unsupported_hunk_selection(
     intelligence: &NativeGitIntelligence,
     operation: GitIndexTransactionOperationV1,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    let mut unique_paths = Vec::new();
+    let mut seen_paths = BTreeSet::new();
     for hunk in selected_hunks {
         if hunk.original_path.is_some() {
             return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
@@ -843,11 +845,11 @@ fn unsupported_hunk_selection(
         if modes.iter().flatten().any(|mode| mode.is_symlink()) {
             return Some(GitIndexUnsupportedStateV1::Symlink);
         }
-        if let Some(reason) = unsupported_path_state(runner, intelligence, operation, &hunk.path) {
-            return Some(reason);
+        if seen_paths.insert(hunk.path.clone()) {
+            unique_paths.push(hunk.path.clone());
         }
     }
-    None
+    unsupported_selected_paths(runner, intelligence, operation, &unique_paths)
 }
 
 fn unsupported_path_state(
@@ -856,6 +858,18 @@ fn unsupported_path_state(
     operation: GitIndexTransactionOperationV1,
     path: &str,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    unsupported_selected_paths(runner, intelligence, operation, &[path.to_owned()])
+}
+
+fn unsupported_selected_paths(
+    runner: &FixedGitIndexRunner,
+    intelligence: &NativeGitIntelligence,
+    operation: GitIndexTransactionOperationV1,
+    paths: &[String],
+) -> Option<GitIndexUnsupportedStateV1> {
+    if paths.is_empty() {
+        return None;
+    }
     let unreadable = match operation {
         GitIndexTransactionOperationV1::StageHunks => {
             GitIndexUnsupportedStateV1::UnreadableWorkingTree
@@ -875,49 +889,64 @@ fn unsupported_path_state(
     let Ok(diff) = intelligence.diff(&scope) else {
         return Some(unreadable);
     };
-    let Some(file) = diff.files.iter().find(|file| file.path == path) else {
-        return Some(unreadable);
+    for path in paths {
+        let Some(file) = diff.files.iter().find(|file| file.path == *path) else {
+            return Some(unreadable);
+        };
+        if file.original_path.is_some() {
+            return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
+        }
+        if file.binary {
+            return Some(GitIndexUnsupportedStateV1::BinaryHunk);
+        }
+        if file.submodule {
+            return Some(GitIndexUnsupportedStateV1::Submodule);
+        }
+        if [file.old_mode.as_ref(), file.new_mode.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(tracedecay_domain::GitFileModeV1::is_symlink)
+        {
+            return Some(GitIndexUnsupportedStateV1::Symlink);
+        }
+        if file.old_mode != file.new_mode && file.hunks.is_empty() {
+            return Some(GitIndexUnsupportedStateV1::FileModeOnly);
+        }
+        if !diff.coverage.is_complete() {
+            return Some(unreadable);
+        }
+    }
+    let filtered_paths = match check_attr_filter_paths(runner.repository_root(), paths) {
+        Ok(filtered_paths) => filtered_paths,
+        Err(()) => return Some(unreadable),
     };
-    if file.original_path.is_some() {
-        return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
+    paths
+        .iter()
+        .any(|path| filtered_paths.contains(path))
+        .then_some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine)
+}
+
+fn check_attr_filter_paths(
+    repository_root: &Path,
+    paths: &[String],
+) -> Result<BTreeSet<String>, ()> {
+    if paths.is_empty() {
+        return Ok(BTreeSet::new());
     }
-    if file.binary {
-        return Some(GitIndexUnsupportedStateV1::BinaryHunk);
-    }
-    if file.submodule {
-        return Some(GitIndexUnsupportedStateV1::Submodule);
-    }
-    if [file.old_mode.as_ref(), file.new_mode.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(tracedecay_domain::GitFileModeV1::is_symlink)
-    {
-        return Some(GitIndexUnsupportedStateV1::Symlink);
-    }
-    if file.old_mode != file.new_mode && file.hunks.is_empty() {
-        return Some(GitIndexUnsupportedStateV1::FileModeOnly);
-    }
-    if !diff.coverage.is_complete() {
-        return Some(unreadable);
-    }
-    let mut command = read_git_command(runner.repository_root());
-    let Ok(output) = command
-        .args([
-            "check-attr",
-            "-z",
-            "filter",
-            "text",
-            "eol",
-            "working-tree-encoding",
-            "--",
-            path,
-        ])
-        .output()
-    else {
-        return Some(unreadable);
-    };
+    let mut command = read_git_command(repository_root);
+    command.args([
+        "check-attr",
+        "-z",
+        "filter",
+        "text",
+        "eol",
+        "working-tree-encoding",
+        "--",
+    ]);
+    command.args(paths);
+    let output = command.output().map_err(|_| ())?;
     if !output.status.success() {
-        return Some(unreadable);
+        return Err(());
     }
     let fields = output
         .stdout
@@ -925,17 +954,17 @@ fn unsupported_path_state(
         .filter(|field| !field.is_empty())
         .collect::<Vec<_>>();
     let mut records = fields.chunks_exact(3);
-    let has_filter = records.any(|record| {
+    let mut filtered = BTreeSet::new();
+    for record in records.by_ref() {
         let value = record[2];
-        value != b"unspecified" && value != b"unset" && value != b"false"
-    });
+        if value != b"unspecified" && value != b"unset" && value != b"false" {
+            filtered.insert(String::from_utf8_lossy(record[0]).into_owned());
+        }
+    }
     if !records.remainder().is_empty() {
-        return Some(unreadable);
+        return Err(());
     }
-    if has_filter {
-        return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
-    }
-    None
+    Ok(filtered)
 }
 
 #[derive(Serialize)]

@@ -1,9 +1,8 @@
 //! `DaemonInvocationState`: daemon-generation-local state for the closed
 //! invocation protocol, shared by the Unix and portable brokers.
 //!
-//! `use super::*` re-exposes the daemon authorities needed by this state (including
-//! the `multi_root_family_allows` kill-switch call target) while request
-//! cancellation remains threaded through the invocation boundary explicitly.
+//! Request cancellation stays threaded through the invocation boundary
+//! explicitly, including the `multi_root_family_allows` kill-switch.
 
 use std::sync::Arc;
 
@@ -504,7 +503,10 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
-            let Some(request_lease) = self.service.admit_project_request(&locator.canonical_root)
+            let Some(request_lease) = self.service.admit_project_request_resolved(
+                &locator.canonical_root,
+                Some(&locator.canonical_root),
+            )
             else {
                 let Ok(generation) = unavailable_root_generation(
                     scope,

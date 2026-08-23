@@ -67,6 +67,10 @@ impl SessionRetrievalCommand {
     pub(crate) fn query(&self) -> &SessionTemporalQuery {
         &self.query
     }
+
+    pub(crate) fn into_query(self) -> SessionTemporalQuery {
+        self.query
+    }
 }
 
 fn temporal_candidate_filter(

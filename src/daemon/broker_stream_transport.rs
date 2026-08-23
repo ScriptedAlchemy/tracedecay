@@ -133,11 +133,33 @@ impl BrokerStreamTransport {
             .flatten()
     }
 
-    fn response_request_key(value: &serde_json::Value) -> Option<String> {
-        (value.get("result").is_some() || value.get("error").is_some())
-            .then(|| value.get("id"))
-            .flatten()
-            .and_then(Self::request_key)
+    fn outbound_response_id(
+        item: &rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+    ) -> Option<serde_json::Value> {
+        match item {
+            rmcp::model::JsonRpcMessage::Response(response) => {
+                Some(response.id.clone().into_json_value())
+            }
+            rmcp::model::JsonRpcMessage::Error(error) => error
+                .id
+                .clone()
+                .map(rmcp::model::NumberOrString::into_json_value),
+            rmcp::model::JsonRpcMessage::Request(_)
+            | rmcp::model::JsonRpcMessage::Notification(_) => None,
+        }
+    }
+
+    fn typed_response_request_key(
+        item: &rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+        response_id: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        match item {
+            rmcp::model::JsonRpcMessage::Response(_) | rmcp::model::JsonRpcMessage::Error(_) => {
+                response_id.and_then(Self::request_key)
+            }
+            rmcp::model::JsonRpcMessage::Request(_)
+            | rmcp::model::JsonRpcMessage::Notification(_) => None,
+        }
     }
 
     fn take_response_write(
@@ -315,15 +337,14 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let selected_project_responses = self.selected_project_responses.clone();
         let work_delivery_settlement = self.work_delivery_settlement.clone();
         async move {
+            let response_id = Self::outbound_response_id(&item);
+            let request_key = Self::typed_response_request_key(&item, response_id.as_ref());
             let mut bytes = serde_json::to_vec(&item)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            let value: serde_json::Value = serde_json::from_slice(&bytes)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             bytes.push(b'\n');
-            let request_key = Self::response_request_key(&value);
             let selected_response_lease = match selected_project_responses {
                 Some(authority) => authority
-                    .take(value.get("id"))
+                    .take(response_id.as_ref())
                     .map_err(|error| std::io::Error::other(error.to_string()))?,
                 None => None,
             };

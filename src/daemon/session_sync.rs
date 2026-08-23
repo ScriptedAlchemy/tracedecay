@@ -1,6 +1,7 @@
 //! One daemon-wide authority for bounded native transcript acquisition and session/Git sync.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -20,7 +21,6 @@ use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
-const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SESSION_SYNC_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
 
@@ -34,6 +34,7 @@ pub(crate) struct DaemonSessionSyncService {
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
     shutdown: tracedecay_usecases::observation::ObservationCancellation,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -115,6 +116,7 @@ impl Default for DaemonSessionSyncService {
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
             completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
             shutdown: tracedecay_usecases::observation::ObservationCancellation::default(),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -444,6 +446,31 @@ impl DaemonSessionSyncService {
         let acquire = Arc::clone(&self.scan_slots).acquire_owned();
         tokio::pin!(acquire);
         let permit = loop {
+            if self.shutdown.is_cancelled() {
+                return;
+            }
+            if request.cancellation().is_cancelled() {
+                let _ = self
+                    .persist_interruption_with_project_sessions(
+                        &context,
+                        &project_sessions,
+                        &key,
+                        OperationTermination::Cancelled,
+                    )
+                    .await;
+                return;
+            }
+            if request.deadline().is_elapsed_at(now_micros()) {
+                let _ = self
+                    .persist_interruption_with_project_sessions(
+                        &context,
+                        &project_sessions,
+                        &key,
+                        OperationTermination::TimedOut,
+                    )
+                    .await;
+                return;
+            }
             tokio::select! {
                 permit = &mut acquire => {
                     match permit {
@@ -451,32 +478,30 @@ impl DaemonSessionSyncService {
                         Err(_) => return,
                     }
                 }
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if self.shutdown.is_cancelled() {
-                        return;
-                    }
-                    if request.cancellation().is_cancelled() {
-                        let _ = self
-                            .persist_interruption_with_project_sessions(
-                                &context,
-                                &project_sessions,
-                                &key,
-                                OperationTermination::Cancelled,
-                            )
-                            .await;
-                        return;
-                    }
-                    if request.deadline().is_elapsed_at(now_micros()) {
-                        let _ = self
-                            .persist_interruption_with_project_sessions(
-                                &context,
-                                &project_sessions,
-                                &key,
-                                OperationTermination::TimedOut,
-                            )
-                            .await;
-                        return;
-                    }
+                () = self.shutdown_notify.notified() => {
+                    continue;
+                }
+                () = request.cancellation().cancelled() => {
+                    let _ = self
+                        .persist_interruption_with_project_sessions(
+                            &context,
+                            &project_sessions,
+                            &key,
+                            OperationTermination::Cancelled,
+                        )
+                        .await;
+                    return;
+                }
+                () = sleep_until_deadline(request.deadline()) => {
+                    let _ = self
+                        .persist_interruption_with_project_sessions(
+                            &context,
+                            &project_sessions,
+                            &key,
+                            OperationTermination::TimedOut,
+                        )
+                        .await;
+                    return;
                 }
             }
         };
@@ -810,6 +835,7 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
     fn shutdown(&self) -> SessionSyncShutdownFuture<'_> {
         Box::pin(async move {
             self.shutdown.cancel();
+            self.shutdown_notify.notify_waiters();
             let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
             let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
@@ -849,6 +875,13 @@ mod project_lifecycle;
 mod work;
 
 use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
+
+fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Future<Output = ()> {
+    let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
+    let remaining = u64::try_from(remaining_micros).unwrap_or(0);
+    tokio::time::sleep(Duration::from_micros(remaining))
+}
+
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();

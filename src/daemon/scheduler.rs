@@ -1034,6 +1034,15 @@ async fn run_automation_scheduler_loop(
                     );
                     break;
                 }
+                // Still configured or the generation advanced, so stay in the
+                // loop — but yield until the next tick or an explicit wake
+                // instead of spinning through the gate locks.
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(
+                        tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+                    )) => {}
+                    () = wake.notified() => {}
+                }
                 continue;
             }
             Err(e) => {
