@@ -620,7 +620,7 @@ impl SemanticModelLifecycleOwnerV1 {
         persist_durable(&self.root, &guard.durable)?;
         match guard.durable.state.as_ref() {
             Some(state) => {
-                crate::hotpath::record_model_state(crate::hotpath::lifecycle_state_name(state));
+                crate::hotpath::record_lifecycle_state(state);
             }
             None => crate::hotpath::record_model_state("disabled"),
         }

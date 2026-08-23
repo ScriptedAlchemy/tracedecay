@@ -44,7 +44,7 @@ fn duration_micros(duration: Duration) -> Option<u64> {
 }
 
 fn session_acquire_failed(error: SessionAcquireError) -> SessionAcquireError {
-    crate::hotpath::record_session_failure(crate::hotpath::session_acquire_error_class(&error));
+    crate::hotpath::record_session_error(&error);
     error
 }
 

@@ -169,7 +169,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
         permit: LocalRerankPermitV1,
     ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1> {
         let (query, documents) = decode_views(inputs).inspect_err(|error| {
-            crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(error));
+            crate::hotpath::record_rerank_error(error);
         })?;
         let expected_invocations = u32::try_from(inputs.len())
             .unwrap_or(u32::MAX)
@@ -180,7 +180,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             || permit.input_bytes > self.authority.resident_byte_ceiling
         {
             let error = LocalRerankFailureV1::Rejected(SanitizedStageFailure::Incompatible);
-            crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(&error));
+            crate::hotpath::record_rerank_error(&error);
             return Err(error);
         }
         let mut session = match self.session.try_lock() {
@@ -188,7 +188,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             Err(TryLockError::WouldBlock) => {
                 let error =
                     LocalRerankFailureV1::Unavailable(SanitizedStageFailure::AuthorityUnavailable);
-                crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(&error));
+                crate::hotpath::record_rerank_error(&error);
                 return Err(error);
             }
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
@@ -196,9 +196,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
         if session.is_none() {
             *session = Some(hotpath::measure_block!("semantic.model.load", {
                 open_session(&self.authority).inspect_err(|error| {
-                    crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(
-                        error,
-                    ));
+                    crate::hotpath::record_rerank_error(error);
                 })?
             }));
         }
@@ -212,7 +210,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             self.authority.max_batch_size,
         )
         .inspect_err(|error| {
-            crate::hotpath::record_model_failure(crate::hotpath::rerank_failure_class(error));
+            crate::hotpath::record_rerank_error(error);
         })
     }
 }

@@ -26,7 +26,7 @@ fn run_acquisition(
     match &result {
         Ok(()) => crate::hotpath::record_model_state("installed"),
         Err(error) => {
-            crate::hotpath::record_model_failure(crate::hotpath::lifecycle_error_class(error));
+            crate::hotpath::record_lifecycle_error(error);
         }
     }
     if let Err(error) = &result

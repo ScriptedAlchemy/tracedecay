@@ -297,7 +297,7 @@ impl ModelArtifactStore {
                 })
         {
             let error = SemanticCapabilityDisabledV1::LeaseUnavailable;
-            crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(&error));
+            crate::hotpath::record_capability_error(&error);
             return Err(error);
         }
         match record.state {
@@ -305,16 +305,12 @@ impl ModelArtifactStore {
             }
             ArtifactInventoryStateV1::Revoked => {
                 let error = SemanticCapabilityDisabledV1::RevokedArtifact;
-                crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(
-                    &error,
-                ));
+                crate::hotpath::record_capability_error(&error);
                 return Err(error);
             }
             ArtifactInventoryStateV1::Quarantined => {
                 let error = SemanticCapabilityDisabledV1::QuarantinedArtifact;
-                crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(
-                    &error,
-                ));
+                crate::hotpath::record_capability_error(&error);
                 return Err(error);
             }
             ArtifactInventoryStateV1::Staged | ArtifactInventoryStateV1::Verified => {
@@ -328,28 +324,26 @@ impl ModelArtifactStore {
             || record.members != manifest.payload.members
         {
             let error = SemanticCapabilityDisabledV1::IdentityMismatch;
-            crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(&error));
+            crate::hotpath::record_capability_error(&error);
             return Err(error);
         }
         self.verify_artifact_record(record).map_err(|_| {
             let error = SemanticCapabilityDisabledV1::CorruptArtifact;
-            crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(&error));
+            crate::hotpath::record_capability_error(&error);
             error
         })?;
         check_compatibility(&manifest.payload.runtime, env).inspect_err(|error| {
-            crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(error));
+            crate::hotpath::record_capability_error(error);
         })?;
         check_resource_ceiling(&manifest.payload.resource_ceiling, env).inspect_err(|error| {
-            crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(error));
+            crate::hotpath::record_capability_error(error);
         })?;
         let directory = self
             .artifacts_dir
             .open_dir_nofollow(digest.as_str())
             .map_err(|_| {
                 let error = SemanticCapabilityDisabledV1::CorruptArtifact;
-                crate::hotpath::record_model_failure(crate::hotpath::capability_disabled_class(
-                    &error,
-                ));
+                crate::hotpath::record_capability_error(&error);
                 error
             })?;
         Ok(AdmittedArtifactV1 {

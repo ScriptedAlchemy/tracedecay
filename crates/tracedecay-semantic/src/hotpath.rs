@@ -11,11 +11,16 @@
 
 use tracedecay_query::retrieval::rerank::LocalRerankFailureV1;
 
-use crate::artifact_store::{ArtifactImportErrorV1, SemanticCapabilityDisabledV1};
-use crate::fastembed_adapter::{EmbedError, RuntimeFailureKindV1};
+#[cfg(any(feature = "hotpath", test))]
+use crate::artifact_store::ArtifactImportErrorV1;
+use crate::artifact_store::SemanticCapabilityDisabledV1;
+use crate::fastembed_adapter::EmbedError;
+#[cfg(any(feature = "hotpath", test))]
+use crate::fastembed_adapter::RuntimeFailureKindV1;
 use crate::model_lifecycle::{ModelLifecycleErrorV1, SemanticModelLifecycleStateV1};
 use crate::session_pool::SessionAcquireError;
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn lifecycle_state_name(state: &SemanticModelLifecycleStateV1) -> &'static str {
     match state {
         SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. } => "selected_not_downloaded",
@@ -34,6 +39,7 @@ pub(crate) fn lifecycle_state_name(state: &SemanticModelLifecycleStateV1) -> &'s
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn lifecycle_error_class(error: &ModelLifecycleErrorV1) -> &'static str {
     match error {
         ModelLifecycleErrorV1::Catalog(_) => "catalog",
@@ -51,6 +57,7 @@ pub(crate) fn lifecycle_error_class(error: &ModelLifecycleErrorV1) -> &'static s
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn embed_error_class(error: &EmbedError) -> &'static str {
     match error {
         EmbedError::Cancelled => "cancelled",
@@ -64,6 +71,7 @@ pub(crate) fn embed_error_class(error: &EmbedError) -> &'static str {
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn runtime_failure_class(kind: RuntimeFailureKindV1) -> &'static str {
     match kind {
         RuntimeFailureKindV1::LoadFailed => "load_failed",
@@ -75,6 +83,7 @@ pub(crate) fn runtime_failure_class(kind: RuntimeFailureKindV1) -> &'static str 
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn session_acquire_error_class(error: &SessionAcquireError) -> &'static str {
     match error {
         SessionAcquireError::Exhausted { .. } => "exhausted",
@@ -88,6 +97,7 @@ pub(crate) fn session_acquire_error_class(error: &SessionAcquireError) -> &'stat
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn capability_disabled_class(error: &SemanticCapabilityDisabledV1) -> &'static str {
     match error {
         SemanticCapabilityDisabledV1::MissingArtifact => "missing_artifact",
@@ -103,6 +113,7 @@ pub(crate) fn capability_disabled_class(error: &SemanticCapabilityDisabledV1) ->
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn import_error_class(error: &ArtifactImportErrorV1) -> &'static str {
     match error {
         ArtifactImportErrorV1::ManifestRejected => "manifest_rejected",
@@ -126,6 +137,7 @@ pub(crate) fn import_error_class(error: &ArtifactImportErrorV1) -> &'static str 
     }
 }
 
+#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn rerank_failure_class(error: &LocalRerankFailureV1) -> &'static str {
     match error {
         LocalRerankFailureV1::Unavailable(_) => "unavailable",
@@ -135,32 +147,102 @@ pub(crate) fn rerank_failure_class(error: &LocalRerankFailureV1) -> &'static str
     }
 }
 
+#[inline(always)]
 pub(crate) fn record_model_state(name: &'static str) {
+    #[cfg(feature = "hotpath")]
     hotpath::val!("semantic_model_state").set(&name);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = name;
 }
 
+#[inline(always)]
 pub(crate) fn record_model_failure(class: &'static str) {
+    #[cfg(feature = "hotpath")]
     hotpath::val!("semantic_model_failure").set(&class);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = class;
 }
 
+#[inline(always)]
 pub(crate) fn record_remote_failure(class: &'static str) {
+    #[cfg(feature = "hotpath")]
     hotpath::val!("semantic_remote_failure").set(&class);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = class;
 }
 
+#[inline(always)]
 pub(crate) fn record_session_acquire(kind: &'static str) {
+    #[cfg(feature = "hotpath")]
     hotpath::val!("semantic_session_acquire").set(&kind);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = kind;
 }
 
+#[inline(always)]
+#[cfg(feature = "hotpath")]
 pub(crate) fn record_session_failure(class: &'static str) {
     hotpath::val!("semantic_session_failure").set(&class);
 }
 
+#[inline(always)]
 pub(crate) fn record_artifact_cache(hit: bool) {
+    #[cfg(feature = "hotpath")]
     if hit {
         hotpath::gauge!("semantic_artifact_cache_hit").inc(1);
     } else {
         hotpath::gauge!("semantic_artifact_cache_miss").inc(1);
     }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = hit;
+}
+
+#[inline(always)]
+pub(crate) fn record_lifecycle_state(state: &SemanticModelLifecycleStateV1) {
+    #[cfg(feature = "hotpath")]
+    record_model_state(lifecycle_state_name(state));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = state;
+}
+
+#[inline(always)]
+pub(crate) fn record_lifecycle_error(error: &ModelLifecycleErrorV1) {
+    #[cfg(feature = "hotpath")]
+    record_model_failure(lifecycle_error_class(error));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = error;
+}
+
+#[inline(always)]
+pub(crate) fn record_embed_error(error: &EmbedError) {
+    #[cfg(feature = "hotpath")]
+    record_model_failure(embed_error_class(error));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = error;
+}
+
+#[inline(always)]
+pub(crate) fn record_session_error(error: &SessionAcquireError) {
+    #[cfg(feature = "hotpath")]
+    record_session_failure(session_acquire_error_class(error));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = error;
+}
+
+#[inline(always)]
+pub(crate) fn record_capability_error(error: &SemanticCapabilityDisabledV1) {
+    #[cfg(feature = "hotpath")]
+    record_model_failure(capability_disabled_class(error));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = error;
+}
+
+#[inline(always)]
+pub(crate) fn record_rerank_error(error: &LocalRerankFailureV1) {
+    #[cfg(feature = "hotpath")]
+    record_model_failure(rerank_failure_class(error));
+    #[cfg(not(feature = "hotpath"))]
+    let _ = error;
 }
 
 #[cfg(test)]
