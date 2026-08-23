@@ -324,7 +324,7 @@ impl StoreRuntimeRegistry {
                 .entry(key)
                 .or_default()
                 .insert(token);
-            crate::hotpath::profile_pin_acquired();
+            hotpath::gauge!("runtime_core.registry.profile_pins").inc(1.0);
             return ProfileAuthorityPinResult::Pinned(ProfileAuthorityPin {
                 inner: Arc::new(ProfileAuthorityPinToken {
                     registry: self.clone(),
@@ -357,7 +357,7 @@ impl StoreRuntimeRegistry {
         if !tokens.remove(&token) {
             return;
         }
-        crate::hotpath::profile_pin_released();
+        hotpath::gauge!("runtime_core.registry.profile_pins").dec(1.0);
         if tokens.is_empty() {
             state.profile_pin_tokens.remove(&key);
         }

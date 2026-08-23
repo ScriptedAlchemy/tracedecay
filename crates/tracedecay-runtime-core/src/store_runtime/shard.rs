@@ -368,7 +368,8 @@ impl ShardRuntime {
             .runtime_leases
             .insert(lease.lease_id.clone(), lease.clone());
         state.touch();
-        crate::hotpath::runtime_lease_acquired();
+        hotpath::gauge!("runtime_core.registry.runtime_leases").inc(1.0);
+        hotpath::gauge!("runtime_core.registry.lease_acquires").inc(1.0);
         Ok(lease)
     }
 
@@ -378,7 +379,8 @@ impl ShardRuntime {
         let released = state.runtime_leases.remove(lease_id).is_some();
         if released {
             state.touch();
-            crate::hotpath::runtime_lease_released();
+            hotpath::gauge!("runtime_core.registry.runtime_leases").dec(1.0);
+            hotpath::gauge!("runtime_core.registry.lease_releases").inc(1.0);
         }
         released
     }
@@ -488,7 +490,8 @@ impl ShardRuntime {
         runtime: std::sync::Arc<Self>,
     ) -> Result<ShardRuntimeClientLifetimeLease, ShardRuntimeError> {
         let token = runtime.register_lifetime_lease(ShardRuntimeResource::Client)?;
-        crate::hotpath::client_lease_acquired();
+        hotpath::gauge!("runtime_core.registry.client_leases").inc(1.0);
+        hotpath::gauge!("runtime_core.registry.lease_acquires").inc(1.0);
         Ok(ShardRuntimeClientLifetimeLease {
             inner: std::sync::Arc::new(ShardRuntimeLifetimeLeaseToken {
                 runtime,
@@ -646,7 +649,11 @@ impl ShardRuntimeState {
         self.runtime_leases
             .retain(|_, lease| !lease.is_expired_at(now));
         let released = before - self.runtime_leases.len();
-        crate::hotpath::runtime_leases_expired(released);
+        if released > 0 {
+            let count = released as f64;
+            hotpath::gauge!("runtime_core.registry.runtime_leases").dec(count);
+            hotpath::gauge!("runtime_core.registry.lease_releases").inc(count);
+        }
         released
     }
 
@@ -768,12 +775,19 @@ impl ShardRuntimeState {
             })?;
         match kind {
             ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {
-                crate::hotpath::reader_lease_acquired();
+                hotpath::gauge!("runtime_core.registry.reader_leases").inc(1.0);
+                hotpath::gauge!("runtime_core.registry.lease_acquires").inc(1.0);
             }
-            ShardRuntimeLeaseKind::Snapshot => crate::hotpath::snapshot_lease_acquired(),
-            ShardRuntimeLeaseKind::Client => crate::hotpath::client_lease_acquired(),
+            ShardRuntimeLeaseKind::Snapshot => {
+                hotpath::gauge!("runtime_core.registry.snapshot_leases").inc(1.0);
+                hotpath::gauge!("runtime_core.registry.lease_acquires").inc(1.0);
+            }
+            ShardRuntimeLeaseKind::Client => {
+                hotpath::gauge!("runtime_core.registry.client_leases").inc(1.0);
+                hotpath::gauge!("runtime_core.registry.lease_acquires").inc(1.0);
+            }
             ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {
-                crate::hotpath::other_lease_acquired();
+                hotpath::gauge!("runtime_core.registry.lease_acquires").inc(1.0);
             }
         }
         Ok(())
@@ -786,12 +800,19 @@ impl ShardRuntimeState {
             *counter = next;
             match kind {
                 ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {
-                    crate::hotpath::reader_lease_released();
+                    hotpath::gauge!("runtime_core.registry.reader_leases").dec(1.0);
+                    hotpath::gauge!("runtime_core.registry.lease_releases").inc(1.0);
                 }
-                ShardRuntimeLeaseKind::Snapshot => crate::hotpath::snapshot_lease_released(),
-                ShardRuntimeLeaseKind::Client => crate::hotpath::client_lease_released(),
+                ShardRuntimeLeaseKind::Snapshot => {
+                    hotpath::gauge!("runtime_core.registry.snapshot_leases").dec(1.0);
+                    hotpath::gauge!("runtime_core.registry.lease_releases").inc(1.0);
+                }
+                ShardRuntimeLeaseKind::Client => {
+                    hotpath::gauge!("runtime_core.registry.client_leases").dec(1.0);
+                    hotpath::gauge!("runtime_core.registry.lease_releases").inc(1.0);
+                }
                 ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {
-                    crate::hotpath::other_lease_released();
+                    hotpath::gauge!("runtime_core.registry.lease_releases").inc(1.0);
                 }
             }
         } else {
@@ -896,7 +917,8 @@ impl ShardRuntimeLifetimeLeaseToken {
         self.runtime
             .release_lifetime_lease(self.resource, self.token);
         if self.resource == ShardRuntimeResource::Client {
-            crate::hotpath::client_lease_released();
+            hotpath::gauge!("runtime_core.registry.client_leases").dec(1.0);
+            hotpath::gauge!("runtime_core.registry.lease_releases").inc(1.0);
         }
         true
     }

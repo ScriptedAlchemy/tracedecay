@@ -213,7 +213,7 @@ impl StoreRuntimeRegistry {
         }
         drop(state);
         drop(evicting);
-        crate::hotpath::runtime_unmounted();
+        hotpath::gauge!("runtime_core.registry.runtimes_ready").dec(1.0);
         outcome
     }
 }
