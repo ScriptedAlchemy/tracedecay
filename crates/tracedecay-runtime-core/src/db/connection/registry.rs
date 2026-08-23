@@ -112,6 +112,18 @@ impl DatabaseRuntimeClientV1 {
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
         self.guard.runtime().dispatch_read(request, probe)
     }
+
+    /// Exact rusqlite writer/reader telemetry for this guarded client.
+    ///
+    /// Delegates to the production lease retained by the client token.
+    /// Repository-backed publications return the rusqlite-runtime snapshot.
+    /// Driver stubs and test attachments return `None`.
+    #[must_use]
+    pub fn writer_telemetry_snapshot(
+        &self,
+    ) -> Option<crate::store_runtime::registry::RepositoryRuntimePhysicalSnapshot> {
+        self.guard.runtime().writer_telemetry_snapshot()
+    }
 }
 
 /// Non-cloneable map authority for one stable database publication. It owns
