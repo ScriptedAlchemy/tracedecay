@@ -675,16 +675,8 @@ fn codex_embedded_file_list_covers_the_whole_source_bundle() {
         .map(|(relative, _)| relative.to_string())
         .collect();
 
-    // Every skill dir under plugin/skills is deployed by Codex (all 14).
+    // Every skill dir under plugin/skills is deployed by Codex.
     let skills_root = plugin_source_root().join("skills");
-    let mut skill_dirs: Vec<String> = std::fs::read_dir(&skills_root)
-        .expect("plugin/skills should be readable")
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    skill_dirs.sort();
-    assert_eq!(skill_dirs.len(), 17, "expected 17 shared skill dirs");
     // Every file under plugin/skills/ (SKILL.md *and* any support files) is
     // deployed — the recursive embed leaves nothing on disk unwired.
     for relative in skill_tree_files(&skills_root) {

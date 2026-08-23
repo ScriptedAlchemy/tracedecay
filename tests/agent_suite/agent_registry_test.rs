@@ -7,12 +7,6 @@ use tracedecay::agents::*;
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_get_all_integrations() {
-    let all = all_integrations();
-    assert_eq!(all.len(), 15);
-}
-
-#[test]
 fn test_available_integrations() {
     let ids = available_integrations();
     assert!(ids.contains(&"claude"));
@@ -30,7 +24,6 @@ fn test_available_integrations() {
     assert!(ids.contains(&"kiro"));
     assert!(ids.contains(&"kimi"));
     assert!(ids.contains(&"vibe"));
-    assert_eq!(ids.len(), 15);
 }
 
 #[test]

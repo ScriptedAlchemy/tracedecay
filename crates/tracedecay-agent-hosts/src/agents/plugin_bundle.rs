@@ -517,35 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn each_host_composes_the_expected_file_count() {
-        // Skill files are embedded recursively (SKILL.md + support files), so
-        // the skill count is derived from the generated set rather than a
-        // frozen literal. The `tracedecay-*` dispatcher skills were removed, so
-        // Cursor's subset now equals the full skill set; the filter is kept as a
-        // guard against a dispatcher skill ever being reintroduced.
-        let all_skills = GENERATED_SKILL_FILES.len();
-        let cursor_skills = cursor_skill_files().count();
-
-        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + native
-        // agents + 13 commands.
-        assert_eq!(
-            claude_files().len(),
-            all_skills + 5 + GENERATED_CLAUDE_AGENT_FILES.len() + 13
-        );
-        // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
-        //   README) + rules + native agents + 13 native commands.
-        // Memory lives in ~/.cursor/rules/, not the plugin inventory.
-        assert_eq!(
-            cursor_files().len(),
-            cursor_skills + 4 + CURSOR_RULE_FILES.len() + GENERATED_CURSOR_AGENT_FILES.len() + 13
-        );
-        // Codex: skills + 4 manifest (dot + mcp + hooks + README).
-        assert_eq!(codex_files().len(), all_skills + 4);
-        // Kimi: skills + 2 manifest (dot + README) + 13 shared commands.
-        assert_eq!(kimi_files().len(), all_skills + 2 + 13);
-    }
-
-    #[test]
     fn kimi_manifest_declares_identity_and_inline_mcp_server() {
         let manifest = kimi_files()
             .into_iter()

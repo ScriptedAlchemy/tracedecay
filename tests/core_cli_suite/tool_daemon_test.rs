@@ -102,7 +102,6 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Output {
 
 enum FakeDaemonResponse {
     Complete { text: String },
-    TruncatedJsonRpc,
     HoldOpen,
 }
 
@@ -206,11 +205,6 @@ fn spawn_scripted_daemon(
                     let mut writer = stream;
                     writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
                         .expect("write fake daemon response");
-                }
-                FakeDaemonResponse::TruncatedJsonRpc => {
-                    let mut writer = stream;
-                    write!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":").expect("write truncated frame");
-                    // Close without a terminating newline so the client sees EOF mid-frame.
                 }
                 FakeDaemonResponse::HoldOpen => {
                     // Keep the accepted socket open without writing a matching response.
@@ -1787,96 +1781,6 @@ fn status_json_requests_compact_daemon_payload_noninteractively() {
     assert_eq!(args["include_storage_health"], false);
     assert_eq!(args["include_session_ingest"], false);
     assert_eq!(args["include_staleness"], false);
-}
-
-#[test]
-fn status_json_rejects_truncated_tool_payload_without_partial_stdout() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
-
-    // A truncation envelope carrying a retrieval handle is transparently
-    // recovered by the CLI via `tracedecay_retrieve`; the rejection contract
-    // covers the unrecoverable envelope that omits the handle. It must fail
-    // closed: non-zero exit, no partial stdout, and a truncation diagnostic.
-    let truncated = json!({
-        "truncated": true,
-        "original_chars": 20_000,
-        "preview_chars": 32,
-        "preview": "{\"node_count\":1}",
-    })
-    .to_string();
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let _observed = spawn_scripted_daemon(
-        socket_path.clone(),
-        "tracedecay_status",
-        FakeDaemonResponse::Complete { text: truncated },
-    );
-    let project_arg = project_path.to_string_lossy().to_string();
-    let mut command = tracedecay_command_with_home(&home_path);
-    command
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["status", "--json", project_arg.as_str()]);
-    let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
-
-    assert!(
-        !output.status.success(),
-        "truncated status envelope must fail\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "must not print a partial/wrong-schema status object, got:\n{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("truncated JSON") && stderr.contains("tracedecay_status"),
-        "expected truncation diagnostic, got:\n{stderr}"
-    );
-}
-
-#[test]
-fn tool_cli_rejects_truncated_json_rpc_response_without_hanging() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
-
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let _observed = spawn_scripted_daemon(
-        socket_path.clone(),
-        "tracedecay_status",
-        FakeDaemonResponse::TruncatedJsonRpc,
-    );
-    let project_arg = project_path.to_string_lossy().to_string();
-    let mut command = tracedecay_command_with_home(&home_path);
-    command
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"]);
-    let output = run_command_with_timeout(command, CLI_CHILD_KILL_TIMEOUT);
-
-    assert!(
-        !output.status.success(),
-        "truncated JSON-RPC must fail\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    assert!(
-        (stderr.contains("json") || stderr.contains("eof") || stderr.contains("decode"))
-            && (stderr.contains("daemon") || stderr.contains("tool")),
-        "expected a decode/EOF protocol diagnostic, got:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[test]

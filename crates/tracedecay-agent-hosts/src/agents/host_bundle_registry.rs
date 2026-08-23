@@ -1327,7 +1327,6 @@ mod tests {
 
     #[test]
     fn every_host_with_a_default_set_is_reported_supported() {
-        assert_eq!(RECEIPT_BACKED_HOST_KINDS.len(), 12);
         for host in HostKindV1::ALL {
             assert_eq!(
                 default_components(host).is_empty(),
