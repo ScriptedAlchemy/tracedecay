@@ -272,7 +272,7 @@ macro_rules! validated_string_newtype {
     )+};
 }
 
-pub use validated_string_newtype;
+pub(crate) use validated_string_newtype;
 
 #[cfg(test)]
 mod tests {
