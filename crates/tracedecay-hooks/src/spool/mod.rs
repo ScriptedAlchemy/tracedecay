@@ -307,9 +307,12 @@ impl HookSpoolV1 {
         self.meta = committed_meta;
         self.physical_len = self.physical_len.saturating_add(frame_len);
         self.note_pending(&record)?;
-        hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame_len);
-        hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
-        hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame_len);
+            hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
+            hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
+        }
         Ok(record)
     }
 
@@ -361,24 +364,27 @@ impl HookSpoolV1 {
             self.replay_claims.insert(session, claim_id);
             batches.push(batch);
         }
-        let frame_count = batches
-            .iter()
-            .map(|batch| batch.records.len())
-            .sum::<usize>();
-        let frame_bytes = batches
-            .iter()
-            .map(|batch| u64::from(batch.byte_count))
-            .sum::<u64>();
-        let queue_wait_micros = batches
-            .iter()
-            .flat_map(|batch| batch.records.iter())
-            .map(|record| now.0.saturating_sub(record.queued_at.0))
-            .max()
-            .unwrap_or(0);
-        hotpath::gauge!("hooks.spool.replay.batch_count").set(batches.len());
-        hotpath::gauge!("hooks.spool.replay.frame_count").set(frame_count);
-        hotpath::gauge!("hooks.spool.replay.frame_bytes").set(frame_bytes);
-        hotpath::gauge!("hooks.spool.queue_wait_micros").set(queue_wait_micros);
+        #[cfg(feature = "hotpath")]
+        {
+            let frame_count = batches
+                .iter()
+                .map(|batch| batch.records.len())
+                .sum::<usize>();
+            let frame_bytes = batches
+                .iter()
+                .map(|batch| u64::from(batch.byte_count))
+                .sum::<u64>();
+            let queue_wait_micros = batches
+                .iter()
+                .flat_map(|batch| batch.records.iter())
+                .map(|record| now.0.saturating_sub(record.queued_at.0))
+                .max()
+                .unwrap_or(0);
+            hotpath::gauge!("hooks.spool.replay.batch_count").set(batches.len());
+            hotpath::gauge!("hooks.spool.replay.frame_count").set(frame_count);
+            hotpath::gauge!("hooks.spool.replay.frame_bytes").set(frame_bytes);
+            hotpath::gauge!("hooks.spool.queue_wait_micros").set(queue_wait_micros);
+        }
         Ok(batches)
     }
 
@@ -448,11 +454,14 @@ impl HookSpoolV1 {
         self.pending.remove(index);
         self.forget_pending_event(removed.envelope.event_id, index);
         self.release_usage(&removed);
-        hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(removed.framed_len));
-        hotpath::gauge!("hooks.spool.queue_wait_micros")
-            .set(now.0.saturating_sub(removed.queued_at.0));
-        hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
-        hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(removed.framed_len));
+            hotpath::gauge!("hooks.spool.queue_wait_micros")
+                .set(now.0.saturating_sub(removed.queued_at.0));
+            hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
+            hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
+        }
         // Compaction rewrites every remaining frame, so draining N records
         // must not rewrite the file once per acknowledgement (O(N^2) bytes).
         // Reclaim only when acknowledged frames occupy at least as much of
