@@ -6,9 +6,7 @@ use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::agents::host_bundle_registry::{
-    default_components, unsupported_host_component_set_reason,
-};
+use tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay::agents::host_bundle_v2::{
     HostBundleComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
@@ -168,12 +166,6 @@ fn host_case(host: HostKindV1) -> HostCase {
         host,
         configs,
     }
-}
-
-fn supported_host_cases() -> impl Iterator<Item = HostCase> {
-    HostKindV1::ALL
-        .into_iter()
-        .filter_map(|host| (!default_components(host).is_empty()).then(|| host_case(host)))
 }
 
 struct IsolatedCli {
@@ -559,9 +551,13 @@ fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
 
 #[test]
 fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
-    for case in
-        supported_host_cases().filter(|case| !lifecycle_requires_absent_host_binary(case.host))
-    {
+    // The writer-level acceptance suite covers every host. This CLI journey
+    // keeps one representative for each distinct lifecycle shape: OpenCode's
+    // config-native bundle, Cline's MCP-only bundle, and Hermes' standalone
+    // core integration.
+    for host in [HostKindV1::OpenCode, HostKindV1::Cline, HostKindV1::Hermes] {
+        let case = host_case(host);
+        assert!(!lifecycle_requires_absent_host_binary(case.host));
         let cli = IsolatedCli::new();
         let originals = seed_host(case, &cli);
 

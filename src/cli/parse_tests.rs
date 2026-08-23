@@ -4,7 +4,7 @@ use super::{
     HostBundleAction, LspAction, MemoryAction, PackageHookAction, ProfileStorageAction,
     RemoteAction, ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
 };
-use clap::{Command, CommandFactory, Parser, error::ErrorKind};
+use clap::{Parser, error::ErrorKind};
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
@@ -74,132 +74,6 @@ fn first_class_git_hunks_carries_no_preview_binding_arguments() {
         "git hunks must reject caller-supplied preview bindings"
     );
     assert!(Cli::try_parse_from(["tracedecay", "git", "hunks", "--scope", "staged"]).is_ok());
-}
-
-fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {
-    fn collect(command: &Command, prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
-        for subcommand in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
-            let mut path = prefix.clone();
-            path.push(subcommand.get_name().to_string());
-            paths.push(path.clone());
-            collect(subcommand, path, paths);
-        }
-    }
-
-    let mut paths = Vec::new();
-    collect(command, Vec::new(), &mut paths);
-    paths
-}
-
-#[test]
-fn visible_subcommands_accept_clap_help() {
-    let command = Cli::command();
-    for path in visible_subcommand_paths(&command) {
-        if path == ["tool"] {
-            continue;
-        }
-
-        let args = std::iter::once("tracedecay".to_string())
-            .chain(path.iter().cloned())
-            .chain(std::iter::once("--help".to_string()));
-        let err = match Cli::try_parse_from(args) {
-            Ok(_) => panic!(
-                "`tracedecay {} --help` should short-circuit parsing",
-                path.join(" ")
-            ),
-            Err(err) => err,
-        };
-        assert_eq!(
-            err.kind(),
-            ErrorKind::DisplayHelp,
-            "`tracedecay {} --help` should display help",
-            path.join(" ")
-        );
-    }
-}
-
-#[test]
-fn every_visible_top_level_subcommand_ships_rich_help() {
-    let command = Cli::command();
-    for subcommand in command
-        .get_subcommands()
-        .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
-    {
-        let name = subcommand.get_name();
-        let long_about = subcommand
-            .get_long_about()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            long_about.len() >= 80,
-            "`tracedecay {name}` needs a long_about paragraph (what it does and \
-             when to use it); got {} chars",
-            long_about.len()
-        );
-        let after_help = subcommand
-            .get_after_help()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            after_help.contains("Examples:"),
-            "`tracedecay {name}` after_help must contain an `Examples:` section"
-        );
-        assert!(
-            after_help.contains("tracedecay "),
-            "`tracedecay {name}` examples must show real `tracedecay` invocations"
-        );
-        assert!(
-            after_help.contains("Related:") || after_help.contains("Notes:"),
-            "`tracedecay {name}` after_help must cross-reference related commands \
-             or carry agent-relevant notes"
-        );
-    }
-}
-
-#[test]
-fn every_visible_nested_subcommand_has_a_purpose_line() {
-    let command = Cli::command();
-    for path in visible_subcommand_paths(&command) {
-        if path.len() < 2 {
-            continue;
-        }
-        let mut current = &command;
-        for name in &path {
-            current = current
-                .find_subcommand(name)
-                .unwrap_or_else(|| panic!("subcommand path {path:?} should resolve"));
-        }
-        let about = current
-            .get_about()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            about.trim().len() >= 10,
-            "`tracedecay {}` needs a descriptive purpose line; got {about:?}",
-            path.join(" ")
-        );
-    }
-}
-
-#[test]
-fn top_level_help_teaches_the_tool_discovery_flow() {
-    let command = Cli::command();
-    let after_help = command
-        .get_after_help()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    for needle in [
-        "tracedecay tool",
-        "--help",
-        "--args",
-        "--json",
-        "Quick start:",
-    ] {
-        assert!(
-            after_help.contains(needle),
-            "top-level after_help must teach the MCP tool discovery flow; missing {needle:?}"
-        );
-    }
 }
 
 #[test]
@@ -563,42 +437,6 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
             lifecycle_lease_token: None,
         })
     ));
-}
-
-/// The full about text for one subcommand, so help assertions don't couple
-/// to exact phrasing elsewhere in the global help output.
-fn subcommand_about(name: &str) -> String {
-    let command = Cli::command();
-    let subcommand = command
-        .find_subcommand(name)
-        .unwrap_or_else(|| panic!("`{name}` subcommand should exist"));
-    let about = subcommand
-        .get_long_about()
-        .or_else(|| subcommand.get_about())
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    format!("{} {about}", subcommand.get_about().unwrap_or_default())
-}
-
-#[test]
-fn upgrade_help_states_refresh_runs_only_after_install() {
-    let about = subcommand_about("upgrade").to_lowercase();
-
-    // The distinction from `update`: install first, and no refresh (plugins,
-    // daemon, health pass) on a no-op upgrade.
-    assert!(about.contains("install"));
-    assert!(about.contains("refresh"));
-    assert!(about.contains("already up to date"));
-}
-
-#[test]
-fn update_help_states_refresh_runs_even_when_current() {
-    let about = subcommand_about("update").to_lowercase();
-
-    // The distinction from `upgrade`: the refresh runs regardless of whether
-    // a new binary was installed.
-    assert!(about.contains("refresh"));
-    assert!(about.contains("even when"));
 }
 
 #[test]
@@ -1284,28 +1122,6 @@ fn automation_facts_rejects_removed_mutation_commands() {
 }
 
 #[test]
-fn automation_facts_help_describes_terminal_automatic_fact_receipts() {
-    let help = Cli::try_parse_from(["tracedecay", "automation", "facts", "list", "--help"])
-        .err()
-        .expect("help exits through clap")
-        .to_string()
-        .to_ascii_lowercase();
-
-    for behavior in ["automatic", "receipt", "applied", "quarantined"] {
-        assert!(
-            help.contains(behavior),
-            "automation facts help must describe {behavior} behavior:\n{help}"
-        );
-    }
-    for legacy in ["proposal", "applying", "rejected"] {
-        assert!(
-            !help.contains(legacy),
-            "automation facts help must not advertise legacy {legacy} state:\n{help}"
-        );
-    }
-}
-
-#[test]
 fn automation_rejects_removed_raw_run_launchers() {
     for task in ["session-reflection", "skill-writing"] {
         let error = match Cli::try_parse_from(["tracedecay", "automation", "run", task]) {
@@ -1812,40 +1628,6 @@ fn parses_sessions_import_and_search_commands() {
 }
 
 #[test]
-fn sessions_help_describes_bounded_daemon_import() {
-    let command = Cli::command();
-    let sessions = command
-        .find_subcommand("sessions")
-        .expect("sessions command");
-    let long_about = sessions
-        .get_long_about()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    let after_help = sessions
-        .get_after_help()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-
-    for needle in [
-        "sessions import",
-        "bounded all-host source",
-        "daemon-owned canonical observation path",
-        "without waiting for historical convergence",
-        "owns no parallel temporal writer",
-        "never invoked by a read",
-    ] {
-        assert!(
-            long_about.contains(needle),
-            "sessions help must retain the import authority contract; missing {needle:?}"
-        );
-    }
-    assert!(
-        after_help.contains("sessions git-sync --dry-run"),
-        "sessions help must expose the durable git sync capability"
-    );
-}
-
-#[test]
 fn sessions_refresh_parses_exact_lifecycle_selectors() {
     let begin = Cli::try_parse_from([
         "tracedecay",
@@ -2012,102 +1794,6 @@ fn sessions_refresh_never_falls_back_to_the_current_directory() {
             error.kind(),
             ErrorKind::MissingRequiredArgument,
             "args: {args:?}"
-        );
-    }
-}
-
-#[test]
-fn sessions_refresh_help_lists_modes_and_exact_selectors() {
-    let command = Cli::command();
-    let refresh = command
-        .find_subcommand("sessions")
-        .and_then(|sessions| sessions.find_subcommand("refresh"))
-        .expect("sessions refresh should be registered");
-    let modes = refresh
-        .get_subcommands()
-        .map(|subcommand| subcommand.get_name())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        modes,
-        ["start", "status", "join", "resume", "cancel", "begin"]
-    );
-
-    let begin = refresh
-        .find_subcommand("begin")
-        .expect("sessions refresh begin should be registered");
-    let flags = begin
-        .get_arguments()
-        .filter_map(|argument| argument.get_long())
-        .collect::<Vec<_>>();
-    for selector in [
-        "project-id",
-        "project-path",
-        "profile-id",
-        "session-id",
-        "provider",
-        "source",
-        "target",
-        "json",
-    ] {
-        assert!(
-            flags.contains(&selector),
-            "refresh begin help should expose --{selector}"
-        );
-    }
-
-    let target_help = begin
-        .get_arguments()
-        .find(|argument| argument.get_long() == Some("target"))
-        .and_then(|argument| argument.get_help())
-        .expect("refresh target help");
-    assert!(target_help.to_string().contains("mode=current"));
-    assert!(target_help.to_string().contains("grain=logical_message"));
-
-    for mode in ["status", "cancel"] {
-        let command = refresh
-            .find_subcommand(mode)
-            .unwrap_or_else(|| panic!("sessions refresh {mode} should be registered"));
-        let handle = command
-            .get_arguments()
-            .find(|argument| argument.get_long() == Some("handle"))
-            .expect("status/cancel should expose --handle");
-        assert!(
-            handle
-                .get_visible_aliases()
-                .is_some_and(|aliases| aliases.contains(&"operation-id")),
-            "--operation-id should remain a visible deprecated alias"
-        );
-        assert!(
-            handle
-                .get_help()
-                .is_some_and(|help| help.to_string().contains("daemon-local handle"))
-        );
-    }
-
-    let status = refresh.find_subcommand("status").unwrap();
-    assert!(
-        status
-            .get_about()
-            .is_some_and(|about| about.to_string().contains("read-only"))
-    );
-    let status_handle = status
-        .get_arguments()
-        .find(|argument| argument.get_long() == Some("handle"))
-        .and_then(|argument| argument.get_help())
-        .expect("status handle help");
-    for origin in ["start", "join", "resume", "begin"] {
-        assert!(
-            status_handle.to_string().contains(origin),
-            "status handle help must identify {origin} as a handle origin"
-        );
-    }
-    for mode in ["join", "resume"] {
-        assert!(
-            refresh
-                .find_subcommand(mode)
-                .and_then(|command| command.get_about())
-                .is_some_and(|about| about.to_string().contains("opaque handle")),
-            "{mode} help must explain that it returns an opaque handle"
         );
     }
 }

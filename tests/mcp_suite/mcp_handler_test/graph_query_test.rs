@@ -1117,23 +1117,53 @@ async fn test_similar() {
 }
 
 #[tokio::test]
-async fn test_rank() {
+async fn analytics_tools_return_their_canonical_envelope_keys() {
     let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_rank",
-        json!({"edge_kind": "calls", "direction": "incoming"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
+    let cases: &[(&str, Value, &[&str])] = &[
+        (
+            "tracedecay_rank",
+            json!({"edge_kind": "calls", "direction": "incoming"}),
+            &["ranking", "result_count"],
+        ),
+        (
+            "tracedecay_largest",
+            json!({"limit": 5}),
+            &["ranking", "result_count"],
+        ),
+        (
+            "tracedecay_coupling",
+            json!({"direction": "fan_in"}),
+            &["ranking"],
+        ),
+        (
+            "tracedecay_inheritance_depth",
+            json!({"limit": 5}),
+            &["result_count"],
+        ),
+        ("tracedecay_distribution", json!({}), &["per_file"]),
+        (
+            "tracedecay_distribution",
+            json!({"summary": true}),
+            &["summary", "distribution"],
+        ),
+        ("tracedecay_complexity", json!({}), &["ranking", "formula"]),
+        (
+            "tracedecay_doc_coverage",
+            json!({}),
+            &["total_undocumented"],
+        ),
+    ];
+
+    for (tool, args, required_keys) in cases {
+        let result = call_production_tool(&cg, tool, args.clone(), None, None)
+            .await
+            .unwrap_or_else(|error| panic!("{tool} failed: {error}"));
+        let text = extract_text(&result.value);
+        for key in *required_keys {
+            assert!(text.contains(key), "{tool} omitted canonical key {key}");
+        }
+    }
+    shutdown_graph_fixture(cg).await;
 }
 
 #[tokio::test]
@@ -1158,113 +1188,6 @@ async fn test_rank_invalid_direction() {
         }
         Ok(_) => panic!("invalid direction should produce an error"),
     }
-}
-
-#[tokio::test]
-async fn test_largest() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_largest", json!({"limit": 5}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
-}
-
-#[tokio::test]
-async fn test_coupling() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_coupling",
-        json!({"direction": "fan_in"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-}
-
-#[tokio::test]
-async fn test_inheritance_depth() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_inheritance_depth",
-        json!({"limit": 5}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
-}
-
-#[tokio::test]
-async fn test_distribution_default() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_distribution", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("per_file"), "default mode should be per_file");
-}
-
-#[tokio::test]
-async fn test_distribution_summary() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_distribution",
-        json!({"summary": true}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("summary"),
-        "summary mode should report 'summary'"
-    );
-    assert!(
-        text.contains("distribution"),
-        "should have distribution key"
-    );
-}
-
-#[tokio::test]
-async fn test_complexity() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_complexity", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-    assert!(text.contains("formula"), "should have formula key");
-}
-
-#[tokio::test]
-async fn test_doc_coverage() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_doc_coverage", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("total_undocumented"),
-        "should have total_undocumented key"
-    );
-    shutdown_graph_fixture(cg).await;
 }
 
 #[tokio::test]
