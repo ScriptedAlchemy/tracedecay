@@ -321,7 +321,11 @@ impl From<SessionRefreshProgressView> for SessionRefreshProgressV1 {
             session_id: value.session_id,
             frontier: value.frontier.into(),
             coverage: value.coverage.into(),
-            source_coverage: value.source_coverage,
+            source_coverage: value
+                .source_coverage
+                .into_iter()
+                .map(super::source_coverage)
+                .collect(),
             committed_batches: value.committed_batches,
             committed_records: value.committed_records,
             updated_at: value.updated_at,
@@ -344,7 +348,11 @@ impl TryFrom<SessionRefreshReceiptView> for SessionRefreshReceiptV1 {
             session_id: value.session_id,
             frontier: value.frontier.into(),
             coverage: value.coverage.into(),
-            source_coverage: value.source_coverage,
+            source_coverage: value
+                .source_coverage
+                .into_iter()
+                .map(super::source_coverage)
+                .collect(),
             state,
             failure_code: value.failure_code,
             terminal_at: value.terminal_at,

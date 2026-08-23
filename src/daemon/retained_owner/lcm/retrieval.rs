@@ -837,7 +837,7 @@ async fn expand_query_from_nodes(
     let mut expansions = stream::iter(selected.iter().enumerate())
         .map(|(index, node_id)| {
             let cursor = cursor.clone();
-            async {
+            async move {
                 let outcome = service
                     .expand_lcm_admitted(
                         context.request_context,
