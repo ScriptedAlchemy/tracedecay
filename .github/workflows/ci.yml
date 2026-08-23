@@ -154,6 +154,19 @@ jobs:
       - name: Test GitHub release installer
         run: bash tests/install_script_test.sh
 
+      # These two sat unwired: they are the tests for
+      # `scripts/check-release-pr-integrity.sh` and
+      # `scripts/check-dashboard-bundle.py`, both of which CI does run. So the
+      # guards were enforced while the tests proving the guards work were not,
+      # which is the shape that let a `test-transport` target rot until it
+      # stopped compiling. Three of the five `tests/*_test.sh` gates were wired;
+      # these are the other two.
+      - name: Test release PR integrity guard
+        run: bash tests/release_pr_integrity_test.sh
+
+      - name: Test dashboard bundle check
+        run: bash tests/dashboard_bundle_check_test.sh
+
       - name: Check release version drift
         run: scripts/check-release-drift.sh
 
@@ -210,6 +223,24 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked
+
+      # Compile-only gate for the features this lane does not enable. Both are
+      # otherwise built for the first time at release (`--all-features`), so
+      # anything that breaks them merges green and is discovered at tag time.
+      # That is not hypothetical: `tests/mcp_suite/support.rs` called
+      # `fs::create_dir_all` without importing `std::fs`, which made ten
+      # `required-features = ["test-transport"]` targets unbuildable, and
+      # nothing reported it.
+      #
+      # `check --all-targets` rather than `nextest run`: the point is that the
+      # code still compiles, and the acceptance suites behind `test-transport`
+      # spawn daemons, so running them here would change this lane's cost and
+      # flakiness profile. Enable them as a real test lane separately once
+      # they are confirmed green.
+      - name: Check feature-gated surfaces compile
+        run: |
+          cargo check --workspace --all-targets --features test-transport --locked
+          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
 
       - name: Upload ${{ matrix.name }} nextest report
         if: always()
