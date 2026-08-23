@@ -712,6 +712,21 @@ pub fn prepare_next_code_generation_retention_cancellable(
         graph_replay_pool_root,
         is_cancelled,
     )?;
+    // Most maintenance ticks have no collectable work. Inventory those ticks
+    // from bounded manifest metadata first, and pay the full digest cost only
+    // when this exact census found bytes that may be unlinked. The executor
+    // still refuses metadata-only plans, so no deletion can cross this gate
+    // without the canonical full verification below.
+    let census = plan_code_generation_retention_with_verification_cancellable(
+        store_root,
+        vector_readable_sources,
+        rollback_floor,
+        GenerationDigestVerificationV1::MetadataOnly,
+        is_cancelled,
+    )?;
+    if !census.has_collectable_work() {
+        return Ok(census);
+    }
     plan_next_code_generation_retention_cancellable(
         store_root,
         vector_readable_sources,
@@ -5257,9 +5272,48 @@ mod tests {
     }
 
     #[test]
+    fn idle_maintenance_preparation_stays_metadata_only() {
+        let (store, _generations) = fixture_store(1);
+
+        let plan = prepare_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            &|| false,
+            None,
+        )
+        .expect("prepare idle retention census");
+
+        assert!(!plan.has_collectable_work());
+        assert_eq!(
+            plan.verification,
+            GenerationDigestVerificationV1::MetadataOnly,
+            "an idle maintenance tick must not re-hash every retained generation"
+        );
+    }
+
+    #[test]
+    fn collectable_maintenance_preparation_escalates_to_full_verification() {
+        let (store, _generations) = fixture_store(8);
+
+        let plan = prepare_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            &|| false,
+            None,
+        )
+        .expect("prepare collectable retention unit");
+
+        assert!(plan.has_collectable_work());
+        assert_eq!(plan.collectable_generations.len(), 1);
+        assert_eq!(plan.verification, GenerationDigestVerificationV1::Full);
+    }
+
+    #[test]
     fn cancellable_maintenance_preparation_stops_during_generation_verification() {
-        let (store, mut generations) = fixture_store(1);
-        pad_generation_file(&store, &mut generations[0], 3 * 1024 * 1024, true);
+        let (store, mut generations) = fixture_store(8);
+        pad_generation_file(&store, &mut generations[7], 3 * 1024 * 1024, true);
         let checks = std::sync::atomic::AtomicUsize::new(0);
 
         let error = prepare_next_code_generation_retention_cancellable(
