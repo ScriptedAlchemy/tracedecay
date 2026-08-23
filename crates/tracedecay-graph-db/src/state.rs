@@ -367,6 +367,13 @@ pub(crate) fn load_relation_cached(
     load_relation_by_key(database, namespace, identity, cache)
 }
 
+pub(crate) fn load_relation_by_edge(
+    database: &GrafeoDB,
+    edge_id: EdgeId,
+) -> Result<Option<StoredRelation>, GraphDbError> {
+    load_relation_by_edge_cached(database, edge_id, &mut EndpointIdentityCache::default())
+}
+
 pub(crate) fn load_relation_by_edge_cached(
     database: &GrafeoDB,
     edge_id: EdgeId,
@@ -523,7 +530,7 @@ fn load_relation_projection_by_edge(
     database: &GrafeoDB,
     edge_id: EdgeId,
 ) -> Result<Option<GraphProjectionId>, GraphDbError> {
-    Ok(load_relation_reference_by_edge(database, edge_id)?.map(|relation| relation.projection))
+    Ok(load_relation_by_edge(database, edge_id)?.map(|stored| stored.projection))
 }
 
 fn load_relation_reference_by_edge(
