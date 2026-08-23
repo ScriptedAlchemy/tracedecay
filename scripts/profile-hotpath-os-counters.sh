@@ -12,10 +12,6 @@
 # Memory gauges (heap/anonymous RSS, swap) are recorded before catch-up,
 # after catch-up, and after idle (default 600s).
 #
-# The report binds Linux runtime cpu_percent to
-# src/runtime_telemetry.rs::read_linux_process_cpu_ticks (630c437ed).
-# sysinfo cpu_usage() after ProcessesToUpdate::Some(&[pid]) is still 0.0.
-#
 # One workload sample (no idle, wrap a command; the child is the sample PID):
 #   scripts/profile-hotpath-os-counters.sh \
 #       --scenario one-workload-sample \
@@ -373,8 +369,6 @@ for name, delta in deltas.items():
     rchar = io.get("rchar", {})
     rchar_v = rchar.get("value") if rchar.get("state") == "delta" else rchar.get("reason")
     print("delta", name, "cpu_ticks=%s cpu_percent=%s rchar=%s" % (ticks, cpu_v, rchar_v))
-hyp = report["runtime_cpu_telemetry"]
-print("cpu0", "%s::%s" % (hyp["file"], hyp["tick_reader"]), "authority=%s" % hyp["linux_cpu_percent_authority"])
 ' "$out_dir/report.json"
 
 exit "$workload_exit"

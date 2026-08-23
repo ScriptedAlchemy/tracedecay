@@ -142,24 +142,6 @@ class FdClassificationTests(unittest.TestCase):
         self.assertEqual(parsed["value"]["utime"], 40)
         self.assertEqual(parsed["value"]["stime"], 10)
 
-    def test_hypothesis_is_bound_to_runtime_telemetry(self) -> None:
-        hyp = self.mod.CPU_TELEMETRY_HYPOTHESIS
-        self.assertEqual(hyp["linux_cpu_percent_authority"], "proc_utime_stime")
-        self.assertFalse(hyp["runtime_cpu_percent_still_zero"])
-        self.assertTrue(hyp["sysinfo_cpu_usage_after_some_pid_still_zero"])
-        self.assertEqual(hyp["file"], "src/runtime_telemetry.rs")
-        self.assertEqual(hyp["function"], "sample_process_with_window")
-        self.assertEqual(hyp["tick_reader"], "read_linux_process_cpu_ticks")
-        source = (ROOT / hyp["file"]).read_text(encoding="utf-8")
-        self.assertIn("fn sample_process_with_window", source)
-        self.assertIn("fn read_linux_process_cpu_ticks", source)
-        self.assertIn("fn cpu_percent_from_linux_ticks", source)
-        self.assertIn("linux_clock_ticks_per_second", source)
-        self.assertIn("ProcessesToUpdate::Some(&[pid])", source)
-        self.assertIn("let start_ticks = read_linux_process_cpu_ticks();", source)
-        self.assertIn("let end_ticks = read_linux_process_cpu_ticks();", source)
-        self.assertNotIn("cpu_percent: process.cpu_usage()", source)
-
     def test_live_self_snapshot_cpu_and_io_deltas(self) -> None:
         before = self.mod.sample_proc(os.getpid())
         end = time.monotonic() + 0.35
@@ -238,17 +220,9 @@ class FdClassificationTests(unittest.TestCase):
             stat = report["deltas"]["before_to_after_catch_up"]["stat"]
             self.assertEqual(stat["state"], "observed")
             self.assertGreater(stat["value"]["cpu_ticks"], 0)
-            hyp = report["runtime_cpu_telemetry"]
-            self.assertEqual(hyp["file"], "src/runtime_telemetry.rs")
-            self.assertEqual(hyp["linux_cpu_percent_authority"], "proc_utime_stime")
-            self.assertFalse(hyp["runtime_cpu_percent_still_zero"])
-            self.assertTrue(hyp["sysinfo_cpu_usage_after_some_pid_still_zero"])
+            self.assertIsNone(report["runtime_snapshot"])
             blob = json.dumps(report)
             self.assertNotIn(str(Path.home()), blob)
-            self.assertIn(
-                "cpu0 src/runtime_telemetry.rs::read_linux_process_cpu_ticks authority=proc_utime_stime",
-                completed.stdout,
-            )
 
 
 if __name__ == "__main__":

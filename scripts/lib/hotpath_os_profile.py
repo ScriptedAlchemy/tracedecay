@@ -29,31 +29,6 @@ from typing import Any
 
 SCHEMA = "tracedecay.hotpath.os_counter_profile.v1"
 
-# Linux runtime cpu_percent is the /proc/self/stat utime+stime delta
-# (630c437ed). sysinfo 0.32.1 still reports cpu_usage() == 0.0 after a
-# ProcessesToUpdate::Some(&[pid]) refresh; that value is no longer the
-# Linux authority.
-CPU_TELEMETRY_HYPOTHESIS = {
-    "id": "runtime-cpu-percent-from-proc-ticks",
-    "linux_cpu_percent_authority": "proc_utime_stime",
-    "runtime_cpu_percent_still_zero": False,
-    "sysinfo_cpu_usage_after_some_pid_still_zero": True,
-    "file": "src/runtime_telemetry.rs",
-    "function": "sample_process_with_window",
-    "tick_reader": "read_linux_process_cpu_ticks",
-    "tick_clock": "linux_clock_ticks_per_second",
-    "percent_fn": "cpu_percent_from_linux_ticks",
-    "fixed_in": "630c437ed",
-    "clock_cache": "06fe96cca",
-    "sysinfo": "0.32.1",
-    "sysinfo_gate": (
-        "crates.io sysinfo-0.32.1 src/unix/linux/system.rs "
-        "SystemInner::refresh_processes_specifics calls update_procs_cpu "
-        "only when processes_to_update is ProcessesToUpdate::All; "
-        "cpu_usage() after Some(&[pid]) stays 0.0"
-    ),
-}
-
 STORE_BASENAMES = {
     "tracedecay.db": "store_graph",
     "graph.db": "store_graph",
@@ -721,24 +696,14 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                 else "harness_error"
             ),
         },
-        "runtime_cpu_telemetry": {
-            **CPU_TELEMETRY_HYPOTHESIS,
-            "commit": meta.get("commit"),
-            "observed_runtime_snapshot": (
-                load_json(Path(args.runtime_snapshot)) if args.runtime_snapshot else None
-            ),
-        },
+        "runtime_snapshot": (
+            load_json(Path(args.runtime_snapshot)) if args.runtime_snapshot else None
+        ),
     }
     leak = contains_sensitive_path(report)
     if leak:
         raise SystemExit(f"report leaked a filesystem path at {leak}")
     write_json(Path(args.out), report)
-    return 0
-
-
-def cmd_hypothesis(_: argparse.Namespace) -> int:
-    json.dump(CPU_TELEMETRY_HYPOTHESIS, sys.stdout, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
     return 0
 
 
@@ -768,8 +733,6 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--out", required=True)
     assemble.set_defaults(func=cmd_assemble)
 
-    hypothesis = sub.add_parser("hypothesis", help="print the CPU-0% source bind")
-    hypothesis.set_defaults(func=cmd_hypothesis)
     return parser
 
 
