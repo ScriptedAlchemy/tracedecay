@@ -425,6 +425,7 @@ impl StdioLspClient {
     /// Sends one standard semantic request and returns its standard JSON
     /// result after matching the JSON-RPC correlation id. Notifications and
     /// stale responses from a cancelled request are deliberately ignored.
+    #[hotpath::measure(label = "lsp_analyzer_semantic_request", impl_type = "StdioLspClient")]
     pub async fn semantic_request(
         &mut self,
         request: LspSemanticRequest,
@@ -647,6 +648,7 @@ impl StdioLspClient {
             .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_request_json", impl_type = "StdioLspClient")]
     async fn request_json<R>(
         &mut self,
         params: R::Params,
@@ -662,6 +664,7 @@ impl StdioLspClient {
         })
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_request", impl_type = "StdioLspClient")]
     async fn request<R>(
         &mut self,
         params: R::Params,
