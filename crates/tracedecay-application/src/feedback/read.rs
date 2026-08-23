@@ -366,39 +366,15 @@ where
         if request.validate().is_err() {
             return invalid_request(context, &self.operations.diagnostics);
         }
-        let operation = &self.operations.diagnostics;
-        let admission = match self.authorization.admit(context, operation, observed_at) {
-            Ok(admission) => admission,
-            Err(problem) => return problem_envelope(context, operation, problem),
-        };
-        let outcome = self
-            .port
-            .diagnostics(
-                &FeedbackReadPortContext {
-                    request: context,
-                    operation,
-                },
-                &request,
-            )
-            .await;
-        if outcome
-            .evidence()
-            .payload
-            .as_ref()
-            .is_some_and(|payload| !valid_diagnostics(context, &request, payload))
-        {
-            return invalid_port_evidence(context, operation);
-        }
-        let authority = match self.authorization.recheck_publication(
+        self.complete_read(
             context,
-            operation,
-            &admission,
-            outcome.evidence().finished_at,
-        ) {
-            Ok(authority) => authority,
-            Err(problem) => return problem_envelope(context, operation, problem),
-        };
-        evidence_envelope(context, operation, authority, outcome, observed_at)
+            request,
+            observed_at,
+            &self.operations.diagnostics,
+            |port, ctx, request| port.diagnostics(ctx, request),
+            |ctx, request, payload, _| valid_diagnostics(ctx, request, payload),
+        )
+        .await
     }
 
     pub async fn get(
@@ -410,39 +386,15 @@ where
         if request.validate().is_err() {
             return invalid_request(context, &self.operations.get);
         }
-        let operation = &self.operations.get;
-        let admission = match self.authorization.admit(context, operation, observed_at) {
-            Ok(admission) => admission,
-            Err(problem) => return problem_envelope(context, operation, problem),
-        };
-        let outcome = self
-            .port
-            .get(
-                &FeedbackReadPortContext {
-                    request: context,
-                    operation,
-                },
-                &request,
-            )
-            .await;
-        if outcome
-            .evidence()
-            .payload
-            .as_ref()
-            .is_some_and(|payload| !valid_get(context, &request, payload))
-        {
-            return invalid_port_evidence(context, operation);
-        }
-        let authority = match self.authorization.recheck_publication(
+        self.complete_read(
             context,
-            operation,
-            &admission,
-            outcome.evidence().finished_at,
-        ) {
-            Ok(authority) => authority,
-            Err(problem) => return problem_envelope(context, operation, problem),
-        };
-        evidence_envelope(context, operation, authority, outcome, observed_at)
+            request,
+            observed_at,
+            &self.operations.get,
+            |port, ctx, request| port.get(ctx, request),
+            |ctx, request, payload, _| valid_get(ctx, request, payload),
+        )
+        .await
     }
 
     pub async fn expand(
@@ -458,39 +410,15 @@ where
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::AfterRevalidate),
             );
         }
-        let operation = &self.operations.expand;
-        let admission = match self.authorization.admit(context, operation, observed_at) {
-            Ok(admission) => admission,
-            Err(problem) => return problem_envelope(context, operation, problem),
-        };
-        let outcome = self
-            .port
-            .expand(
-                &FeedbackReadPortContext {
-                    request: context,
-                    operation,
-                },
-                &request,
-            )
-            .await;
-        if outcome
-            .evidence()
-            .payload
-            .as_ref()
-            .is_some_and(|payload| !valid_expand(context, &request, payload))
-        {
-            return invalid_port_evidence(context, operation);
-        }
-        let authority = match self.authorization.recheck_publication(
+        self.complete_read(
             context,
-            operation,
-            &admission,
-            outcome.evidence().finished_at,
-        ) {
-            Ok(authority) => authority,
-            Err(problem) => return problem_envelope(context, operation, problem),
-        };
-        evidence_envelope(context, operation, authority, outcome, observed_at)
+            request,
+            observed_at,
+            &self.operations.expand,
+            |port, ctx, request| port.expand(ctx, request),
+            |ctx, request, payload, _| valid_expand(ctx, request, payload),
+        )
+        .await
     }
 
     pub async fn list(
@@ -502,26 +430,49 @@ where
         if request.validate().is_err() {
             return invalid_request(context, &self.operations.list);
         }
-        let operation = &self.operations.list;
+        self.complete_read(
+            context,
+            request,
+            observed_at,
+            &self.operations.list,
+            |port, ctx, request| port.list(ctx, request),
+            valid_list,
+        )
+        .await
+    }
+
+    async fn complete_read<Req, Res, PortFn, PortFut, ValidFn>(
+        &self,
+        context: &RequestContext,
+        request: Req,
+        observed_at: UtcMicros,
+        operation: &ApplicationOperation,
+        port: PortFn,
+        valid: ValidFn,
+    ) -> Result<ApplicationResult<Res>, ApplicationContractError>
+    where
+        PortFn: FnOnce(&P, &FeedbackReadPortContext<'_>, &Req) -> PortFut,
+        PortFut: Future<Output = RetrievalPortOutcome<Res>>,
+        ValidFn: FnOnce(&RequestContext, &Req, &Res, &RetrievalEvidence<Res>) -> bool,
+    {
         let admission = match self.authorization.admit(context, operation, observed_at) {
             Ok(admission) => admission,
             Err(problem) => return problem_envelope(context, operation, problem),
         };
-        let outcome = self
-            .port
-            .list(
-                &FeedbackReadPortContext {
-                    request: context,
-                    operation,
-                },
-                &request,
-            )
-            .await;
+        let outcome = port(
+            &self.port,
+            &FeedbackReadPortContext {
+                request: context,
+                operation,
+            },
+            &request,
+        )
+        .await;
         if outcome
             .evidence()
             .payload
             .as_ref()
-            .is_some_and(|payload| !valid_list(context, &request, payload, outcome.evidence()))
+            .is_some_and(|payload| !valid(context, &request, payload, outcome.evidence()))
         {
             return invalid_port_evidence(context, operation);
         }

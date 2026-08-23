@@ -1,4 +1,4 @@
-//! query read-only native Git intelligence adapter (Plan 36).
+//! Read-only native Git intelligence adapter.
 //!
 //! This module is the fixed internal adapter for the typed read-only Git
 //! contracts in [`tracedecay_domain::git`]: repository status,
@@ -18,8 +18,8 @@
 //!   optional index locks on our behalf.
 //! - The adapter never writes the index, objects, refs, config, or the
 //!   worktree; `hash-object` is always invoked without `-w` (content hashing
-//!   only, no object write). Plan 34/36 mutation paths (staging, apply,
-//!   index transactions) are out of scope and unrepresentable here.
+//!   only, no object write). Mutation paths (staging, apply, index
+//!   transactions) are out of scope and unrepresentable here.
 //!
 //! Degraded repository states (ignored collision, conflicted, detached,
 //! unborn, sparse, split-index, submodule, shallow boundary) are reported
@@ -27,7 +27,10 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Instant;
@@ -49,6 +52,7 @@ use tracedecay_domain::git::{
 use tracedecay_domain::research::time::UtcMicros;
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git_repository::GitRepositoryError;
 
 mod topology;
 
@@ -194,8 +198,6 @@ pub trait GitTopologyReadPort {
 fn map_repository_error(
     error: tracedecay_runtime_core::git_repository::GitRepositoryError,
 ) -> GitIntelligenceError {
-    use tracedecay_runtime_core::git_repository::GitRepositoryError;
-
     match error {
         GitRepositoryError::NotARepository { path } => GitIntelligenceError::NotARepository(path),
         GitRepositoryError::UnreadableRepository { detail, .. } => {
@@ -274,7 +276,7 @@ impl NativeGitIntelligence {
         Ok(self.repository_snapshot()?.head)
     }
 
-    /// Read one exact commit/path blob through the mounted Plan 36 authority.
+    /// Read one exact commit/path blob through the mounted Git authority.
     ///
     /// The `gix` read itself lives beside its port in
     /// [`tracedecay_application::NativeHistoricalBlobReaderV1`] so extracted
@@ -954,7 +956,7 @@ impl NativeGitIntelligence {
 
         let snapshot = self.repository_snapshot()?;
         let joined = self.diff_internal(scope, &snapshot)?;
-        let mut references = Vec::new();
+        let mut candidates = Vec::new();
 
         for joined_entry in joined.entries {
             let entry = joined_entry.raw;
@@ -990,8 +992,40 @@ impl NativeGitIntelligence {
             {
                 continue;
             }
+            candidates.push((entry, patch_file));
+        }
 
-            let index_entry = self.index_entry_expectation(&entry.path)?;
+        let index_paths = candidates
+            .iter()
+            .map(|(entry, _)| entry.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let index_by_path = self.index_entries_for_paths(&index_paths)?;
+        let attributes_by_path = self.attributes_for_paths(&index_paths)?;
+        let head_paths = candidates
+            .iter()
+            .filter_map(|(entry, _)| match direction {
+                HunkDirectionV1::IndexToHead => {
+                    Some(entry.original_path.as_deref().unwrap_or(&entry.path))
+                }
+                HunkDirectionV1::WorkingTreeToIndex => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let head_by_path = self.head_blobs_for_paths(&head_paths, &snapshot)?;
+        let worktree_paths = candidates
+            .iter()
+            .filter_map(|(entry, _)| match direction {
+                HunkDirectionV1::WorkingTreeToIndex => Some(entry.path.as_str()),
+                HunkDirectionV1::IndexToHead => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let worktree_by_path = self.worktree_blobs_for_paths(&worktree_paths)?;
+
+        let mut references = Vec::new();
+        for (entry, patch_file) in candidates {
+            let index_entry = index_by_path
+                .get(&entry.path)
+                .cloned()
+                .unwrap_or_else(absent_index_entry);
             if index_entry.unmerged_stage.is_some() {
                 continue;
             }
@@ -1002,9 +1036,11 @@ impl NativeGitIntelligence {
             {
                 continue;
             }
-            let (attributes_digest, special_attributes) =
-                self.attributes_digest_and_special_state(&entry.path)?;
-            if special_attributes {
+            let Some((attributes_digest, special_attributes)) = attributes_by_path.get(&entry.path)
+            else {
+                continue;
+            };
+            if *special_attributes {
                 continue;
             }
 
@@ -1012,7 +1048,10 @@ impl NativeGitIntelligence {
                 HunkDirectionV1::WorkingTreeToIndex => index_entry.blob.clone(),
                 HunkDirectionV1::IndexToHead => {
                     let base_path = entry.original_path.as_deref().unwrap_or(&entry.path);
-                    self.head_blob_expectation(base_path, &snapshot)?
+                    head_by_path
+                        .get(base_path)
+                        .cloned()
+                        .unwrap_or(GitBlobExpectationV1::AbsentFile)
                 }
             };
 
@@ -1022,7 +1061,15 @@ impl NativeGitIntelligence {
                     if mode.as_ref().is_some_and(GitFileModeV1::is_symlink) {
                         continue;
                     }
-                    (Some(self.worktree_blob_expectation(&entry.path)?), mode)
+                    (
+                        Some(
+                            worktree_by_path
+                                .get(&entry.path)
+                                .cloned()
+                                .unwrap_or(GitBlobExpectationV1::AbsentFile),
+                        ),
+                        mode,
+                    )
                 }
                 HunkDirectionV1::IndexToHead => (None, None),
             };
@@ -1057,93 +1104,155 @@ impl NativeGitIntelligence {
         Ok(references)
     }
 
-    /// Current index entry expectation for a path (blob, mode, stage).
-    fn index_entry_expectation(
+    fn index_entries_for_paths(
         &self,
-        path: &str,
-    ) -> Result<GitIndexEntryExpectationV1, GitIntelligenceError> {
-        let output = self.run_git("ls-files", &["ls-files", "-s", "-z", "--", path])?;
+        paths: &BTreeSet<&str>,
+    ) -> Result<BTreeMap<String, GitIndexEntryExpectationV1>, GitIntelligenceError> {
+        let mut by_path = BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(by_path);
+        }
+        let mut args = vec!["ls-files", "-s", "-z", "--"];
+        args.extend(paths.iter().copied());
+        let output = self.run_git("ls-files", &args)?;
         let text = String::from_utf8_lossy(&output.stdout);
-        let mut stages = Vec::new();
+        let mut stages_by_path: BTreeMap<String, Vec<(GitFileModeV1, GitOidV1, u8)>> =
+            BTreeMap::new();
         for record in text.split('\0').filter(|record| !record.is_empty()) {
-            stages.push(parse_ls_files_stage(record)?);
-        }
-        let Some((mode, blob, _)) = stages.first().cloned() else {
-            return Ok(GitIndexEntryExpectationV1 {
-                blob: GitBlobExpectationV1::AbsentFile,
-                mode: None,
-                unmerged_stage: None,
-            });
-        };
-        // A stage-0 entry is merged (None); any stage 1-3 record means the
-        // path is unmerged.
-        let unmerged_stage = stages
-            .iter()
-            .map(|(_, _, stage)| *stage)
-            .find(|stage| *stage > 0);
-        Ok(GitIndexEntryExpectationV1 {
-            blob: GitBlobExpectationV1::Present(blob),
-            mode: Some(mode),
-            unmerged_stage,
-        })
-    }
-
-    /// HEAD blob expectation for a path (absent when not in HEAD's tree).
-    fn head_blob_expectation(
-        &self,
-        path: &str,
-        snapshot: &RepositoryReadSnapshot,
-    ) -> Result<GitBlobExpectationV1, GitIntelligenceError> {
-        if matches!(snapshot.head, GitHeadStateV1::Unborn { .. }) {
-            return Ok(GitBlobExpectationV1::AbsentFile);
-        }
-        let output = self.run_git("ls-tree", &["ls-tree", "-z", "HEAD", "--", path])?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let record = text.split('\0').find(|record| !record.is_empty());
-        let Some(record) = record else {
-            return Ok(GitBlobExpectationV1::AbsentFile);
-        };
-        // "<mode> <type> <oid>\t<path>"
-        let (meta, _) = record
-            .split_once('\t')
-            .ok_or(GitIntelligenceError::MalformedOutput {
-                operation: "ls-tree",
-                detail: format!("missing path separator in {record:?}"),
-            })?;
-        let oid_text =
-            meta.split_whitespace()
-                .nth(2)
-                .ok_or(GitIntelligenceError::MalformedOutput {
-                    operation: "ls-tree",
-                    detail: format!("missing object id in {record:?}"),
+            let path = record
+                .split_once('\t')
+                .map(|(_, path)| path.to_owned())
+                .ok_or_else(|| GitIntelligenceError::MalformedOutput {
+                    operation: "ls-files",
+                    detail: format!("missing path separator in {record:?}"),
                 })?;
-        Ok(GitBlobExpectationV1::Present(GitOidV1::new(oid_text)?))
+            stages_by_path
+                .entry(path)
+                .or_default()
+                .push(parse_ls_files_stage(record)?);
+        }
+        for path in paths {
+            by_path.insert(
+                (*path).to_owned(),
+                index_expectation_from_stages(stages_by_path.remove(*path).unwrap_or_default()),
+            );
+        }
+        Ok(by_path)
     }
 
-    /// Native content identity or explicit absence of a worktree file.
+    fn head_blobs_for_paths(
+        &self,
+        paths: &BTreeSet<&str>,
+        snapshot: &RepositoryReadSnapshot,
+    ) -> Result<BTreeMap<String, GitBlobExpectationV1>, GitIntelligenceError> {
+        let mut by_path = BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(by_path);
+        }
+        if matches!(snapshot.head, GitHeadStateV1::Unborn { .. }) {
+            for path in paths {
+                by_path.insert((*path).to_owned(), GitBlobExpectationV1::AbsentFile);
+            }
+            return Ok(by_path);
+        }
+        let mut args = vec!["ls-tree", "-z", "HEAD", "--"];
+        args.extend(paths.iter().copied());
+        let output = self.run_git("ls-tree", &args)?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        for path in paths {
+            by_path.insert((*path).to_owned(), GitBlobExpectationV1::AbsentFile);
+        }
+        for record in text.split('\0').filter(|record| !record.is_empty()) {
+            let (meta, path) =
+                record
+                    .split_once('\t')
+                    .ok_or(GitIntelligenceError::MalformedOutput {
+                        operation: "ls-tree",
+                        detail: format!("missing path separator in {record:?}"),
+                    })?;
+            let oid_text =
+                meta.split_whitespace()
+                    .nth(2)
+                    .ok_or(GitIntelligenceError::MalformedOutput {
+                        operation: "ls-tree",
+                        detail: format!("missing object id in {record:?}"),
+                    })?;
+            by_path.insert(
+                path.to_owned(),
+                GitBlobExpectationV1::Present(GitOidV1::new(oid_text)?),
+            );
+        }
+        Ok(by_path)
+    }
+
+    /// Native content identity or explicit absence of worktree files.
     /// Present content is hashed by `git hash-object` WITHOUT `-w` — hashing
     /// only, no object write.
-    fn worktree_blob_expectation(
+    fn worktree_blobs_for_paths(
         &self,
-        path: &str,
-    ) -> Result<GitBlobExpectationV1, GitIntelligenceError> {
-        if std::fs::symlink_metadata(self.repo_root.join(path)).is_err() {
-            return Ok(GitBlobExpectationV1::AbsentFile);
+        paths: &BTreeSet<&str>,
+    ) -> Result<BTreeMap<String, GitBlobExpectationV1>, GitIntelligenceError> {
+        let mut by_path = BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(by_path);
         }
-        let output = self.stdout("hash-object", &["hash-object", "--", path])?;
-        Ok(GitBlobExpectationV1::Present(GitOidV1::new(output.trim())?))
+        let existing = paths
+            .iter()
+            .copied()
+            .filter(|path| std::fs::symlink_metadata(self.repo_root.join(path)).is_ok())
+            .collect::<Vec<_>>();
+        for path in paths {
+            by_path.insert((*path).to_owned(), GitBlobExpectationV1::AbsentFile);
+        }
+        if existing.is_empty() {
+            return Ok(by_path);
+        }
+        let mut args = vec!["hash-object", "--"];
+        args.extend(existing.iter().copied());
+        let output = self.stdout("hash-object", &args)?;
+        let oids = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if oids.len() != existing.len() {
+            return Err(GitIntelligenceError::MalformedOutput {
+                operation: "hash-object",
+                detail: format!(
+                    "expected {} object ids, received {}",
+                    existing.len(),
+                    oids.len()
+                ),
+            });
+        }
+        for (path, oid) in existing.into_iter().zip(oids) {
+            by_path.insert(
+                path.to_owned(),
+                GitBlobExpectationV1::Present(GitOidV1::new(oid)?),
+            );
+        }
+        Ok(by_path)
     }
 
-    /// Capture the exact attribute identity and classify paths whose
-    /// clean/smudge or end-of-line behavior lacks a proven native round trip.
-    fn attributes_digest_and_special_state(
+    /// Capture exact attribute identity and classify paths whose clean/smudge
+    /// or end-of-line behavior lacks a proven native round trip.
+    fn attributes_for_paths(
         &self,
-        path: &str,
-    ) -> Result<(ManifestDigest, bool), GitIntelligenceError> {
-        let output = self.run_git("check-attr", &["check-attr", "-z", "-a", "--", path])?;
-        let digest = canonical_sha256(&String::from_utf8_lossy(&output.stdout).into_owned())?;
+        paths: &BTreeSet<&str>,
+    ) -> Result<BTreeMap<String, (ManifestDigest, bool)>, GitIntelligenceError> {
+        let empty_digest = canonical_sha256(&String::new())?;
+        let mut by_path = BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(by_path);
+        }
+        for path in paths {
+            by_path.insert((*path).to_owned(), (empty_digest.clone(), false));
+        }
+        let mut args = vec!["check-attr", "-z", "-a", "--"];
+        args.extend(paths.iter().copied());
+        let output = self.run_git("check-attr", &args)?;
         if output.stdout.is_empty() {
-            return Ok((digest, false));
+            return Ok(by_path);
         }
         let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
         let Some((terminator, records)) = fields.split_last() else {
@@ -1158,16 +1267,36 @@ impl NativeGitIntelligence {
                 detail: "attribute output was not complete NUL-delimited triples".to_owned(),
             });
         }
-        let special = records.chunks_exact(3).any(|record| {
-            let attribute = record[1];
-            let value = record[2];
-            if attribute == b"filter" {
-                value != b"unset"
-            } else {
-                attribute == b"text" || attribute == b"eol" || attribute == b"working-tree-encoding"
+        let mut triples_by_path: BTreeMap<String, Vec<(&[u8], &[u8], &[u8])>> = BTreeMap::new();
+        for triple in records.chunks_exact(3) {
+            triples_by_path
+                .entry(String::from_utf8_lossy(triple[0]).into_owned())
+                .or_default()
+                .push((triple[0], triple[1], triple[2]));
+        }
+        for (path, triples) in triples_by_path {
+            let mut reconstructed = Vec::new();
+            for (path_bytes, attribute, value) in &triples {
+                reconstructed.extend_from_slice(path_bytes);
+                reconstructed.push(0);
+                reconstructed.extend_from_slice(attribute);
+                reconstructed.push(0);
+                reconstructed.extend_from_slice(value);
+                reconstructed.push(0);
             }
-        });
-        Ok((digest, special))
+            let digest = canonical_sha256(&String::from_utf8_lossy(&reconstructed).into_owned())?;
+            let special = triples.iter().any(|(_, attribute, value)| {
+                if *attribute == b"filter" {
+                    *value != b"unset"
+                } else {
+                    *attribute == b"text"
+                        || *attribute == b"eol"
+                        || *attribute == b"working-tree-encoding"
+                }
+            });
+            by_path.insert(path, (digest, special));
+        }
+        Ok(by_path)
     }
 }
 
@@ -1505,6 +1634,33 @@ fn parse_blame_porcelain(text: &str) -> Result<Vec<GitBlameLineV1>, GitIntellige
     Ok(lines)
 }
 
+fn absent_index_entry() -> GitIndexEntryExpectationV1 {
+    GitIndexEntryExpectationV1 {
+        blob: GitBlobExpectationV1::AbsentFile,
+        mode: None,
+        unmerged_stage: None,
+    }
+}
+
+fn index_expectation_from_stages(
+    stages: Vec<(GitFileModeV1, GitOidV1, u8)>,
+) -> GitIndexEntryExpectationV1 {
+    let Some((mode, blob, _)) = stages.first().cloned() else {
+        return absent_index_entry();
+    };
+    // A stage-0 entry is merged (None); any stage 1-3 record means the
+    // path is unmerged.
+    let unmerged_stage = stages
+        .iter()
+        .map(|(_, _, stage)| *stage)
+        .find(|stage| *stage > 0);
+    GitIndexEntryExpectationV1 {
+        blob: GitBlobExpectationV1::Present(blob),
+        mode: Some(mode),
+        unmerged_stage,
+    }
+}
+
 /// Parse one `ls-files -s` record: "<mode> <oid> <stage>\t<path>".
 fn parse_ls_files_stage(
     record: &str,
@@ -1532,7 +1688,6 @@ fn parse_ls_files_stage(
 
 /// Bounded binary sniff: NUL byte in the first 8 KiB.
 fn looks_binary(path: &Path) -> bool {
-    use std::io::Read as _;
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
@@ -1549,7 +1704,6 @@ fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
     } else {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
             if metadata.permissions().mode() & 0o111 != 0 {
                 GitFileModeV1::EXECUTABLE
             } else {
@@ -1568,6 +1722,8 @@ fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::process::Command;
     use tempfile::TempDir;
     use tracedecay_domain::git::GitStatusEntryV1;
@@ -2114,8 +2270,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn status_reports_file_modes_differentially() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let Some(fixture) = Fixture::standard() else {
             return;
         };
@@ -2548,8 +2702,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hunk_refs_keep_text_from_mixed_unstaged_diff() {
-        use std::os::unix::fs::PermissionsExt;
-
         let Some(fixture) = Fixture::standard() else {
             return;
         };
@@ -2607,8 +2759,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hunk_refs_keep_text_from_mixed_staged_diff_without_symlink_ref() {
-        use std::os::unix::fs::symlink;
-
         let Some(fixture) = Fixture::standard() else {
             return;
         };

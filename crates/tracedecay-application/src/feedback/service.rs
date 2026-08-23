@@ -1567,20 +1567,21 @@ fn resolve_baselines<'a>(
     for provider in &request.providers {
         let expected = feedback_baseline_identity(&request.input, runtime, provider)?;
         expected_provider_digests.push(expected.provider_identity_digest.clone());
-        let exact = baselines
+        let mut exact = baselines
             .iter()
             .filter(|baseline| baseline.validate().is_ok() && baseline.identity == expected)
-            .collect::<Vec<_>>();
-        let (baseline, state) = match exact.as_slice() {
-            [baseline] => (Some(*baseline), baseline.state),
-            [] if baselines.iter().any(|baseline| {
-                baseline.identity.provider_identity_digest == expected.provider_identity_digest
-            }) =>
+            .take(2);
+        let (baseline, state) = match (exact.next(), exact.next()) {
+            (Some(baseline), None) => (Some(baseline), baseline.state),
+            (None, _)
+                if baselines.iter().any(|baseline| {
+                    baseline.identity.provider_identity_digest == expected.provider_identity_digest
+                }) =>
             {
                 (None, FeedbackBaselineStateV1::Stale)
             }
-            [] => (None, FeedbackBaselineStateV1::Unavailable),
-            _ => (None, FeedbackBaselineStateV1::Partial),
+            (None, _) => (None, FeedbackBaselineStateV1::Unavailable),
+            (Some(_), Some(_)) => (None, FeedbackBaselineStateV1::Partial),
         };
         resolved.push(ResolvedBaseline {
             expected: Some(expected),
@@ -1620,7 +1621,10 @@ fn collect_diagnostics(
         .any(|result| !request.providers.contains(&result.identity));
 
     for (provider_index, expected) in request.providers.iter().enumerate() {
-        let mut matched = results.iter().filter(|result| result.identity == *expected);
+        let mut matched = results
+            .iter()
+            .filter(|result| result.identity == *expected)
+            .take(2);
         let result = match (matched.next(), matched.next()) {
             (Some(result), None) => result,
             (None, _) => {

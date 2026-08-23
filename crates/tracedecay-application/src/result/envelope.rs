@@ -315,8 +315,6 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                 ));
             }
         };
-        let canonical =
-            Self::new(wire.request_id.clone(), source).map_err(serde::de::Error::custom)?;
         let record = Self {
             revision: wire.revision,
             kind: wire.kind,
@@ -338,7 +336,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             details: wire.details,
             legal_actions: wire.legal_actions,
             coverage: wire.coverage,
-            source: canonical.source,
+            source,
         };
         record.validate().map_err(serde::de::Error::custom)?;
         Ok(record)

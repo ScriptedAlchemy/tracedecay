@@ -23,8 +23,9 @@ use crate::context::{RequestAdmission, RequestContext, RequestId, ResolvedScope}
 use crate::error::ApplicationContractError;
 use crate::feedback::FeedbackFindingReadV1;
 use crate::identity::application_identifier;
+use crate::workflow_coordination::TASK_HANDOFF_LIFETIME_MICROS;
 
-pub const MAX_HANDOFF_OPEN_LIFETIME_MICROS: i64 = 60_000_000;
+pub const MAX_HANDOFF_OPEN_LIFETIME_MICROS: i64 = TASK_HANDOFF_LIFETIME_MICROS.0;
 
 pub const HANDOFF_ISSUE_CAPABILITY_ID_V1: &str = "capability.handoff.issue_task_handoff";
 pub const HANDOFF_ISSUE_USE_CASE_ID_V1: &str = "use-case.handoff.issue_task_handoff";
@@ -858,23 +859,31 @@ impl ListTaskHandoffsResultV1 {
         observed_at: UtcMicros,
         more_existed: bool,
     ) -> Self {
-        let handoffs: Vec<ListedTaskHandoffV1> = listings
+        let mut open_count = 0u32;
+        let mut consumed_count = 0u32;
+        let mut expired_count = 0u32;
+        let handoffs = listings
             .iter()
-            .map(|listing| ListedTaskHandoffV1::from_listing(listing, observed_at))
+            .map(|listing| {
+                let handoff = ListedTaskHandoffV1::from_listing(listing, observed_at);
+                match handoff.state {
+                    TaskHandoffTokenStateV1::Open => {
+                        open_count = open_count.saturating_add(1);
+                    }
+                    TaskHandoffTokenStateV1::Consumed => {
+                        consumed_count = consumed_count.saturating_add(1);
+                    }
+                    TaskHandoffTokenStateV1::Expired => {
+                        expired_count = expired_count.saturating_add(1);
+                    }
+                }
+                handoff
+            })
             .collect();
-        let count = |wanted: TaskHandoffTokenStateV1| {
-            u32::try_from(
-                handoffs
-                    .iter()
-                    .filter(|handoff| handoff.state == wanted)
-                    .count(),
-            )
-            .unwrap_or(u32::MAX)
-        };
         Self {
-            open_count: count(TaskHandoffTokenStateV1::Open),
-            consumed_count: count(TaskHandoffTokenStateV1::Consumed),
-            expired_count: count(TaskHandoffTokenStateV1::Expired),
+            open_count,
+            consumed_count,
+            expired_count,
             truncated: more_existed,
             handoffs,
             observed_at,

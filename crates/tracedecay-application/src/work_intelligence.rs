@@ -597,7 +597,7 @@ where
                     .push(link);
             }
         }
-        let mut candidates = Vec::new();
+        let mut picks = Vec::new();
         let mut stale_excluded = 0u32;
         for item in graph.items() {
             if item.task_id() == target.task_id() || !item.is_accepted() || item.is_archived() {
@@ -618,28 +618,31 @@ where
             if applicability.is_empty() {
                 continue;
             }
-            let evidence = evidence_by_task
+            let Some(evidence) = evidence_by_task
                 .get(item.task_id())
-                .map(|links| links.iter().map(|&link| link.clone()).collect::<Vec<_>>())
-                .unwrap_or_default();
-            if evidence.is_empty() {
+                .filter(|links| !links.is_empty())
+            else {
                 stale_excluded = stale_excluded.saturating_add(1);
                 continue;
-            }
-            candidates.push(WorkExperienceCandidateV1 {
-                item: item.clone(),
-                evidence,
-                applicability,
-            });
+            };
+            picks.push((item, evidence.as_slice(), applicability));
         }
-        candidates.sort_by(|left, right| left.item.task_id().cmp(right.item.task_id()));
-        let applicable = bounded(candidates.len())?
+        picks.sort_by(|left, right| left.0.task_id().cmp(right.0.task_id()));
+        let applicable = bounded(picks.len())?
             .checked_add(stale_excluded)
             .ok_or(WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
         let limit = usize::try_from(request.limit)
             .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
-        let omitted = candidates.len().saturating_sub(limit);
-        candidates.truncate(limit);
+        let omitted = picks.len().saturating_sub(limit);
+        let candidates = picks
+            .into_iter()
+            .take(limit)
+            .map(|(item, evidence, applicability)| WorkExperienceCandidateV1 {
+                item: item.clone(),
+                evidence: evidence.iter().copied().cloned().collect(),
+                applicability,
+            })
+            .collect::<Vec<_>>();
         let returned = bounded(candidates.len())?;
         let coverage = if omitted == 0 {
             WorkExperienceCoverageV1::Complete {
@@ -849,19 +852,20 @@ fn proposal_runtime_coverage(
 ) -> Result<WorkProposalRuntimeCoverageV1, WorkProductApplicationErrorV1> {
     match runtime.coverage() {
         WorkRuntimeProjectionCoverageV1::Complete => {
-            let attempts = runtime
-                .attempts()
-                .iter()
-                .filter(|attempt| attempt.identity.task_id() == task_id)
-                .collect::<Vec<_>>();
+            let mut attempt_count = 0usize;
+            let mut terminal_attempt_count = 0usize;
+            for attempt in runtime.attempts() {
+                if attempt.identity.task_id() != task_id {
+                    continue;
+                }
+                attempt_count = attempt_count.saturating_add(1);
+                if attempt.state.is_terminal() {
+                    terminal_attempt_count = terminal_attempt_count.saturating_add(1);
+                }
+            }
             Ok(WorkProposalRuntimeCoverageV1::Complete {
-                attempt_count: bounded(attempts.len())?,
-                terminal_attempt_count: bounded(
-                    attempts
-                        .iter()
-                        .filter(|attempt| attempt.state.is_terminal())
-                        .count(),
-                )?,
+                attempt_count: bounded(attempt_count)?,
+                terminal_attempt_count: bounded(terminal_attempt_count)?,
             })
         }
         WorkRuntimeProjectionCoverageV1::Partial { .. } => {

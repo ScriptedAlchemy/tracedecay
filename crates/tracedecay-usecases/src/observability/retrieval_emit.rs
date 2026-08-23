@@ -38,13 +38,14 @@ use tracedecay_domain::{
     AnalyticsConsentChangedV1, AnalyticsModeV1, ContextOutcomeObservedV1, CoverageStateV1,
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
     ObservabilityTerminalResultV1, RetrievalAblationObservedV1, RetrievalPlannerObservedV1,
-    RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1, canonical_sha256,
+    RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_query::retrieval::observation::{
     ObservedWithCoverageV1, RetrievalPipelineObservationV1,
 };
 
+use super::emit::{ObservabilityEnvelopeSpec, assemble_observability_envelope};
 use super::producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, ObservabilityProducerIdentityV1,
 };
@@ -99,55 +100,25 @@ struct EnvelopeSpec<'a> {
 }
 
 fn build_envelope(spec: EnvelopeSpec<'_>) -> Result<ObservabilityEnvelopeV1, &'static str> {
-    let digest = canonical_sha256(&(
-        spec.payload.event_kind(),
-        spec.boot_id,
-        spec.producer_sequence,
-        spec.scope_ref,
-        spec.operation,
-    ))
-    .map_err(|_| "observability_event_identity")?;
-    let event_id = format!(
-        "{prefix}:{digest}",
-        prefix = spec.event_prefix,
-        digest = digest.as_str()
-    );
-    let envelope = ObservabilityEnvelopeV1 {
-        event_id: event_id.clone(),
-        event_kind: spec.payload.event_kind().to_owned(),
-        schema_revision: SCHEMA_REVISION,
-        idempotency_key: event_id.clone(),
-        trace_id: event_id,
-        scope_ref: spec.scope_ref.to_owned(),
-        capability: spec.capability.to_owned(),
-        operation: spec.operation.to_owned(),
-        event_time_micros: spec.observed_at_micros,
-        observation_time_micros: spec.observed_at_micros,
-        valid_from_micros: Some(spec.observed_at_micros),
-        valid_until_micros: None,
-        quantity: spec.quantity,
-        unit: spec.unit.map(str::to_owned),
-        terminal_result: spec.terminal_result,
-        producer_revision: spec.producer_revision.to_owned(),
-        configuration_revision: spec.configuration_revision.to_owned(),
-        policy_revision: spec.policy_revision.to_owned(),
-        watermark: format!(
-            "{boot}:{sequence}",
-            boot = spec.boot_id,
-            sequence = spec.producer_sequence
-        ),
-        coverage: spec.coverage,
-        sampling_probability: None,
-        retention_class: spec.retention_class,
-        emitted_count: 1,
-        delayed_count: 0,
-        dropped_count: 0,
-        process_boot_id: spec.boot_id.to_owned(),
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
+        scope_ref: spec.scope_ref,
+        boot_id: spec.boot_id,
         producer_sequence: spec.producer_sequence,
+        event_prefix: spec.event_prefix,
+        capability: spec.capability,
+        operation: spec.operation,
+        quantity: spec.quantity,
+        unit: spec.unit,
+        terminal_result: spec.terminal_result,
+        producer_revision: spec.producer_revision,
+        configuration_revision: spec.configuration_revision,
+        policy_revision: spec.policy_revision,
+        coverage: spec.coverage,
+        retention_class: spec.retention_class,
+        observed_at_micros: spec.observed_at_micros,
         payload: spec.payload,
-    };
-    envelope.validate()?;
-    Ok(envelope)
+        schema_revision: SCHEMA_REVISION,
+    })
 }
 
 fn contract_error(reason: &'static str) -> ApplicationContractError {
