@@ -19,6 +19,9 @@ pub use grep_analysis::{
     TraceDecayAstGrepAuthorityV1, TraceDecayComplexityAuthorityV1,
     TraceDecayDependencyDepthAuthorityV1,
 };
+pub use support::{
+    AffectedTestTraversal, RankedAffectedTest, affected_test_proximity, rank_affected_tests,
+};
 pub use production::{
     ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
     TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,

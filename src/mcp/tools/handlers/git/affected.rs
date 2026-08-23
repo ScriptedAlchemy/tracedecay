@@ -1,6 +1,9 @@
 //! `tracedecay_affected` — breadth-first reverse-dependency traversal from changed files to the tests that cover them.
 
 use super::*;
+use tracedecay_usecases::primitives::{
+    AffectedTestTraversal, RankedAffectedTest, affected_test_proximity, rank_affected_tests,
+};
 
 type FileDependentsByFile = HashMap<String, Vec<String>>;
 type AffectedDependentsFuture<'a> =
@@ -47,43 +50,6 @@ impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
             }
             Ok(dependents)
         })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RankedAffectedTest {
-    pub(crate) path: String,
-    pub(crate) distance: usize,
-}
-
-pub(crate) struct AffectedTestTraversal {
-    pub(crate) test_distances: HashMap<String, usize>,
-}
-
-pub(crate) fn rank_affected_tests(
-    test_distances: &HashMap<String, usize>,
-) -> Vec<RankedAffectedTest> {
-    let mut ranked = test_distances
-        .iter()
-        .map(|(path, distance)| RankedAffectedTest {
-            path: path.clone(),
-            distance: *distance,
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
-        left.distance
-            .cmp(&right.distance)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    ranked
-}
-
-pub(crate) fn affected_test_proximity(distance: usize) -> &'static str {
-    match distance {
-        0 => "changed",
-        1 => "direct",
-        2 => "near",
-        _ => "transitive",
     }
 }
 

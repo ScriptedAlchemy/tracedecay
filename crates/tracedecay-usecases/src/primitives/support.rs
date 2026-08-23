@@ -110,16 +110,16 @@ mod bounded_source_search_tests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RankedAffectedTest {
-    pub(crate) path: String,
-    pub(crate) distance: usize,
+pub struct RankedAffectedTest {
+    pub path: String,
+    pub distance: usize,
 }
 
-pub(crate) struct AffectedTestTraversal {
-    pub(crate) test_distances: HashMap<String, usize>,
+pub struct AffectedTestTraversal {
+    pub test_distances: HashMap<String, usize>,
 }
 
-pub(crate) fn rank_affected_tests(
+pub fn rank_affected_tests(
     test_distances: &HashMap<String, usize>,
 ) -> Vec<RankedAffectedTest> {
     let mut ranked = test_distances
@@ -137,7 +137,7 @@ pub(crate) fn rank_affected_tests(
     ranked
 }
 
-pub(crate) const fn affected_test_proximity(distance: usize) -> &'static str {
+pub const fn affected_test_proximity(distance: usize) -> &'static str {
     match distance {
         0 => "changed",
         1 => "direct",
