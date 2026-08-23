@@ -840,7 +840,7 @@ fn evidence_difference(
         .filter(|candidate| {
             right_by_link
                 .get(candidate.link_id())
-                .is_none_or(|bucket| !bucket.iter().any(|existing| *existing == *candidate))
+                .is_none_or(|bucket| !bucket.contains(candidate))
         })
         .cloned()
         .collect()
