@@ -82,15 +82,12 @@ macro_rules! dispatch_symbol {
         let outcome = $runtime
             .project_runtime
             .symbol_graph
-            .$method(symbol_context($context, $operation, $observed_at), &$request)
+            .$method(
+                symbol_context($context, $operation, $observed_at),
+                &$request,
+            )
             .await;
-        symbol_outcome(
-            &$runtime.access,
-            $context,
-            $operation,
-            $domain,
-            outcome,
-        )
+        symbol_outcome(&$runtime.access, $context, $operation, $domain, outcome)
     }};
 }
 
