@@ -213,6 +213,7 @@ pub(crate) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, Rpc
     }
 }
 
+#[hotpath::measure(label = "lsp_dispatch_incoming")]
 pub(crate) fn dispatch_incoming<P, S, D>(
     session: &mut DaemonLspProtocolSession<P, S, D>,
     incoming: ParsedIncoming,

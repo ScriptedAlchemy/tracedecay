@@ -225,6 +225,7 @@ impl LspSessionControl {
     /// Admits a request with a daemon-supplied monotonic deadline. The session
     /// owns cancellation and response suppression even when an upstream
     /// analyzer cannot stop a request immediately.
+    #[hotpath::measure(label = "lsp_session_admit_request", impl_type = "LspSessionControl")]
     pub fn admit_request_with_deadline(
         &mut self,
         id: LspRequestId,
@@ -295,6 +296,10 @@ impl LspSessionControl {
         expired
     }
 
+    #[hotpath::measure(
+        label = "lsp_session_complete_request",
+        impl_type = "LspSessionControl"
+    )]
     pub fn complete_request(&mut self, id: &LspRequestId) -> CompletionDisposition {
         match self.pending.remove(id).map(|request| request.state) {
             Some(PendingState::Active) => CompletionDisposition::Publish,

@@ -52,6 +52,10 @@ impl WorkspaceDiagnosticAdapter {
         self.authority.supports_workspace_diagnostics()
     }
 
+    #[hotpath::measure(
+        label = "lsp_workspace_diagnostics_snapshot",
+        impl_type = "WorkspaceDiagnosticAdapter"
+    )]
     pub(super) fn snapshot(
         &self,
         workspace: &AuthorizedLspWorkspace,

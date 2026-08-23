@@ -168,6 +168,10 @@ where
     /// Decodes and routes one already-admitted JSON-RPC payload. Responses and
     /// server notifications remain queued until a typed daemon-session
     /// transport acknowledges delivery to the bridge.
+    #[hotpath::measure(
+        label = "lsp_protocol_handle_payload",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         self.prepare_payload_dispatch(now_ms);
         self.handle_prepared_payload(payload, now_ms)
@@ -337,6 +341,10 @@ where
             }
         }
     }
+    #[hotpath::measure(
+        label = "lsp_protocol_did_open",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub(crate) fn handle_did_open(
         &mut self,
         params: &Value,
@@ -384,6 +392,10 @@ where
         Ok(())
     }
 
+    #[hotpath::measure(
+        label = "lsp_protocol_did_change",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub(crate) fn handle_did_change(
         &mut self,
         params: &Value,

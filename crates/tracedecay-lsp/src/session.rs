@@ -395,6 +395,7 @@ impl LspSessionRegistry {
         Ok(access)
     }
 
+    #[hotpath::measure(label = "lsp_session_authenticate", impl_type = "LspSessionRegistry")]
     pub fn authenticate(
         &mut self,
         access: &LspSessionAccess,
@@ -576,6 +577,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp_session_open", impl_type = "DaemonLspSessionEndpoint")]
     pub fn open(
         &mut self,
         request: LspSessionOpenRequest,

@@ -545,6 +545,7 @@ impl StdioLspClient {
             .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_document_symbols", impl_type = "StdioLspClient")]
     pub async fn document_symbols(
         &mut self,
         params: DocumentSymbolParams,
@@ -555,6 +556,7 @@ impl StdioLspClient {
             .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_workspace_symbols", impl_type = "StdioLspClient")]
     pub async fn workspace_symbols(
         &mut self,
         params: WorkspaceSymbolParams,
@@ -748,6 +750,7 @@ impl StdioLspClient {
         .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_client_refresh", impl_type = "StdioLspClient")]
     pub async fn collect_document_diagnostics(
         &mut self,
         project_root: &Path,
