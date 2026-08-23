@@ -139,13 +139,20 @@ async fn context_eval_fixture_scores_real_queries() {
     let expected_anchor_rate = expected["anchor_hit_rate"]
         .as_f64()
         .expect("anchor_hit_rate");
+    // Ratchet, not equality. These are retrieval-quality metrics, so the
+    // fixture value is a floor the ranking must not fall below — not a number
+    // it must reproduce exactly. Pinned to 1e-9 the assertion failed on any
+    // genuine *improvement*, and the only way to green it was to regenerate
+    // the fixture, which is how a golden stops being reviewed and starts being
+    // rubber-stamped. A floor still catches every regression; raise the
+    // recorded value deliberately when a win should become the new baseline.
     assert!(
-        (mean_recall - expected_recall).abs() < 1e-9,
-        "mean_recall_at_5: computed {mean_recall}, fixture expects {expected_recall}"
+        mean_recall + 1e-9 >= expected_recall,
+        "mean_recall_at_5 regressed: computed {mean_recall}, floor is {expected_recall}"
     );
     assert!(
-        (anchor_hit_rate - expected_anchor_rate).abs() < 1e-9,
-        "anchor_hit_rate: computed {anchor_hit_rate}, fixture expects {expected_anchor_rate}"
+        anchor_hit_rate + 1e-9 >= expected_anchor_rate,
+        "anchor_hit_rate regressed: computed {anchor_hit_rate}, floor is {expected_anchor_rate}"
     );
     production.harness.shutdown().await;
 }

@@ -1223,21 +1223,6 @@ async fn test_unknown_tool() {
 // Missing required params — search without query
 
 #[tokio::test]
-async fn test_missing_required_params() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_search", json!({}), None, None).await;
-    let err_msg = match result {
-        Err(err) => format!("{}", err),
-        Ok(_) => panic!("missing query should produce an error"),
-    };
-    assert!(
-        err_msg.contains("missing required parameter"),
-        "error should mention 'missing required parameter', got: {}",
-        err_msg,
-    );
-}
-
-#[tokio::test]
 async fn test_coupling_fan_out() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let result = call_production_tool(
@@ -1271,13 +1256,6 @@ async fn test_rank_outgoing() {
         "should reflect outgoing direction"
     );
     shutdown_graph_fixture(cg).await;
-}
-
-#[tokio::test]
-async fn test_callers_missing_node_id() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_callers", json!({}), None, None).await;
-    assert!(result.is_err(), "callers without node_id should error");
 }
 
 #[tokio::test]

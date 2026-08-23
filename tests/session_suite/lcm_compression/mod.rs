@@ -4,10 +4,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::lcm::{
-    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate,
-    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPreflightRequest, LcmScope,
-    LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummarizerMode,
-    LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
+    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest,
+    LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSourceRef,
+    LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::HostAdmissionScope;

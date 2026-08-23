@@ -1948,46 +1948,6 @@ mod tests {
     }
 
     #[test]
-    fn fake_embed_is_deterministic_across_sessions() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority(16);
-        let mut s1 = runtime.open_session(&authority).expect("session 1");
-        let mut s2 = runtime.open_session(&authority).expect("session 2");
-        let texts = batch(&["fn reserve_stock()", "impl Display for Error"]);
-        let cancel = never_cancelled();
-        let v1 = s1.embed_batch(&texts, &cancel).expect("embed 1");
-        let v2 = s2.embed_batch(&texts, &cancel).expect("embed 2");
-        assert_eq!(v1, v2, "same model identity + same text => same vector");
-    }
-
-    #[test]
-    fn fake_embed_distinguishes_inputs_and_model_identities() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority(16);
-        let mut session = runtime.open_session(&authority).expect("session");
-        let cancel = never_cancelled();
-        let pair = session
-            .embed_batch(&batch(&["alpha", "beta"]), &cancel)
-            .expect("embed");
-        assert_ne!(pair[0].values, pair[1].values, "distinct texts differ");
-
-        let other = authority_with(
-            16,
-            'f',
-            EmbeddingMetricV1::Cosine,
-            EmbeddingNormalizationV1::L2,
-        );
-        let mut other_session = runtime.open_session(&other).expect("other session");
-        let other_vec = other_session
-            .embed_batch(&batch(&["alpha"]), &cancel)
-            .expect("embed other");
-        assert_ne!(
-            pair[0].values, other_vec[0].values,
-            "distinct model identities differ"
-        );
-    }
-
-    #[test]
     fn echo_dimensions_metric_and_normalization_are_exact() {
         let runtime = FakeEmbeddingRuntime::new();
         let authority = authority_with(

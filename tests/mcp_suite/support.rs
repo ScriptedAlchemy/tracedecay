@@ -8,12 +8,12 @@ use serde_json::Value;
 #[cfg(feature = "test-transport")]
 use serde_json::json;
 use std::ffi::OsString;
+#[cfg(feature = "test-transport")]
+use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use std::process::Command;
-#[cfg(feature = "test-transport")]
-use std::fs;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]

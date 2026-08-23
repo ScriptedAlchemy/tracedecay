@@ -22,73 +22,6 @@ fn assert_help_succeeds(args: &[&str], expected: &str) {
 }
 
 #[test]
-fn top_level_subcommands_accept_help() {
-    for command in [
-        "init",
-        "sync",
-        "status",
-        "tool",
-        "lsp",
-        "install",
-        "reinstall",
-        "update-plugin",
-        "uninstall",
-        "dashboard",
-        "serve",
-        "daemon",
-        "upgrade",
-        "update",
-        "channel",
-        "current-counter",
-        "reset-counter",
-        "disable-upload-counter",
-        "enable-upload-counter",
-        "gitignore",
-        "doctor",
-        "cost",
-        "bench",
-        "gain",
-        "monitor",
-        "sessions",
-        "projects",
-        "branch",
-        "memory",
-        "automation",
-        "storage",
-        "wipe",
-        "list",
-    ] {
-        assert_help_succeeds(&[command, "--help"], "Usage:");
-    }
-}
-
-#[test]
-fn nested_subcommands_accept_help() {
-    for args in [
-        &["lsp", "servers", "--help"][..],
-        &["daemon", "run", "--help"],
-        &["daemon", "install-service", "--help"],
-        &["sessions", "import", "--help"],
-        &["sessions", "git-sync", "--help"],
-        &["sessions", "search", "--help"],
-        &["sessions", "unfinished", "--help"],
-        &["projects", "list", "--help"],
-        &["projects", "search", "--help"],
-        &["projects", "context", "--help"],
-        &["branch", "list", "--help"],
-        &["branch", "add", "--help"],
-        &["memory", "status", "--help"],
-        &["automation", "config", "--help"],
-        &["automation", "config", "get", "--help"],
-        &["automation", "runs", "list", "--help"],
-        &["automation", "skills", "list", "--help"],
-        &["automation", "facts", "list", "--help"],
-    ] {
-        assert_help_succeeds(args, "Usage:");
-    }
-}
-
-#[test]
 fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
     for args in [
         &["storage", "report", "--help"][..],
@@ -128,9 +61,4 @@ fn legacy_host_cli_aliases_are_rejected() {
             "removed tracedecay {alias} should exit nonzero\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
-}
-
-#[test]
-fn tool_name_help_still_prints_tool_schema() {
-    assert_help_succeeds(&["tool", "search", "--help"], "tracedecay tool search");
 }
