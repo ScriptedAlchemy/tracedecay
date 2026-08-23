@@ -375,6 +375,21 @@ for required_package in \
     die "workspace package required by the distribution gate was not produced: $required_package"
 done
 root_package=${package_dirs[tracedecay]}
+
+# Reconstruct the repository-relative package layout beneath the extracted root
+# crate. Some workspace build scripts intentionally consume root-owned product
+# authorities (the plugin bundle, version manifest, and build identity) through
+# `../../`; a flat directory of otherwise valid package archives gives those
+# paths a false parent and does not represent the distribution we ship.
+mkdir -p -- "$root_package/crates"
+while IFS=$'\t' read -r name version; do
+  [[ $name == tracedecay ]] && continue
+  source_directory=${package_dirs[$name]}
+  destination_directory="$root_package/crates/$name"
+  mv -- "$source_directory" "$destination_directory"
+  package_dirs["$name"]=$destination_directory
+done <"$package_table"
+
 lsp_package=${package_dirs[tracedecay-lsp]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
 query_package=${package_dirs[tracedecay-query]}
@@ -394,7 +409,7 @@ mv -- \
   "$code_extraction_package/vendor/tree-sitter-rust/Cargo.toml"
 
 patch_config="$work/packaged-crates.toml"
-python3 - "$metadata" "$packages" "$code_extraction_package" >"$patch_config" <<'PY'
+python3 - "$metadata" "$root_package" "$code_extraction_package" >"$patch_config" <<'PY'
 import json
 import pathlib
 import sys
@@ -402,13 +417,13 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     metadata = json.load(handle)
 members = set(metadata["workspace_members"])
-packages = pathlib.Path(sys.argv[2])
+packaged_workspace = pathlib.Path(sys.argv[2])
 code_extraction_package = pathlib.Path(sys.argv[3])
 print("[patch.crates-io]")
 for package in sorted(metadata["packages"], key=lambda value: value["name"]):
     if package["id"] not in members or package["name"] == "tracedecay":
         continue
-    path = packages / f'{package["name"]}-{package["version"]}'
+    path = packaged_workspace / "crates" / package["name"]
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
 grammar = code_extraction_package / "vendor" / "tree-sitter-rust"
 print(f'"tree-sitter-rust" = {{ path = {json.dumps(str(grammar))} }}')
