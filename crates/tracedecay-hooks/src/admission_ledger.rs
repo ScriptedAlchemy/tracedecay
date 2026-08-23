@@ -271,6 +271,7 @@ impl HookAdmissionLedgerV1 {
 
     /// Records one attempt and exposes the durable entry order. Exact
     /// duplicates reuse the original order, including after ledger reopen.
+    #[hotpath::measure]
     pub fn admit_with_receipt(
         &mut self,
         envelope: &HookEventEnvelopeV2,
@@ -302,12 +303,12 @@ impl HookAdmissionLedgerV1 {
             self.trim_to((self.limits.max_records as usize).saturating_sub(1));
             self.rewrite()?;
         }
-        append_durable(
-            &records_path(&self.root),
-            &encode_record(identity, digest, now),
-            DIRECTORY_POLICY,
-        )
-        .map_err(|_| HookAdmissionLedgerError::Io)?;
+        let record = encode_record(identity, digest, now);
+        hotpath::gauge!("hooks.admission.append.bytes").set(record.len());
+        hotpath::measure_block!("hooks.admission.fsync.append", {
+            append_durable(&records_path(&self.root), &record, DIRECTORY_POLICY)
+                .map_err(|_| HookAdmissionLedgerError::Io)
+        })?;
         let order = self.next_order;
         self.next_order = self.next_order.saturating_add(1);
         self.entries.insert(
@@ -387,6 +388,7 @@ impl HookAdmissionLedgerV1 {
         dropped as u32
     }
 
+    #[hotpath::measure]
     fn rewrite(&mut self) -> Result<(), HookAdmissionLedgerError> {
         let mut ordered = self
             .entries
@@ -407,26 +409,33 @@ impl HookAdmissionLedgerV1 {
             }
         }
         self.next_order = ordered.len() as u64;
-        shared_atomic_write(
-            &records_path(&self.root),
-            "hook-admissions",
-            &bytes,
-            DIRECTORY_POLICY,
-        )
-        .map_err(|_| HookAdmissionLedgerError::Io)?;
+        hotpath::gauge!("hooks.admission.rewrite.bytes").set(bytes.len());
+        hotpath::measure_block!("hooks.admission.fsync.rewrite", {
+            shared_atomic_write(
+                &records_path(&self.root),
+                "hook-admissions",
+                &bytes,
+                DIRECTORY_POLICY,
+            )
+            .map_err(|_| HookAdmissionLedgerError::Io)
+        })?;
         self.write_work_completions()
     }
 
+    #[hotpath::measure]
     fn write_work_completions(&self) -> Result<(), HookAdmissionLedgerError> {
         let bytes = canonical_json_bytes(&self.completed_work.iter().copied().collect::<Vec<_>>())
             .map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;
-        shared_atomic_write(
-            &completions_path(&self.root),
-            "hook-admission-work-completions",
-            &bytes,
-            DIRECTORY_POLICY,
-        )
-        .map_err(|_| HookAdmissionLedgerError::Io)
+        hotpath::gauge!("hooks.admission.completions.bytes").set(bytes.len());
+        hotpath::measure_block!("hooks.admission.fsync.completions", {
+            shared_atomic_write(
+                &completions_path(&self.root),
+                "hook-admission-work-completions",
+                &bytes,
+                DIRECTORY_POLICY,
+            )
+            .map_err(|_| HookAdmissionLedgerError::Io)
+        })
     }
 }
 
