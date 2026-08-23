@@ -17,8 +17,8 @@ use crate::recovery::{
     validate_or_initialize_format,
 };
 use crate::state::{
-    FormatState, latest_projection, load_entity, projection_entities, projection_relations,
-    publication, relations_for_entity,
+    FormatState, latest_projection, load_entity_locator, outgoing_relation_projections,
+    projection_entities, projection_relations, publication,
 };
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
@@ -789,7 +789,7 @@ impl GraphDb {
         starts: &[GraphEntityId],
     ) -> Result<(), GraphDbError> {
         for start in starts {
-            if let Some(stored) = load_entity(database, namespace, start)? {
+            if let Some(stored) = load_entity_locator(database, namespace, start)? {
                 self.ensure_projection_readable(&stored.namespace, &stored.projection)?;
             }
         }
@@ -803,13 +803,11 @@ impl GraphDb {
         starts: &[GraphEntityId],
     ) -> Result<(), GraphDbError> {
         for start in starts {
-            let Some(stored) = load_entity(database, namespace, start)? else {
+            let Some(stored) = load_entity_locator(database, namespace, start)? else {
                 continue;
             };
-            for relation in relations_for_entity(database, stored.node)? {
-                if relation.relation.from == *start {
-                    self.ensure_projection_readable(namespace, &relation.projection)?;
-                }
+            for projection in outgoing_relation_projections(database, stored.node)? {
+                self.ensure_projection_readable(namespace, &projection)?;
             }
         }
         Ok(())

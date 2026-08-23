@@ -521,24 +521,7 @@ impl GenerationGitBlameJoinV1 {
             }
         }
 
-        let lines = blame
-            .lines
-            .iter()
-            .map(|line| {
-                let mut symbol_occurrence_ids: Vec<SymbolOccurrenceId> = symbol_bindings
-                    .iter()
-                    .filter(|binding| {
-                        binding.start_line <= line.final_line && line.final_line <= binding.end_line
-                    })
-                    .map(|binding| binding.symbol_occurrence_id.clone())
-                    .collect();
-                symbol_occurrence_ids.sort();
-                GenerationGitBlameLineJoinV1 {
-                    line: line.clone(),
-                    symbol_occurrence_ids,
-                }
-            })
-            .collect();
+        let lines = bind_blame_lines(&blame.lines, symbol_bindings);
         let coverage = if blame.availability != GitBlameAvailabilityV1::Available {
             GenerationGitBlameJoinCoverageV1::Unavailable {
                 availability: blame.availability,
@@ -952,6 +935,48 @@ fn hunk_context(
         hazard_anchors,
         affected_tests,
     })
+}
+
+fn bind_blame_lines(
+    lines: &[GitBlameLineV1],
+    symbol_bindings: &[GitSymbolLineBindingV1],
+) -> Vec<GenerationGitBlameLineJoinV1> {
+    let mut bindings: Vec<&GitSymbolLineBindingV1> = symbol_bindings.iter().collect();
+    bindings.sort_by(|left, right| {
+        left.start_line
+            .cmp(&right.start_line)
+            .then(left.end_line.cmp(&right.end_line))
+            .then(left.symbol_occurrence_id.cmp(&right.symbol_occurrence_id))
+    });
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by_key(|&index| lines[index].final_line);
+
+    let mut symbols_by_line = vec![Vec::new(); lines.len()];
+    let mut active: Vec<&GitSymbolLineBindingV1> = Vec::new();
+    let mut next_binding = 0usize;
+    for &line_index in &order {
+        let line_no = lines[line_index].final_line;
+        while next_binding < bindings.len() && bindings[next_binding].start_line <= line_no {
+            active.push(bindings[next_binding]);
+            next_binding += 1;
+        }
+        active.retain(|binding| binding.end_line >= line_no);
+        let mut symbol_occurrence_ids: Vec<SymbolOccurrenceId> = active
+            .iter()
+            .map(|binding| binding.symbol_occurrence_id.clone())
+            .collect();
+        symbol_occurrence_ids.sort();
+        symbols_by_line[line_index] = symbol_occurrence_ids;
+    }
+
+    lines
+        .iter()
+        .zip(symbols_by_line)
+        .map(|(line, symbol_occurrence_ids)| GenerationGitBlameLineJoinV1 {
+            line: line.clone(),
+            symbol_occurrence_ids,
+        })
+        .collect()
 }
 
 fn validate_generation_snapshot(

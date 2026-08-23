@@ -274,6 +274,7 @@ fn directed_relations(
     let projected = relation_projection(Arc::clone(&store), relation_kinds);
     let mut admitted = 0_usize;
     let mut results = Vec::with_capacity(starts.len());
+    let mut entity_ids = HashMap::new();
     for start in starts {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -292,6 +293,7 @@ fn directed_relations(
                 edge,
                 namespace,
                 ensure_projection_readable,
+                &mut entity_ids,
             )?);
         }
         relations.sort_by(|left, right| left.identity.cmp(&right.identity));
@@ -405,6 +407,8 @@ fn native_outgoing_traversal(
 ) -> Result<TraversalResult, GraphDbError> {
     let mut depths = HashMap::from([(start, 0_usize)]);
     let mut entities = HashMap::new();
+    let mut entity_ids = HashMap::new();
+    let mut relation_ids = HashMap::new();
     let mut via_relations = HashMap::<NodeId, GraphRelationId>::new();
     let mut unfinished_by_depth = HashMap::<usize, usize>::new();
     let mut cutoff_depth = None;
@@ -432,7 +436,7 @@ fn native_outgoing_traversal(
                         message: "native BFS discovered a node without a depth".to_owned(),
                     }));
                 };
-                match entity_identity(store, node, &request.namespace) {
+                match cached_entity_identity(store, node, &request.namespace, &mut entity_ids) {
                     Ok(identity) => {
                         entities.insert(node, identity);
                         let unfinished = unfinished_by_depth.entry(depth).or_default();
@@ -471,11 +475,12 @@ fn native_outgoing_traversal(
                         request.max_depth,
                     )));
                 };
-                let relation = match relation_identity(
+                let relation = match cached_relation_identity(
                     store,
                     edge,
                     &request.namespace,
                     ensure_projection_readable,
+                    &mut relation_ids,
                 ) {
                     Ok(relation) => relation,
                     Err(error) => {
@@ -506,11 +511,12 @@ fn native_outgoing_traversal(
                     }));
                 };
                 if source_depth.checked_add(1) == Some(target_depth) {
-                    let relation = match relation_identity(
+                    let relation = match cached_relation_identity(
                         store,
                         edge,
                         &request.namespace,
                         ensure_projection_readable,
+                        &mut relation_ids,
                     ) {
                         Ok(relation) => relation,
                         Err(error) => {
@@ -692,6 +698,7 @@ fn projected_reachable(
 ) -> Result<BTreeSet<GraphEntityId>, GraphDbError> {
     let mut queue = VecDeque::from([start.clone()]);
     let mut visited = BTreeSet::new();
+    let mut entity_ids = HashMap::new();
     while let Some(entity) = queue.pop_front() {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -724,7 +731,12 @@ fn projected_reachable(
             )? {
                 continue;
             }
-            neighbors.push(entity_identity(projected, neighbor, namespace)?);
+            neighbors.push(cached_entity_identity(
+                projected,
+                neighbor,
+                namespace,
+                &mut entity_ids,
+            )?);
         }
         neighbors.sort();
         neighbors.dedup();
@@ -928,6 +940,7 @@ fn relation_for_edge(
         &GraphNamespace,
         &GraphProjectionId,
     ) -> Result<(), GraphDbError>,
+    entity_ids: &mut HashMap<NodeId, GraphEntityId>,
 ) -> Result<GraphRelation, GraphDbError> {
     let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
         message: "outgoing relation references a missing native edge".to_owned(),
@@ -977,8 +990,8 @@ fn relation_for_edge(
         stored.get_property(RELATION_TO_PROPERTY),
         "outgoing relation target",
     )?;
-    if entity_identity(store, stored.src, namespace)? != from
-        || entity_identity(store, stored.dst, namespace)? != to
+    if cached_entity_identity(store, stored.src, namespace, entity_ids)? != from
+        || cached_entity_identity(store, stored.dst, namespace, entity_ids)? != to
     {
         return Err(GraphDbError::Corrupt {
             message: "outgoing relation endpoints disagree with native adjacency".to_owned(),

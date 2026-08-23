@@ -69,12 +69,20 @@ pub(crate) const INDEXED_PROPERTIES: [&str; 5] = [
     PUBLICATION_KEY_PROPERTY,
 ];
 
-pub(crate) fn stable_key(namespace: &GraphNamespace, identity: &str) -> String {
+pub(crate) fn encoded_namespace_key(namespace: &GraphNamespace) -> String {
+    hex::encode(namespace.as_str().as_bytes())
+}
+
+pub(crate) fn stable_key_from_encoded(encoded_namespace: &str, identity: &str) -> String {
     format!(
         "{}:{}",
-        hex::encode(namespace.as_str().as_bytes()),
+        encoded_namespace,
         hex::encode(identity.as_bytes())
     )
+}
+
+pub(crate) fn stable_key(namespace: &GraphNamespace, identity: &str) -> String {
+    stable_key_from_encoded(&encoded_namespace_key(namespace), identity)
 }
 
 pub(crate) fn projection_key(namespace: &GraphNamespace, projection: &GraphProjectionId) -> String {
@@ -139,7 +147,7 @@ pub(crate) fn entity_projection_label(
 ) -> String {
     format!(
         "{OWNER_LABEL_PREFIX}{}_{}",
-        hex::encode(namespace.as_str().as_bytes()),
+        encoded_namespace_key(namespace),
         hex::encode(projection.as_str().as_bytes())
     )
 }
@@ -180,16 +188,18 @@ pub(crate) fn entity_labels(
     projection: &GraphProjectionId,
     labels: &BTreeSet<GraphLabel>,
 ) -> Vec<String> {
+    let namespace_hex = encoded_namespace_key(namespace);
+    let projection_hex = hex::encode(projection.as_str().as_bytes());
     let mut native = vec![
         ENTITY_LABEL.to_owned(),
-        entity_projection_label(namespace, projection),
+        format!("{OWNER_LABEL_PREFIX}{namespace_hex}_{projection_hex}"),
     ];
     for label in labels {
+        let label_hex = hex::encode(label.as_str().as_bytes());
+        native.push(format!("{DOMAIN_LABEL_PREFIX}{label_hex}"));
         native.push(format!(
-            "{DOMAIN_LABEL_PREFIX}{}",
-            hex::encode(label.as_str().as_bytes())
+            "{OWNER_DOMAIN_LABEL_PREFIX}{namespace_hex}_{projection_hex}_{label_hex}"
         ));
-        native.push(entity_projection_domain_label(namespace, projection, label));
     }
     native
 }
@@ -249,14 +259,21 @@ pub(crate) fn entity_properties(
     projection: &GraphProjectionId,
     entity: &GraphEntity,
 ) -> Vec<(String, Value)> {
+    let encoded_namespace = encoded_namespace_key(namespace);
     let mut properties = vec![
         (
             ENTITY_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key(namespace, entity.identity.as_str())),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace,
+                entity.identity.as_str(),
+            )),
         ),
         (
             PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(projection_key(namespace, projection)),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace,
+                projection.as_str(),
+            )),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -289,14 +306,21 @@ pub(crate) fn relation_properties(
     let edge = i64::try_from(edge.as_u64()).map_err(|_| GraphDbError::Corrupt {
         message: "Grafeo edge identity exceeds the persisted scalar range".to_owned(),
     })?;
+    let encoded_namespace = encoded_namespace_key(namespace);
     let mut properties = vec![
         (
             RELATION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key(namespace, relation.identity.as_str())),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace,
+                relation.identity.as_str(),
+            )),
         ),
         (
             PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(projection_key(namespace, projection)),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace,
+                projection.as_str(),
+            )),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -338,14 +362,21 @@ pub(crate) fn edge_properties(
     projection: &GraphProjectionId,
     relation: &GraphRelation,
 ) -> Vec<(String, Value)> {
+    let encoded_namespace = encoded_namespace_key(namespace);
     let mut properties = vec![
         (
             RELATION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key(namespace, relation.identity.as_str())),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace,
+                relation.identity.as_str(),
+            )),
         ),
         (
             PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(projection_key(namespace, projection)),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace,
+                projection.as_str(),
+            )),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -389,7 +420,10 @@ pub(crate) fn projection_properties(
     let mut properties = vec![
         (
             PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(projection_key(namespace, projection)),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace_key(namespace),
+                projection.as_str(),
+            )),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -414,7 +448,10 @@ pub(crate) fn publication_properties(
     let mut properties = vec![
         (
             PUBLICATION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key(namespace, key.as_str())),
+            Value::from(stable_key_from_encoded(
+                &encoded_namespace_key(namespace),
+                key.as_str(),
+            )),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),

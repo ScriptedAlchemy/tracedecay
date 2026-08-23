@@ -662,8 +662,6 @@ impl CompositionKernel {
             ));
         }
 
-        let snapshot_digest = request.snapshot.compute_digest()?;
-        let candidate_set_digest = digest_candidate_set(&output.ranked_candidates)?;
         let start = match cursor {
             Some(cursor) => {
                 keyring.verify_cursor(cursor)?;
@@ -671,18 +669,6 @@ impl CompositionKernel {
                     return Err(RetrievalError::CursorExpired);
                 }
                 cursor.validate()?;
-                let query_digest = keyring
-                    .digest_query_for(&cursor.key_id, cursor.key_epoch, request, query_view)
-                    .map_err(|_| RetrievalError::CursorSetMismatch)?;
-                validate_cursor(
-                    cursor,
-                    request,
-                    output,
-                    &query_digest,
-                    &snapshot_digest,
-                    &candidate_set_digest,
-                    &self.ranking_revision,
-                )?;
                 cursor.next_ordinal as usize
             }
             None => 0,
@@ -695,21 +681,42 @@ impl CompositionKernel {
             .saturating_add(page_size)
             .min(output.ranked_candidates.len());
         let ranked_candidates = output.ranked_candidates[start..end].to_vec();
-        let cursor = if end < output.ranked_candidates.len() {
-            let query_digest = keyring
-                .digest_active_query(request, query_view)
-                .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
-            Some(build_cursor(
-                request,
-                output,
-                query_digest,
-                snapshot_digest,
-                candidate_set_digest,
-                self.ranking_revision.clone(),
-                end as u32,
-                now,
-                keyring,
-            )?)
+        let needs_set_digest = cursor.is_some() || end < output.ranked_candidates.len();
+        let cursor = if needs_set_digest {
+            let snapshot_digest = request.snapshot.compute_digest()?;
+            let candidate_set_digest = digest_candidate_set(&output.ranked_candidates)?;
+            if let Some(cursor) = cursor {
+                let query_digest = keyring
+                    .digest_query_for(&cursor.key_id, cursor.key_epoch, request, query_view)
+                    .map_err(|_| RetrievalError::CursorSetMismatch)?;
+                validate_cursor(
+                    cursor,
+                    request,
+                    output,
+                    &query_digest,
+                    &snapshot_digest,
+                    &candidate_set_digest,
+                    &self.ranking_revision,
+                )?;
+            }
+            if end < output.ranked_candidates.len() {
+                let query_digest = keyring
+                    .digest_active_query(request, query_view)
+                    .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
+                Some(build_cursor(
+                    request,
+                    output,
+                    query_digest,
+                    snapshot_digest,
+                    candidate_set_digest,
+                    self.ranking_revision.clone(),
+                    end as u32,
+                    now,
+                    keyring,
+                )?)
+            } else {
+                None
+            }
         } else {
             None
         };

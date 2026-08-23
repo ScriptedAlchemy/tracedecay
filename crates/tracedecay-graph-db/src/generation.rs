@@ -246,9 +246,19 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Vec<u8>, GraphDbError> {
         self.validate_checked(check)?;
-        self.replay_source_payload(
-            GraphGenerationReplaySource::InlineManifest(self.clone()),
+        // Serialize the same externally-tagged `inline_manifest` shape as
+        // `GraphGenerationReplaySource::InlineManifest` without cloning the
+        // entity/relation payload into an owned enum just to write it.
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        enum InlineReplaySourceView<'a> {
+            InlineManifest(&'a GraphGenerationManifest),
+        }
+        checked_canonical_bytes(
+            &InlineReplaySourceView::InlineManifest(self),
             check,
+            "canonical graph generation replay",
+            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
         )
     }
 

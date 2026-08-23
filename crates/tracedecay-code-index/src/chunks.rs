@@ -803,7 +803,8 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             end_byte: base_offset + cursor as u64,
         };
         for subtoken in split_subtokens(token) {
-            if seen_subtokens.insert(subtoken.clone()) {
+            if !seen_subtokens.contains(subtoken.as_str()) {
+                seen_subtokens.insert(subtoken.clone());
                 subtokens.push(subtoken);
             }
         }
@@ -814,6 +815,10 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
     let mut line_start = 0usize;
     for line in text.split_inclusive('\n') {
         let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        if !line_has_ascii_error_marker(line_without_newline) {
+            line_start += line.len();
+            continue;
+        }
         let lowercase = line_without_newline.to_ascii_lowercase();
         let marker = [
             (
@@ -876,6 +881,16 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             ))
     });
     (terms, subtokens)
+}
+
+fn line_has_ascii_error_marker(line: &str) -> bool {
+    const MARKERS: [&[u8]; 3] = [b"compiler error:", b"runtime error:", b"panic:"];
+    let bytes = line.as_bytes();
+    MARKERS.iter().any(|marker| {
+        bytes
+            .windows(marker.len())
+            .any(|window| window.eq_ignore_ascii_case(marker))
+    })
 }
 
 /// Mint a whole technical term only after a type-specific recognizer has
