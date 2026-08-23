@@ -27,7 +27,6 @@ pub use tracedecay::serve;
 use cli::*;
 use tracedecay::daemon::StderrTracingDefault;
 
-/// Alias for the shared timestamp utility.
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay::tracedecay::current_timestamp()
 }
@@ -70,7 +69,6 @@ impl Spinner {
     ) -> std::thread::JoinHandle<()> {
         let msg = message.clone();
         let stp = stop.clone();
-        // Hide cursor while spinner is active.
         let _ = write!(std::io::stderr(), "\x1b[?25l");
         let _ = std::io::stderr().flush();
         std::thread::spawn(move || {
@@ -108,7 +106,6 @@ impl Spinner {
         self.stop();
         let mut stderr = std::io::stderr();
         if self.interactive {
-            // Show cursor again, then print the done line.
             let _ = write!(stderr, "\x1b[?25h");
             let _ = writeln!(stderr, "\r\x1b[2K\x1b[32m✔\x1b[0m {}", message);
         } else {
@@ -352,17 +349,16 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
 async fn run_startup_preamble(command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
-    // First-run notice (check BEFORE any config save creates the file)
+    // Check first-run before any config save creates the file.
     let is_first_run = tracedecay::user_config::UserConfig::is_fresh();
 
-    // Best-effort flush of pending worldwide counter tokens.
     let is_force_flush = matches!(
         command,
         Commands::Init { .. } | Commands::Sync { .. } | Commands::Status { .. }
     );
     let mut user_config = tracedecay::user_config::UserConfig::load();
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
-    // makes a synchronous HTTP call (#84) which can add seconds to
+    // makes a synchronous HTTP call which can add seconds to
     // `tracedecay serve` startup on slow networks — long enough to blow the
     // MCP client's 30 s `initialize` timeout. The canonical setting lookup is
     // only consulted when there are pending tokens to flush: with nothing
@@ -408,11 +404,6 @@ async fn run_startup_preamble(command: &Commands) {
         );
     }
 
-    // The "beta merged into stable" nudge that lived here through 4.3.x was
-    // retired in 4.3.12. The beta channel is open again as of v5.0.0-beta.1
-    // and beta users now stay on beta until they explicitly switch off.
-
-    // Best-effort check: warn if install needs re-running.
     if startup_policy.runs_agent_install_check() {
         tracedecay::agents::claude::check_install_stale();
     }
@@ -1408,10 +1399,3 @@ fn is_local_install_command(command: &Commands) -> bool {
 
 #[cfg(test)]
 mod startup_tests;
-
-// handle_branch_action, handle_wipe, handle_list, handle_no_command,
-// init_and_index has been moved to src/commands.rs.
-//
-// update_global_db, try_flush, check_for_update, gather_target_projects,
-// gather_local_projects, gather_local_projects_from, find_descendant_tracedecay,
-// print_flash_warning, and tracedecay_dir_size have been moved to src/global.rs.

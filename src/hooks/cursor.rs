@@ -49,8 +49,6 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 ];
 
 /// Cursor `subagentStart` hook handler.
-///
-/// Allows Cursor subagents while preserving legacy hook compatibility.
 pub async fn hook_cursor_subagent_start() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
@@ -247,7 +245,6 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 ///    dedupe and initialized-store gating as `postToolUse`.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
-    // One parse for the root, the analytics row, and the daemon notification.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
@@ -299,7 +296,6 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     0
 }
 
-/// Cursor `sessionStart` hook handler.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
     let (root, output) = cursor_session_start_response(&event).await;
@@ -615,8 +611,7 @@ fn cursor_after_file_edit_rel_paths_from_parsed(
     rels
 }
 
-/// Returns `true` when a sync should run given the last marker time and a
-/// debounce window. Used to coalesce back-to-back `afterShellExecution` syncs.
+/// Coalesces back-to-back `afterShellExecution` syncs against the last marker.
 pub fn cursor_should_run_sync(now_secs: i64, last_secs: Option<i64>, debounce_secs: i64) -> bool {
     match last_secs {
         Some(last) => now_secs - last >= debounce_secs,
@@ -624,9 +619,8 @@ pub fn cursor_should_run_sync(now_secs: i64, last_secs: Option<i64>, debounce_se
     }
 }
 
-/// Builds the Cursor `sessionStart` output JSON (`additional_context` + `env`).
-/// When `project_root` is known, exposes it as `TRACEDECAY_PROJECT_ROOT` so
-/// subsequent session hooks can reuse it.
+/// Exposes a known project root as `TRACEDECAY_PROJECT_ROOT` so later session
+/// hooks can reuse it.
 pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context: &str) -> String {
     let mut env = serde_json::Map::new();
     if let Some(root) = project_root {
@@ -954,8 +948,8 @@ mod tests {
             context.contains("tracedecay_redundancy"),
             "context: {context}"
         );
-        // The Cursor surface uses the soft `additional_context` shape only — no
-        // permission / hookSpecificOutput keys.
+        // Soft `additional_context` only — Cursor has no permission /
+        // hookSpecificOutput envelope on this surface.
         assert!(v.get("permission").is_none());
         assert!(v.get("hookSpecificOutput").is_none());
     }
@@ -990,7 +984,6 @@ mod tests {
     /// nudge never spams ordinary Cursor edits.
     #[test]
     fn cursor_after_file_edit_stays_silent_for_non_redundancy_edits() {
-        // A one-line edit is below the redundancy line threshold.
         let small = serde_json::json!({
             "hook_event_name": "afterFileEdit",
             "file_path": "src/widgets.rs",
@@ -1000,8 +993,6 @@ mod tests {
         .to_string();
         assert!(evaluate_cursor_after_file_edit(&small).is_none());
 
-        // A markdown/data file never trips the source-language heuristic even
-        // with a long body.
         let long_body = (0..12)
             .map(|i| format!("line number {i} of prose"))
             .collect::<Vec<_>>()
@@ -1015,7 +1006,6 @@ mod tests {
         .to_string();
         assert!(evaluate_cursor_after_file_edit(&markdown).is_none());
 
-        // An event with no `edits` array carries no added text.
         let no_edits = serde_json::json!({
             "hook_event_name": "afterFileEdit",
             "file_path": "src/widgets.rs",

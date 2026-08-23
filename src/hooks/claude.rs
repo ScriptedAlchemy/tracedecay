@@ -31,19 +31,14 @@ pub fn hook_pre_tool_use() {
         &parsed,
     );
     let decision = evaluate_hook_decision(&tool_input);
-    // Explore-block telemetry: record every invocation with its deny/allow
-    // outcome and session attribution so deny frequency is measurable. The
-    // deny behavior itself (printing `decision`) is unchanged.
+    // Record deny/allow with session attribution so deny frequency is measurable.
     record_explore_block_outcome(root.as_deref(), &parsed, !decision.is_empty());
     if !decision.is_empty() {
         println!("{decision}");
     }
 }
 
-/// Records the outcome of a `PreToolUse` explore-block evaluation. `denied`
-/// is true when the hook blocked the call (a non-empty decision was printed),
-/// false when the call was allowed through. Session id and tool attribution
-/// are pulled from the already-parsed `TOOL_INPUT`.
+/// `denied` is true when a non-empty decision was printed (the call was blocked).
 fn record_explore_block_outcome(root: Option<&std::path::Path>, parsed: &Value, denied: bool) {
     record_hook_analytics(
         root,
@@ -52,9 +47,7 @@ fn record_explore_block_outcome(root: Option<&std::path::Path>, parsed: &Value, 
     );
 }
 
-/// Builds the `explore_block` analytics payload for an evaluated `PreToolUse`
-/// event. Kept pure (no I/O) so the deny/allow attribution is unit-testable
-/// without touching the profile store.
+/// Pure (no I/O) so deny/allow attribution is unit-testable without the profile store.
 fn explore_block_analytics_fields(parsed: &Value, denied: bool) -> Value {
     serde_json::json!({
         "agent": HintAgent::Claude.as_key(),
@@ -330,8 +323,8 @@ async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<
     (root, response)
 }
 
-/// `UserPromptSubmit` hook handler: resets the project counter and injects
-/// scope-correct memory recall.
+/// `UserPromptSubmit` hook handler: resets the project counter; a projectless
+/// session is ingested into the profile store.
 pub async fn hook_prompt_submit() -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
@@ -557,8 +550,6 @@ mod tests {
             "hint should point at a tracedecay search tool: {context}"
         );
 
-        // The PostToolUse JSON envelope carries the hint as additionalContext —
-        // the exact shape hook_claude_post_tool_use prints to stdout.
         let json: Value =
             serde_json::from_str(&codex_additional_context_json("PostToolUse", &context)).unwrap();
         assert_eq!(
@@ -595,7 +586,6 @@ mod tests {
         let context = format_tool_hint(&hint);
         assert!(context.contains("tracedecay_search") || context.contains("tracedecay_context"));
 
-        // A non-search, non-build Bash command yields no hint.
         let plain_bash = post_event("Bash", &serde_json::json!({ "command": "ls -la" }));
         assert!(decide_post_tool_use_hint(&plain_bash).is_none());
     }
@@ -685,8 +675,6 @@ mod tests {
 
     #[test]
     fn write_adding_a_function_body_decides_an_edit_redundancy_hint() {
-        // A Write whose content is a new function-sized Rust body nudges toward
-        // the duplicate-logic probe.
         let content = "fn summarize(items: &[Item]) -> u64 {\n    let mut total = 0;\n    for item in items {\n        if item.active {\n            total += item.count;\n        }\n    }\n    total\n}\n";
         let event = post_event(
             "Write",
@@ -700,7 +688,6 @@ mod tests {
             "edit-redundancy hint must point at tracedecay_redundancy: {context}"
         );
 
-        // A MultiEdit whose joined new_strings form a function body also nudges.
         let multi = post_event(
             "MultiEdit",
             &serde_json::json!({
@@ -713,7 +700,6 @@ mod tests {
             "a MultiEdit adding a function body must produce a hint"
         );
 
-        // A small, non-function edit stays silent.
         let tiny = post_event(
             "Edit",
             &serde_json::json!({ "file_path": "src/widgets.rs", "new_string": "let x = 1;" }),
@@ -743,9 +729,7 @@ mod tests {
 
     #[test]
     fn untracked_post_tool_use_events_get_no_hint() {
-        // No tool_name → no candidate.
         assert!(decide_post_tool_use_hint(&serde_json::json!({})).is_none());
-        // A Read with no file_path is not a single-file read.
         let bare_read = post_event("Read", &serde_json::json!({}));
         assert!(decide_post_tool_use_hint(&bare_read).is_none());
     }
@@ -756,7 +740,6 @@ mod tests {
             r#"{"session_id":"s1","tool_name":"Agent","subagent_type":"Explore"}"#,
         )
         .unwrap();
-        // A blocked Explore subagent: denied = true.
         let fields = explore_block_analytics_fields(&parsed, true);
         assert_eq!(fields["outcome"].as_str(), Some("deny"));
         assert_eq!(fields["session_id"].as_str(), Some("s1"));
@@ -770,7 +753,6 @@ mod tests {
             r#"{"session_id":"s2","tool_name":"Agent","subagent_type":"general-purpose"}"#,
         )
         .unwrap();
-        // An allowed agent call: denied = false.
         let fields = explore_block_analytics_fields(&parsed, false);
         assert_eq!(fields["outcome"].as_str(), Some("allow"));
         assert_eq!(fields["session_id"].as_str(), Some("s2"));
@@ -779,7 +761,6 @@ mod tests {
 
     #[test]
     fn explore_block_outcome_tracks_evaluate_hook_decision() {
-        // The recorded outcome must mirror whether evaluate_hook_decision blocks.
         let deny_input = r#"{"session_id":"s3","subagent_type":"Explore","prompt":"find files"}"#;
         let deny_parsed: Value = serde_json::from_str(deny_input).unwrap();
         let denied = !evaluate_hook_decision(deny_input).is_empty();
@@ -802,8 +783,6 @@ mod tests {
 
     #[test]
     fn subagent_start_context_constant_carries_compact_routing() {
-        // The compact context must steer toward the graph and name the deferred
-        // ToolSearch entry point plus the literal/symbol/concept routing rule.
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("graph before grep"));
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("ToolSearch"));
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("tracedecay_context"));

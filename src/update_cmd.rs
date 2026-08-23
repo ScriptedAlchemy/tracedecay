@@ -1037,7 +1037,6 @@ mod tests {
     fn markers_advance_only_on_all_ok() {
         let running = "9.9.9";
 
-        // AllOk: markers advance.
         let mut config = UserConfig {
             installed_agents: vec!["claude".to_string()],
             previous_version: "9.0.0".to_string(),
@@ -1051,22 +1050,17 @@ mod tests {
         assert_eq!(config.previous_version, running);
         assert_eq!(config.last_installed_version, running);
 
-        // PartialFailure: markers must NOT advance, so a later
-        // mark_version_installed still reports work to do.
         let mut config = UserConfig {
             installed_agents: vec!["claude".to_string()],
             previous_version: "9.0.0".to_string(),
             ..UserConfig::default()
         };
         match partition_reinstall_results(vec![err("claude")]) {
-            ReinstallOutcome::PartialFailure { .. } => {
-                // Intentionally do not advance markers.
-            }
+            ReinstallOutcome::PartialFailure { .. } => {}
             ReinstallOutcome::AllOk => panic!("expected PartialFailure"),
         }
         assert_eq!(config.previous_version, "9.0.0");
         assert!(config.last_installed_version.is_empty());
-        // A subsequent full install pass would still have work to record.
         assert!(config.mark_version_installed(running));
     }
 
@@ -1085,8 +1079,6 @@ mod tests {
             ids.iter().map(ToString::to_string).collect()
         };
 
-        // Full coverage: every tracked agent was installed by this pass, so
-        // the shared completion protocol records both markers.
         let mut config = armed(&["claude"]);
         assert!(install_pass_covers_tracked_agents(
             &config.installed_agents,
@@ -1096,8 +1088,6 @@ mod tests {
         assert_eq!(config.previous_version, running);
         assert_eq!(config.last_installed_version, running);
 
-        // Partial coverage: `cursor` stayed tracked but untouched, so the
-        // full-refresh marker must not be recorded.
         let mut config = armed(&["claude", "cursor"]);
         assert!(!install_pass_covers_tracked_agents(
             &config.installed_agents,
@@ -1107,11 +1097,9 @@ mod tests {
         assert_eq!(config.previous_version, "9.0.0");
         assert_eq!(config.last_installed_version, running);
 
-        // Nothing tracked: trivially covered, nothing left to refresh.
         assert!(install_pass_covers_tracked_agents(&[], &refreshed(&[])));
     }
 
-    /// Closure factory for the upgrade step: records `label`, returns `result`.
     fn record_upgrade<'a>(
         calls: &'a RefCell<Vec<&'static str>>,
         label: &'static str,
@@ -1123,8 +1111,6 @@ mod tests {
         }
     }
 
-    /// Closure factory for the post-update step: records `label` and the
-    /// binary path it was handed, returns `result`.
     fn record_post_update<'a>(
         calls: &'a RefCell<Vec<&'static str>>,
         label: &'static str,
@@ -1151,7 +1137,6 @@ mod tests {
         .expect("update steps should succeed");
 
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-        // Nothing was installed, so no installed-binary path to prefer.
         assert_eq!(seen_binary.into_inner(), Some(None));
     }
 
@@ -1210,8 +1195,6 @@ mod tests {
         .expect("upgrade steps should succeed");
 
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-        // The refresh must re-exec the binary the upgrade just installed,
-        // never a re-resolved (possibly stale) one.
         assert_eq!(seen_binary.into_inner(), Some(Some(installed)));
     }
 
@@ -1251,7 +1234,6 @@ mod tests {
             ),
         );
 
-        // The binary upgrade itself succeeded — a refresh failure only warns.
         assert!(result.is_ok());
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
     }

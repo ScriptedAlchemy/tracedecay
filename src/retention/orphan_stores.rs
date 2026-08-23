@@ -1,4 +1,4 @@
-//! Store-level orphan detection and collection (plan 38, §2).
+//! Store-level orphan detection and collection.
 //!
 //! The parent module prunes append-only *rows* inside a live store. This
 //! submodule operates one level up: whole profile-sharded store directories
@@ -2091,7 +2091,7 @@ pub(crate) async fn sweep_orphan_stores(
     })
 }
 
-// === Unregistered store directories (plan 38 §2, disjoint audit class) =====
+// Unregistered store directories.
 //
 // `build_store_census` walks *from* the registry: for every registered
 // project, for every one of its registered store instances. A store dir with
