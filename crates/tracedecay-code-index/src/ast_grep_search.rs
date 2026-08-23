@@ -387,43 +387,84 @@ where
             continue;
         };
 
-        result.files_scanned += 1;
-
-        let Ok(doc) = StrDoc::try_new(&source, td_lang.clone()) else {
-            continue;
+        let stop = if crate::hotpath_observe::sample_hot_loop() {
+            hotpath::measure_block!(
+                "code_index_ast_grep_file",
+                examine_ast_grep_file(
+                    &source,
+                    td_lang,
+                    compiled,
+                    &rel_str,
+                    key,
+                    &mut result,
+                    max_results,
+                    &is_cancelled,
+                )
+            )
+        } else {
+            examine_ast_grep_file(
+                &source,
+                td_lang,
+                compiled,
+                &rel_str,
+                key,
+                &mut result,
+                max_results,
+                &is_cancelled,
+            )
         };
-        let ast = AstGrep::doc(doc);
-        for node in ast.root().find_all(compiled) {
-            if is_cancelled() {
-                result.cancelled = true;
-                return Ok(result);
-            }
-            let start = node.start_pos();
-            let range = node.range();
-            let line0 = start.line();
-            result.lines_examined = result.lines_examined.saturating_add(1);
-            result.lines_visited = result.lines_visited.saturating_add(1);
-            let line_text = source_line_at_byte(&source, range.start);
-            result.matches.push(AstGrepSearchMatch {
-                file: rel_str.clone(),
-                start_byte: range.start,
-                end_byte: range.end,
-                node_kind: node.kind().into_owned(),
-                line: (line0 as u32) + 1,
-                column: (start.column(&node) as u32) + 1,
-                matched_text: collapse_snippet(&node.text()),
-                line_text,
-                lang: key.to_string(),
-            });
-            if result.matches.len() > max_results {
-                result.truncated = true;
-                result.matches.truncate(max_results);
-                return Ok(result);
-            }
+        if stop {
+            return Ok(result);
         }
     }
 
     Ok(result)
+}
+
+fn examine_ast_grep_file<C: Fn() -> bool>(
+    source: &str,
+    td_lang: &TdLang,
+    compiled: &Pattern,
+    rel_str: &str,
+    key: &str,
+    result: &mut AstGrepSearchResult,
+    max_results: usize,
+    is_cancelled: &C,
+) -> bool {
+    result.files_scanned += 1;
+    let Ok(doc) = StrDoc::try_new(source, td_lang.clone()) else {
+        return false;
+    };
+    let ast = AstGrep::doc(doc);
+    for node in ast.root().find_all(compiled) {
+        if is_cancelled() {
+            result.cancelled = true;
+            return true;
+        }
+        let start = node.start_pos();
+        let range = node.range();
+        let line0 = start.line();
+        result.lines_examined = result.lines_examined.saturating_add(1);
+        result.lines_visited = result.lines_visited.saturating_add(1);
+        let line_text = source_line_at_byte(source, range.start);
+        result.matches.push(AstGrepSearchMatch {
+            file: rel_str.to_owned(),
+            start_byte: range.start,
+            end_byte: range.end,
+            node_kind: node.kind().into_owned(),
+            line: (line0 as u32) + 1,
+            column: (start.column(&node) as u32) + 1,
+            matched_text: collapse_snippet(&node.text()),
+            line_text,
+            lang: key.to_string(),
+        });
+        if result.matches.len() > max_results {
+            result.truncated = true;
+            result.matches.truncate(max_results);
+            return true;
+        }
+    }
+    false
 }
 
 fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
