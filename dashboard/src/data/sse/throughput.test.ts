@@ -1,23 +1,7 @@
 /**
- * The SSE performance envelope's *quantified* bounds
- * (docs/plans/tracedecay-v2/11-dashboard-frontend.md):
- *
- *   "sustain 100 SSE events/s for ten minutes and 1,000/s for ten seconds,
- *    coalesce to at most ten renders/s/view, keep input <=200 ms p95, and bound
- *    the queue to 5,000 events or 10 MiB. Overflow marks the projection stale
- *    and performs one canonical invalidation/refetch."
- *
- * `reducer.test.ts` proves the overflow *mechanism* against injected toy limits
- * (three events, ten bytes). It never drives the real ceilings, so a regression
- * that raised `MAX_QUEUED_EVENTS` to a million, or that counted bytes wrong at
- * scale, would not be caught. These cases drive the production defaults to and
- * past their limit and replay both named sustained rates.
- *
- * Time here is the loop index, never a wall clock: one iteration of the outer
- * loop is one 100 ms render tick, so "ten minutes at 100 events/s" is 6,000
- * ticks of ten events. The arithmetic is deterministic and the gate cannot
- * flake on a slow machine. Real React render counts are asserted separately in
- * `coalescing.dom.test.tsx`; the reducer owns no timers.
+ * Production queue ceilings and named sustained rates. `reducer.test.ts` uses
+ * injected toy limits; this file drives the real defaults. Time is the loop
+ * index (one outer iteration = one 100 ms tick), never a wall clock.
  */
 import { describe, expect, it } from "vitest";
 
@@ -51,16 +35,14 @@ function envelope(revision: number, filler = ""): SseEventEnvelope<Body> {
   };
 }
 
-describe("SSE queue ceiling — the plan's 5,000 events / 10 MiB", () => {
-  it("uses the plan's numbers as the production defaults", () => {
+describe("SSE queue ceiling — 5,000 events / 10 MiB", () => {
+  it("uses the production defaults", () => {
     expect(MAX_QUEUED_EVENTS).toBe(5_000);
     expect(MAX_QUEUED_BYTES).toBe(10 * 1024 * 1024);
   });
 
   it("holds the queue at exactly 5,000 events when the render layer stalls", () => {
     const reducer = createSseReducer<Body>();
-    // Ten seconds at the plan's peak rate with a view that never drains: twice
-    // the ceiling, so the bound is crossed and then pushed well past.
     const total = 10 * 1_000;
     let accepted = 0;
     let firstRejected: number | null = null;
@@ -77,7 +59,6 @@ describe("SSE queue ceiling — the plan's 5,000 events / 10 MiB", () => {
 
     expect(accepted).toBe(MAX_QUEUED_EVENTS);
     expect(firstRejected).toBe(MAX_QUEUED_EVENTS + 1);
-    // The ceiling is never momentarily exceeded, not even by one event.
     expect(peakQueued).toBe(MAX_QUEUED_EVENTS);
     expect(peakBytes).toBeLessThanOrEqual(MAX_QUEUED_BYTES);
 
@@ -142,7 +123,7 @@ describe("SSE queue ceiling — the plan's 5,000 events / 10 MiB", () => {
   });
 });
 
-describe("SSE sustained throughput — the plan's two named rates", () => {
+describe("SSE sustained throughput — two named rates", () => {
   const rates = [
     { label: "100 events/s for ten minutes", perSecond: 100, seconds: 600 },
     { label: "1,000 events/s for ten seconds", perSecond: 1_000, seconds: 10 },
@@ -179,19 +160,13 @@ describe("SSE sustained throughput — the plan's two named rates", () => {
         if (batch.stale) staleBatches += 1;
       }
 
-      // Every event reached the view exactly once: a coalescing boundary is not
-      // permission to drop.
       expect(revision).toBe(perSecond * seconds);
       expect(delivered).toBe(perSecond * seconds);
-      // A contiguous stream drained on the grid never signals a gap or overflow.
       expect(refetchSignals).toBe(0);
       expect(staleBatches).toBe(0);
-      // Backlog stays at one tick's arrivals, far below the ceilings.
       expect(peakQueued).toBe(perTick);
       expect(peakQueued).toBeLessThanOrEqual(MAX_QUEUED_EVENTS);
       expect(peakBytes).toBeLessThanOrEqual(MAX_QUEUED_BYTES);
-      // Batch boundaries are the render trigger, so this is the coalescing
-      // arithmetic: ten per simulated second regardless of the arrival rate.
       expect(batches / seconds).toBe(RENDER_TICKS_PER_SECOND);
     },
   );

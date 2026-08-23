@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '../cn';
 import { WorkspaceHeader } from '../instrument.tsx';
@@ -47,27 +47,39 @@ export function ExplorerSplit({
   // Roving arrows over the result rows: rows are native buttons, so
   // Enter/Space activate for free; arrows, Home, End and Page keys move
   // focus without forcing a Tab-through of every row.
-  const onResultsKeyDown = (event: React.KeyboardEvent) => {
-    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp'];
-    if (!keys.includes(event.key)) return;
+  const onResultsKeyDown = (event: KeyboardEvent) => {
     const container = resultsRef.current;
     if (!container) return;
     const rows = [...container.querySelectorAll<HTMLButtonElement>('button')];
     if (rows.length === 0) return;
-    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const active = document.activeElement;
+    const current = active instanceof HTMLButtonElement ? rows.indexOf(active) : -1;
     const page = 10;
-    const next =
-      event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? rows.length - 1
-          : event.key === 'PageDown'
-            ? Math.min((current < 0 ? 0 : current) + page, rows.length - 1)
-            : event.key === 'PageUp'
-              ? Math.max((current < 0 ? 0 : current) - page, 0)
-              : event.key === 'ArrowDown'
-                ? Math.min(current + 1, rows.length - 1)
-                : Math.max(current - 1, 0);
+    const last = rows.length - 1;
+    const from = current < 0 ? 0 : current;
+    let next: number;
+    switch (event.key) {
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = last;
+        break;
+      case 'PageDown':
+        next = Math.min(from + page, last);
+        break;
+      case 'PageUp':
+        next = Math.max(from - page, 0);
+        break;
+      case 'ArrowDown':
+        next = Math.min(current + 1, last);
+        break;
+      case 'ArrowUp':
+        next = Math.max(current - 1, 0);
+        break;
+      default:
+        return;
+    }
     event.preventDefault();
     rows[next]?.focus();
     rows[next]?.scrollIntoView({ block: 'nearest' });

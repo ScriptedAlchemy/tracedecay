@@ -413,7 +413,7 @@ pub(super) async fn dispatch_info_tools(
             let graph = admitted_graph_query(cg, &options, "source_outline").await?;
             info::handle_outline(cg, &graph, args).await
         }
-        "tracedecay_config" => info::handle_config(cg, &args),
+        "tracedecay_config" => info::handle_config(cg, &args).await,
         "tracedecay_signature_search" => {
             let graph = admitted_graph_query(cg, &options, "code_signature_search").await?;
             info::handle_signature_search(cg, &graph, args, selected_scope_prefix).await

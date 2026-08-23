@@ -1,34 +1,30 @@
 /** Plan 26 retrieval quality from the canonical Observatory projection. */
 import type { ObservatoryReadModelV1 } from '../../contracts/generated.ts';
-import { readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
+import {
+  dimensionCoverage,
+  readAnchors,
+  readMetric,
+  type PlanDimension,
+  type PlanDimensionBand,
+  type ReadAnchors,
+} from './planDimension.ts';
 
-/** Why no per-retriever budget, candidate, rank, or contribution figure reaches
- * this surface. */
 const NO_RETRIEVER_PROJECTION =
   'the canonical Observatory projection has no retriever evidence for this horizon';
 
-/** Why no planner, fan-out, or synthesis span reaches this surface. */
 const NO_SPAN_PROJECTION =
   'the canonical Observatory projection has no retrieval-span evidence for this horizon';
 
-/** Why context precision is not read off the feedback relevance ratio. */
 const NO_CONTEXT_PRECISION =
   'context precision is not recorded; feedback relevance uses a different population and is not substituted';
 
-/** Why no task-outcome linkage figure reaches this surface. */
 const NO_OUTCOME_LINKAGE =
   'the canonical Observatory projection has no task-outcome evidence for this horizon';
 
-/** Why no ablation comparison reaches this surface. */
 const NO_ABLATION_PROJECTION =
   'the canonical Observatory projection has no compatible equal-budget ablation evidence';
 
-/** One band of the view, in the order Plan 26 names them. */
-export interface RetrievalBand {
-  marker: string;
-  label: string;
-  dimensions: PlanDimension[];
-}
+export type RetrievalBand = PlanDimensionBand;
 
 /**
  * Source freshness, coverage, and denial — the band that is genuinely measured.
@@ -199,13 +195,8 @@ export function retrievalQualityBands(model: ObservatoryReadModelV1): RetrievalB
   ];
 }
 
-/** The anchors every card falls back to when it has no metric of its own. */
 export function retrievalAnchors(model: ObservatoryReadModelV1): ReadAnchors {
-  return {
-    authorizedScopeRef: model.authorized_scope_ref,
-    watermark: model.watermark,
-    horizon: model.horizon,
-  };
+  return readAnchors(model);
 }
 
 /**
@@ -225,17 +216,10 @@ export const RETRIEVAL_FAMILIES: readonly { eventKind: string; label: string }[]
   { eventKind: 'retrieval.ablation.measured.v1', label: 'ablation measured' },
 ];
 
-/** Totals for the view header. Both numbers print, because "5 measured" alone
- * does not say out of how many requirements. */
 export function retrievalCoverage(bands: readonly RetrievalBand[]): {
   measured: number;
   required: number;
   unprojected: number;
 } {
-  const dimensions = bands.flatMap((band) => band.dimensions);
-  return {
-    measured: dimensions.filter((dimension) => dimension.reading.kind === 'measured').length,
-    required: dimensions.length,
-    unprojected: dimensions.filter((dimension) => dimension.reading.kind === 'unpublished').length,
-  };
+  return dimensionCoverage(bands);
 }

@@ -14,14 +14,14 @@ impl CppExtractor {
         // Extract the name once: the constructor/destructor checks and the
         // node itself all need it, and each extraction is a declarator
         // subtree search plus an allocation.
-        let extracted_name = Self::extract_function_name(state, node);
+        let extracted_name = Self::extract_function_name(state, node).map(str::to_owned);
         if in_class {
-            if Self::is_constructor(state, extracted_name) {
-                Self::visit_constructor(state, node, extracted_name);
+            if Self::is_constructor(state, extracted_name.as_deref()) {
+                Self::visit_constructor(state, node, extracted_name.as_deref());
                 return;
             }
-            if Self::is_destructor(node, extracted_name) {
-                Self::visit_destructor(state, node, extracted_name);
+            if Self::is_destructor(node, extracted_name.as_deref()) {
+                Self::visit_destructor(state, node, extracted_name.as_deref());
                 return;
             }
         }
@@ -34,7 +34,7 @@ impl CppExtractor {
         } else {
             Visibility::Pub
         };
-        let name = extracted_name.unwrap_or("<anonymous>").to_string();
+        let name = extracted_name.unwrap_or_else(|| "<anonymous>".to_owned());
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;

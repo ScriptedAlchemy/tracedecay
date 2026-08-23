@@ -34,6 +34,10 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -879,14 +883,11 @@ fn stable_jsonl_file_id(
     hasher.update(b"tracedecay-jsonl-file-id-v1");
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         hasher.update(meta.dev().to_le_bytes());
         hasher.update(meta.ino().to_le_bytes());
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
         if let Ok(information) = tracedecay_runtime_core::windows_file::information(file) {
             hasher.update(information.volume_serial_number.to_le_bytes());
             hasher.update(information.file_index.to_le_bytes());

@@ -20,7 +20,7 @@ export function usePayload<T>(
   const scope = useScope((s) => s.scope);
   const target = scopedUrl(scope, url);
   return useQuery<PayloadResult<T>>({
-    queryKey: [...scopedQueryKey(scope, key, url)],
+    queryKey: scopedQueryKey(scope, key, url),
     // React Query's signal, threaded through so a read this dashboard has
     // stopped waiting for actually stops. Two callers abandon reads: a scope
     // change (a scoped read's key carries its project, so every one of them is

@@ -842,8 +842,6 @@ fn publication_rejects_unresolved_v2_owner_without_partial_rows() {
 
 #[test]
 fn batched_anchor_liveness_matches_row_at_a_time() {
-    use std::collections::BTreeSet;
-
     fn dispose(
         connection: &rusqlite::Connection,
         anchor_id: &str,
@@ -890,10 +888,14 @@ fn batched_anchor_liveness_matches_row_at_a_time() {
     // Compares the batched cache against the row-at-a-time free functions it
     // replaced, asserting they agree, and hands back the shared outcome.
     let compare = |connection: &rusqlite::Connection| {
-        let mut anchor_ids = BTreeSet::new();
-        anchor_ids.insert(occurrence.occurrence_anchor.anchor_id().as_str().to_owned());
-        anchor_ids.insert(occurrence.exact_source_anchor.as_str().to_owned());
-        let cache = super::anchor_state::load_anchor_liveness(connection, &anchor_ids).unwrap();
+        let cache = super::anchor_state::load_anchor_liveness(
+            connection,
+            [
+                occurrence.occurrence_anchor.anchor_id().as_str(),
+                occurrence.exact_source_anchor.as_str(),
+            ],
+        )
+        .unwrap();
 
         let free_current = super::anchor_state::evidence_anchor_is_current(
             connection,

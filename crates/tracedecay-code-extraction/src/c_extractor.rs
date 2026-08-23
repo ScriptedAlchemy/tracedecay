@@ -278,7 +278,7 @@ impl CExtractor {
 
     /// Extract the function name from a `function_definition` or declaration node.
     /// The name is typically inside a `function_declarator` -> `identifier`.
-    fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<&str> {
+    fn extract_function_name<'a>(state: &'a ExtractionState, node: TsNode<'_>) -> Option<&'a str> {
         // Look for function_declarator which contains the name
         if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
             // The function name is the identifier child of the function_declarator
@@ -456,7 +456,7 @@ impl CExtractor {
     }
 
     /// Extract a variable name from a declaration node.
-    fn extract_variable_name(state: &ExtractionState, node: TsNode<'_>) -> Option<&str> {
+    fn extract_variable_name<'a>(state: &'a ExtractionState, node: TsNode<'_>) -> Option<&'a str> {
         // Look for init_declarator first (e.g., `int x = 0;`)
         if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
             // The identifier is the first child of init_declarator

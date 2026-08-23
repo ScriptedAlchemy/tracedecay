@@ -2,6 +2,7 @@
 import type { ReactNode } from 'react';
 import {
   ObservatoryReadModelV1Schema,
+  type ComparisonDispositionV1,
   type ObservatoryReadModelV1,
 } from '../../contracts/generated.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
@@ -18,7 +19,6 @@ import {
   dispositionPresentation,
   performanceComparisonBands,
 } from './performanceComparisons.ts';
-import type { ComparisonDispositionV1 } from '../../contracts/generated.ts';
 
 export function PerformanceComparisons() {
   const read = useEnvelope(

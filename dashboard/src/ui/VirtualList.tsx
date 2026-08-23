@@ -115,7 +115,10 @@ function VirtualRows<T>({
     estimateSize: () => estimateHeight,
     overscan,
     scrollMargin,
-    getItemKey: (index) => getKey(items[index] as T, index),
+    getItemKey: (index) => {
+      const item = items[index];
+      return item === undefined ? index : getKey(item, index);
+    },
   });
 
   return (
@@ -129,20 +132,24 @@ function VirtualRows<T>({
             position: 'relative',
           }}
         >
-          {virtualizer.getVirtualItems().map((row) => (
-            <div
-              key={row.key}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                transform: `translateY(${row.start - scrollMargin}px)`,
-              }}
-            >
-              {renderItem(items[row.index] as T, row.index)}
-            </div>
-          ))}
+          {virtualizer.getVirtualItems().map((row) => {
+            const item = items[row.index];
+            if (item === undefined) return null;
+            return (
+              <div
+                key={row.key}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${row.start - scrollMargin}px)`,
+                }}
+              >
+                {renderItem(item, row.index)}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

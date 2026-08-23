@@ -1,33 +1,30 @@
 /** Plan 26 performance dimensions from the canonical Observatory projection. */
 import type { ObservatoryReadModelV1 } from '../../contracts/generated.ts';
-import { readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
+import {
+  dimensionCoverage,
+  readAnchors,
+  readMetric,
+  type PlanDimension,
+  type PlanDimensionBand,
+  type ReadAnchors,
+} from './planDimension.ts';
 
 const NO_PERCENTILE_PROJECTION =
   'the canonical Observatory projection has no operation-latency evidence for this horizon';
 
-/** Why no span stage reaches this surface. */
 const NO_SPAN_PROJECTION =
   'the canonical Observatory projection has no span evidence for this horizon';
 
-/** Why no resource figure reaches this surface. */
 const NO_RESOURCE_PROJECTION =
   'the canonical Observatory projection has no resource evidence for this horizon';
 
-/** Why no no-progress outcome reaches this surface. */
 const NO_PROGRESS_PROJECTION =
   'the canonical Observatory projection has no no-progress evidence for this horizon';
 
-/** Why no accepted budget revision reaches this surface. */
 const NO_BUDGET_REVISION =
   'no accepted performance budget is published; the descriptor revision on a measured card is the projector definition, not an accepted budget';
 
-/** One band of the view. Bands are the plan's own grouping of the sentence, not
- * a taxonomy invented here. */
-export interface BudgetBand {
-  marker: string;
-  label: string;
-  dimensions: PlanDimension[];
-}
+export type BudgetBand = PlanDimensionBand;
 
 /**
  * The percentile band.
@@ -158,27 +155,14 @@ export function performanceBudgetBands(model: ObservatoryReadModelV1): BudgetBan
   ];
 }
 
-/** The anchors every card falls back to: the scope the read was authorized for,
- * the watermark it was taken at, and its window. */
 export function budgetAnchors(model: ObservatoryReadModelV1): ReadAnchors {
-  return {
-    authorizedScopeRef: model.authorized_scope_ref,
-    watermark: model.watermark,
-    horizon: model.horizon,
-  };
+  return readAnchors(model);
 }
 
-/** Totals for the view header. Both numbers are stated because "2 measured"
- * alone would not say out of how many requirements. */
 export function budgetCoverage(bands: readonly BudgetBand[]): {
   measured: number;
   required: number;
   unprojected: number;
 } {
-  const dimensions = bands.flatMap((band) => band.dimensions);
-  return {
-    measured: dimensions.filter((dimension) => dimension.reading.kind === 'measured').length,
-    required: dimensions.length,
-    unprojected: dimensions.filter((dimension) => dimension.reading.kind === 'unpublished').length,
-  };
+  return dimensionCoverage(bands);
 }

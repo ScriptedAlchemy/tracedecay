@@ -166,13 +166,13 @@ pub fn parse_normalized_observation_record_v1(
         return Err(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope);
     }
     let canonical_provider = envelope.provider().clone();
-    let value = serde_json::to_value(envelope)
-        .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
-    let canonical_bytes = serde_json::to_vec(&value)
+    let canonical_bytes = serde_json::to_vec(&envelope)
         .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     if canonical_bytes.len() > limits.record_bytes {
         return Err(ClaudeRecordParseErrorV1::CanonicalEnvelopeTooLarge);
     }
+    let value = serde_json::from_slice(&canonical_bytes)
+        .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     let structure = validate_structure(&value, limits)?;
     Ok(ParsedObservationRecordV1 {
         value,

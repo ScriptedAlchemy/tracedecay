@@ -5,7 +5,14 @@ import type {
   ObservatoryReadModelV1,
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
-import { readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
+import {
+  dimensionCoverage,
+  readAnchors,
+  readMetric,
+  type PlanDimension,
+  type PlanDimensionBand,
+  type ReadAnchors,
+} from './planDimension.ts';
 import {
   RATE_MIN_COVERAGE,
   RATE_MIN_ELIGIBLE,
@@ -119,12 +126,7 @@ export function adoptionCoverageReading(model: ObservatoryReadModelV1): Eligible
   return eligibleVersusObserved(observed.value, eligible.value);
 }
 
-/** One band of the view. */
-export interface CoverageBand {
-  marker: string;
-  label: string;
-  dimensions: PlanDimension[];
-}
+export type CoverageBand = PlanDimensionBand;
 
 /** Eligible against observed, as dimension cards. */
 export function populationDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
@@ -178,11 +180,7 @@ export function adoptionCoverageBands(model: ObservatoryReadModelV1): CoverageBa
 }
 
 export function coverageAnchors(model: ObservatoryReadModelV1): ReadAnchors {
-  return {
-    authorizedScopeRef: model.authorized_scope_ref,
-    watermark: model.watermark,
-    horizon: model.horizon,
-  };
+  return readAnchors(model);
 }
 
 /**
@@ -309,10 +307,5 @@ export function coverageTotals(bands: readonly CoverageBand[]): {
   required: number;
   unprojected: number;
 } {
-  const dimensions = bands.flatMap((band) => band.dimensions);
-  return {
-    measured: dimensions.filter((dimension) => dimension.reading.kind === 'measured').length,
-    required: dimensions.length,
-    unprojected: dimensions.filter((dimension) => dimension.reading.kind === 'unpublished').length,
-  };
+  return dimensionCoverage(bands);
 }

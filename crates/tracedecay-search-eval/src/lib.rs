@@ -336,11 +336,11 @@ fn validate_activation_native_matrix(
         .outputs
         .iter()
         .map(|output| output.profile_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let expected_profiles = required_profiles
         .iter()
         .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     if observed_profiles != expected_profiles {
         return Err(SearchEvalError::Contract(
             "activation evaluation did not execute the required profile matrix".to_owned(),
@@ -728,13 +728,13 @@ fn validate_output_matrix(
             "generated output matrix must not be empty".to_owned(),
         ));
     }
-    let known_profiles: std::collections::BTreeSet<_> = workload
+    let known_profiles: BTreeSet<_> = workload
         .profile_matrix
         .iter()
         .map(|profile| profile.profile_id.as_str())
         .collect();
-    let mut selected_profiles = std::collections::BTreeSet::new();
-    let mut pairs = std::collections::BTreeSet::new();
+    let mut selected_profiles = BTreeSet::new();
+    let mut pairs = BTreeSet::new();
     for output in &generated.outputs {
         if !known_profiles.contains(output.profile_id.as_str()) {
             return Err(SearchEvalError::Contract(format!(

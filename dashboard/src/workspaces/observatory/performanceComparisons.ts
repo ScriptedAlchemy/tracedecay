@@ -4,7 +4,13 @@ import type {
   ObservatoryReadModelV1,
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
-import { readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
+import {
+  readAnchors,
+  readMetric,
+  type PlanDimension,
+  type PlanDimensionBand,
+  type ReadAnchors,
+} from './planDimension.ts';
 
 export const COMPARISON_DISPOSITIONS: readonly ComparisonDispositionV1[] = [
   'promote',
@@ -180,26 +186,13 @@ export function resultDimensions(model: ObservatoryReadModelV1): PlanDimension[]
   ];
 }
 
-export interface ComparisonBand {
-  marker: string;
-  label: string;
-  dimensions: PlanDimension[];
-}
-
-export function performanceComparisonBands(model: ObservatoryReadModelV1): ComparisonBand[] {
+export function performanceComparisonBands(model: ObservatoryReadModelV1): PlanDimensionBand[] {
   return [
     { marker: 'subjects', label: 'Baseline and candidate evidence', dimensions: subjectDimensions(model) },
     { marker: 'results', label: 'Evaluation results', dimensions: resultDimensions(model) },
   ];
 }
 
-/** The anchors a comparison read is taken against. Plan 26 requires these to be
- * safe anchors; a scope reference and a watermark are, and a path or a query
- * would not be. */
 export function comparisonAnchors(model: ObservatoryReadModelV1): ReadAnchors {
-  return {
-    authorizedScopeRef: model.authorized_scope_ref,
-    watermark: model.watermark,
-    horizon: model.horizon,
-  };
+  return readAnchors(model);
 }

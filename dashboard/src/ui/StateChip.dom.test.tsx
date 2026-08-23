@@ -33,6 +33,17 @@ const EXPECTED_LABELS: Record<DomainStateKind, string> = {
 
 const ENTRIES = Object.entries(EXPECTED_LABELS) as [DomainStateKind, string][];
 
+function chipVisual(kind: DomainStateKind) {
+  const { container } = render(<StateChip kind={kind} />);
+  const chip = container.querySelector(`[data-state="${kind}"]`);
+  expect(chip, `chip for ${kind}`).not.toBeNull();
+  const glyph = chip!.querySelector('svg');
+  const lamp = chip!.querySelector('span[aria-hidden]');
+  expect(glyph, `icon for ${kind}`).not.toBeNull();
+  expect(lamp, `lamp for ${kind}`).not.toBeNull();
+  return { label: chip!.textContent, glyph: glyph!.innerHTML, lamp: lamp!.className };
+}
+
 describe('StateChip', () => {
   it('covers exactly 19 domain states', () => {
     expect(ENTRIES).toHaveLength(19);
@@ -63,19 +74,8 @@ describe('StateChip', () => {
    * that survives colour blindness and monochrome.
    */
   it('tells a source that cannot answer apart from an unreachable daemon', () => {
-    const chipFor = (kind: DomainStateKind) => {
-      const { container } = render(<StateChip kind={kind} />);
-      const chip = container.querySelector(`[data-state="${kind}"]`);
-      expect(chip, `chip for ${kind}`).not.toBeNull();
-      const glyph = chip!.querySelector('svg');
-      const lamp = chip!.querySelector('span[aria-hidden]');
-      expect(glyph, `icon for ${kind}`).not.toBeNull();
-      expect(lamp, `lamp for ${kind}`).not.toBeNull();
-      return { label: chip!.textContent, glyph: glyph!.innerHTML, lamp: lamp!.className };
-    };
-
-    const unavailable = chipFor('unavailable');
-    const offline = chipFor('offline');
+    const unavailable = chipVisual('unavailable');
+    const offline = chipVisual('offline');
     cleanup();
 
     expect(unavailable.label).toBe('Source unavailable');
@@ -92,19 +92,8 @@ describe('StateChip', () => {
    * tellable from `partial` by label and glyph, never only by detail text.
    */
   it('tells a rate-limited read apart from an ordinary partial answer', () => {
-    const chipFor = (kind: DomainStateKind) => {
-      const { container } = render(<StateChip kind={kind} />);
-      const chip = container.querySelector(`[data-state="${kind}"]`);
-      expect(chip, `chip for ${kind}`).not.toBeNull();
-      const glyph = chip!.querySelector('svg');
-      const lamp = chip!.querySelector('span[aria-hidden]');
-      expect(glyph, `icon for ${kind}`).not.toBeNull();
-      expect(lamp, `lamp for ${kind}`).not.toBeNull();
-      return { label: chip!.textContent, glyph: glyph!.innerHTML, lamp: lamp!.className };
-    };
-
-    const rateLimited = chipFor('rate_limited');
-    const partial = chipFor('partial');
+    const rateLimited = chipVisual('rate_limited');
+    const partial = chipVisual('partial');
     cleanup();
 
     expect(rateLimited.label).toBe('Rate limited');

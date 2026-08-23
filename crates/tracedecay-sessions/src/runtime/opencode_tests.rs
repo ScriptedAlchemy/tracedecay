@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 use rusqlite::Connection;
 use serde_json::json;
@@ -511,8 +513,6 @@ async fn cancellation_during_admission_is_typed_and_persists_no_payloads() {
 #[cfg(unix)]
 #[tokio::test]
 async fn unavailable_database_is_typed_instead_of_empty_success() {
-    use std::os::unix::fs::symlink;
-
     let temp = tempfile::TempDir::new().unwrap();
     let target = temp.path().join("outside.db");
     Connection::open(&target).unwrap();
@@ -544,8 +544,6 @@ async fn unavailable_database_is_typed_instead_of_empty_success() {
 #[cfg(unix)]
 #[tokio::test]
 async fn linked_database_sidecar_is_rejected_before_snapshotting() {
-    use std::os::unix::fs::symlink;
-
     let (temp, project, database) = fixture();
     let external = temp.path().join("external-wal");
     fs::write(&external, b"foreign database bytes").unwrap();

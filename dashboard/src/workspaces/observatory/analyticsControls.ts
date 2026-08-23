@@ -8,16 +8,11 @@ import type {
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
-export type AnalyticsCollectionModeV1 = AnalyticsModeV1;
-
 export interface AnalyticsModeDescription {
-  mode: AnalyticsCollectionModeV1;
+  mode: AnalyticsModeV1;
   label: string;
-  /** Whether this mode has a network exporter at all. */
   exporter: 'none' | 'network';
-  /** Whether this is the default mode. */
   isDefault: boolean;
-  /** Whether reaching this mode requires an explicit opt-in. */
   requiresOptIn: boolean;
   sentence: string;
 }
@@ -59,7 +54,7 @@ export const ANALYTICS_MODE_LADDER: readonly AnalyticsModeDescription[] = [
 
 export interface ModeReading {
   /** The published mode, or `null` when nothing publishes one. */
-  mode: AnalyticsCollectionModeV1 | null;
+  mode: AnalyticsModeV1 | null;
   label: string;
   state: DomainStateKind;
   reason: string | null;
