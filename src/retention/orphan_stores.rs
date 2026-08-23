@@ -1465,7 +1465,7 @@ async fn check_store_durable_memory(
 /// It lives under the *profile* root, never inside the store being examined.
 /// Two reasons, both load-bearing: the store is a deletion candidate, and
 /// writing into it bumps the newest mtime that
-/// [`newest_mtime_secs`] uses as the revival fence — a store that failed one
+/// [`walk_store_stats`] uses as the revival fence — a store that failed one
 /// check would have its age reset by the check itself and could never mature
 /// past the retention window again.
 fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
@@ -1647,13 +1647,7 @@ fn walk_store_stats(dir: &Path) -> StoreWalkStats {
     }
 }
 
-/// Newest mtime under `dir`, unix seconds, or `0` when nothing is readable.
-#[cfg(test)]
-fn newest_mtime_secs(dir: &Path) -> i64 {
-    walk_store_stats(dir).newest_mtime_secs
-}
-
-/// Controlled counterpart of [`newest_mtime_secs`]. Every recursive descent
+/// Controlled counterpart of [`walk_store_stats`]. Every recursive descent
 /// checks the maintenance admission before asking the next directory for
 /// entries, so a cancellation cannot turn age accounting into an unbounded
 /// traversal. Ordinary I/O remains best-effort exactly as in the unbounded
