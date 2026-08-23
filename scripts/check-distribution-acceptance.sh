@@ -199,13 +199,25 @@ assert_code_extraction_assets() {
 verify_feature_wiring() {
   local source_manifest=$1
   local packaged_manifest=$2
-  local semantic_source_manifest=$3
-  local semantic_packaged_manifest=$4
+  local code_index_source_manifest=$3
+  local code_index_packaged_manifest=$4
+  local extraction_source_manifest=$5
+  local extraction_packaged_manifest=$6
+  local semantic_source_manifest=$7
+  local semantic_packaged_manifest=$8
+  local cargo_config=$9
   python3 "$repo/scripts/check-distribution-feature-wiring.py" \
     --root-source "$source_manifest" \
     --root-packaged "$packaged_manifest" \
+    --code-index-source "$code_index_source_manifest" \
+    --code-index-packaged "$code_index_packaged_manifest" \
+    --extraction-source "$extraction_source_manifest" \
+    --extraction-packaged "$extraction_packaged_manifest" \
     --semantic-source "$semantic_source_manifest" \
-    --semantic-packaged "$semantic_packaged_manifest"
+    --semantic-packaged "$semantic_packaged_manifest" \
+    --check-extraction-manifest "$extraction_packaged_manifest" \
+    --cargo-config "$cargo_config" \
+    --offline
 }
 
 while (($#)); do
@@ -354,6 +366,7 @@ for required_package in \
   tracedecay-api \
   tracedecay-tool-catalog \
   tracedecay-lsp \
+  tracedecay-code-index \
   tracedecay-code-extraction \
   tracedecay-query \
   tracedecay-semantic; do
@@ -362,6 +375,7 @@ for required_package in \
 done
 root_package=${package_dirs[tracedecay]}
 lsp_package=${package_dirs[tracedecay-lsp]}
+code_index_package=${package_dirs[tracedecay-code-index]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
 query_package=${package_dirs[tracedecay-query]}
 semantic_package=${package_dirs[tracedecay-semantic]}
@@ -369,11 +383,6 @@ catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
 assert_required_assets "$root_package"
 assert_code_extraction_assets "$code_extraction_package"
-verify_feature_wiring \
-  "$repo/Cargo.toml" \
-  "$root_package/Cargo.toml" \
-  "$repo/crates/tracedecay-semantic/Cargo.toml" \
-  "$semantic_package/Cargo.toml"
 
 patch_config="$work/packaged-crates.toml"
 python3 - "$metadata" "$packages" >"$patch_config" <<'PY'
@@ -392,6 +401,17 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
 PY
+
+verify_feature_wiring \
+  "$repo/Cargo.toml" \
+  "$root_package/Cargo.toml" \
+  "$repo/crates/tracedecay-code-index/Cargo.toml" \
+  "$code_index_package/Cargo.toml" \
+  "$repo/crates/tracedecay-code-extraction/Cargo.toml" \
+  "$code_extraction_package/Cargo.toml" \
+  "$repo/crates/tracedecay-semantic/Cargo.toml" \
+  "$semantic_package/Cargo.toml" \
+  "$patch_config"
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
 cargo nextest run \
