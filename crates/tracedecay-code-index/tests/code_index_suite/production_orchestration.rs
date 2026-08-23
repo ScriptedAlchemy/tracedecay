@@ -426,6 +426,68 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     assert!(stats.extracted_bytes < 120);
 }
 
+/// Carry-forward rematerialize already succeeds for unchanged files, including
+/// after restore. `code_index_reused_parses` is the matching hotpath success
+/// event (`add_reused_parses(1)`); these extract counts are the readable
+/// re-extract dual on the default (non-hotpath) path. No carry-forward miss
+/// to fix — this locks the counter floor so a later fallback would fail.
+#[test]
+fn unchanged_increment_does_not_reextract_carried_files() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+
+    owner
+        .build_and_publish(request("file.carry.1", 1_100_000), &ActiveControl)
+        .expect("first generation");
+    let after_first = owner.retained_parse_stats();
+    assert_eq!(after_first.full_extractions, 1);
+    assert_eq!(after_first.initial_parses, 1);
+    assert_eq!(after_first.incremental_parses, 0);
+    assert_eq!(after_first.incremental_extractions, 0);
+    assert_eq!(after_first.noop_parses, 0);
+
+    owner
+        .build_and_publish(request("file.carry.2", 1_200_000), &ActiveControl)
+        .expect("unchanged increment");
+    let after_second = owner.retained_parse_stats();
+
+    assert_eq!(
+        after_second.full_extractions, after_first.full_extractions,
+        "carry-forward rematerialize must not fall back to full re-extract"
+    );
+    assert_eq!(
+        after_second.incremental_extractions, after_first.incremental_extractions,
+        "carry-forward rematerialize must not re-extract incrementally"
+    );
+    assert_eq!(after_second.initial_parses, after_first.initial_parses);
+    assert_eq!(
+        after_second.incremental_parses,
+        after_first.incremental_parses
+    );
+    assert_eq!(after_second.noop_parses, after_first.noop_parses);
+
+    let mut restarted = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("restart owner");
+    let after_restart = restarted.retained_parse_stats();
+    assert_eq!(after_restart.full_extractions, 0);
+    assert_eq!(after_restart.initial_parses, 0);
+
+    restarted
+        .build_and_publish(request("file.carry.3", 1_300_000), &ActiveControl)
+        .expect("unchanged increment after restore");
+    let after_restored = restarted.retained_parse_stats();
+    assert_eq!(
+        after_restored.full_extractions, 0,
+        "restored carry-forward rematerialize must not fall back to full re-extract"
+    );
+    assert_eq!(after_restored.incremental_extractions, 0);
+    assert_eq!(after_restored.initial_parses, 0);
+    assert_eq!(after_restored.incremental_parses, 0);
+    assert_eq!(after_restored.noop_parses, 0);
+}
+
 /// One file exceeding the bounded per-file parse budget must never fail the
 /// whole build: the generation still completes, publishes, and serves, with
 /// the slow file recorded as a typed unsupported document (with a reason) and
