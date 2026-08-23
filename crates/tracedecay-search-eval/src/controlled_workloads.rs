@@ -1,11 +1,13 @@
 //! Controlled, machine-readable acceptance workloads for capture composition
 //! and private-fs framed-log durability.
 //!
-//! These do not enable the `hotpath` crate feature. They measure wall time and
-//! byte identity directly so a composing binary can compare two runs without
-//! production-only annotations.
+//! This crate does not declare a `hotpath` feature. Workloads measure wall
+//! time and byte identity so a composing binary can compare capture/private-fs
+//! feature-off vs feature-on runs without production-only annotations.
+//! Acceptance is durable identity (`bytes_match` / `both_ok`), not latency.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
@@ -19,8 +21,10 @@ use tracedecay_private_fs::framed_log::{
 };
 
 const SCHEMA_VERSION: u32 = 1;
-const FRAMED_LOG_WORKLOAD: &str = "framed_log_durability";
-const CURSOR_PARSE_WORKLOAD: &str = "cursor_parse_batch";
+pub const FRAMED_LOG_WORKLOAD: &str = "framed_log_durability";
+pub const CURSOR_PARSE_WORKLOAD: &str = "cursor_parse_batch";
+pub const FRAMED_LOG_REPORT_FILE: &str = "framed_log_durability.json";
+pub const CURSOR_PARSE_REPORT_FILE: &str = "cursor_parse_batch.json";
 const FRAME_BYTES: usize = 32 * 1024;
 const PUBLISH_BYTES: usize = 64 * 1024;
 const APPEND_FRAMES: u64 = 8;
@@ -125,6 +129,31 @@ pub fn compare_controlled_workloads(
         right_workload: right.workload.clone(),
         operations,
     })
+}
+
+impl ControlledWorkloadComparisonV1 {
+    /// Durable identity only: byte counts, verify digests, and success flags.
+    /// Timing fields are informational and must not be used as acceptance.
+    pub fn durable_results_identical(&self) -> bool {
+        !self.operations.is_empty()
+            && self
+                .operations
+                .iter()
+                .all(|operation| operation.bytes_match && operation.both_ok)
+    }
+}
+
+pub fn write_controlled_workload_reports(
+    report_dir: &Path,
+) -> Result<(), ControlledWorkloadErrorV1> {
+    fs::create_dir_all(report_dir)?;
+    let framed_root = report_dir.join("framed_log_root");
+    fs::create_dir_all(&framed_root)?;
+    let framed = run_framed_log_durability_workload(&framed_root)?;
+    let cursor = run_cursor_parse_batch_workload()?;
+    write_report_json(&report_dir.join(FRAMED_LOG_REPORT_FILE), &framed)?;
+    write_report_json(&report_dir.join(CURSOR_PARSE_REPORT_FILE), &cursor)?;
+    Ok(())
 }
 
 pub fn run_framed_log_durability_workload(
@@ -353,6 +382,19 @@ fn signed_delta(left: u64, right: u64) -> i64 {
     }
 }
 
+fn write_report_json(
+    path: &Path,
+    report: &ControlledWorkloadReportV1,
+) -> Result<(), ControlledWorkloadErrorV1> {
+    let bytes = serde_json::to_vec(report).map_err(|error| {
+        ControlledWorkloadErrorV1::Contract(format!(
+            "failed to encode controlled workload report: {error}"
+        ))
+    })?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
 fn operations_by_name(
     report: &ControlledWorkloadReportV1,
 ) -> Result<BTreeMap<String, &ControlledOperationV1>, ControlledWorkloadErrorV1> {
@@ -373,9 +415,14 @@ fn operations_by_name(
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
     use super::{
-        CURSOR_PARSE_WORKLOAD, FRAMED_LOG_WORKLOAD, PARSE_RECORDS, compare_controlled_workloads,
-        run_cursor_parse_batch_workload, run_framed_log_durability_workload,
+        CURSOR_PARSE_REPORT_FILE, CURSOR_PARSE_WORKLOAD, ControlledOperationV1,
+        ControlledWorkloadReportV1, FRAMED_LOG_REPORT_FILE, FRAMED_LOG_WORKLOAD, PARSE_RECORDS,
+        compare_controlled_workloads, run_cursor_parse_batch_workload,
+        run_framed_log_durability_workload, write_controlled_workload_reports,
     };
 
     #[test]
@@ -430,10 +477,7 @@ mod tests {
         assert_eq!(comparison.schema_version, 1);
         assert_eq!(comparison.operations.len(), left.operations.len());
         assert!(
-            comparison
-                .operations
-                .iter()
-                .all(|operation| operation.bytes_match && operation.both_ok),
+            comparison.durable_results_identical(),
             "repeat runs must keep byte identity: {comparison:?}"
         );
         let encoded = serde_json::to_value(&comparison).expect("comparison json");
@@ -443,5 +487,217 @@ mod tests {
                 .as_array()
                 .is_some_and(|ops| !ops.is_empty())
         );
+
+        let cursor_left = run_cursor_parse_batch_workload().expect("cursor left");
+        let cursor_right = run_cursor_parse_batch_workload().expect("cursor right");
+        let cursor_comparison =
+            compare_controlled_workloads(&cursor_left, &cursor_right).expect("compare cursor");
+        assert!(
+            cursor_comparison.durable_results_identical(),
+            "repeat cursor-parse runs must keep byte identity: {cursor_comparison:?}"
+        );
+    }
+
+    #[test]
+    fn durable_identity_ignores_elapsed_mismatch() {
+        let left = report(
+            FRAMED_LOG_WORKLOAD,
+            vec![operation("framed_log.append_durable", 32, "abc", 10, true)],
+        );
+        let right = report(
+            FRAMED_LOG_WORKLOAD,
+            vec![operation(
+                "framed_log.append_durable",
+                32,
+                "abc",
+                9_999,
+                true,
+            )],
+        );
+        let comparison = compare_controlled_workloads(&left, &right).expect("compare");
+
+        assert_ne!(
+            comparison.operations[0].left_elapsed_us,
+            comparison.operations[0].right_elapsed_us
+        );
+        assert!(comparison.operations[0].bytes_match);
+        assert!(comparison.operations[0].both_ok);
+        assert!(
+            comparison.durable_results_identical(),
+            "elapsed deltas are not acceptance: {comparison:?}"
+        );
+    }
+
+    #[test]
+    fn durable_identity_rejects_mismatched_verify_digests() {
+        let left = report(
+            CURSOR_PARSE_WORKLOAD,
+            vec![operation("capture.cursor_parse_batch", 16, "aaa", 1, true)],
+        );
+        let right = report(
+            CURSOR_PARSE_WORKLOAD,
+            vec![operation("capture.cursor_parse_batch", 16, "bbb", 1, true)],
+        );
+        let comparison = compare_controlled_workloads(&left, &right).expect("compare");
+
+        assert!(!comparison.operations[0].bytes_match);
+        assert!(comparison.operations[0].both_ok);
+        assert!(!comparison.durable_results_identical());
+    }
+
+    #[test]
+    fn durable_identity_rejects_empty_operations() {
+        let left = report(FRAMED_LOG_WORKLOAD, Vec::new());
+        let right = report(FRAMED_LOG_WORKLOAD, Vec::new());
+        let comparison = compare_controlled_workloads(&left, &right).expect("compare");
+
+        assert!(comparison.operations.is_empty());
+        assert!(!comparison.durable_results_identical());
+    }
+
+    #[test]
+    fn write_reports_cover_framed_log_and_cursor_parse() {
+        let dir = tempfile::tempdir().expect("report dir");
+        write_controlled_workload_reports(dir.path()).expect("write reports");
+
+        let framed = load_report(&dir.path().join(FRAMED_LOG_REPORT_FILE));
+        let cursor = load_report(&dir.path().join(CURSOR_PARSE_REPORT_FILE));
+        assert_eq!(framed.workload, FRAMED_LOG_WORKLOAD);
+        assert_eq!(cursor.workload, CURSOR_PARSE_WORKLOAD);
+        assert!(!framed.operations.is_empty());
+        assert!(!cursor.operations.is_empty());
+        assert!(framed.operations.iter().all(|operation| operation.ok));
+        assert!(cursor.operations.iter().all(|operation| operation.ok));
+    }
+
+    #[test]
+    fn hotpath_off_vs_on_durable_results_are_identical() {
+        let scratch = tempfile::tempdir().expect("identity scratch");
+        let target_dir = isolated_target_dir();
+        std::fs::create_dir_all(&target_dir).expect("isolated target");
+        let off_dir = scratch.path().join("off");
+        let on_dir = scratch.path().join("on");
+
+        emit_reports_via_cargo(&off_dir, &target_dir, false);
+        emit_reports_via_cargo(&on_dir, &target_dir, true);
+
+        assert_durable_identity(
+            FRAMED_LOG_WORKLOAD,
+            &load_report(&off_dir.join(FRAMED_LOG_REPORT_FILE)),
+            &load_report(&on_dir.join(FRAMED_LOG_REPORT_FILE)),
+        );
+        assert_durable_identity(
+            CURSOR_PARSE_WORKLOAD,
+            &load_report(&off_dir.join(CURSOR_PARSE_REPORT_FILE)),
+            &load_report(&on_dir.join(CURSOR_PARSE_REPORT_FILE)),
+        );
+    }
+
+    fn report(
+        workload: &str,
+        operations: Vec<ControlledOperationV1>,
+    ) -> ControlledWorkloadReportV1 {
+        ControlledWorkloadReportV1 {
+            schema_version: 1,
+            workload: workload.to_owned(),
+            operations,
+        }
+    }
+
+    fn operation(
+        name: &str,
+        bytes: u64,
+        digest: &str,
+        elapsed_us: u64,
+        ok: bool,
+    ) -> ControlledOperationV1 {
+        ControlledOperationV1 {
+            operation: name.to_owned(),
+            iterations: 1,
+            bytes,
+            elapsed_us,
+            verify_digest: Some(digest.to_owned()),
+            ok,
+        }
+    }
+
+    fn load_report(path: &Path) -> ControlledWorkloadReportV1 {
+        let bytes =
+            std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+    }
+
+    fn assert_durable_identity(
+        workload: &str,
+        off: &ControlledWorkloadReportV1,
+        on: &ControlledWorkloadReportV1,
+    ) {
+        assert_eq!(off.workload, workload);
+        assert_eq!(on.workload, workload);
+        let comparison = compare_controlled_workloads(off, on).expect("compare");
+        assert!(
+            !comparison.operations.is_empty(),
+            "{workload} comparison must not be empty"
+        );
+        assert!(
+            comparison
+                .operations
+                .iter()
+                .all(|operation| operation.bytes_match && operation.both_ok),
+            "{workload} feature-off vs feature-on durable results must match: {comparison:?}"
+        );
+        assert!(comparison.durable_results_identical());
+    }
+
+    fn emit_reports_via_cargo(report_dir: &Path, target_dir: &Path, hotpath_on: bool) {
+        std::fs::create_dir_all(report_dir).expect("report dir");
+        let mut command = Command::new(env!("CARGO"));
+        command
+            .current_dir(workspace_root())
+            .env("CARGO_TARGET_DIR", target_dir)
+            .env("CARGO_TERM_COLOR", "never")
+            .env("TRACEDECAY_SKIP_DASHBOARD_BUILD", "1")
+            .args([
+                "run",
+                "-p",
+                "tracedecay-search-eval",
+                "--example",
+                "emit_controlled_workload_reports",
+                "--locked",
+                "--offline",
+                "--quiet",
+            ]);
+        if hotpath_on {
+            command.args([
+                "--features",
+                "tracedecay-capture/hotpath,tracedecay-private-fs/hotpath",
+            ]);
+        }
+        command.arg("--").arg(report_dir);
+        let output = command.output().expect("spawn cargo");
+        assert!(
+            output.status.success(),
+            "cargo run emit example failed (hotpath_on={hotpath_on}): status={:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn isolated_target_dir() -> PathBuf {
+        std::env::var_os("TRACEDECAY_SEARCH_EVAL_HOTPATH_IDENTITY_TARGET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join("tracedecay-search-eval-hotpath-identity-target")
+            })
+    }
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root above crates/<crate>")
+            .to_owned()
     }
 }

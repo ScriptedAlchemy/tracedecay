@@ -43,9 +43,11 @@ pub use candidate_output::{
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
 };
 pub use controlled_workloads::{
-    ControlledOperationDeltaV1, ControlledOperationV1, ControlledWorkloadComparisonV1,
-    ControlledWorkloadErrorV1, ControlledWorkloadReportV1, compare_controlled_workloads,
-    run_cursor_parse_batch_workload, run_framed_log_durability_workload,
+    CURSOR_PARSE_REPORT_FILE, CURSOR_PARSE_WORKLOAD, ControlledOperationDeltaV1,
+    ControlledOperationV1, ControlledWorkloadComparisonV1, ControlledWorkloadErrorV1,
+    ControlledWorkloadReportV1, FRAMED_LOG_REPORT_FILE, FRAMED_LOG_WORKLOAD,
+    compare_controlled_workloads, run_cursor_parse_batch_workload,
+    run_framed_log_durability_workload, write_controlled_workload_reports,
 };
 pub use native_qualification::{
     NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
