@@ -5,6 +5,12 @@
 //! blocking type. Header/connection time and body/decode time are therefore
 //! split with `measure_block!` around `.send()` and `.json()` / decode.
 //!
+//! Execute-boundary time is a separate static span: `sdk.mcp.execute` covers
+//! encode / tool-call / decode on the MCP path; `sdk.http.execute` covers the
+//! typed HTTP execute (encode, admission, request, contract checks). Nested
+//! `sdk.http.headers` / `sdk.http.body_decode` remain the send vs decode split.
+//! Span names are static — never a URL, tool name, operation id, or payload.
+//!
 //! Error class is the typed [`ClientError`] / [`RemoteClientError`] variant,
 //! or a closed [`ApplicationProblemKind`] name — never an unbounded message.
 
@@ -17,6 +23,18 @@ pub(crate) fn headers<T, E>(send: impl FnOnce() -> Result<T, E>) -> Result<T, E>
 
 pub(crate) fn body_decode<T, E>(decode: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
     hotpath::measure_block!("sdk.http.body_decode", decode())
+}
+
+pub(crate) fn mcp_execute<T>(
+    run: impl FnOnce() -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    hotpath::measure_block!("sdk.mcp.execute", finish(run()))
+}
+
+pub(crate) fn http_execute<T>(
+    run: impl FnOnce() -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    hotpath::measure_block!("sdk.http.execute", finish(run()))
 }
 
 #[inline(always)]

@@ -195,29 +195,31 @@ impl Client {
         Operation::Request: Serialize,
         Operation::Result: DeserializeOwned,
     {
-        let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
-            status: None,
-            message: format!("typed request could not be encoded: {error}"),
-        })?;
-        let OperationTransport::McpTool { tool_name } = Operation::TRANSPORT else {
-            return Err(ClientError::UnsupportedTransport {
-                operation_id: Operation::OPERATION_ID,
-                transport: "http",
-            });
-        };
-        let transport = self
-            .mcp_transport
-            .as_ref()
-            .ok_or(ClientError::MissingMcpTransport {
-                operation_id: Operation::OPERATION_ID,
+        crate::observe::mcp_execute(|| {
+            let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
+                status: None,
+                message: format!("typed request could not be encoded: {error}"),
             })?;
-        let response = transport.call_tool(tool_name, &request)?;
-        serde_json::from_value(response).map_err(|error| ClientError::Protocol {
-            status: None,
-            message: format!(
-                "MCP tool {tool_name} returned a malformed {} result: {error}",
-                Operation::OPERATION_ID
-            ),
+            let OperationTransport::McpTool { tool_name } = Operation::TRANSPORT else {
+                return Err(ClientError::UnsupportedTransport {
+                    operation_id: Operation::OPERATION_ID,
+                    transport: "http",
+                });
+            };
+            let transport =
+                self.mcp_transport
+                    .as_ref()
+                    .ok_or(ClientError::MissingMcpTransport {
+                        operation_id: Operation::OPERATION_ID,
+                    })?;
+            let response = transport.call_tool(tool_name, &request)?;
+            serde_json::from_value(response).map_err(|error| ClientError::Protocol {
+                status: None,
+                message: format!(
+                    "MCP tool {tool_name} returned a malformed {} result: {error}",
+                    Operation::OPERATION_ID
+                ),
+            })
         })
     }
 
@@ -232,200 +234,204 @@ impl Client {
         Operation::Request: Serialize,
         Operation::Result: DeserializeOwned,
     {
-        let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
-            status: None,
-            message: format!("typed request could not be encoded: {error}"),
-        })?;
-        let OperationTransport::Http { route } = Operation::TRANSPORT else {
-            return Err(ClientError::UnsupportedTransport {
-                operation_id: Operation::OPERATION_ID,
-                transport: "mcp_tool",
-            });
-        };
-        let expected_request_id = crate::request_control::admit::<Operation>(&options)?;
-        let response = self.request_route(
-            Operation::OPERATION_ID,
-            Operation::BINDING_ID,
-            route,
-            &request,
-            options,
-            expected_request_id.as_ref(),
-        )?;
-        let binding = response
-            .envelope()
-            .get("binding_id")
-            .and_then(Value::as_str);
-        let contract = response.envelope().get("contract");
-        let schema_id = contract
-            .and_then(|value| value.get("schema_id"))
-            .and_then(Value::as_str);
-        let schema_revision = contract
-            .and_then(|value| value.get("schema_revision"))
-            .and_then(Value::as_u64);
-        if binding != Some(Operation::BINDING_ID)
-            || schema_id != Some(Operation::RESULT_SCHEMA_ID)
-            || schema_revision != Some(u64::from(Operation::RESULT_SCHEMA_REVISION))
-        {
-            return Err(ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon returned mismatched contracts for {}",
-                    Operation::OPERATION_ID
-                ),
-            });
-        }
-        let outcome = response
-            .envelope()
-            .get("outcome")
-            .ok_or_else(|| ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!("daemon omitted the {} outcome", Operation::OPERATION_ID),
+        crate::observe::http_execute(|| {
+            let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
+                status: None,
+                message: format!("typed request could not be encoded: {error}"),
             })?;
-        let outcome_kind = outcome
-            .get("outcome")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon omitted the {} outcome kind",
-                    Operation::OPERATION_ID
-                ),
-            })?;
-        let lifecycle_shape_is_legal = matches!(
-            (Operation::RECEIPT, Operation::RECONCILIATION, outcome_kind),
-            (
-                ReceiptContract::Operation,
-                ReconciliationContract::NotRequired,
-                "evidence" | "preview"
-            ) | (
-                ReceiptContract::DurableEffect,
-                ReconciliationContract::Required,
-                "effect"
-            )
-        );
-        if !lifecycle_shape_is_legal {
-            return Err(ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon returned outcome {outcome_kind} outside the {} receipt contract",
-                    Operation::OPERATION_ID
-                ),
-            });
-        }
-        let execution = outcome
-            .get("value")
-            .and_then(|value| value.get("execution"))
-            .ok_or_else(|| ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon omitted the {} execution receipt",
-                    Operation::OPERATION_ID
-                ),
-            })?;
-        let termination = execution
-            .get("termination")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon omitted the {} terminal state",
-                    Operation::OPERATION_ID
-                ),
-            })?;
-        if !Operation::TERMINAL_STATES
-            .iter()
-            .copied()
-            .any(|state| terminal_state_name(state) == termination)
-        {
-            return Err(ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon returned terminal state {termination} outside the {} contract",
-                    Operation::OPERATION_ID
-                ),
-            });
-        }
-        if let Some(cancellation) = execution.get("cancellation")
-            && !cancellation.is_null()
-        {
-            if !Operation::CANCELLABLE {
-                return Err(ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
-                        "daemon returned cancellation evidence for non-cancellable {}",
-                        Operation::OPERATION_ID
-                    ),
+            let OperationTransport::Http { route } = Operation::TRANSPORT else {
+                return Err(ClientError::UnsupportedTransport {
+                    operation_id: Operation::OPERATION_ID,
+                    transport: "mcp_tool",
                 });
-            }
-            let stage = cancellation
-                .get("stage")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
-                        "daemon returned malformed cancellation evidence for {}",
-                        Operation::OPERATION_ID
-                    ),
-                })?;
-            if !Operation::CANCELLATION_POINTS
-                .iter()
-                .copied()
-                .any(|point| cancellation_point_name(point) == stage)
+            };
+            let expected_request_id = crate::request_control::admit::<Operation>(&options)?;
+            let response = self.request_route(
+                Operation::OPERATION_ID,
+                Operation::BINDING_ID,
+                route,
+                &request,
+                options,
+                expected_request_id.as_ref(),
+            )?;
+            let binding = response
+                .envelope()
+                .get("binding_id")
+                .and_then(Value::as_str);
+            let contract = response.envelope().get("contract");
+            let schema_id = contract
+                .and_then(|value| value.get("schema_id"))
+                .and_then(Value::as_str);
+            let schema_revision = contract
+                .and_then(|value| value.get("schema_revision"))
+                .and_then(Value::as_u64);
+            if binding != Some(Operation::BINDING_ID)
+                || schema_id != Some(Operation::RESULT_SCHEMA_ID)
+                || schema_revision != Some(u64::from(Operation::RESULT_SCHEMA_REVISION))
             {
                 return Err(ClientError::Protocol {
                     status: Some(response.status()),
                     message: format!(
-                        "daemon returned cancellation stage {stage} outside the {} contract",
+                        "daemon returned mismatched contracts for {}",
                         Operation::OPERATION_ID
                     ),
                 });
             }
-        }
-        let payload = response
-            .payload()
-            .cloned()
-            .ok_or_else(|| ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon omitted the {} result payload",
-                    Operation::OPERATION_ID
-                ),
-            })?;
-        let request_id = response
-            .envelope()
-            .get("request_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ClientError::Protocol {
-                status: Some(response.status()),
-                message: "daemon omitted the application request ID".into(),
-            })?
-            .to_owned();
-        if !crate::semantic::response_matches(
-            Operation::RESULT_SEMANTICS,
-            &request_id,
-            expected_request_id.as_ref(),
-            &request,
-            &payload,
-        ) {
-            return Err(ClientError::Protocol {
-                status: Some(response.status()),
-                message: format!(
-                    "daemon returned a semantically invalid {} result",
-                    Operation::OPERATION_ID
-                ),
-            });
-        }
-        let result = serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
-            status: Some(response.status()),
-            message: format!(
-                "daemon returned a malformed {} result: {error}",
-                Operation::OPERATION_ID
-            ),
-        })?;
-        Ok(TypedResponse {
-            request_id,
-            result,
-            envelope: response.envelope,
+            let outcome =
+                response
+                    .envelope()
+                    .get("outcome")
+                    .ok_or_else(|| ClientError::Protocol {
+                        status: Some(response.status()),
+                        message: format!("daemon omitted the {} outcome", Operation::OPERATION_ID),
+                    })?;
+            let outcome_kind = outcome
+                .get("outcome")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon omitted the {} outcome kind",
+                        Operation::OPERATION_ID
+                    ),
+                })?;
+            let lifecycle_shape_is_legal = matches!(
+                (Operation::RECEIPT, Operation::RECONCILIATION, outcome_kind),
+                (
+                    ReceiptContract::Operation,
+                    ReconciliationContract::NotRequired,
+                    "evidence" | "preview"
+                ) | (
+                    ReceiptContract::DurableEffect,
+                    ReconciliationContract::Required,
+                    "effect"
+                )
+            );
+            if !lifecycle_shape_is_legal {
+                return Err(ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned outcome {outcome_kind} outside the {} receipt contract",
+                        Operation::OPERATION_ID
+                    ),
+                });
+            }
+            let execution = outcome
+                .get("value")
+                .and_then(|value| value.get("execution"))
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon omitted the {} execution receipt",
+                        Operation::OPERATION_ID
+                    ),
+                })?;
+            let termination = execution
+                .get("termination")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon omitted the {} terminal state",
+                        Operation::OPERATION_ID
+                    ),
+                })?;
+            if !Operation::TERMINAL_STATES
+                .iter()
+                .copied()
+                .any(|state| terminal_state_name(state) == termination)
+            {
+                return Err(ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned terminal state {termination} outside the {} contract",
+                        Operation::OPERATION_ID
+                    ),
+                });
+            }
+            if let Some(cancellation) = execution.get("cancellation")
+                && !cancellation.is_null()
+            {
+                if !Operation::CANCELLABLE {
+                    return Err(ClientError::Protocol {
+                        status: Some(response.status()),
+                        message: format!(
+                            "daemon returned cancellation evidence for non-cancellable {}",
+                            Operation::OPERATION_ID
+                        ),
+                    });
+                }
+                let stage = cancellation
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ClientError::Protocol {
+                        status: Some(response.status()),
+                        message: format!(
+                            "daemon returned malformed cancellation evidence for {}",
+                            Operation::OPERATION_ID
+                        ),
+                    })?;
+                if !Operation::CANCELLATION_POINTS
+                    .iter()
+                    .copied()
+                    .any(|point| cancellation_point_name(point) == stage)
+                {
+                    return Err(ClientError::Protocol {
+                        status: Some(response.status()),
+                        message: format!(
+                            "daemon returned cancellation stage {stage} outside the {} contract",
+                            Operation::OPERATION_ID
+                        ),
+                    });
+                }
+            }
+            let payload = response
+                .payload()
+                .cloned()
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon omitted the {} result payload",
+                        Operation::OPERATION_ID
+                    ),
+                })?;
+            let request_id = response
+                .envelope()
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: "daemon omitted the application request ID".into(),
+                })?
+                .to_owned();
+            if !crate::semantic::response_matches(
+                Operation::RESULT_SEMANTICS,
+                &request_id,
+                expected_request_id.as_ref(),
+                &request,
+                &payload,
+            ) {
+                return Err(ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned a semantically invalid {} result",
+                        Operation::OPERATION_ID
+                    ),
+                });
+            }
+            let result =
+                serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned a malformed {} result: {error}",
+                        Operation::OPERATION_ID
+                    ),
+                })?;
+            Ok(TypedResponse {
+                request_id,
+                result,
+                envelope: response.envelope,
+            })
         })
     }
 
@@ -470,48 +476,48 @@ impl Client {
     ) -> Result<OperationCancellation, ClientError> {
         validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
         crate::observe::finish((|| {
-        let response = crate::observe::headers(|| {
-            self.http
-                .post(self.lifecycle_url(operation_id, "cancel")?)
-                .headers(self.headers("application/json"))
-                .send()
-                .map_err(ClientError::transport)
-        })?;
-        let status = response.status();
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ClientError::Authentication(status.as_u16()));
-        }
-        let body: Value = crate::observe::body_decode(|| {
-            response.json().map_err(|error| ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: format!("daemon returned malformed cancellation JSON: {error}"),
-            })
-        })?;
-        if body.get("kind").and_then(Value::as_str) == Some("problem") {
-            return Err(problem_error(
-                &body,
-                status.as_u16(),
-                "cancellation problem envelope has no value",
-            ));
-        }
-        let value: OperationCancellation =
-            serde_json::from_value(body).map_err(|error| ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: format!("daemon returned malformed cancellation JSON: {error}"),
+            let response = crate::observe::headers(|| {
+                self.http
+                    .post(self.lifecycle_url(operation_id, "cancel")?)
+                    .headers(self.headers("application/json"))
+                    .send()
+                    .map_err(ClientError::transport)
             })?;
-        let valid_status = matches!(
-            (status, value.status),
-            (StatusCode::ACCEPTED, CancellationStatus::Requested)
-                | (StatusCode::OK, CancellationStatus::AlreadyRequested)
-                | (StatusCode::OK, CancellationStatus::AlreadyTerminal)
-        );
-        if !valid_status {
-            return Err(ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: "daemon returned a non-canonical cancellation response".into(),
-            });
-        }
-        Ok(value)
+            let status = response.status();
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                return Err(ClientError::Authentication(status.as_u16()));
+            }
+            let body: Value = crate::observe::body_decode(|| {
+                response.json().map_err(|error| ClientError::Protocol {
+                    status: Some(status.as_u16()),
+                    message: format!("daemon returned malformed cancellation JSON: {error}"),
+                })
+            })?;
+            if body.get("kind").and_then(Value::as_str) == Some("problem") {
+                return Err(problem_error(
+                    &body,
+                    status.as_u16(),
+                    "cancellation problem envelope has no value",
+                ));
+            }
+            let value: OperationCancellation =
+                serde_json::from_value(body).map_err(|error| ClientError::Protocol {
+                    status: Some(status.as_u16()),
+                    message: format!("daemon returned malformed cancellation JSON: {error}"),
+                })?;
+            let valid_status = matches!(
+                (status, value.status),
+                (StatusCode::ACCEPTED, CancellationStatus::Requested)
+                    | (StatusCode::OK, CancellationStatus::AlreadyRequested)
+                    | (StatusCode::OK, CancellationStatus::AlreadyTerminal)
+            );
+            if !valid_status {
+                return Err(ClientError::Protocol {
+                    status: Some(status.as_u16()),
+                    message: "daemon returned a non-canonical cancellation response".into(),
+                });
+            }
+            Ok(value)
         })())
     }
 
@@ -522,29 +528,29 @@ impl Client {
         options: StreamOptions,
     ) -> Result<OperationStream, ClientError> {
         crate::observe::finish((|| {
-        validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
-        if let Some(resume) = &options.resume {
-            validate_opaque(&resume.token, MAX_OPAQUE_BYTES, "resume token")?;
-        }
-        let mut stream = OperationStream {
-            client: self.clone(),
-            operation_id: operation_id.to_owned(),
-            reader: None,
-            options,
-            reconnects: 0,
-            next_sequence: None,
-            resume_token: None,
-            terminal: false,
-            pending_event: None,
-            pending_id: None,
-            pending_data: Vec::new(),
-        };
-        if let Some(resume) = &stream.options.resume {
-            stream.next_sequence = Some(resume.next_sequence);
-            stream.resume_token = Some(resume.token.clone());
-        }
-        stream.connect()?;
-        Ok(stream)
+            validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
+            if let Some(resume) = &options.resume {
+                validate_opaque(&resume.token, MAX_OPAQUE_BYTES, "resume token")?;
+            }
+            let mut stream = OperationStream {
+                client: self.clone(),
+                operation_id: operation_id.to_owned(),
+                reader: None,
+                options,
+                reconnects: 0,
+                next_sequence: None,
+                resume_token: None,
+                terminal: false,
+                pending_event: None,
+                pending_id: None,
+                pending_data: Vec::new(),
+            };
+            if let Some(resume) = &stream.options.resume {
+                stream.next_sequence = Some(resume.next_sequence);
+                stream.resume_token = Some(resume.token.clone());
+            }
+            stream.connect()?;
+            Ok(stream)
         })())
     }
 
