@@ -76,9 +76,11 @@ impl ExtractionState {
 
     /// Gets the text of a tree-sitter node from the source.
     fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+        self.node_str(node).to_string()
+    }
+
+    fn node_str(&self, node: TsNode<'_>) -> &str {
+        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -95,8 +97,8 @@ impl AnnotationEmitterState for ExtractionState {
         ExtractionState::qualified_prefix(self)
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        ExtractionState::node_text(self, node)
+    fn node_str(&self, node: TsNode<'_>) -> &str {
+        ExtractionState::node_str(self, node)
     }
 
     fn timestamp(&self) -> u64 {
@@ -117,10 +119,7 @@ impl AnnotationEmitterState for ExtractionState {
 }
 
 impl JavaExtractor {
-    /// Extract code graph nodes and edges from a Java source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Java source code to parse.
     pub fn extract_java(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -203,7 +202,6 @@ impl JavaExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -217,7 +215,6 @@ impl JavaExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package_declaration" => Self::visit_package(state, node),
@@ -920,10 +917,6 @@ impl JavaExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the name of a node by looking for a "name" field child.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {

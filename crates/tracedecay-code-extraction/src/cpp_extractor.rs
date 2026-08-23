@@ -74,23 +74,49 @@ impl ExtractionState {
         self.node_stack.last().map(|(_, id)| id.as_str())
     }
 
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-
     /// Borrowed text of a tree-sitter node, sliced straight from the source.
     /// Use for signature extraction on nodes with bodies so the (possibly
     /// huge) body is never materialized into an owned `String`.
     fn node_str(&self, node: TsNode<'_>) -> &str {
         node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
     }
+
+    /// Source slice from `node.start_byte()` up to `end_byte`.
+    ///
+    /// Callers pass a body child's start so the (possibly huge) body is
+    /// never even borrowed as a `&str`, let alone copied.
+    fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
+        let start = node.start_byte();
+        let end = end_byte.min(self.source.len()).max(start);
+        std::str::from_utf8(&self.source[start..end]).unwrap_or("<invalid utf8>")
+    }
+
+    /// Header text up to a known body child, trimmed.
+    fn signature_before_child(&self, node: TsNode<'_>, body: TsNode<'_>) -> String {
+        self.text_before(node, body.start_byte()).trim().to_string()
+    }
+
+    /// Function/type header: slice to the body child when present, otherwise
+    /// own the (small) declaration without a trailing `;`.
+    fn signature_up_to_body(&self, node: TsNode<'_>) -> String {
+        let end = node
+            .child_by_field_name("body")
+            .or_else(|| find_direct_child_by_kind(node, "compound_statement"))
+            .or_else(|| find_direct_child_by_kind(node, "try_statement"))
+            .or_else(|| find_direct_child_by_kind(node, "field_declaration_list"))
+            .or_else(|| find_direct_child_by_kind(node, "declaration_list"))
+            .or_else(|| find_direct_child_by_kind(node, "enumerator_list"))
+            .map(|body| body.start_byte())
+            .unwrap_or_else(|| node.end_byte());
+        self.text_before(node, end)
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string()
+    }
 }
 
 impl CppExtractor {
-    /// Extract code graph nodes and edges from a C++ source file.
     pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -173,7 +199,6 @@ impl CppExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -187,7 +212,6 @@ impl CppExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_definition" => Self::visit_function_definition(state, node),
@@ -208,17 +232,12 @@ impl CppExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // class_specifier
-    // -------------------------------------------------------
-
-    /// Visit a class specifier (default visibility: Private).
     fn visit_class_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
         let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
 
         if name == "<anonymous>" {
             return;
@@ -235,13 +254,12 @@ impl CppExtractor {
         );
     }
 
-    /// Visit a struct specifier (default visibility: Pub).
     fn visit_struct_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
         let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
 
         if name == "<anonymous>" {
             return;
@@ -258,8 +276,6 @@ impl CppExtractor {
         );
     }
 
-    /// Create a Class or Struct node and walk its body.
-    ///
     /// C++ classes default members to private access, structs to public;
     /// the record bodies are otherwise handled identically.
     fn create_record_node(
@@ -276,8 +292,8 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, name, start_line);
-        let text = state.node_str(node);
-        let signature = text.find('{').map(|pos| text[..pos].trim().to_string());
+        let signature = find_direct_child_by_kind(node, "field_declaration_list")
+            .map(|body| state.signature_before_child(node, body));
 
         let graph_node = Node {
             id: id.clone(),
@@ -316,10 +332,8 @@ impl CppExtractor {
         }
 
         Self::extract_annotations(state, node, &id);
-        // Extract base classes (inheritance).
         Self::extract_base_classes(state, node, &id);
 
-        // Save and set access specifier state
         let old_access = state.access_specifier.clone();
         let old_depth = state.class_depth;
 
@@ -332,12 +346,10 @@ impl CppExtractor {
         }
         state.node_stack.pop();
 
-        // Restore state
         state.access_specifier = old_access;
         state.class_depth = old_depth;
     }
 
-    /// Walk the body of a class/struct, handling access specifiers and members.
     fn visit_class_body(state: &mut ExtractionState, body: TsNode<'_>) {
         let mut cursor = body.walk();
         if cursor.goto_first_child() {
@@ -360,7 +372,6 @@ impl CppExtractor {
         }
     }
 
-    /// Visit a `field_declaration` inside a class/struct body.
     fn visit_field_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Check if this is actually a method declaration (has a function_declarator)
         if find_descendant_by_kind(node, "function_declarator").is_some() {
@@ -368,15 +379,14 @@ impl CppExtractor {
             return;
         }
 
-        // It's a field
         let name = find_descendant_by_kind(node, "field_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
 
         if name == "<anonymous>" {
             return;
         }
 
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -421,19 +431,9 @@ impl CppExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // access_specifier
-    // -------------------------------------------------------
-
-    /// Update the current access specifier based on an `access_specifier` node.
     fn visit_access_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
-        let text = state
-            .node_text(node)
-            .trim()
-            .trim_end_matches(':')
-            .trim()
-            .to_string();
-        state.access_specifier = match text.as_str() {
+        let text = state.node_str(node).trim().trim_end_matches(':').trim();
+        state.access_specifier = match text {
             "public" => Visibility::Pub,
             "private" => Visibility::Private,
             "protected" => Visibility::PubSuper,
@@ -441,15 +441,10 @@ impl CppExtractor {
         };
     }
 
-    // -------------------------------------------------------
-    // namespace
-    // -------------------------------------------------------
-
-    /// Visit a namespace definition.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
             .or_else(|| find_direct_child_by_kind(node, "namespace_identifier"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -458,8 +453,8 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Namespace, &name, start_line);
-        let text = state.node_str(node);
-        let signature = text.find('{').map(|pos| text[..pos].trim().to_string());
+        let signature = find_direct_child_by_kind(node, "declaration_list")
+            .map(|body| state.signature_before_child(node, body));
 
         let graph_node = Node {
             id: id.clone(),
@@ -497,7 +492,6 @@ impl CppExtractor {
             });
         }
 
-        // Walk namespace body
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
             Self::visit_children(state, body);
@@ -505,14 +499,9 @@ impl CppExtractor {
         state.node_stack.pop();
     }
 
-    // -------------------------------------------------------
-    // template
-    // -------------------------------------------------------
-
-    /// Visit a template declaration.
     fn visit_template(state: &mut ExtractionState, node: TsNode<'_>) {
         let inner_name = Self::extract_template_inner_name(state, node);
-        let name = inner_name.unwrap_or_else(|| "<anonymous>".to_string());
+        let name = inner_name.unwrap_or("<anonymous>").to_string();
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -521,11 +510,20 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Template, &name, start_line);
-        let text = state.node_str(node);
-        let signature = text
-            .find('{')
-            .map(|pos| text[..pos].trim().to_string())
-            .or_else(|| Some(text.trim().trim_end_matches(';').trim().to_string()));
+        let inner_body = find_direct_child_by_kind(node, "function_definition")
+            .and_then(|func| {
+                func.child_by_field_name("body")
+                    .or_else(|| find_direct_child_by_kind(func, "compound_statement"))
+            })
+            .or_else(|| {
+                find_direct_child_by_kind(node, "class_specifier")
+                    .or_else(|| find_direct_child_by_kind(node, "struct_specifier"))
+                    .and_then(|spec| find_direct_child_by_kind(spec, "field_declaration_list"))
+            });
+        let signature = Some(inner_body.map_or_else(
+            || state.signature_up_to_body(node),
+            |body| state.signature_before_child(node, body),
+        ));
 
         let graph_node = Node {
             id: id.clone(),
@@ -563,7 +561,6 @@ impl CppExtractor {
             });
         }
 
-        // If the template wraps a function, extract call sites
         if let Some(func_def) = find_direct_child_by_kind(node, "function_definition")
             && let Some(body) = find_direct_child_by_kind(func_def, "compound_statement")
         {
@@ -571,18 +568,20 @@ impl CppExtractor {
         }
     }
 
-    /// Extract the name of the inner declaration in a template.
-    fn extract_template_inner_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
+    fn extract_template_inner_name<'a>(
+        state: &'a ExtractionState,
+        node: TsNode<'_>,
+    ) -> Option<&'a str> {
         if let Some(func_def) = find_direct_child_by_kind(node, "function_definition") {
             return Self::extract_function_name(state, func_def);
         }
         if let Some(class_spec) = find_direct_child_by_kind(node, "class_specifier") {
             return find_direct_child_by_kind(class_spec, "type_identifier")
-                .map(|n| state.node_text(n));
+                .map(|n| state.node_str(n));
         }
         if let Some(struct_spec) = find_direct_child_by_kind(node, "struct_specifier") {
             return find_direct_child_by_kind(struct_spec, "type_identifier")
-                .map(|n| state.node_text(n));
+                .map(|n| state.node_str(n));
         }
         if let Some(decl) = find_direct_child_by_kind(node, "declaration") {
             return Self::extract_function_name(state, decl);

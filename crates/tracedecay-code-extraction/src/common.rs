@@ -20,37 +20,24 @@ fn node_text(source: &[u8], node: TsNode<'_>) -> String {
 /// Strip comment markers from a single C-style comment text
 /// (`//` line comments and `/* ... */` block comments).
 pub(crate) fn clean_c_comment(comment: &str) -> String {
-    let trimmed = comment.trim();
-    if let Some(stripped) = trimmed.strip_prefix("//") {
-        stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-    } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-        let inner = &trimmed[2..trimmed.len() - 2];
-        inner
-            .lines()
-            .map(|line| {
-                let l = line.trim();
-                l.strip_prefix("* ")
-                    .or_else(|| l.strip_prefix('*'))
-                    .unwrap_or(l)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
-    } else {
-        trimmed.to_string()
-    }
+    clean_c_line_or_block_comment(comment, &["//"])
 }
 
 /// Strip comment markers from a single C-style comment text, including
 /// `///` doc comments.
 pub(crate) fn clean_c_doc_comment(comment: &str) -> String {
+    // Longer prefixes first so `///` is not stripped as `//`.
+    clean_c_line_or_block_comment(comment, &["///", "//"])
+}
+
+fn clean_c_line_or_block_comment(comment: &str, line_prefixes: &[&str]) -> String {
     let trimmed = comment.trim();
-    if let Some(stripped) = trimmed.strip_prefix("///") {
-        stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-    } else if let Some(stripped) = trimmed.strip_prefix("//") {
-        stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
-    } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
+    for prefix in line_prefixes {
+        if let Some(stripped) = trimmed.strip_prefix(prefix) {
+            return stripped.strip_prefix(' ').unwrap_or(stripped).to_string();
+        }
+    }
+    if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
         let inner = &trimmed[2..trimmed.len() - 2];
         inner
             .lines()

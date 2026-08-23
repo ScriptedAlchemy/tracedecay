@@ -63,10 +63,12 @@ impl ExtractionState {
         }
     }
 
+    fn node_str(&self, node: TsNode<'_>) -> &str {
+        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    }
+
     fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+        self.node_str(node).to_string()
     }
 }
 
@@ -95,7 +97,7 @@ impl TokenWalker {
         // The `.` operator extends an import path; everything else
         // is a terminator handled below.
         let extends_import =
-            matches!(kind, "identifier") || (kind == "operator" && state.node_text(child) == ".");
+            matches!(kind, "identifier") || (kind == "operator" && state.node_str(child) == ".");
         if !extends_import && let Some((parts, line)) = self.import_collect.take() {
             QuintExtractor::commit_import(state, &parts, line);
         }
@@ -124,7 +126,7 @@ impl TokenWalker {
                 }
             }
             "keyword" => {
-                let text = state.node_text(child);
+                let text = state.node_str(child);
                 if text == "module" {
                     self.pending = Some(PendingKind::Module);
                 } else if text == "import" {
@@ -135,7 +137,7 @@ impl TokenWalker {
             "storage_modifier" => {
                 // `pure` prefixes `def`/`val`; we just keep updating `pending`
                 // until the meaningful storage modifier arrives.
-                if let Some(kind) = quint_storage_kind(&state.node_text(child)) {
+                if let Some(kind) = quint_storage_kind(state.node_str(child)) {
                     self.pending = Some(kind);
                 }
             }

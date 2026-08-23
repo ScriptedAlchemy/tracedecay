@@ -93,7 +93,6 @@ impl TypeScriptExtractor {
     /// Extract code graph nodes and edges from a TypeScript/JavaScript source file.
     ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the source code to parse.
     pub fn extract_typescript(file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_typescript_artifact(file_path, source).result
     }
@@ -1376,13 +1375,14 @@ impl TypeScriptExtractor {
     /// Extract the function/method signature (everything up to the body `{`).
     fn extract_signature(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
         let text = state.node_text(node);
-        if let Some(brace_pos) = text.find('{') {
-            text[..brace_pos].trim().to_string()
-        } else if let Some(body) = node.child_by_field_name("body") {
-            // Body shapes that do not open with `{`: own only the header
-            // before the body child instead of copying the whole item.
+        if let Some(body) = node.child_by_field_name("body") {
+            // Prefer the body child's start so a `{` in a parameter type
+            // (`x: { a: number }`) cannot truncate the header, and the
+            // (possibly huge) body is never scanned.
             let body_offset = body.start_byte() - node.start_byte();
             text[..body_offset].trim().to_string()
+        } else if let Some(brace_pos) = text.find('{') {
+            text[..brace_pos].trim().to_string()
         } else {
             // Signature-only declaration: the whole (small) text is the
             // signature.

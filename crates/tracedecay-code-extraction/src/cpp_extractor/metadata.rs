@@ -17,8 +17,8 @@ use crate::{
 impl CppExtractor {
     pub(super) fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_text(child));
-        let text = state.node_text(node);
+            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_str(child).to_string());
+        let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -72,14 +72,14 @@ impl CppExtractor {
                 || "<unknown>".to_string(),
                 |child| {
                     state
-                        .node_text(child)
+                        .node_str(child)
                         .trim_matches(|character| {
                             character == '"' || character == '<' || character == '>'
                         })
                         .to_string()
                 },
             );
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -140,8 +140,8 @@ impl CppExtractor {
 
     fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_text(child));
-        let text = state.node_text(node);
+            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_str(child).to_string());
+        let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -196,7 +196,7 @@ impl CppExtractor {
                     if child.kind() == "type_identifier" || child.kind() == "qualified_identifier" {
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: class_id.to_string(),
-                            reference_name: state.node_text(child),
+                            reference_name: state.node_str(child).to_string(),
                             reference_kind: EdgeKind::Extends,
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
@@ -238,7 +238,7 @@ impl CppExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "storage_class_specifier" && state.node_text(child) == class {
+                if child.kind() == "storage_class_specifier" && state.node_str(child) == class {
                     return true;
                 }
                 if !cursor.goto_next_sibling() {
@@ -250,18 +250,27 @@ impl CppExtractor {
     }
 
     pub(super) fn is_pure_virtual(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        // The pure-specifier `= 0` is a sibling that follows the
-        // function_declarator — never inside the parameter list (where a
-        // default argument like `int x = 0` lives) and never inside the
-        // body — so scan only that tail slice of the source.
+        // Prefer the grammar token; fall back to `=` + lone `0` siblings
+        // after the parameter list so `int x = 0` defaults and body text
+        // cannot be misclassified.
+        if find_descendant_by_kind(node, "pure_virtual_clause").is_some() {
+            return true;
+        }
         let Some(declarator) = find_descendant_by_kind(node, "function_declarator") else {
             return false;
         };
-        let tail_start = declarator.end_byte();
-        let tail_end = node
+        let param_end = find_direct_child_by_kind(declarator, "parameter_list")
+            .map_or(declarator.end_byte(), |params| params.end_byte());
+        let body_start = node
             .child_by_field_name("body")
+            .or_else(|| find_direct_child_by_kind(node, "compound_statement"))
             .map_or_else(|| node.end_byte(), |body| body.start_byte());
-        let Some(tail) = state.source.get(tail_start..tail_end) else {
+        if tail_has_pure_virtual_token(state, declarator, param_end, body_start)
+            || tail_has_pure_virtual_token(state, node, param_end, body_start)
+        {
+            return true;
+        }
+        let Some(tail) = state.source.get(param_end..body_start) else {
             return false;
         };
         is_pure_specifier(tail)
@@ -319,7 +328,7 @@ impl CppExtractor {
                         end_line,
                         start_column,
                         end_column,
-                        signature: Some(format!("[[{}]]", state.node_text(child).trim())),
+                        signature: Some(format!("[[{}]]", state.node_str(child).trim())),
                         docstring: None,
                         visibility: Visibility::Private,
                         is_async: false,
@@ -357,10 +366,10 @@ impl CppExtractor {
 
     fn extract_cpp_attribute_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(identifier) = find_direct_child_by_kind(node, "identifier") {
-            return state.node_text(identifier);
+            return state.node_str(identifier).to_string();
         }
-        let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        let text = state.node_str(node);
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     pub(super) fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
@@ -372,6 +381,37 @@ impl CppExtractor {
             duration_ms: start.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// Walks direct children in `[tail_start, tail_end)` for a grammar
+/// `pure_virtual_clause` or an `=` token followed by a lone `0` literal.
+fn tail_has_pure_virtual_token(
+    state: &ExtractionState,
+    root: TsNode<'_>,
+    tail_start: usize,
+    tail_end: usize,
+) -> bool {
+    let mut saw_eq = false;
+    let mut cursor = root.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if child.start_byte() >= tail_start && child.start_byte() < tail_end {
+            match child.kind() {
+                "pure_virtual_clause" => return true,
+                "=" => saw_eq = true,
+                "number_literal" if saw_eq => return state.node_str(child) == "0",
+                "comment" => {}
+                _ => saw_eq = false,
+            }
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+    false
 }
 
 /// True when `tail` contains a C++ pure-specifier `= 0`.
