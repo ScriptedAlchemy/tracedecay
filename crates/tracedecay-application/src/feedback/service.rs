@@ -200,16 +200,6 @@ struct FeedbackCycleProgress {
     dedupe_key: Option<FeedbackDedupeKeyV1>,
 }
 
-fn admitted_progress(
-    progress: &Option<FeedbackCycleProgress>,
-) -> Result<&FeedbackCycleProgress, ApplicationContractError> {
-    progress
-        .as_ref()
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "feedback cycle admission state",
-        })
-}
-
 fn admitted_progress_mut(
     progress: &mut Option<FeedbackCycleProgress>,
 ) -> Result<&mut FeedbackCycleProgress, ApplicationContractError> {
