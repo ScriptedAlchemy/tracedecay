@@ -495,12 +495,12 @@ pub(crate) async fn ingest_user_session(
 
 /// Fail-open transcript ingest shared by Cursor and Kiro catch-up hooks.
 #[derive(Default)]
-struct TranscriptIngestOutcome {
+pub(crate) struct TranscriptIngestOutcome {
     user_scope: bool,
     messages_upserted: u64,
 }
 
-async fn await_within_stop_budget<T>(
+pub(crate) async fn await_within_stop_budget<T>(
     work: impl Future<Output = T>,
     budget: Duration,
     telemetry: Option<&analytics::HookTimingSpan>,
@@ -525,7 +525,7 @@ async fn await_within_stop_budget<T>(
     }
 }
 
-async fn ingest_transcript_for_event(
+pub(crate) async fn ingest_transcript_for_event(
     provider: &str,
     event_json: &str,
     project_root: Option<&Path>,
