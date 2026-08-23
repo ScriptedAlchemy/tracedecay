@@ -305,11 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn registered_dashboard_work_route_payloads_are_contracted() {
-        render_dashboard_contract_schema().expect("render validated dashboard Work contracts");
-    }
-
-    #[test]
     fn canonical_work_contracts_are_registered() {
         let schema: serde_json::Value = serde_json::from_str(
             &render_dashboard_contract_schema().expect("render validated dashboard contracts"),

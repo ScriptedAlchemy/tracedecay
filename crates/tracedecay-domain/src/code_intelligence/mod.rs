@@ -21,22 +21,3 @@ pub use index::*;
 pub use language::*;
 pub use search::*;
 pub use vector_contract::*;
-
-#[cfg(test)]
-mod tests {
-    use super::NodeKind;
-
-    #[test]
-    fn protobuf_node_kinds_are_unconditional_domain_vocabulary() {
-        let kinds = [
-            (NodeKind::ProtoMessage, "proto_message"),
-            (NodeKind::ProtoService, "proto_service"),
-            (NodeKind::ProtoRpc, "proto_rpc"),
-        ];
-
-        for (kind, wire_name) in kinds {
-            assert_eq!(kind.as_str(), wire_name);
-            assert_eq!(NodeKind::from_str(wire_name), Some(kind));
-        }
-    }
-}

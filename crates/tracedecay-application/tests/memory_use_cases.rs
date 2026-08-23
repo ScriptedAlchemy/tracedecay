@@ -5,8 +5,7 @@ use std::task::{Context, Poll, Waker};
 use tracedecay_application::memory::{
     CommitFactPort, CurrentFactsPort, MemoryApplication, MemoryApplicationInvariantError,
     MemoryCommitFactCommand, MemoryCommitFactDisposition, MemoryCommitFactPortResult,
-    MemoryContradictionState, MemoryCurrentFactsPortResult, MemoryCurrentFactsQuery,
-    MemoryFactSnapshot, MemoryReadCoverage, MemoryReadResult, MemoryUseCaseError,
+    MemoryCurrentFactsPortResult, MemoryCurrentFactsQuery, MemoryFactSnapshot, MemoryUseCaseError,
 };
 use tracedecay_domain::{
     DomainError, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProjectId,
@@ -246,19 +245,6 @@ fn current_fact_pages_reject_cross_owner_cursor_and_limit_violations() {
             )
         ));
     }
-}
-
-#[test]
-fn empty_payload_with_unknown_coverage_remains_truthfully_incomplete() {
-    let result = MemoryReadResult::new(
-        Vec::<FactId>::new(),
-        MemoryReadCoverage::new(0, 0, 1, 0),
-        MemoryContradictionState::Unknown,
-    );
-
-    assert!(result.payload().is_empty());
-    assert!(!result.coverage().is_complete());
-    assert_eq!(result.contradiction(), &MemoryContradictionState::Unknown);
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

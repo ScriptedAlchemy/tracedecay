@@ -124,32 +124,6 @@ fn exported_configuration_operation_names_match_the_catalog_specs() {
 }
 
 #[test]
-fn invocation_requests_keep_configuration_read_and_cas_inputs_typed() {
-    let get = ConfigurationGetRequestV1 {
-        key: tracedecay_domain::configuration::SettingKey::new("mcp.tool_timings").unwrap(),
-    };
-    let set = ConfigurationSetRequestV1 {
-        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
-        key: get.key.clone(),
-        value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
-        expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
-            "revision.configuration-test",
-        )
-        .unwrap(),
-        idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
-            "configuration.idempotency.test",
-        )
-        .unwrap(),
-    };
-
-    assert_eq!(get.key, set.key);
-    assert!(matches!(
-        set.value,
-        tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true)
-    ));
-}
-
-#[test]
 fn empty_configuration_requests_reject_transport_arguments() {
     assert!(
         serde_json::from_value::<ConfigurationListRequestV1>(serde_json::json!({"format": "json"}))

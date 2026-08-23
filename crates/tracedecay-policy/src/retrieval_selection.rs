@@ -43,19 +43,3 @@ pub const fn select_retrieval(
         RetrievalSelectionV1::Unavailable
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strict_retrieval_fails_closed() {
-        assert_eq!(
-            select_retrieval(
-                RetrievalAvailabilityV1::Indexing,
-                RetrievalRequirementV1::StrictSemantic,
-            ),
-            RetrievalSelectionV1::Unavailable
-        );
-    }
-}

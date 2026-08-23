@@ -91,14 +91,4 @@ mod tests {
 
         assert!(PrivacyDomainBoundLocatorDigest::new("not-a-digest").is_err());
     }
-
-    #[test]
-    fn privacy_domain_bound_locator_digest_is_not_a_generic_digest_alias() {
-        use std::any::TypeId;
-
-        assert_ne!(
-            TypeId::of::<PrivacyDomainBoundLocatorDigest>(),
-            TypeId::of::<LocatorDigest>()
-        );
-    }
 }

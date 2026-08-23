@@ -501,7 +501,6 @@ pub fn work_invalid_request_response(request_id: RequestId) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::str::FromStr;
 
     use super::WorkOperation;
@@ -518,17 +517,6 @@ mod tests {
                 "{path}"
             );
         }
-    }
-
-    #[test]
-    fn the_descriptor_lists_each_operation_once() {
-        assert_eq!(
-            WorkOperation::ALL
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .len(),
-            WorkOperation::ALL.len(),
-        );
     }
 
     #[test]

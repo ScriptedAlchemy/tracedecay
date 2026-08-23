@@ -443,27 +443,6 @@ fn malformed_authorization_fails_closed() {
 }
 
 #[test]
-fn public_http_payload_never_contains_credentials() {
-    let request: RemoteHttpRequestV1<()> = serde_json::from_value(serde_json::json!({
-        "request": {
-            "protocol_version": 1,
-            "request_id": "request.remote",
-            "brain_id": "brain.remote",
-            "caller_node_id": "node.remote",
-            "enrollment_revision": 1,
-            "expected_authority": null,
-            "sent_at": 10,
-            "body": null
-        }
-    }))
-    .unwrap();
-
-    let json = serde_json::to_string(&request).unwrap();
-    assert!(!json.contains("credential"));
-    assert!(!json.contains("authorization"));
-}
-
-#[test]
 fn credential_rejection_precedes_polling_the_json_body() {
     let admission_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));

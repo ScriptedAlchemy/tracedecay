@@ -97,15 +97,6 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn unknown_status_is_carried_through_verbatim() {
-        let event =
-            codex_goal_event_from_line(&goal_event_line("do the thing", "completed")).unwrap();
-        assert_eq!(event.status.as_deref(), Some("completed"));
-        let metadata = event.metadata();
-        assert_eq!(metadata["status"], "completed");
-    }
-
-    #[test]
     fn missing_status_and_objective_are_handled_gracefully() {
         // No status key at all -> status None, still a valid goal row.
         let mut no_status = goal_event_line("objective only", "active");

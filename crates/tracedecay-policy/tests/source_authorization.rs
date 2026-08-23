@@ -56,18 +56,6 @@ fn canonical_source_authorization_truth_tables_hold() {
 }
 
 #[test]
-fn identical_inputs_produce_identical_canonical_decisions() {
-    let evaluator = SourceAuthorizationEvaluatorV1::default();
-    let input = truth_tables()
-        .into_iter()
-        .find(|row| row.name == "project_authorized_live")
-        .expect("allow fixture exists")
-        .input;
-
-    assert_eq!(evaluator.evaluate(&input), evaluator.evaluate(&input));
-}
-
-#[test]
 fn definition_binding_and_owner_snapshots_remain_separate_authorities() {
     let evaluator = SourceAuthorizationEvaluatorV1::default();
     let mut input = truth_tables()

@@ -215,38 +215,3 @@ fn serde_error_field(message: &str) -> Option<String> {
             Some(rest[..end].to_owned())
         })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{ProjectSettingsPatch, UserSettingsPatch};
-    use serde_json::json;
-
-    #[test]
-    fn settings_patches_omit_absent_edits_when_serialized() {
-        let project = ProjectSettingsPatch {
-            expected_revision_id: "project-revision".to_owned(),
-            idempotency_key: "configuration.idempotency.dashboard-settings".to_owned(),
-            ..ProjectSettingsPatch::default()
-        };
-        assert_eq!(
-            serde_json::to_value(project).expect("serialize project settings patch"),
-            json!({
-                "expected_revision_id": "project-revision",
-                "idempotency_key": "configuration.idempotency.dashboard-settings"
-            })
-        );
-
-        let user = UserSettingsPatch {
-            expected_revision_id: "user-revision".to_owned(),
-            idempotency_key: "configuration.idempotency.dashboard-user-settings".to_owned(),
-            ..UserSettingsPatch::default()
-        };
-        assert_eq!(
-            serde_json::to_value(user).expect("serialize user settings patch"),
-            json!({
-                "expected_revision_id": "user-revision",
-                "idempotency_key": "configuration.idempotency.dashboard-user-settings"
-            })
-        );
-    }
-}

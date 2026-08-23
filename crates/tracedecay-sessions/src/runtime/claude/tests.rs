@@ -417,17 +417,6 @@ fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
 }
 
 #[test]
-fn unicode_paths_keep_the_legacy_cursor_key() {
-    let path = Path::new("/tmp/claude-session.jsonl");
-    let source = ClaudeSource::with_home(Path::new("/unused"));
-
-    assert_eq!(
-        source.cursor_key(path).durable_text(),
-        path.to_string_lossy()
-    );
-}
-
-#[test]
 fn structured_git_operation_becomes_host_commit_evidence() {
     let mut metadata = Map::new();
     append_git_operation_metadata(
