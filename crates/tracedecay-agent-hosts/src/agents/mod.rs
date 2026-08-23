@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
@@ -1132,10 +1133,7 @@ pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf
     let path_bytes = serde_json::to_vec(path).map_err(|error| TraceDecayError::Config {
         message: format!("could not bind host config write intent: {error}"),
     })?;
-    Ok(root.join(format!(
-        "{}.intent",
-        hex::encode(Sha256::digest(path_bytes))
-    )))
+    Ok(root.join(format!("{}.intent", sha256_hex(&path_bytes))))
 }
 
 /// Persist an already-read native-host observation without reading the file a
@@ -1320,10 +1318,7 @@ pub fn install_mcp_server_entry(
         .is_some_and(|value| !value.is_object())
     {
         return Err(TraceDecayError::Config {
-            message: format!(
-                "{}.{root_key} must be a JSON object",
-                config_path.display()
-            ),
+            message: format!("{}.{root_key} must be a JSON object", config_path.display()),
         });
     }
     settings[root_key]["tracedecay"] = entry;

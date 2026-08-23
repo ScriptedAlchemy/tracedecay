@@ -24,6 +24,7 @@ use grafeo_common::types::EpochId;
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, sha256_hex};
 
 use crate::location::PersistentGraphStoreState;
 use crate::{
@@ -430,7 +431,7 @@ fn receipt(manifest: &GraphBackupManifest, bytes: &[u8]) -> GraphBackupReceipt {
         graph_format_version: manifest.graph_format_version,
         target_epoch: manifest.target_epoch,
         artifact_count: manifest.artifacts.len(),
-        manifest_sha256: hex::encode(Sha256::digest(bytes)),
+        manifest_sha256: sha256_hex(bytes),
     }
 }
 
@@ -606,7 +607,7 @@ fn sha256_file(path: &Path) -> Result<String, GraphDbError> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(hex::encode(digest.finalize()))
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }
 
 fn sync_file(path: &Path) -> Result<(), GraphDbError> {

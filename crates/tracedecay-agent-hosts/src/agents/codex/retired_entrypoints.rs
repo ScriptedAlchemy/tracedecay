@@ -1,4 +1,4 @@
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 /// Exact identities of auto-discovered Codex skills retired from previously
 /// shipped plugin bundles. Cleanup is deliberately closed over these
@@ -128,7 +128,7 @@ pub(super) const CODEX_RETIRED_ENTRYPOINT_IDENTITIES: &[(&str, &str)] = &[
 ];
 
 pub(super) fn has_exact_identity(relative: &str, contents: &[u8]) -> bool {
-    let digest = hex::encode(Sha256::digest(contents));
+    let digest = sha256_hex(contents);
     CODEX_RETIRED_ENTRYPOINT_IDENTITIES
         .iter()
         .any(|(owned_relative, owned_digest)| {

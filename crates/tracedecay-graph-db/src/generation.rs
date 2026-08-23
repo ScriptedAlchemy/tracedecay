@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_store::runtime::{
     GraphDependencyGenerationClosureDigestV1, GraphDependencyGenerationIdentityV1,
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
@@ -301,9 +302,9 @@ impl GraphGenerationManifest {
                 "failed to encode graph dependency generation closure: {error}"
             ))
         })?;
-        GraphDependencyGenerationClosureDigestV1::new(format!(
-            "sha256:{}",
-            hex::encode(digest.finalize())
+        GraphDependencyGenerationClosureDigestV1::new(encode_tagged_lowercase_hex(
+            "sha256:",
+            &digest.finalize(),
         ))
         .map_err(|error| GraphDbError::invalid(error.to_string()))
     }
@@ -830,7 +831,7 @@ fn recovered_generation_digest(
         write_frame(&mut writer, "relation", &bytes)?;
     }
     writer.finish()?;
-    Ok(hex::encode(digest.finalize()))
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }
 
 fn write_frame(

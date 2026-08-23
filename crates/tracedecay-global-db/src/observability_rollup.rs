@@ -7,8 +7,8 @@
 //! before any cell payload or exact population count leaves storage.
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tracedecay_domain::CoverageStateV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
 use crate::RegisteredGlobalDb;
@@ -370,7 +370,7 @@ fn validate_fragment_json(fragment_json: &str) -> Result<(), String> {
 fn digest_json(value: &impl Serialize) -> Result<String, String> {
     let encoded = serde_json::to_vec(value)
         .map_err(|error| format!("failed to serialize observability rollup digest: {error}"))?;
-    Ok(hex::encode(Sha256::digest(encoded)))
+    Ok(sha256_hex(&encoded))
 }
 
 async fn read_published_generation(

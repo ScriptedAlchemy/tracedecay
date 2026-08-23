@@ -39,8 +39,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::ProjectId;
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
@@ -91,7 +91,7 @@ pub(crate) struct ManualBranchArtifactsV1 {
 
 impl ManualBranchArtifactsV1 {
     pub(crate) fn for_branch(data_root: &Path, branch: &str) -> Self {
-        let branch_digest = hex::encode(Sha256::digest(branch.as_bytes()));
+        let branch_digest = sha256_hex(branch.as_bytes());
         Self {
             branch: branch.to_owned(),
             worktree: data_root.join("branch-worktrees").join(&branch_digest),

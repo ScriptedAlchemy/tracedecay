@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphIdempotencyKey, GraphNamespace,
@@ -117,9 +117,7 @@ pub(crate) struct GraphPublicationDigests {
 }
 
 impl GraphPublication {
-    pub(crate) fn validate_and_digest(
-        &mut self,
-    ) -> Result<GraphPublicationDigests, GraphDbError> {
+    pub(crate) fn validate_and_digest(&mut self) -> Result<GraphPublicationDigests, GraphDbError> {
         if self.cancellation.is_cancelled() || self.batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -145,7 +143,7 @@ impl GraphPublication {
             GraphDbError::invalid(format!("failed to canonicalize publication: {error}"))
         })?;
         Ok(GraphPublicationDigests {
-            publication: hex::encode(Sha256::digest(canonical)),
+            publication: sha256_hex(&canonical),
             batch: batch_digest,
         })
     }

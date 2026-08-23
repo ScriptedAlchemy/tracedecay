@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::watch;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 #[cfg(feature = "semantic-fastembed")]
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};

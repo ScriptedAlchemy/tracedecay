@@ -6,6 +6,8 @@ use parking_lot::RawRwLock;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use sha2::{Digest, Sha256};
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_store::runtime::GraphVerifiedHeadV1;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use tracedecay_store::runtime::{
@@ -221,9 +223,9 @@ impl VerifiedGraphSnapshot {
                 GraphPublicationIdempotencyKeyV1::new("graph-memory-publication")
                     .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             ),
-            input_digest: GraphPublicationInputDigestV1::new(format!(
-                "sha256:{}",
-                hex::encode(Sha256::digest(recovered_digest.as_str().as_bytes()))
+            input_digest: GraphPublicationInputDigestV1::new(encode_tagged_lowercase_hex(
+                "sha256:",
+                &Sha256::digest(recovered_digest.as_str().as_bytes()),
             ))
             .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             dependency_generation_closure_digest: manifest.dependency_closure_digest(&check)?,

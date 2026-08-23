@@ -1,5 +1,6 @@
 use grafeo_engine::GrafeoDB;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
 
 use crate::GraphDbError;
@@ -124,5 +125,5 @@ pub(crate) fn recovered_generation_digest_from_database(
         write_frame(&mut writer, "relation", &bytes)?;
     }
     writer.finish()?;
-    Ok(hex::encode(digest.finalize()))
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }

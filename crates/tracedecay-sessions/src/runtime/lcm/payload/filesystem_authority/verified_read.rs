@@ -1,6 +1,9 @@
-use super::*;
-use sha2::Digest;
 use std::io::{Read, Seek, SeekFrom};
+
+use sha2::Digest;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
+
+use super::*;
 
 pub(in crate::runtime::lcm::payload) fn read_verified_payload_text(
     path: &Path,
@@ -175,7 +178,7 @@ fn scan_utf8_content(
     }
     utf8.finish()?;
     checkpoint()?;
-    Ok((hex::encode(hasher.finalize()), char_count))
+    Ok((encode_lowercase_hex(&hasher.finalize()), char_count))
 }
 
 #[derive(Default)]

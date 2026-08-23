@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(any(test, feature = "semantic-fastembed"))]
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
@@ -689,7 +689,7 @@ impl LifecycleInstallArtifactV1 {
                 "cataloged lifecycle member cannot be read",
             )
         })?;
-        if hex::encode(Sha256::digest(&bytes)) != pin.sha256 {
+        if sha256_hex(&bytes) != pin.sha256 {
             return Err(fastembed_failure(
                 RuntimeFailureKindV1::CorruptArtifact,
                 "cataloged lifecycle member no longer matches its digest pin",

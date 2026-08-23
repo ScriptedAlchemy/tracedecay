@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 pub const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
@@ -18,7 +18,7 @@ pub struct RelatedMessageCopyIdentity<'a> {
 }
 
 pub fn projected_content_hash(content: &str) -> String {
-    hex::encode(Sha256::digest(content.as_bytes()))
+    sha256_hex(content.as_bytes())
 }
 
 pub fn derived_text_for_index(raw: &str) -> String {

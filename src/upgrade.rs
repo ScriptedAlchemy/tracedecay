@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
@@ -149,7 +151,7 @@ fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
 }
 
 fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
-    let actual = hex::encode(Sha256::digest(bytes));
+    let actual = sha256_hex(bytes);
     if actual == expected {
         return Ok(());
     }

@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 #[path = "sqlite_snapshot_connection.rs"]
 mod connection;
@@ -514,7 +515,7 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     if family_state(path)? != before {
         return Err(changed_during_snapshot(path));
     }
-    Ok(hex::encode(hash.finalize()))
+    Ok(encode_lowercase_hex(&hash.finalize()))
 }
 
 /// How long a bounded probe waits on a lock before giving up.

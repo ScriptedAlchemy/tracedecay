@@ -5,9 +5,10 @@
 //! project graph runtime and every query is evaluated from its verified
 //! snapshot. SQLite retains only resumable-history receipts and watermarks.
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::SessionMessageRecord;
@@ -879,7 +880,7 @@ fn commit_record_order(
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    sha256_hex(bytes)
 }
 
 fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {

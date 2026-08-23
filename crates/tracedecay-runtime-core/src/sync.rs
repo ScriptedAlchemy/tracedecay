@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 /// Read a source file to a UTF-8 string, transparently handling UTF-16 LE/BE
 /// (detected via BOM). Returns an IO error only when the file genuinely cannot
@@ -90,8 +90,5 @@ pub fn file_stat(path: &Path) -> Option<(i64, u64)> {
 
 /// Compute SHA-256 content hash of file content.
 pub fn content_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(result)
+    sha256_hex(content.as_bytes())
 }

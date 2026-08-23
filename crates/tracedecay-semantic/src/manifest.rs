@@ -9,9 +9,8 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_domain::canonical_text::is_lowercase_hex;
+use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 pub use tracedecay_domain::{
     EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
@@ -40,9 +39,7 @@ impl Sha256DigestHex {
     }
 
     pub fn of_bytes(bytes: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        Self(hex::encode(hasher.finalize()))
+        Self(sha256_hex(bytes))
     }
 
     pub fn as_str(&self) -> &str {
@@ -245,9 +242,8 @@ impl ModelArtifactManifestV1 {
     /// fields in declaration order and the manifest contains no maps, so this
     /// encoding is byte-stable across processes and platforms.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ManifestValidationErrorV1> {
-        serde_json::to_vec(self).map_err(|error| {
-            ManifestValidationErrorV1::NonCanonicalEncoding(error.to_string())
-        })
+        serde_json::to_vec(self)
+            .map_err(|error| ManifestValidationErrorV1::NonCanonicalEncoding(error.to_string()))
     }
 
     /// SHA-256 over `canonical_bytes`. Stable manifest and artifact identity.
@@ -528,7 +524,8 @@ mod tests {
     fn canonical_bytes_and_digest_are_stable_across_reserialization() {
         let manifest = sample_manifest();
         let first = manifest.canonical_bytes().unwrap();
-        let reparsed = ModelArtifactManifestV1::parse(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        let reparsed =
+            ModelArtifactManifestV1::parse(&manifest.to_canonical_bytes().unwrap()).unwrap();
         let second = reparsed.canonical_bytes().unwrap();
         assert_eq!(first, second);
         assert_eq!(manifest.canonical_digest(), reparsed.canonical_digest());

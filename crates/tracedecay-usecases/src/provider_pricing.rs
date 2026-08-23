@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 /// Curated static snapshot of the `OpenRouter` response (same JSON shape).
 const FALLBACK_JSON: &str = include_str!("model_prices_fallback.json");
@@ -215,9 +216,9 @@ pub fn load_table() -> &'static PriceTable {
             available,
             models,
             source: "bundled",
-            revision: format!(
-                "sha256:{}",
-                hex::encode(Sha256::digest(FALLBACK_JSON.as_bytes()))
+            revision: encode_tagged_lowercase_hex(
+                "sha256:",
+                &Sha256::digest(FALLBACK_JSON.as_bytes()),
             ),
         }
     })
