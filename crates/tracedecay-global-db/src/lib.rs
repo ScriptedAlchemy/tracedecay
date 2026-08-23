@@ -182,6 +182,9 @@ mod observability_outbox_tests;
 mod observability_rollup_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod observation_batch_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod observation_collision_tests;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

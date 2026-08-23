@@ -943,6 +943,16 @@ pub trait ObservationStore: Send + Sync {
         write: AnchoredObservationWrite,
     ) -> impl Future<Output = ObservationStoreResult<ObservationPersistOutcome>> + Send;
 
+    /// Persist a bounded admission batch through one store-owned writer
+    /// transaction. An empty `writes` returns an empty outcome list and must
+    /// not mint a success that skipped cursor, collision, or file-identity
+    /// authority. Implementations cannot default this to N one-record
+    /// transactions; test fakes have to name the batch contract.
+    fn persist_observations(
+        &self,
+        writes: Vec<AnchoredObservationWrite>,
+    ) -> impl Future<Output = ObservationStoreResult<Vec<ObservationPersistOutcome>>> + Send;
+
     fn get_source_cursor(
         &self,
         source: &ObservationSourceIdentityV1,
