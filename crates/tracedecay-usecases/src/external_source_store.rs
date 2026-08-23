@@ -433,7 +433,6 @@ impl RuntimeExternalSourceStore {
         let mut states = std::collections::BTreeMap::new();
         let mut settled = vec![None; receipts.len()];
         let mut pending_commits = Vec::new();
-        let mut pending_slots = Vec::new();
         for (slot, receipt) in receipts.iter().enumerate() {
             let (_, _, binding_identity) = host_source_authority(receipt, self.runtime.binding())?;
             if !states.contains_key(&binding_identity) {
@@ -470,6 +469,7 @@ impl RuntimeExternalSourceStore {
             }
             match apply_source_commit(current, commit.clone()).map_err(invalid)? {
                 SourceCommitApplyOutcomeV1::Committed(state) => {
+                    settled[slot] = Some((binding_identity.clone(), state.receipt().clone()));
                     states.insert(binding_identity.clone(), Some(*state));
                 }
                 SourceCommitApplyOutcomeV1::ExactDuplicate(receipt) => {
@@ -477,7 +477,6 @@ impl RuntimeExternalSourceStore {
                     continue;
                 }
             }
-            pending_slots.push((slot, binding_identity));
             pending_commits.push(commit);
         }
         if !pending_commits.is_empty() {
@@ -522,16 +521,6 @@ impl RuntimeExternalSourceStore {
                     return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
                 }
                 _ => return Err(RuntimeExternalSourceErrorV1::Unavailable),
-            }
-            for ((slot, binding_identity), commit) in
-                pending_slots.into_iter().zip(&pending_commits)
-            {
-                settled[slot] = Some((
-                    binding_identity.clone(),
-                    self.read_receipt(binding_identity, commit.idempotency_key().clone())
-                        .await?
-                        .ok_or(RuntimeExternalSourceErrorV1::Unavailable)?,
-                ));
             }
         }
         let mut projection_pending = std::collections::BTreeMap::new();
