@@ -195,6 +195,7 @@ where
         self.admit_with_fan_out(run_id, definition, admission, Vec::new(), context)
     }
 
+    #[hotpath::measure]
     pub fn admit_with_fan_out(
         &self,
         run_id: RunId,
@@ -229,6 +230,7 @@ where
             .into_projection())
     }
 
+    #[hotpath::measure]
     pub fn apply(
         &self,
         run_id: &RunId,
