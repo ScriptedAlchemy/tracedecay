@@ -8,7 +8,6 @@ use serde_json::Value;
 #[cfg(feature = "test-transport")]
 use serde_json::json;
 use std::ffi::OsString;
-use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]

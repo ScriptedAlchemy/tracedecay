@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
