@@ -19,6 +19,7 @@ pub(crate) enum HydrationSource {
 }
 
 impl HydrationSource {
+    #[cfg(feature = "hotpath")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Live => "live",
@@ -46,28 +47,47 @@ pub(crate) const LOCK_WAIT_SNAPSHOT_GATE_UPGRADE: &str = "graph_db.lock.wait.sna
 pub(crate) const LOCK_WAIT_REGISTRY: &str = "graph_db.lock.wait.registry";
 pub(crate) const LOCK_WAIT_VERIFIED_GENERATIONS: &str = "graph_db.lock.wait.verified_generations";
 
-#[inline]
+#[inline(always)]
 pub(crate) fn wait_lock<T>(label: &'static str, acquire: impl FnOnce() -> T) -> T {
-    // Feature-off `measure_block!` drops the label; keep the argument live so
-    // the same call sites compile without unused-variable warnings.
-    let _ = label;
-    hotpath::measure_block!(label, acquire())
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::measure_block!(label, acquire())
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = label;
+        acquire()
+    }
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn record_counts(
     nodes: usize,
     edges: usize,
     replay_rows: usize,
     generation_bytes: usize,
 ) {
-    hotpath::gauge!("graph_db.nodes").set(nodes as f64);
-    hotpath::gauge!("graph_db.edges").set(edges as f64);
-    hotpath::gauge!("graph_db.replay_rows").set(replay_rows as f64);
-    hotpath::gauge!("graph_db.generation_bytes").set(generation_bytes as f64);
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("graph_db.nodes").set(nodes as f64);
+        hotpath::gauge!("graph_db.edges").set(edges as f64);
+        hotpath::gauge!("graph_db.replay_rows").set(replay_rows as f64);
+        hotpath::gauge!("graph_db.generation_bytes").set(generation_bytes as f64);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = (nodes, edges, replay_rows, generation_bytes);
+    }
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn record_hydration_source(source: HydrationSource) {
-    hotpath::val!("graph_db.hydration_source").set(&source.as_str());
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::val!("graph_db.hydration_source").set(&source.as_str());
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = source;
+    }
 }

@@ -156,14 +156,17 @@ impl GraphDb {
             return Ok(commit);
         }
         let pages = generation_stage_pages(manifest)?;
-        let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
-        crate::hotpath::record_counts(
-            manifest.entities.len(),
-            manifest.relations.len(),
-            0,
-            generation_bytes,
-        );
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Staged);
+        #[cfg(feature = "hotpath")]
+        {
+            let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
+            crate::hotpath::record_counts(
+                manifest.entities.len(),
+                manifest.relations.len(),
+                0,
+                generation_bytes,
+            );
+            crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Staged);
+        }
         for (index, page) in pages.iter().enumerate() {
             check()?;
             self.apply_generation_stage_page_with_context(
@@ -908,12 +911,15 @@ impl GraphDb {
                 }
             }
         }
-        let edges = visits
-            .iter()
-            .filter(|visit| visit.via_relation.is_some())
-            .count();
-        crate::hotpath::record_counts(visits.len(), edges, 0, 0);
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = visits
+                .iter()
+                .filter(|visit| visit.via_relation.is_some())
+                .count();
+            crate::hotpath::record_counts(visits.len(), edges, 0, 0);
+            crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        }
         Ok(VerifiedTraversalResult { visits })
     }
 

@@ -393,13 +393,16 @@ impl GraphDb {
         let result = traversal::traverse(database, request, &|namespace, projection| {
             self.ensure_projection_readable(namespace, projection)
         })?;
-        let edges = result
-            .visits
-            .iter()
-            .filter(|visit| visit.via_relation.is_some())
-            .count();
-        crate::hotpath::record_counts(result.visits.len(), edges, 0, 0);
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = result
+                .visits
+                .iter()
+                .filter(|visit| visit.via_relation.is_some())
+                .count();
+            crate::hotpath::record_counts(result.visits.len(), edges, 0, 0);
+            crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        }
         Ok(result)
     }
 
@@ -471,9 +474,12 @@ impl GraphDb {
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
         )?;
-        let edges = batches.iter().map(Vec::len).sum();
-        crate::hotpath::record_counts(starts.len(), edges, 0, 0);
-        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        }
         Ok(batches)
     }
 
