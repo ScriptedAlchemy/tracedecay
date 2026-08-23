@@ -349,7 +349,8 @@ impl FinalizationWakeMetricsV1 {
                     .inc(1u64);
             }
             FinalizationSectionV1::ImportEvidence => {
-                hotpath::gauge!("query.artifact.finalization.phase.import_evidence_total").inc(1u64);
+                hotpath::gauge!("query.artifact.finalization.phase.import_evidence_total")
+                    .inc(1u64);
             }
             FinalizationSectionV1::Rows => {
                 hotpath::gauge!("query.artifact.finalization.phase.rows_total").inc(1u64);
