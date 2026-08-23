@@ -171,6 +171,7 @@ impl SharedRetainedParsePool {
             .map(|(report, _)| report)
     }
 
+    #[hotpath::measure]
     pub fn parse_and_extract(
         &self,
         identity: ParseDocumentIdentity,
