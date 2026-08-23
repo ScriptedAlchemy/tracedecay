@@ -175,7 +175,14 @@ impl RetainedParseDocument {
             ParsedExtractionDisposition::Reset {
                 reason: ParsedExtractionResetReason::CompositeGrammar,
             } => ParsedExtractionArtifactV1::reset(
-                extractor.extract_artifact(self.identity.logical_path(), &self.source),
+                // Markdown is the sole composite-grammar producer and uses
+                // the default artifact shape. Build it directly so this
+                // fallback does not re-enter the full traversal span.
+                crate::hotpath_observe::measure_markdown_composite_fallback(|| {
+                    ExtractionArtifactV1::from_result(
+                        extractor.extract(self.identity.logical_path(), &self.source),
+                    )
+                }),
                 ParsedExtractionResetReason::CompositeGrammar,
                 self.source.len(),
             ),

@@ -92,35 +92,69 @@ pub(crate) fn file_byte_bucket(bytes: usize) -> &'static str {
 }
 
 #[cfg(feature = "hotpath")]
-fn record_file_dims(language: &str, source_bytes: usize) {
+fn record_parse_dims(language: &str, source_bytes: usize) {
+    hotpath::gauge!("code_extraction.parse_calls").inc(1.0);
+    hotpath::gauge!("code_extraction.parse_bytes").inc(source_bytes as f64);
     match language_family(language) {
-        "systems" => hotpath::gauge!("code_extraction.files.systems").inc(1.0),
-        "jvm" => hotpath::gauge!("code_extraction.files.jvm").inc(1.0),
-        "dotnet" => hotpath::gauge!("code_extraction.files.dotnet").inc(1.0),
-        "web" => hotpath::gauge!("code_extraction.files.web").inc(1.0),
-        "python" => hotpath::gauge!("code_extraction.files.python").inc(1.0),
-        "go" => hotpath::gauge!("code_extraction.files.go").inc(1.0),
-        "managed" => hotpath::gauge!("code_extraction.files.managed").inc(1.0),
-        "scripting" => hotpath::gauge!("code_extraction.files.scripting").inc(1.0),
-        "functional" => hotpath::gauge!("code_extraction.files.functional").inc(1.0),
-        "data" => hotpath::gauge!("code_extraction.files.data").inc(1.0),
-        "markup" => hotpath::gauge!("code_extraction.files.markup").inc(1.0),
-        "shader" => hotpath::gauge!("code_extraction.files.shader").inc(1.0),
-        "basic" => hotpath::gauge!("code_extraction.files.basic").inc(1.0),
-        "spec" => hotpath::gauge!("code_extraction.files.spec").inc(1.0),
-        _ => hotpath::gauge!("code_extraction.files.other").inc(1.0),
+        "systems" => hotpath::gauge!("code_extraction.parse_calls.systems").inc(1.0),
+        "jvm" => hotpath::gauge!("code_extraction.parse_calls.jvm").inc(1.0),
+        "dotnet" => hotpath::gauge!("code_extraction.parse_calls.dotnet").inc(1.0),
+        "web" => hotpath::gauge!("code_extraction.parse_calls.web").inc(1.0),
+        "python" => hotpath::gauge!("code_extraction.parse_calls.python").inc(1.0),
+        "go" => hotpath::gauge!("code_extraction.parse_calls.go").inc(1.0),
+        "managed" => hotpath::gauge!("code_extraction.parse_calls.managed").inc(1.0),
+        "scripting" => hotpath::gauge!("code_extraction.parse_calls.scripting").inc(1.0),
+        "functional" => hotpath::gauge!("code_extraction.parse_calls.functional").inc(1.0),
+        "data" => hotpath::gauge!("code_extraction.parse_calls.data").inc(1.0),
+        "markup" => hotpath::gauge!("code_extraction.parse_calls.markup").inc(1.0),
+        "shader" => hotpath::gauge!("code_extraction.parse_calls.shader").inc(1.0),
+        "basic" => hotpath::gauge!("code_extraction.parse_calls.basic").inc(1.0),
+        "spec" => hotpath::gauge!("code_extraction.parse_calls.spec").inc(1.0),
+        _ => hotpath::gauge!("code_extraction.parse_calls.other").inc(1.0),
     };
     match file_byte_bucket(source_bytes) {
-        "le_1kib" => hotpath::gauge!("code_extraction.files.le_1kib").inc(1.0),
-        "le_4kib" => hotpath::gauge!("code_extraction.files.le_4kib").inc(1.0),
-        "le_16kib" => hotpath::gauge!("code_extraction.files.le_16kib").inc(1.0),
-        "le_64kib" => hotpath::gauge!("code_extraction.files.le_64kib").inc(1.0),
-        "le_256kib" => hotpath::gauge!("code_extraction.files.le_256kib").inc(1.0),
-        "le_1mib" => hotpath::gauge!("code_extraction.files.le_1mib").inc(1.0),
-        "le_2mib" => hotpath::gauge!("code_extraction.files.le_2mib").inc(1.0),
-        _ => hotpath::gauge!("code_extraction.files.gt_2mib").inc(1.0),
+        "le_1kib" => hotpath::gauge!("code_extraction.parse_calls.le_1kib").inc(1.0),
+        "le_4kib" => hotpath::gauge!("code_extraction.parse_calls.le_4kib").inc(1.0),
+        "le_16kib" => hotpath::gauge!("code_extraction.parse_calls.le_16kib").inc(1.0),
+        "le_64kib" => hotpath::gauge!("code_extraction.parse_calls.le_64kib").inc(1.0),
+        "le_256kib" => hotpath::gauge!("code_extraction.parse_calls.le_256kib").inc(1.0),
+        "le_1mib" => hotpath::gauge!("code_extraction.parse_calls.le_1mib").inc(1.0),
+        "le_2mib" => hotpath::gauge!("code_extraction.parse_calls.le_2mib").inc(1.0),
+        _ => hotpath::gauge!("code_extraction.parse_calls.gt_2mib").inc(1.0),
     };
-    hotpath::gauge!("code_extraction.source_bytes").inc(source_bytes as f64);
+}
+
+#[cfg(feature = "hotpath")]
+fn record_traverse_dims(language: &str, source_bytes: usize) {
+    hotpath::gauge!("code_extraction.traverse_calls").inc(1.0);
+    hotpath::gauge!("code_extraction.traverse_bytes").inc(source_bytes as f64);
+    match language_family(language) {
+        "systems" => hotpath::gauge!("code_extraction.traverse_calls.systems").inc(1.0),
+        "jvm" => hotpath::gauge!("code_extraction.traverse_calls.jvm").inc(1.0),
+        "dotnet" => hotpath::gauge!("code_extraction.traverse_calls.dotnet").inc(1.0),
+        "web" => hotpath::gauge!("code_extraction.traverse_calls.web").inc(1.0),
+        "python" => hotpath::gauge!("code_extraction.traverse_calls.python").inc(1.0),
+        "go" => hotpath::gauge!("code_extraction.traverse_calls.go").inc(1.0),
+        "managed" => hotpath::gauge!("code_extraction.traverse_calls.managed").inc(1.0),
+        "scripting" => hotpath::gauge!("code_extraction.traverse_calls.scripting").inc(1.0),
+        "functional" => hotpath::gauge!("code_extraction.traverse_calls.functional").inc(1.0),
+        "data" => hotpath::gauge!("code_extraction.traverse_calls.data").inc(1.0),
+        "markup" => hotpath::gauge!("code_extraction.traverse_calls.markup").inc(1.0),
+        "shader" => hotpath::gauge!("code_extraction.traverse_calls.shader").inc(1.0),
+        "basic" => hotpath::gauge!("code_extraction.traverse_calls.basic").inc(1.0),
+        "spec" => hotpath::gauge!("code_extraction.traverse_calls.spec").inc(1.0),
+        _ => hotpath::gauge!("code_extraction.traverse_calls.other").inc(1.0),
+    };
+    match file_byte_bucket(source_bytes) {
+        "le_1kib" => hotpath::gauge!("code_extraction.traverse_calls.le_1kib").inc(1.0),
+        "le_4kib" => hotpath::gauge!("code_extraction.traverse_calls.le_4kib").inc(1.0),
+        "le_16kib" => hotpath::gauge!("code_extraction.traverse_calls.le_16kib").inc(1.0),
+        "le_64kib" => hotpath::gauge!("code_extraction.traverse_calls.le_64kib").inc(1.0),
+        "le_256kib" => hotpath::gauge!("code_extraction.traverse_calls.le_256kib").inc(1.0),
+        "le_1mib" => hotpath::gauge!("code_extraction.traverse_calls.le_1mib").inc(1.0),
+        "le_2mib" => hotpath::gauge!("code_extraction.traverse_calls.le_2mib").inc(1.0),
+        _ => hotpath::gauge!("code_extraction.traverse_calls.gt_2mib").inc(1.0),
+    };
 }
 
 /// Time one file parse. `output_count` is a file-level count (root children),
@@ -134,7 +168,7 @@ pub(crate) fn measure_parse_file<T>(
 ) -> T {
     #[cfg(feature = "hotpath")]
     {
-        record_file_dims(language, source_bytes);
+        record_parse_dims(language, source_bytes);
         let result = hotpath::measure_block!("code_extraction.parse_file", f());
         hotpath::gauge!("code_extraction.parse.root_children").inc(output_count(&result) as f64);
         result
@@ -156,8 +190,8 @@ pub(crate) fn measure_extract_file<T>(
 ) -> T {
     #[cfg(feature = "hotpath")]
     {
-        record_file_dims(language, source_bytes);
-        let result = hotpath::measure_block!("code_extraction.extract_file", f());
+        record_traverse_dims(language, source_bytes);
+        let result = hotpath::measure_block!("code_extraction.traverse_file", f());
         let counts = counts(&result);
         hotpath::gauge!("code_extraction.extract.nodes").inc(counts.nodes as f64);
         hotpath::gauge!("code_extraction.extract.edges").inc(counts.edges as f64);
@@ -169,6 +203,21 @@ pub(crate) fn measure_extract_file<T>(
     #[cfg(not(feature = "hotpath"))]
     {
         let _ = (language, source_bytes, counts);
+        f()
+    }
+}
+
+/// Time the Markdown composite-grammar fallback without recursively recording
+/// another full-file traversal.
+#[inline]
+pub(crate) fn measure_markdown_composite_fallback<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("code_extraction.markdown_composite_fallback_calls").inc(1.0);
+        hotpath::measure_block!("code_extraction.markdown_composite_fallback", f())
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
         f()
     }
 }
