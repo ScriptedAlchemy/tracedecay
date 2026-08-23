@@ -77,7 +77,7 @@ fn transaction_close_records_commands_rows_lock_and_outcomes() {
             vm_steps: 6,
         },
         lock_work: WriterLockWorkSnapshot {
-            bytes_hashed: 16,
+            bytes_encoded: 16,
             bytes_decoded: 32,
         },
     });
@@ -114,7 +114,7 @@ fn transaction_close_records_commands_rows_lock_and_outcomes() {
     assert_eq!(snapshot.sqlite_vm.fullscan_steps, 1);
     assert_eq!(snapshot.sqlite_vm.sort_steps, 2);
     assert_eq!(snapshot.sqlite_vm.vm_steps, 6);
-    assert_eq!(snapshot.lock_work.bytes_hashed, 16);
+    assert_eq!(snapshot.lock_work.bytes_encoded, 16);
     assert_eq!(snapshot.lock_work.bytes_decoded, 32);
 }
 

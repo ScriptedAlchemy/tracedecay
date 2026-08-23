@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tracedecay_store::{CommitSequenceV1, DurabilityClassV1, OperationPriorityV1, StoreClientIdV1};
 
-pub(crate) use lock_work::{LockWorkScope, record_decoded_bytes, record_hashed_bytes};
+pub(crate) use lock_work::{LockWorkScope, record_decoded_bytes, record_encoded_bytes};
 pub(crate) use reader::ReaderAdmissionRecorder;
 pub(crate) use recorder::WriterTelemetry;
 pub(crate) use sqlite_vm::{observe_statement, take_observed_vm};
@@ -163,7 +163,7 @@ pub struct WalCheckpointSample {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WriterLockWorkSnapshot {
-    pub bytes_hashed: u64,
+    pub bytes_encoded: u64,
     pub bytes_decoded: u64,
 }
 

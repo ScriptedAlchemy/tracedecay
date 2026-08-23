@@ -220,11 +220,11 @@ impl WriterTelemetry {
                 .transaction_micros
                 .saturating_add(metrics.transaction_micros);
             state.snapshot.sqlite_vm = state.snapshot.sqlite_vm.saturating_add(metrics.sqlite_vm);
-            state.snapshot.lock_work.bytes_hashed = state
+            state.snapshot.lock_work.bytes_encoded = state
                 .snapshot
                 .lock_work
-                .bytes_hashed
-                .saturating_add(metrics.lock_work.bytes_hashed);
+                .bytes_encoded
+                .saturating_add(metrics.lock_work.bytes_encoded);
             state.snapshot.lock_work.bytes_decoded = state
                 .snapshot
                 .lock_work
@@ -272,11 +272,11 @@ impl WriterTelemetry {
                 .transaction_micros
                 .saturating_add(elapsed_micros);
             state.snapshot.sqlite_vm = state.snapshot.sqlite_vm.saturating_add(sqlite_vm);
-            state.snapshot.lock_work.bytes_hashed = state
+            state.snapshot.lock_work.bytes_encoded = state
                 .snapshot
                 .lock_work
-                .bytes_hashed
-                .saturating_add(lock_work.bytes_hashed);
+                .bytes_encoded
+                .saturating_add(lock_work.bytes_encoded);
             state.snapshot.lock_work.bytes_decoded = state
                 .snapshot
                 .lock_work

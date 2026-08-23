@@ -77,7 +77,7 @@ pub(super) fn encode_json<T: CanonicalJson>(
     let encoded = value
         .encode()
         .map_err(|_| LedgerError::Encoding { value: field })?;
-    crate::telemetry::record_hashed_bytes(u64::try_from(encoded.len()).unwrap_or(u64::MAX));
+    crate::telemetry::record_encoded_bytes(u64::try_from(encoded.len()).unwrap_or(u64::MAX));
     Ok(encoded)
 }
 
