@@ -19,6 +19,7 @@ include = ["/src/**"]
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "hotpath/hotpath",
+    "hotpath/ureq-3",
     "tracedecay-application/hotpath",
     "tracedecay-automation/hotpath",
     "tracedecay-code-extraction/hotpath",

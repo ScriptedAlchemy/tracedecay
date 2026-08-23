@@ -213,16 +213,15 @@ fn scan_exact_commit_pull_request_v1(
         if request_timeout.is_zero() {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let builder = ureq::Agent::config_builder()
             .timeout_global(Some(request_timeout))
             .timeout_connect(Some(config.connect_timeout.min(request_timeout)))
             .timeout_recv_response(Some(config.socket_timeout.min(request_timeout)))
             .timeout_recv_body(Some(config.socket_timeout.min(request_timeout)))
             .https_only(true)
             .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
+            .http_status_as_error(false);
+        let agent: ureq::Agent = super::instrument_github_ureq_agent(builder).build().into();
         let authorization =
             match credential.authorization_header_for(GitHubReadPermissionV1::PullRequests) {
                 Ok(authorization) => authorization,
