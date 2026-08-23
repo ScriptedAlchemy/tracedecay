@@ -263,7 +263,8 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
                 &fixture.observations,
                 &fixture.cancellation,
             )
-            .await,
+            .await
+            .is_complete(),
             "pass {pass}: an unseated semantic runtime is an ordinary success, not a failure"
         );
         assert_eq!(
@@ -322,9 +323,37 @@ async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
             &fixture.observations,
             &fixture.cancellation,
             &crate::config::RetentionConfig::default(),
+            None,
         )
-        .await,
+        .await
+        .is_complete(),
         "the whole generation-maintenance unit succeeds while semantic stays unseated"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn semantic_vector_continuation_skips_code_generation_retention() {
+    let fixture = open_unseated_graph_fixture().await;
+    let before = sealed_generation_files(&fixture.store_root);
+
+    let outcome = crate::daemon::maintenance::generation::run_project_generation_maintenance(
+        &fixture.graph,
+        &fixture.schedulers,
+        &fixture.observations,
+        &fixture.cancellation,
+        &crate::config::RetentionConfig::default(),
+        Some(crate::daemon::maintenance::MaintenanceContinuation::SemanticVectorRetention),
+    )
+    .await;
+
+    assert!(
+        outcome.is_complete(),
+        "the quiet unseated semantic phase completes without escalating to a retry"
+    );
+    assert_eq!(
+        sealed_generation_files(&fixture.store_root),
+        before,
+        "a semantic-vector continuation must not re-run code-generation retention"
     );
 }
 
