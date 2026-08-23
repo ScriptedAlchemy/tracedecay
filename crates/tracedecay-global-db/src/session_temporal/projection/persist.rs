@@ -23,6 +23,13 @@ use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
 
+fn observation_envelope(
+    observation: &tracedecay_domain::DurableObservationV1,
+) -> SessionStoreResult<CanonicalObservationEnvelopeV1> {
+    serde_json::from_value(observation.payload().clone())
+        .map_err(|error| storage(PERSIST_OPERATION, error))
+}
+
 pub async fn session_temporal_projection_record_count(
     conn: &impl QueryExecutor,
     session_id: &SessionId,
@@ -245,9 +252,7 @@ pub(super) async fn persist_occurrence(
         )
         .await?;
     }
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let envelope = observation_envelope(&observation)?;
     if let Some(parent_agent_id) = envelope.relations().parent_agent_id() {
         ensure_agent(
             conn,
@@ -372,9 +377,7 @@ pub(super) async fn canonical_occurrence(
     projection: &tracedecay_store::ObservationProjection,
     output_ordinal: u32,
 ) -> SessionStoreResult<MessageOccurrenceRecordV1> {
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let envelope = observation_envelope(observation)?;
     let output = projection
         .messages()
         .find(|candidate| candidate.output_ordinal() == output_ordinal)
@@ -645,54 +648,60 @@ pub(super) async fn validate_copy(
 ) -> SessionStoreResult<bool> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     validate_copy_proof(conn, batch, copy).await?;
+    let mut rows = conn
+        .query(
+            "SELECT occurrence_id, knowledge_at, valid_time_json
+             FROM session_occurrences
+             WHERE session_id = ?1 AND generation = ?2
+               AND occurrence_id IN (?3, ?4)",
+            params![
+                batch.session_id().as_str(),
+                generation,
+                copy.occurrence_id.as_str(),
+                copy.copied_from_occurrence_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let mut seen_source = false;
     let mut target_knowledge_at = None;
     let mut target_valid_time = None;
-    for occurrence_id in [&copy.occurrence_id, &copy.copied_from_occurrence_id] {
-        let mut rows = conn
-            .query(
-                "SELECT knowledge_at, valid_time_json FROM session_occurrences
-                 WHERE session_id = ?1 AND generation = ?2 AND occurrence_id = ?3",
-                params![
-                    batch.session_id().as_str(),
-                    generation,
-                    occurrence_id.as_str()
-                ],
-            )
-            .await
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        let occurrence_id: String = row
+            .get(0)
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?
-            .ok_or_else(|| {
-                storage_message(
-                    PERSIST_OPERATION,
-                    "logical copy endpoint is outside the owning session generation",
-                )
-            })?;
-        if occurrence_id == &copy.occurrence_id {
+        if occurrence_id == copy.occurrence_id.as_str() {
             target_knowledge_at = Some(
-                row.get::<i64>(0)
+                row.get::<i64>(1)
                     .map_err(|error| storage(PERSIST_OPERATION, error))?,
             );
             target_valid_time = Some(
-                row.get::<String>(1)
+                row.get::<String>(2)
                     .map_err(|error| storage(PERSIST_OPERATION, error))?,
             );
         }
+        if occurrence_id == copy.copied_from_occurrence_id.as_str() {
+            seen_source = true;
+        }
     }
-    let target_knowledge_at = target_knowledge_at.ok_or_else(|| {
-        storage_message(
+    let (Some(target_knowledge_at), Some(target_valid_time)) =
+        (target_knowledge_at, target_valid_time)
+    else {
+        return Err(storage_message(
             PERSIST_OPERATION,
-            "logical copy target knowledge_at is missing",
-        )
-    })?;
-    let target_valid_time = target_valid_time.ok_or_else(|| {
-        storage_message(
+            "logical copy endpoint is outside the owning session generation",
+        ));
+    };
+    if !seen_source {
+        return Err(storage_message(
             PERSIST_OPERATION,
-            "logical copy target valid_time is missing",
-        )
-    })?;
+            "logical copy endpoint is outside the owning session generation",
+        ));
+    }
     let expected_valid_time = serde_json::to_string(&copy.valid_time)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     if copy.knowledge_at.0 != target_knowledge_at || expected_valid_time != target_valid_time {
@@ -745,8 +754,7 @@ pub(super) async fn occurrence_observation_and_anchor(
     let observation_id = tracedecay_domain::CanonicalObservationIdV1::new(observation_id)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let (_, observation) = read_observation(conn, &observation_id).await?;
-    let envelope = serde_json::from_value(observation.payload().clone())
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let envelope = observation_envelope(&observation)?;
     Ok((observation, envelope, anchor_id))
 }
 
@@ -1014,12 +1022,8 @@ pub(super) async fn validate_assertion(
         tracedecay_domain::CanonicalObservationIdV1::new(object_observation_id)
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let (_, object_observation) = read_observation(conn, &object_observation_id).await?;
-    let subject_envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let object_envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(object_observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let subject_envelope = observation_envelope(&observation)?;
+    let object_envelope = observation_envelope(&object_observation)?;
     let anchor: RetrievalAnchorRecord =
         serde_json::from_str(&anchor_json).map_err(|error| storage(PERSIST_OPERATION, error))?;
     let object_anchor: RetrievalAnchorRecord = serde_json::from_str(&object_anchor_json)

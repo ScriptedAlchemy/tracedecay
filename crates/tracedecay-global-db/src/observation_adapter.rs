@@ -243,9 +243,8 @@ impl ObservationStore for GlobalDbObservationStore {
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
         let runtime = &self.runtime;
-        let observation_id = write.observation().observation_id().clone();
-        let candidate = write.observation().clone();
-        let candidate_cursor = write.next_cursor().clone();
+        let observation = write.observation();
+        let observation_id = observation.observation_id().clone();
         // A previously refused identity collision is deterministic and
         // terminal. The refusal authority is its own retained table keyed by
         // the exact refused candidate signature `(observation_id,
@@ -258,7 +257,7 @@ impl ObservationStore for GlobalDbObservationStore {
         if let Some(retained_digest) = read_admission_refusal(
             &self.database,
             &observation_id,
-            candidate.payload_reference().digest(),
+            observation.payload_reference().digest(),
         )
         .await?
         {
@@ -272,19 +271,18 @@ impl ObservationStore for GlobalDbObservationStore {
             // atomic authority transaction touching no record content.
             self.record_refusal_with_coverage(&write, &retained_digest)
                 .await?;
-            return Err(ObservationStoreError::ObservationCollision {
-                observation_id: Box::new(observation_id),
-                existing_digest: Box::new(retained_digest),
-                candidate_digest: Box::new(candidate.payload_reference().digest().clone()),
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-            });
+            return Err(identity_collision(
+                observation_id,
+                retained_digest,
+                observation.payload_reference().digest().clone(),
+            ));
         }
         let existing = read_runtime_stored_observation(runtime, &observation_id)?;
-        let collision = existing
-            .as_ref()
-            .map(|existing| classify_observation_collision(existing.observation(), &candidate));
+        let collision = existing.as_ref().map(|existing| {
+            classify_observation_collision(existing.observation(), observation)
+        });
         let canonical_payload_revision = existing.as_ref().is_some_and(|existing| {
-            is_canonical_payload_revision_replay(existing.observation(), &candidate)
+            is_canonical_payload_revision_replay(existing.observation(), observation)
         });
         if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision)
             && !canonical_payload_revision
@@ -325,14 +323,11 @@ impl ObservationStore for GlobalDbObservationStore {
                 existing.observation().payload_reference().digest(),
             )
             .await?;
-            return Err(ObservationStoreError::ObservationCollision {
-                observation_id: Box::new(observation_id),
-                existing_digest: Box::new(
-                    existing.observation().payload_reference().digest().clone(),
-                ),
-                candidate_digest: Box::new(candidate.payload_reference().digest().clone()),
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-            });
+            return Err(identity_collision(
+                observation_id,
+                existing.observation().payload_reference().digest().clone(),
+                observation.payload_reference().digest().clone(),
+            ));
         }
         if canonical_payload_revision {
             let Some(existing) = existing.as_ref() else {
@@ -341,7 +336,7 @@ impl ObservationStore for GlobalDbObservationStore {
                     "classified revision replay has no retained observation",
                 ));
             };
-            let identity = candidate.identity();
+            let identity = observation.identity();
             // A revision replay whose range the durable cursor already covers
             // has no missing coverage to restore. Advancing anyway would
             // collide with whatever advance already covers that range — e.g.
@@ -360,7 +355,7 @@ impl ObservationStore for GlobalDbObservationStore {
                     ObservationCommitReceipt::new(
                         existing.sequence(),
                         existing.observation().clone(),
-                        candidate_cursor,
+                        write.next_cursor().clone(),
                         existing.retrieval_anchor().clone(),
                         existing.projection_generation().clone(),
                     )?
@@ -377,7 +372,7 @@ impl ObservationStore for GlobalDbObservationStore {
                 write.expected_cursor().cloned(),
                 identity.position(),
                 ObservationCoverageReason::CanonicalPayloadRevision,
-                candidate.receipt().clone(),
+                observation.receipt().clone(),
             )?;
             match (
                 write.next_cursor().file_identity(),
@@ -399,7 +394,7 @@ impl ObservationStore for GlobalDbObservationStore {
                 ObservationCommitReceipt::new(
                     existing.sequence(),
                     existing.observation().clone(),
-                    candidate_cursor,
+                    write.next_cursor().clone(),
                     existing.retrieval_anchor().clone(),
                     existing.projection_generation().clone(),
                 )?
@@ -410,17 +405,17 @@ impl ObservationStore for GlobalDbObservationStore {
         }
         let same_identity = existing
             .as_ref()
-            .is_some_and(|existing| existing.observation().identity() == candidate.identity());
+            .is_some_and(|existing| existing.observation().identity() == observation.identity());
         if same_identity
             && existing
                 .as_ref()
-                .is_some_and(|existing| existing.observation().receipt() != candidate.receipt())
+                .is_some_and(|existing| existing.observation().receipt() != observation.receipt())
         {
             return Err(ObservationStoreError::SanitizationReceiptCollision);
         }
         for alias in write.retrieval_anchor().aliases() {
             if let Some(existing_anchor_id) =
-                read_runtime_retrieval_anchor_by_alias(runtime, candidate.scope(), alias)?
+                read_runtime_retrieval_anchor_by_alias(runtime, observation.scope(), alias)?
                 && existing_anchor_id != *write.retrieval_anchor_id()
             {
                 return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
@@ -434,9 +429,9 @@ impl ObservationStore for GlobalDbObservationStore {
             collision == Some(ObservationCollisionOutcomeV1::ExactDuplicate) && !same_identity;
         if existing.is_none() || covered_duplicate {
             let actual_cursor =
-                read_runtime_source_cursor(runtime, candidate.source(), candidate.scope())?;
+                read_runtime_source_cursor(runtime, observation.source(), observation.scope())?;
             let covered_duplicate_replay =
-                covered_duplicate && actual_cursor.as_ref() == Some(&candidate_cursor);
+                covered_duplicate && actual_cursor.as_ref() == Some(write.next_cursor());
             if !covered_duplicate_replay && actual_cursor.as_ref() != write.expected_cursor() {
                 return Err(ObservationStoreError::CursorConflict {
                     expected: Box::new(write.expected_cursor().cloned()),
@@ -447,7 +442,7 @@ impl ObservationStore for GlobalDbObservationStore {
         let existed_exact = same_identity
             && existing
                 .as_ref()
-                .is_some_and(|existing| existing.observation().receipt() == candidate.receipt());
+                .is_some_and(|existing| existing.observation().receipt() == observation.receipt());
         if existed_exact {
             let Some(existing) = existing.as_ref() else {
                 return Err(ObservationStoreError::Storage {
@@ -469,6 +464,8 @@ impl ObservationStore for GlobalDbObservationStore {
             )?;
         let idempotency_key =
             format!("observation.{}", runtime_digest_suffix(&command_digest)?);
+        let candidate = write.observation().clone();
+        let candidate_cursor = write.next_cursor().clone();
         let outcome = submit_runtime_write(
             runtime,
             RepositoryWritePayloadV1::Observation(Box::new(write)),
@@ -671,11 +668,24 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
     }
 }
 
+fn identity_collision(
+    observation_id: CanonicalObservationIdV1,
+    existing_digest: PayloadDigestV1,
+    candidate_digest: PayloadDigestV1,
+) -> ObservationStoreError {
+    ObservationStoreError::ObservationCollision {
+        observation_id: Box::new(observation_id),
+        existing_digest: Box::new(existing_digest),
+        candidate_digest: Box::new(candidate_digest),
+        outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+    }
+}
+
 fn dispatch_runtime_observation_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
-    let command_digest = canonical_sha256(&operation)
+    let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(&operation)
         .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
     let suffix = command_digest
         .as_str()
@@ -686,9 +696,7 @@ fn dispatch_runtime_observation_read(
                 "canonical digest prefix is invalid",
             )
         })?;
-    let admission_bytes = serde_json::to_vec(&operation)
-        .map_err(|error| runtime_storage_error("build observation runtime read", error))?
-        .len();
+    let admission_bytes = command_bytes.len();
     let requested_at = now_micros();
     let control = RuntimeRequestControlV1 {
         requested_at,

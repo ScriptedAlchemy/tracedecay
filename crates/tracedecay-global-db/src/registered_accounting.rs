@@ -43,30 +43,7 @@ impl RegisteredGlobalDb {
     /// absent row is `Ok(0)`. Every other outcome is a failed read and stays
     /// an error rather than becoming that same zero.
     pub async fn try_get_project_tokens(&self, project_path: &Path) -> Result<u64, String> {
-        let path = super::project_path_alias_key(project_path);
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT tokens_saved FROM projects WHERE path = ?1",
-                tracedecay_runtime_core::db::engine::params![path],
-            )
-            .await
-            .map_err(|error| format!("failed to query project tokens saved: {error}"))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read project tokens saved row: {error}"))?
-        else {
-            return Ok(0);
-        };
-        let total = row
-            .get::<i64>(0)
-            .map_err(|error| format!("failed to decode project tokens saved: {error}"))?;
-        u64::try_from(total)
-            .map_err(|_| format!("project tokens saved cannot be negative: {total}"))
+        self.try_tokens_saved(Some(project_path), "project").await
     }
 
     pub async fn get_project_tokens(&self, project_path: &Path) -> Option<u64> {
@@ -74,23 +51,34 @@ impl RegisteredGlobalDb {
     }
 
     pub async fn try_global_tokens_saved(&self) -> Result<u64, String> {
+        self.try_tokens_saved(None, "global").await
+    }
+
+    async fn try_tokens_saved(
+        &self,
+        project_path: Option<&Path>,
+        scope: &str,
+    ) -> Result<u64, String> {
+        let path = project_path.map(super::project_path_alias_key);
         let snapshot = self
             .read_snapshot()
             .await
             .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
+        let (sql, values) = tokens_saved_query(path.as_deref());
         let mut rows = snapshot
-            .query("SELECT COALESCE(SUM(tokens_saved), 0) FROM projects", ())
+            .query(&sql, values)
             .await
-            .map_err(|error| format!("failed to query global tokens saved: {error}"))?;
+            .map_err(|error| format!("failed to query {scope} tokens saved: {error}"))?;
         let row = rows
             .next()
             .await
-            .map_err(|error| format!("failed to read global tokens saved row: {error}"))?
-            .ok_or_else(|| "global tokens saved query returned no row".to_string())?;
+            .map_err(|error| format!("failed to read {scope} tokens saved row: {error}"))?
+            .ok_or_else(|| format!("{scope} tokens saved query returned no row"))?;
         let total = row
             .get::<i64>(0)
-            .map_err(|error| format!("failed to decode global tokens saved: {error}"))?;
-        u64::try_from(total).map_err(|_| format!("global tokens saved cannot be negative: {total}"))
+            .map_err(|error| format!("failed to decode {scope} tokens saved: {error}"))?;
+        u64::try_from(total)
+            .map_err(|_| format!("{scope} tokens saved cannot be negative: {total}"))
     }
 
     pub async fn global_tokens_saved(&self) -> Option<u64> {
@@ -274,6 +262,21 @@ impl RegisteredGlobalDb {
         }
         history
     }
+}
+
+fn tokens_saved_query(project_path: Option<&str>) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    push_optional_analytics_filter(&mut clauses, &mut values, "path", project_path);
+    let sql = if clauses.is_empty() {
+        "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects".to_string()
+    } else {
+        format!(
+            "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects WHERE {}",
+            clauses.join(" AND ")
+        )
+    };
+    (sql, values)
 }
 
 fn savings_scope_query(

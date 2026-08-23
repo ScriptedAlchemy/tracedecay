@@ -151,10 +151,12 @@ pub(super) async fn publish_candidate_generation(
              FROM session_temporal_generations WHERE session_id = ?1",
             params![session_id],
         )
-        .await?;
-    // An aggregate SELECT with COALESCE always returns exactly one row.
-    #[allow(clippy::unwrap_used)]
-    let max_generation: i64 = max_rows.next().await?.unwrap().get(0)?;
+            .await?;
+    let max_generation: i64 = max_rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("max generation query returned no row".to_string()))?
+        .get(0)?;
     let candidate = max_generation + 1;
     let (source_frontier, projection_frontier, summary_frontier, cursor_key) =
         if let Some(active) = active {
