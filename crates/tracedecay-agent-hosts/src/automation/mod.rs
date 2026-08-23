@@ -8,6 +8,7 @@ mod artifact_refs;
 pub mod artifacts;
 pub mod automatic_facts;
 pub mod backend;
+pub mod backend_identity;
 pub mod config;
 pub mod hermes_skill_bridge;
 pub mod host_receipts;
