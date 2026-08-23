@@ -138,6 +138,7 @@ impl ProcessResidentMemoryV1 {
         }
     }
 
+    #[hotpath::measure]
     pub fn reserve(
         self: &Arc<Self>,
         key: ResidentMemoryKeyV1,
@@ -213,6 +214,7 @@ impl ProcessResidentMemoryV1 {
         }
         state.used_bytes = next_used;
         *state.charges.entry(key.clone()).or_default() += requested_bytes.get();
+        crate::hotpath::resident_reserved(state.used_bytes);
         Some(ResidentMemoryReservationV1 {
             authority: Arc::clone(self),
             key: key.clone(),
@@ -249,6 +251,7 @@ impl ProcessResidentMemoryV1 {
     }
 
     fn admission_failure(&self, requested_bytes: NonZeroU64) -> ResidentMemoryAdmissionFailureV1 {
+        crate::hotpath::resident_refused();
         ResidentMemoryAdmissionFailureV1 {
             used_bytes: self.lock_state().used_bytes,
             requested_bytes: requested_bytes.get(),
@@ -274,6 +277,7 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= released_bytes;
+        crate::hotpath::gauge_set(crate::hotpath::RESIDENT_USED_BYTES, state.used_bytes);
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= released_bytes;
             if *charge == 0 {
@@ -289,6 +293,7 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= reserved_bytes;
+        crate::hotpath::resident_released(state.used_bytes);
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= reserved_bytes;
             if *charge == 0 {

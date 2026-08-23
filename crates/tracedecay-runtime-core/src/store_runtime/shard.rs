@@ -368,6 +368,7 @@ impl ShardRuntime {
             .runtime_leases
             .insert(lease.lease_id.clone(), lease.clone());
         state.touch();
+        crate::hotpath::runtime_lease_acquired();
         Ok(lease)
     }
 
@@ -377,6 +378,7 @@ impl ShardRuntime {
         let released = state.runtime_leases.remove(lease_id).is_some();
         if released {
             state.touch();
+            crate::hotpath::runtime_lease_released();
         }
         released
     }
@@ -486,6 +488,7 @@ impl ShardRuntime {
         runtime: std::sync::Arc<Self>,
     ) -> Result<ShardRuntimeClientLifetimeLease, ShardRuntimeError> {
         let token = runtime.register_lifetime_lease(ShardRuntimeResource::Client)?;
+        crate::hotpath::client_lease_acquired();
         Ok(ShardRuntimeClientLifetimeLease {
             inner: std::sync::Arc::new(ShardRuntimeLifetimeLeaseToken {
                 runtime,
@@ -642,7 +645,9 @@ impl ShardRuntimeState {
         let before = self.runtime_leases.len();
         self.runtime_leases
             .retain(|_, lease| !lease.is_expired_at(now));
-        before - self.runtime_leases.len()
+        let released = before - self.runtime_leases.len();
+        crate::hotpath::runtime_leases_expired(released);
+        released
     }
 
     fn health_snapshot(
@@ -761,6 +766,16 @@ impl ShardRuntimeState {
             .ok_or(ShardRuntimeError::CounterOverflow {
                 counter: counter_name,
             })?;
+        match kind {
+            ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {
+                crate::hotpath::reader_lease_acquired();
+            }
+            ShardRuntimeLeaseKind::Snapshot => crate::hotpath::snapshot_lease_acquired(),
+            ShardRuntimeLeaseKind::Client => crate::hotpath::client_lease_acquired(),
+            ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {
+                crate::hotpath::other_lease_acquired();
+            }
+        }
         Ok(())
     }
 
@@ -769,6 +784,16 @@ impl ShardRuntimeState {
         let counter = self.lease_counter_mut(kind);
         if let Some(next) = counter.checked_sub(1) {
             *counter = next;
+            match kind {
+                ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {
+                    crate::hotpath::reader_lease_released();
+                }
+                ShardRuntimeLeaseKind::Snapshot => crate::hotpath::snapshot_lease_released(),
+                ShardRuntimeLeaseKind::Client => crate::hotpath::client_lease_released(),
+                ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {
+                    crate::hotpath::other_lease_released();
+                }
+            }
         } else {
             debug_assert!(false, "attempted to release absent {counter_name}");
         }
@@ -870,6 +895,9 @@ impl ShardRuntimeLifetimeLeaseToken {
         }
         self.runtime
             .release_lifetime_lease(self.resource, self.token);
+        if self.resource == ShardRuntimeResource::Client {
+            crate::hotpath::client_lease_released();
+        }
         true
     }
 }

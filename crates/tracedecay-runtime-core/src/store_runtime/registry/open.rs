@@ -281,6 +281,7 @@ impl StoreRuntimeRegistry {
                     Err(failure) => return StoreRuntimeOpenBegin::Rejected(failure),
                 }
             };
+            crate::hotpath::open_started();
             state.entries.insert(
                 key.clone(),
                 RegistryEntry::Opening(OpeningRuntime {
@@ -362,6 +363,7 @@ impl StoreRuntimeRegistry {
         StoreRuntimeOpenBegin::Started(join)
     }
 
+    #[hotpath::measure]
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
         loop {
             if let Some(path) = request
@@ -406,6 +408,7 @@ impl StoreRuntimeRegistry {
         );
         if still_opening {
             state.entries.remove(key);
+            crate::hotpath::open_finished();
             updates.send_replace(OpenState::Failed(failure));
         }
     }
@@ -641,6 +644,8 @@ impl OpenAttemptGuard {
                             self.key.clone(),
                             RegistryEntry::Ready(ReadyRuntime { owner }),
                         );
+                        crate::hotpath::open_finished();
+                        crate::hotpath::runtime_ready();
                         self.updates.send_replace(OpenState::Published);
                     }
                     Err(failure) => self.fail(&mut state, failure),
@@ -653,6 +658,7 @@ impl OpenAttemptGuard {
 
     fn fail(&self, state: &mut RegistryState, failure: StoreRuntimeRegistryFailure) {
         state.entries.remove(&self.key);
+        crate::hotpath::open_finished();
         self.updates.send_replace(OpenState::Failed(failure));
     }
 }

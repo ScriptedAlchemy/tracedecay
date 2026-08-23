@@ -380,6 +380,7 @@ pub struct StoreRuntimeRetirementReservation {
 impl StoreRuntimeRegistry {
     /// Preflights every target beneath one registry lock and transitions the
     /// whole batch to `Retiring` only if every exact target is clear.
+    #[hotpath::measure]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<StoreRuntimeRetirementTarget>,
@@ -596,6 +597,7 @@ impl StoreRuntimeRegistry {
 
         if !blockers.is_empty() {
             drop(state);
+            crate::hotpath::retirement_blocked();
             return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
                 blockers, targets,
             ));
@@ -644,6 +646,7 @@ impl StoreRuntimeRegistry {
                     retry_targets.extend(targets);
                     blockers.push(blocker);
                     drop(state);
+                    crate::hotpath::retirement_blocked();
                     return StoreRuntimeRetirementResult::Blocked(
                         StoreRuntimeRetirementRefusal::new(blockers, retry_targets),
                     );
@@ -672,6 +675,7 @@ impl StoreRuntimeRegistry {
                     .into_iter()
                     .map(|retirement| retirement.target)
                     .collect();
+                crate::hotpath::retirement_blocked();
                 return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
                     blockers, targets,
                 ));
@@ -686,6 +690,7 @@ impl StoreRuntimeRegistry {
                 }),
             );
         }
+        crate::hotpath::retirement_reserved(pending.len());
         StoreRuntimeRetirementResult::Reserved(StoreRuntimeRetirementReservation {
             registry: self.clone(),
             pending,
@@ -792,6 +797,7 @@ impl StoreRuntimeRegistry {
                 .target
                 .remove_graph_owner_attachment_after_store_close(self, &mut state)?;
             state.entries.remove(&retirement.key);
+            crate::hotpath::runtime_unmounted();
             if retirement.key.is_profile()
                 && state
                     .profile_authorities
@@ -853,20 +859,24 @@ impl StoreRuntimeRetirementReservation {
     ///
     /// Once [`Self::commit`] crosses the owner-attachment fence, terminal
     /// outcomes—not reusable targets—describe the physical-close result.
+    #[hotpath::measure]
     pub fn cancel(
         &mut self,
     ) -> Result<Vec<StoreRuntimeRetirementTarget>, StoreRuntimeRegistryFailure> {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
         }
+        let count = self.pending.len();
         let targets = self.registry.restore_retiring_batch(&mut self.pending);
         self.armed = false;
+        crate::hotpath::retirement_released(count);
         Ok(targets)
     }
 
     /// Irreversibly commits the reservation before any physical close begins.
     /// All post-reservation failures are retained as typed terminal states;
     /// they are never restored to `Ready`.
+    #[hotpath::measure]
     pub fn commit(&mut self) -> Result<StoreRuntimeRetirementCommit, StoreRuntimeRegistryFailure> {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
@@ -874,6 +884,8 @@ impl StoreRuntimeRetirementReservation {
         if let Some(message) = self.registry.begin_retirement_commit(&mut self.pending)? {
             let pending = std::mem::take(&mut self.pending);
             self.armed = false;
+            crate::hotpath::retirement_released(pending.len());
+            crate::hotpath::retirement_committed(pending.len());
             let mut outcomes = Vec::with_capacity(pending.len());
             for mut retirement in pending {
                 let target = retirement.target.outcome_target();
@@ -893,6 +905,8 @@ impl StoreRuntimeRetirementReservation {
         }
         let pending = std::mem::take(&mut self.pending);
         self.armed = false;
+        crate::hotpath::retirement_released(pending.len());
+        crate::hotpath::retirement_committed(pending.len());
 
         let mut outcomes = Vec::with_capacity(pending.len());
         for mut retirement in pending {
@@ -977,8 +991,10 @@ impl StoreRuntimeRetirementReservation {
 impl Drop for StoreRuntimeRetirementReservation {
     fn drop(&mut self) {
         if self.armed {
+            let count = self.pending.len();
             let _ = self.registry.restore_retiring_batch(&mut self.pending);
             self.armed = false;
+            crate::hotpath::retirement_released(count);
         }
     }
 }

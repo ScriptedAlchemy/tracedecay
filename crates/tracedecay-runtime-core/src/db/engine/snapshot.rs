@@ -10,6 +10,7 @@ pub struct ReadSnapshot {
 
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
+        crate::hotpath::db_snapshot_acquired();
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
         }
@@ -37,6 +38,12 @@ impl ReadSnapshot {
                 })
                 .collect(),
         ))
+    }
+}
+
+impl Drop for ReadSnapshot {
+    fn drop(&mut self) {
+        crate::hotpath::db_snapshot_released();
     }
 }
 

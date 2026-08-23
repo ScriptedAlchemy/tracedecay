@@ -106,6 +106,7 @@ impl SnapshotDatabase {
     ///
     /// The backup reads only the already-captured immutable/copy connection;
     /// it never opens the live source authority.
+    #[hotpath::measure]
     pub async fn backup_to(&self, destination: &Path) -> io::Result<()> {
         let source = Arc::clone(&self.connection.connection);
         let destination = destination.to_path_buf();
@@ -225,6 +226,7 @@ impl SnapshotSet {
         Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign, control).await
     }
 
+    #[hotpath::measure]
     async fn capture_with_policy(
         paths: &[PathBuf],
         root: &Path,

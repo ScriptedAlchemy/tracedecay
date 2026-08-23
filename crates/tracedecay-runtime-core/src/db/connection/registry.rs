@@ -442,6 +442,7 @@ impl DatabaseOwnerV1 {
     /// Issues one independently counted client facade with this owner's
     /// original access policy. Cloning the returned `Database` shares both
     /// its issuance token and access mode.
+    #[hotpath::measure]
     pub fn issue_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(self.state.access)
     }
@@ -451,6 +452,7 @@ impl DatabaseOwnerV1 {
     /// A read-write owner may reduce an issued client to read-only, while an
     /// owner published read-only remains read-only. No client can elevate its
     /// access mode after issuance.
+    #[hotpath::measure]
     pub fn issue_read_only_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(DatabaseAccessMode::ReadOnly)
     }
@@ -522,6 +524,7 @@ impl DatabaseOwnerV1 {
         self.state.inner.registered_verified_locator()
     }
 
+    #[hotpath::measure]
     pub fn reserve_retirement(
         &self,
     ) -> Result<DatabaseOwnerRetirementReservationV1, DatabaseOwnerErrorV1> {

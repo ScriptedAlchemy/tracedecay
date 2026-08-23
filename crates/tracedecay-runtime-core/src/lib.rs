@@ -86,6 +86,7 @@ pub mod errors;
 pub mod git;
 pub mod git_discovery;
 pub mod git_repository;
+mod hotpath;
 pub mod lifecycle_lease;
 pub mod memory;
 pub mod os_str_bytes;

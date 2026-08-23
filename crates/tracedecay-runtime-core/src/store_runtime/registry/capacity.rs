@@ -213,6 +213,7 @@ impl StoreRuntimeRegistry {
         }
         drop(state);
         drop(evicting);
+        crate::hotpath::runtime_unmounted();
         outcome
     }
 }

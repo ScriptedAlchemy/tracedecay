@@ -45,6 +45,7 @@ struct CloseReservation {
 }
 
 impl StoreRuntimeRegistry {
+    #[hotpath::measure]
     pub async fn close_path(
         &self,
         path: &Path,
@@ -110,6 +111,7 @@ impl StoreRuntimeRegistry {
         .await
     }
 
+    #[hotpath::measure]
     async fn close_exact_with_opened_identity(
         &self,
         expected: &StoreRuntimeBindingV1,
@@ -402,6 +404,7 @@ impl StoreRuntimeRegistry {
         };
         drop(state);
         drop(evicting);
+        crate::hotpath::runtime_unmounted();
         Ok(proof)
     }
 }
