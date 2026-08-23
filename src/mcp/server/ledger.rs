@@ -451,6 +451,24 @@ impl McpServer {
         let thread_id = bounded_identifier(route.thread_id.as_deref())
             .and_then(|value| crate::privacy::protect_sensitive_structural_id(&value).ok());
         let ts = crate::tracedecay::current_timestamp();
+        // Session-only pre-debounce: the full key needs branch/worktree, which
+        // cost gix/git discovery. A burst for one session almost always shares
+        // those, so reject here before paying for derivation. Mid-session
+        // branch switches inside the window are dropped; spans merge anyway.
+        let session_pre_key = format!("hook-span-session:{session_id}");
+        let should_derive = self
+            .span_observation_debounce
+            .lock()
+            .map_or(true, |mut debounce| {
+                debounce.should_record(
+                    &session_pre_key,
+                    ts,
+                    DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
+                )
+            });
+        if !should_derive {
+            return;
+        }
         let cwd = cwd.to_path_buf();
         let server = Arc::clone(self);
         self.spawn_observed_ledger_write(async move {

@@ -32,7 +32,7 @@ pub(super) fn all_symbols(graph: &VerifiedGraphQuery) -> Result<Vec<CodeGraphSym
     Ok(page.symbols)
 }
 
-pub(super) fn indexed_files(
+pub(super) async fn indexed_files(
     cg: &crate::tracedecay::TraceDecay,
     graph: &VerifiedGraphQuery,
 ) -> Result<Vec<IndexedFileSummary>> {
@@ -47,27 +47,34 @@ pub(super) fn indexed_files(
             )
         })?;
     }
-    let mut files = counts
-        .into_iter()
-        .map(|(path, node_count)| {
-            let project_path = crate::storage::ProjectPath::resolve(
-                cg.project_root(),
-                std::path::Path::new(&path),
-            )?;
-            let size = std::fs::metadata(project_path.absolute_path())
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("cannot read indexed file metadata for '{path}': {error}"),
-                })?
-                .len();
-            Ok(IndexedFileSummary {
-                path,
-                node_count,
-                size,
+    let project_root = cg.project_root().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut files = counts
+            .into_iter()
+            .map(|(path, node_count)| {
+                let project_path = crate::storage::ProjectPath::resolve(
+                    &project_root,
+                    std::path::Path::new(&path),
+                )?;
+                let size = std::fs::metadata(project_path.absolute_path())
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("cannot read indexed file metadata for '{path}': {error}"),
+                    })?
+                    .len();
+                Ok(IndexedFileSummary {
+                    path,
+                    node_count,
+                    size,
+                })
             })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    files.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(files)
+            .collect::<Result<Vec<_>>>()?;
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(files)
+    })
+    .await
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("indexed file metadata scan failed to join: {join_error}"),
+    })?
 }
 
 pub(super) fn symbols_in_dir(

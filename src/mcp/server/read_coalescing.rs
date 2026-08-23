@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
 use crate::mcp::tools::{ToolResult, mcp_dispatch_contract};
 use crate::support::weak_registry::WeakRegistry;
@@ -193,22 +193,19 @@ fn read_flight_key(
     arguments: &Value,
     scope_prefix: Option<&str>,
 ) -> ReadFlightKey {
-    let mut hasher = Sha256::new();
-    hasher.update(engine_identity.len().to_le_bytes());
-    hasher.update(engine_identity.as_bytes());
-    hasher.update(tool_name.len().to_le_bytes());
-    hasher.update(tool_name.as_bytes());
-    if let Some(scope_prefix) = scope_prefix {
-        hasher.update([1]);
-        hasher.update(scope_prefix.len().to_le_bytes());
-        hasher.update(scope_prefix.as_bytes());
-    } else {
-        hasher.update([0]);
-    }
     let arguments = serde_json::to_vec(arguments).unwrap_or_default();
-    hasher.update(arguments.len().to_le_bytes());
-    hasher.update(arguments);
-    ReadFlightKey(hasher.finalize().into())
+    let scope_present: &[u8] = if scope_prefix.is_some() { b"1" } else { b"0" };
+    let scope = scope_prefix.unwrap_or_default();
+    ReadFlightKey(canonical_framed_sha256_bytes(
+        b"tracedecay.mcp.read-flight.v1",
+        &[
+            engine_identity.as_bytes(),
+            tool_name.as_bytes(),
+            scope_present,
+            scope.as_bytes(),
+            &arguments,
+        ],
+    ))
 }
 
 #[cfg(test)]

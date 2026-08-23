@@ -28,7 +28,6 @@ pub(crate) async fn handle_field_sites(
         None => (None, raw.to_string()),
     };
 
-    let project_root = cg.project_root();
     let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
     for symbol in verified_analysis_symbols(graph, scope_prefix)? {
         symbols_by_file
@@ -36,63 +35,74 @@ pub(crate) async fn handle_field_sites(
             .or_default()
             .push(symbol);
     }
-    let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
-    files.sort();
-    let mut writes: Vec<Value> = Vec::new();
-    let mut reads: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
+    // Graph phase is done. The source walk reads every candidate file, so it
+    // belongs on a blocking worker like the sibling analysis scans.
+    let project_root = cg.project_root().to_path_buf();
+    let (writes, reads, touched) = tokio::task::spawn_blocking(move || {
+        let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
+        files.sort();
+        let mut writes: Vec<Value> = Vec::new();
+        let mut reads: Vec<Value> = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
 
-    'outer: for file in &files {
-        let abs = project_root.join(file);
-        let Ok(source) = crate::sync::read_source_file(&abs) else {
-            continue;
-        };
+        'outer: for file in &files {
+            let abs = project_root.join(file);
+            let Ok(source) = crate::sync::read_source_file(&abs) else {
+                continue;
+            };
 
-        // Cheap textual pre-filter before any per-file store read. Most files
-        // in a repository never mention the field, and fetching their nodes
-        // anyway cost one daemon round trip per file in the project — O(store)
-        // work to answer a question whose result is a handful of sites.
-        let sites = find_field_references(&source, &field_name);
-        if sites.is_empty() {
-            continue;
-        }
-        let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
-
-        for site in sites {
-            let line_text = line_at(&source, site.byte).unwrap_or("");
-            let enclosing = nodes
-                .iter()
-                .filter(|n| n.metadata.start_line <= site.line && site.line <= n.end_line())
-                .min_by_key(|n| n.metadata.line_span)
-                .map(|n| n.metadata.qualified_name.clone());
-            let entry = json!({
-                "file": file,
-                "line": site.line,
-                "enclosing": enclosing,
-                "snippet": line_text.trim(),
-            });
-            if !touched.contains(file) {
-                touched.push(file.clone());
+            // Cheap textual pre-filter before any per-file store read. Most
+            // files in a repository never mention the field, and fetching their
+            // nodes anyway cost one daemon round trip per file in the project —
+            // O(store) work to answer a question whose result is a handful of
+            // sites.
+            let sites = find_field_references(&source, &field_name);
+            if sites.is_empty() {
+                continue;
             }
-            match site.kind {
-                FieldRefKind::Write => {
-                    writes.push(entry);
-                    if writes.len() >= limit && (writes_only || reads.len() >= limit) {
-                        break 'outer;
+            let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
+
+            for site in sites {
+                let line_text = line_at(&source, site.byte).unwrap_or("");
+                let enclosing = nodes
+                    .iter()
+                    .filter(|n| n.metadata.start_line <= site.line && site.line <= n.end_line())
+                    .min_by_key(|n| n.metadata.line_span)
+                    .map(|n| n.metadata.qualified_name.clone());
+                let entry = json!({
+                    "file": file,
+                    "line": site.line,
+                    "enclosing": enclosing,
+                    "snippet": line_text.trim(),
+                });
+                if !touched.contains(file) {
+                    touched.push(file.clone());
+                }
+                match site.kind {
+                    FieldRefKind::Write => {
+                        writes.push(entry);
+                        if writes.len() >= limit && (writes_only || reads.len() >= limit) {
+                            break 'outer;
+                        }
+                    }
+                    FieldRefKind::Read => {
+                        if writes_only {
+                            continue;
+                        }
+                        reads.push(entry);
+                        if reads.len() >= limit && writes.len() >= limit {
+                            break 'outer;
+                        }
                     }
                 }
-                FieldRefKind::Read => {
-                    if writes_only {
-                        continue;
-                    }
-                    reads.push(entry);
-                    if reads.len() >= limit && writes.len() >= limit {
-                        break 'outer;
-                    }
-                }
             }
         }
-    }
+        (writes, reads, touched)
+    })
+    .await
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("tracedecay_field_sites scan failed to join: {join_error}"),
+    })?;
 
     let qualifier_applied = false;
     let payload = if writes_only {

@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_files` tool calls.
 pub(crate) async fn handle_files(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -10,7 +9,7 @@ pub(crate) async fn handle_files(
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_files")?;
-    let mut files = indexed_files(cg, graph)?;
+    let mut files = indexed_files(cg, graph).await?;
 
     if let Some(dir) = effective_path(&args, scope_prefix) {
         let prefix = if dir.ends_with('/') {

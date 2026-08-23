@@ -175,8 +175,6 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
     identifiers
 }
 
-/// Handles `tracedecay_unused_imports` tool calls.
-///
 /// Walks candidate files in path order, so `cursor` resumes the walk exactly
 /// where the previous page stopped and `complete` reports whether the answer
 /// covers the whole scope. `limit` cuts the walk between files rather than
@@ -199,16 +197,6 @@ pub(crate) async fn handle_unused_imports(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    let project_root = cg.project_root();
-    let mut unused: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
-    let mut scanned_files = 0usize;
-    // The cursor is exclusive, so it must name the last file this call
-    // finished. Advancing it past a file the call never inspected would drop
-    // that file from every continuation.
-    let mut last_scanned: Option<String> = None;
-    let mut partial_reason: Option<&str> = None;
-
     let mut use_symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
     for symbol in verified_analysis_symbols(graph, scope_prefix)? {
         if symbol.metadata.kind == "use" {
@@ -218,35 +206,60 @@ pub(crate) async fn handle_unused_imports(
                 .push(symbol);
         }
     }
-    let mut files = use_symbols_by_file.keys().cloned().collect::<Vec<_>>();
-    files.sort();
-    for file_path in files
-        .into_iter()
-        .filter(|path| after_path.as_ref().is_none_or(|after| path > after))
-    {
-        if scanned_files >= UNUSED_IMPORTS_FILE_BUDGET {
-            partial_reason = Some("file_budget_exhausted");
-            break;
-        }
-        scanned_files += 1;
-        let use_symbols = use_symbols_by_file
-            .get(&file_path)
-            .map_or(&[][..], Vec::as_slice);
-        let file_unused = unused_imports_in_file(project_root, &file_path, use_symbols)?;
-        if !file_unused.is_empty() {
-            touched.push(file_path.clone());
-        }
-        unused.extend(file_unused);
-        last_scanned = Some(file_path);
-        if unused.len() >= limit {
-            // The page may overshoot `limit`, and must: truncating here would
-            // drop the tail of the file `last_scanned` names, and the exclusive
-            // cursor would then skip that file forever. Whole files in, whole
-            // files out.
-            partial_reason = Some("limit_reached");
-            break;
-        }
-    }
+    // Graph phase is done. Each candidate file is read and masked, so the
+    // walk belongs on a blocking worker like the sibling analysis scans.
+    let project_root = cg.project_root().to_path_buf();
+    let (unused, touched, scanned_files, last_scanned, mut partial_reason) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let mut unused: Vec<Value> = Vec::new();
+            let mut touched: Vec<String> = Vec::new();
+            let mut scanned_files = 0usize;
+            // The cursor is exclusive, so it must name the last file this call
+            // finished. Advancing it past a file the call never inspected would
+            // drop that file from every continuation.
+            let mut last_scanned: Option<String> = None;
+            let mut partial_reason: Option<&'static str> = None;
+            let mut files = use_symbols_by_file.keys().cloned().collect::<Vec<_>>();
+            files.sort();
+            for file_path in files
+                .into_iter()
+                .filter(|path| after_path.as_ref().is_none_or(|after| path > after))
+            {
+                if scanned_files >= UNUSED_IMPORTS_FILE_BUDGET {
+                    partial_reason = Some("file_budget_exhausted");
+                    break;
+                }
+                scanned_files += 1;
+                let use_symbols = use_symbols_by_file
+                    .get(&file_path)
+                    .map_or(&[][..], Vec::as_slice);
+                let file_unused = unused_imports_in_file(&project_root, &file_path, use_symbols)?;
+                if !file_unused.is_empty() {
+                    touched.push(file_path.clone());
+                }
+                unused.extend(file_unused);
+                last_scanned = Some(file_path);
+                if unused.len() >= limit {
+                    // The page may overshoot `limit`, and must: truncating here
+                    // would drop the tail of the file `last_scanned` names, and
+                    // the exclusive cursor would then skip that file forever.
+                    // Whole files in, whole files out.
+                    partial_reason = Some("limit_reached");
+                    break;
+                }
+            }
+            Ok((
+                unused,
+                touched,
+                scanned_files,
+                last_scanned,
+                partial_reason,
+            ))
+        })
+        .await
+        .map_err(|join_error| TraceDecayError::Config {
+            message: format!("tracedecay_unused_imports scan failed to join: {join_error}"),
+        })??;
     // A partial answer without a resumable cursor would be a dead end, so a
     // stop that produced no inspected file is reported as complete coverage of
     // what the scope contains rather than a fabricated continuation.

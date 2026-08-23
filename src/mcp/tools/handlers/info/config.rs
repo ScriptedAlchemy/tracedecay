@@ -2,17 +2,17 @@
 
 use super::*;
 
-/// Handles `tracedecay_config` — structured TOML / JSON queries by dotted
-/// key path.
-pub(crate) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+/// Structured TOML / JSON queries by dotted key path.
+pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let key = args
         .get("key")
         .and_then(|v| v.as_str())
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: key".to_string(),
-        })?;
-    let path = args.get("path").and_then(|v| v.as_str());
-    let glob_pat = args.get("glob").and_then(|v| v.as_str());
+        })?
+        .to_owned();
+    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_owned);
+    let glob_pat = args.get("glob").and_then(|v| v.as_str()).map(str::to_owned);
 
     if path.is_none() && glob_pat.is_none() {
         return Err(TraceDecayError::Config {
@@ -26,57 +26,66 @@ pub(crate) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     }
 
     let project_root = cg.project_root().to_path_buf();
-    let mut files: Vec<String> = Vec::new();
-    if let Some(p) = path {
-        let project_path = ProjectPath::resolve(&project_root, Path::new(p))?;
-        files.push(project_path.relative_path_string());
-    } else if let Some(pat) = glob_pat {
-        let combined = project_root.join(pat);
-        let walker =
-            glob::glob(&combined.to_string_lossy()).map_err(|e| TraceDecayError::Config {
-                message: format!("invalid glob '{pat}': {e}"),
-            })?;
-        for entry in walker.flatten() {
-            if let Ok(project_path) = ProjectPath::resolve(&project_root, &entry) {
-                files.push(project_path.relative_path_string());
+    let (payload, touched) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut files: Vec<String> = Vec::new();
+        if let Some(p) = path {
+            let project_path = ProjectPath::resolve(&project_root, Path::new(&p))?;
+            files.push(project_path.relative_path_string());
+        } else if let Some(pat) = glob_pat {
+            let combined = project_root.join(&pat);
+            let walker =
+                glob::glob(&combined.to_string_lossy()).map_err(|e| TraceDecayError::Config {
+                    message: format!("invalid glob '{pat}': {e}"),
+                })?;
+            for entry in walker.flatten() {
+                if let Ok(project_path) = ProjectPath::resolve(&project_root, &entry) {
+                    files.push(project_path.relative_path_string());
+                }
             }
+            files.sort();
         }
-        files.sort();
-    }
 
-    let mut matches: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
-    for rel in &files {
-        let project_path = ProjectPath::resolve(&project_root, Path::new(rel))?;
-        let abs = project_path.absolute_path();
-        let rel = project_path.relative_path_string();
-        let Ok(contents) = std::fs::read_to_string(&abs) else {
-            continue;
-        };
-        let Some(parsed) = parse_config_value(&rel, &contents) else {
-            continue;
-        };
-        let parsed = match parsed {
-            Ok(value) => value,
-            Err(error) => {
-                matches.push(json!({
-                    "file": rel,
-                    "error": error,
-                }));
+        let mut matches: Vec<Value> = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
+        for rel in &files {
+            let project_path = ProjectPath::resolve(&project_root, Path::new(rel))?;
+            let abs = project_path.absolute_path();
+            let rel = project_path.relative_path_string();
+            let Ok(contents) = std::fs::read_to_string(&abs) else {
                 continue;
+            };
+            let Some(parsed) = parse_config_value(&rel, &contents) else {
+                continue;
+            };
+            let parsed = match parsed {
+                Ok(value) => value,
+                Err(error) => {
+                    matches.push(json!({
+                        "file": rel,
+                        "error": error,
+                    }));
+                    continue;
+                }
+            };
+
+            if !touched.contains(&rel) {
+                touched.push(rel.clone());
             }
-        };
-
-        if !touched.contains(&rel) {
-            touched.push(rel.clone());
+            matches.push(config_match_value(&rel, &key, &contents, &parsed));
         }
-        matches.push(config_match_value(&rel, key, &contents, &parsed));
-    }
 
-    let payload = json!({
-        "match_count": matches.iter().filter(|m| m.get("found") != Some(&Value::Bool(false))).count(),
-        "matches": matches,
-    });
+        Ok((
+            json!({
+                "match_count": matches.iter().filter(|m| m.get("found") != Some(&Value::Bool(false))).count(),
+                "matches": matches,
+            }),
+            touched,
+        ))
+    })
+    .await
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("tracedecay_config scan failed to join: {join_error}"),
+    })??;
     Ok(generic_tool_result(
         Some(cg.project_root()),
         args,
