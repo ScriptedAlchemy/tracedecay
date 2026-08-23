@@ -236,7 +236,9 @@ pub(super) struct AppendIntentV1 {
     /// Raw frame bytes, base64-encoded in the JSON meta. A serde byte array
     /// renders as one JSON integer per byte (~4x the frame size), and the
     /// intent is rewritten and fsynced twice per appended event, so the
-    /// encoding directly bounds append write amplification.
+    /// encoding directly bounds append write amplification. The released
+    /// metadata wrote the byte array under this same `SPOOL_META_VERSION`, so
+    /// decoding still accepts it and rewrites it as base64 on the next append.
     #[serde(with = "frame_base64")]
     pub(super) frame: Vec<u8>,
 }
@@ -244,7 +246,9 @@ pub(super) struct AppendIntentV1 {
 mod frame_base64 {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::{Error as DeError, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
 
     pub(super) fn serialize<S: Serializer>(
         bytes: &[u8],
@@ -253,13 +257,40 @@ mod frame_base64 {
         serializer.serialize_str(&STANDARD.encode(bytes))
     }
 
+    /// Accepts the base64 string this build writes and the byte array the
+    /// released build wrote. Both yield the exact same frame bytes, which the
+    /// caller still validates against the magic, length, sequence, checksum,
+    /// and full envelope decode before any recovery decision.
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<u8>, D::Error> {
-        let encoded = String::deserialize(deserializer)?;
-        STANDARD
-            .decode(encoded.as_bytes())
-            .map_err(serde::de::Error::custom)
+        deserializer.deserialize_any(FrameVisitor)
+    }
+
+    struct FrameVisitor;
+
+    impl<'de> Visitor<'de> for FrameVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a base64 frame string or a released frame byte array")
+        }
+
+        fn visit_str<E: DeError>(self, encoded: &str) -> Result<Self::Value, E> {
+            STANDARD.decode(encoded.as_bytes()).map_err(E::custom)
+        }
+
+        fn visit_bytes<E: DeError>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            Ok(bytes.to_vec())
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut bytes = Vec::new();
+            while let Some(byte) = seq.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
     }
 }
 
