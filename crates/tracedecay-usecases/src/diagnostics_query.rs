@@ -312,6 +312,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// Reads the clean-generation publication pointer. A completed empty
     /// publication returns `Some(generation)` even when it contains no
     /// findings; no pointer is distinct from a clean result.
+    #[hotpath::measure]
     pub async fn current_generation(&self) -> CurrentDiagnosticGeneration {
         let operation = "diagnostics query current_generation";
         match self.store.current_generation().await {
@@ -331,6 +332,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records bound to `generation`, paged in ascending anchor
     /// order.
+    #[hotpath::measure]
     pub async fn current_by_generation(
         &self,
         generation: &CodeGenerationId,
@@ -356,6 +358,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records for one file occurrence inside `generation`, paged in
     /// ascending anchor order.
+    #[hotpath::measure]
     pub async fn current_by_file(
         &self,
         generation: &CodeGenerationId,
@@ -382,6 +385,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Stale (superseded or cleared) records bound to `generation`. Stale
     /// findings remain queryable but never re-enter active publication.
+    #[hotpath::measure]
     pub async fn stale_by_generation(
         &self,
         generation: &CodeGenerationId,
@@ -396,6 +400,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Stale (superseded or cleared) records for one file occurrence inside
     /// `generation`, paged in ascending anchor order.
+    #[hotpath::measure]
     pub async fn stale_by_file(
         &self,
         generation: &CodeGenerationId,
@@ -417,16 +422,20 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Fetches one record by its retrieval anchor. A miss is `Complete` with
     /// no record; a store failure is typed `StoreUnavailable`.
+    #[hotpath::measure]
     pub async fn by_anchor(
         &self,
         anchor: &RetrievalAnchorId,
     ) -> Result<DiagnosticAnchorLookup, DiagnosticQueryError> {
         let operation = "diagnostics query by_anchor";
         match self.store.record_by_anchor(anchor).await {
-            Ok(record) => Ok(DiagnosticAnchorLookup {
-                record,
-                coverage: DiagnosticQueryCoverage::Complete,
-            }),
+            Ok(record) => {
+                crate::hotpath_observe::diagnostics_query(usize::from(record.is_some()), 1);
+                Ok(DiagnosticAnchorLookup {
+                    record,
+                    coverage: DiagnosticQueryCoverage::Complete,
+                })
+            }
             Err(error) => Ok(DiagnosticAnchorLookup {
                 record: None,
                 coverage: DiagnosticQueryCoverage::StoreUnavailable {
@@ -441,6 +450,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// `Superseded { successor_generation }` edges toward newer records and
     /// is returned oldest-first including the starting record. The chain
     /// ends at a current, cleared, or missing successor.
+    #[hotpath::measure]
     pub async fn supersession_forward(
         &self,
         anchor: &RetrievalAnchorId,
@@ -459,6 +469,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// same-key record whose `Superseded { successor_generation }` names the
     /// current record's generation. The walk stops deterministically when
     /// there is no unique predecessor.
+    #[hotpath::measure]
     pub async fn supersession_backward(
         &self,
         anchor: &RetrievalAnchorId,
@@ -553,6 +564,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// `superseded` lane, a finding with no `from_generation` counterpart
     /// lands in `introduced`, and a finding with no `to_generation`
     /// counterpart lands in `cleared`. Each lane is capped at `limit`.
+    #[hotpath::measure]
     pub async fn generation_file_diff(
         &self,
         from_generation: &CodeGenerationId,
@@ -642,6 +654,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// finding key the overlay entry wins; every entry carries typed
     /// provenance (persisted vs overlay). The overlay lane is session-only
     /// and is never written back.
+    #[hotpath::measure]
     pub async fn merged_current_with_overlay(
         &self,
         generation: &CodeGenerationId,
@@ -800,6 +813,7 @@ fn paginate_sorted(
     let total = records.len();
     let (records, coverage, next_cursor) =
         paginate_items(records, |record| record.diagnostic_anchor.as_str(), request);
+    crate::hotpath_observe::diagnostics_query(records.len(), total);
     DiagnosticPage {
         records,
         total,
@@ -820,6 +834,7 @@ fn page_from_bounded_records(
                 .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor))
         })
         .flatten();
+    crate::hotpath_observe::diagnostics_query(records.len(), total);
     DiagnosticPage {
         records,
         total,

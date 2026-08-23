@@ -70,22 +70,28 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
             .await
     }
 
+    #[hotpath::measure]
     async fn diagnostics_for_generation(
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
+        let records = DiagnosticsStore::new(self.database.clone())
             .diagnostics_for_generation(generation)
-            .await
+            .await?;
+        crate::hotpath_observe::feedback_query(records.len());
+        Ok(records)
     }
 
+    #[hotpath::measure]
     async fn current_diagnostics(
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
+        let records = DiagnosticsStore::new(self.database.clone())
             .current_diagnostics(generation)
-            .await
+            .await?;
+        crate::hotpath_observe::feedback_query(records.len());
+        Ok(records)
     }
 
     async fn current_diagnostics_for_file(
@@ -107,6 +113,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
             .await
     }
 
+    #[hotpath::measure]
     async fn diagnostic_by_anchor(
         &self,
         anchor: &RetrievalAnchorId,

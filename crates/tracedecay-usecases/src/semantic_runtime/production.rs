@@ -133,6 +133,7 @@ const SEMANTIC_EMBEDS_PER_COMMIT: usize =
 ///
 /// Returns immediately after enqueueing; artifact load, model download, and
 /// indexing run asynchronously and never join into ordinary search.
+#[hotpath::measure]
 pub fn schedule_saved_code_generation<LoadArtifact, StageProjection, StageFuture>(
     handle: &DaemonSemanticRuntimeHandleV1,
     generation: &CodeIndexPublishedGenerationV1,
@@ -1253,6 +1254,7 @@ impl ProductionSemanticRuntimeV1 {
     /// succeed. Daemon publication holds this as its final lease through
     /// commit, so lifecycle writers cannot change the evaluated model between
     /// validation and durable profile publication.
+    #[hotpath::measure]
     pub async fn acquire_verified_evaluation_target_publication_lease(
         &self,
         verification: &SemanticEvaluationLifecycleVerificationV1,
@@ -1350,6 +1352,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Freeze vector-pointer mutation while a freshness-bound accepted profile
     /// publication commits. Every vector mutation enters this same writer
     /// lane, so a validated revision/generation remains exact for the lease.
+    #[hotpath::measure]
     pub async fn acquire_vector_publication_lease(
         &self,
         expected_revision: i64,
@@ -1421,6 +1424,7 @@ impl ProductionSemanticRuntimeV1 {
             .is_some()
     }
 
+    #[hotpath::measure]
     fn schedule_saved_generation_fair(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -1429,6 +1433,7 @@ impl ProductionSemanticRuntimeV1 {
         self.schedule_saved_generation_inner(generation, Some(lease))
     }
 
+    #[hotpath::measure]
     fn schedule_saved_generation_inner(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -1439,7 +1444,12 @@ impl ProductionSemanticRuntimeV1 {
             generation.manifest(),
             self.resources,
         ) {
-            Ok(projection) => projection,
+            Ok(projection) => {
+                crate::hotpath_observe::semantic_candidate_chunks(
+                    generation.chunks().chunks().len(),
+                );
+                projection
+            }
             Err(_) => {
                 return schedule_saved_code_generation(
                     &self.handle,
@@ -2153,6 +2163,11 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             }
             let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+            crate::hotpath_observe::semantic_model_resident_bytes(
+                artifact_bytes
+                    .model
+                    .saturating_add(artifact_bytes.tokenizer),
+            );
             if artifact_bytes.model != required.resources.model_bytes
                 || artifact_bytes.tokenizer != required.resources.tokenizer_bytes
             {

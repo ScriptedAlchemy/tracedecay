@@ -10,6 +10,7 @@ use super::{
     MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, storage,
 };
 
+#[hotpath::measure]
 pub(super) fn read_generation_metadata(
     path: &Path,
     verification: GenerationDigestVerificationV1,
@@ -26,12 +27,15 @@ pub(super) fn read_generation_metadata(
         if bytes_read == 0 {
             break;
         }
+        crate::hotpath_observe::retention_inspected(bytes_read as u64);
         if verification == GenerationDigestVerificationV1::Full {
             hasher.update(&buffer[..bytes_read]);
+            crate::hotpath_observe::retention_hashed(bytes_read as u64);
         }
         let remaining = MAX_GENERATION_METADATA_PREFIX_BYTES.saturating_sub(prefix.len());
         prefix.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
         if is_cancelled() {
+            crate::hotpath_observe::retention_cancelled();
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         if verification == GenerationDigestVerificationV1::MetadataOnly
