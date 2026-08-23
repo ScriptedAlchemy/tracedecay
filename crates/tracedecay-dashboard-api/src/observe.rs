@@ -4,6 +4,7 @@
 //! never a per-tick, per-project, or per-receipt name. Error class is a closed
 //! typed set, never an unbounded message.
 
+#[cfg(any(feature = "hotpath", test))]
 use axum::http::StatusCode;
 #[cfg(feature = "hotpath")]
 use axum::http::header;
