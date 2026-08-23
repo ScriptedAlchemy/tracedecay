@@ -201,6 +201,12 @@ impl ResumeDigest {
         self.hasher.update(bytes);
     }
 
+    /// 64-bit check of the hashed prefix plus `position`. This is not SHA-256
+    /// mid-state: the domain cursor (`StoredCursor` + optional resume
+    /// fingerprint) has no field that can carry hasher bytes without
+    /// displacing `file_id` / generation, which would collapse rewrite and
+    /// file-identity detection. A first append after a durable resume must
+    /// therefore re-walk `[0, cursor)` to rebuild this digest.
     fn fingerprint(&self, position: u64) -> u64 {
         let mut hasher = self.hasher.clone();
         hasher.update(position.to_le_bytes());
@@ -498,6 +504,7 @@ struct RawJsonlScanRequest {
 /// nominal batch cap: a capped read finishes at most one bounded complete record
 /// that crosses the cap, then leaves the remaining backlog for a later call.
 /// This guarantees cursor progress without allowing a second record past the cap.
+#[hotpath::measure]
 pub fn stream_new_jsonl(
     path: &Path,
     prev: StoredCursor,
@@ -526,6 +533,7 @@ pub fn stream_new_jsonl(
 /// `max_record_bytes` includes the terminating newline. Other providers retain
 /// [`stream_new_jsonl`]'s skip-and-advance behavior.
 #[cfg(test)]
+#[hotpath::measure]
 pub fn stream_new_jsonl_strict(
     path: &Path,
     prev: StoredCursor,
@@ -545,6 +553,7 @@ pub fn stream_new_jsonl_strict(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn stream_new_jsonl_with_policy(
     path: &Path,
     prev: StoredCursor,
@@ -647,6 +656,7 @@ pub struct RawNewJsonl {
 
 /// Strict bounded framing used by Claude's single-parse privacy boundary.
 #[cfg(test)]
+#[hotpath::measure]
 pub fn stream_new_jsonl_raw_strict(
     path: &Path,
     prev: StoredCursor,
@@ -663,6 +673,7 @@ pub fn stream_new_jsonl_raw_strict(
 }
 
 #[cfg(test)]
+#[hotpath::measure]
 pub fn try_stream_new_jsonl_raw_strict(
     path: &Path,
     prev: StoredCursor,
@@ -672,6 +683,7 @@ pub fn try_stream_new_jsonl_raw_strict(
     try_stream_new_jsonl_raw_strict_with_resume(path, prev, max_new_bytes, max_record_bytes, None)
 }
 
+#[hotpath::measure]
 pub fn try_stream_new_jsonl_raw_strict_with_resume(
     path: &Path,
     prev: StoredCursor,
@@ -1556,5 +1568,60 @@ mod tests {
             second.io.snapshot_hash_bytes, 0,
             "append-only resume must not snapshot-hash the already-validated prefix"
         );
+    }
+
+    /// RED leftover: a durable resume is `(position, generation, file_identity,
+    /// fingerprint)`. The fingerprint cannot seed `Sha256`, so the first
+    /// append after a process-local-memo miss still walks `[0, cursor)`.
+    /// Stashing hasher bytes in `StoredCursor::file_id` would weaken rewrite
+    /// and file-identity detection. This test locks that invariant.
+    #[test]
+    fn first_append_after_durable_cursor_rewalks_prefix_to_rebuild_hasher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("durable-append.jsonl");
+        let first_line = b"{\"v\":0}\n";
+        std::fs::write(&path, first_line).unwrap();
+        let first = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+        // Drop process-local unchanged memo by using a distinct path identity
+        // window is still required; append changes size so the memo cannot
+        // apply anyway. The durable cursor is only StoredCursor + checkpoint.
+        let appended = b"{\"v\":1}\n";
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(appended)
+            .unwrap();
+        let second = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            first.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(checkpoint),
+        )
+        .unwrap();
+        let prefix = u64::try_from(first_line.len()).unwrap();
+        assert_eq!(second.io.change, JsonlChangeKind::Appended);
+        assert_eq!(
+            second.io.prefix_validation_bytes, prefix,
+            "hasher mid-state is not in the domain cursor; first append re-walks [0, cursor)"
+        );
+        assert_eq!(
+            second.io.content_bytes,
+            u64::try_from(appended.len()).unwrap()
+        );
+        assert_eq!(second.new_cursor.file_id, checkpoint.generation);
     }
 }

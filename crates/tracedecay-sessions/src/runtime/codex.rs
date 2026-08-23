@@ -288,7 +288,7 @@ impl CodexSource {
             }
         }
 
-        let report = pass.into_report(sweep_complete);
+        let report = pass.into_report(sweep_complete, total_files);
         #[cfg(feature = "hotpath")]
         {
             let history_selected = u64::try_from(report.paths.len())
@@ -614,7 +614,7 @@ impl BucketScanState {
         self.truncated = None;
     }
 
-    fn into_report(self, sweep_complete: bool) -> FileDiscoveryReport {
+    fn into_report(self, sweep_complete: bool, files_considered: u64) -> FileDiscoveryReport {
         let truncated = if sweep_complete {
             None
         } else {
@@ -628,7 +628,9 @@ impl BucketScanState {
             truncated,
             skipped_oversized_entries: self.skipped_oversized_entries,
             bytes_charged: self.bytes_charged,
-            files_considered: u64::try_from(self.seen.len()).unwrap_or(u64::MAX),
+            // Exact tree size: every jsonl in enumerated buckets, including
+            // the unvisited backlog this pass did not retain.
+            files_considered,
         }
     }
 }

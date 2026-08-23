@@ -140,7 +140,7 @@ pub(super) async fn persist_codex_history_frontier(
 }
 
 pub(super) async fn persist_host_provider_coverage(
-    admission: &dyn HostAdmission,
+    admission: &(impl HostAdmission + ?Sized),
     scope: &ObservationScopeV1,
     provider: &'static str,
     coverage: HostProviderCoverage,

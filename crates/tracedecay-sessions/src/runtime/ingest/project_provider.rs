@@ -524,10 +524,30 @@ impl<'a> ProjectProviderRun<'a> {
         )
         .await
         {
-            Ok(stats) => ProjectProviderRunResult::claude(
-                claude_provider_run_outcome(&stats, None, self.max_new_bytes),
-                stats.projected_session_ids().clone(),
-            ),
+            Ok(stats) => {
+                let mut outcome = claude_provider_run_outcome(&stats, None, self.max_new_bytes);
+                if let Err(error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
+                    "claude",
+                    if outcome.deferred_units == 0 {
+                        HostProviderCoverage::Complete
+                    } else {
+                        HostProviderCoverage::Partial
+                    },
+                    outcome.deferred_units,
+                )
+                .await
+                {
+                    outcome.add_failure(warn_transcript_catch_up_failure(
+                        "claude",
+                        "coverage",
+                        &error,
+                        "project Claude coverage persistence failed",
+                    ));
+                }
+                ProjectProviderRunResult::claude(outcome, stats.projected_session_ids().clone())
+            }
             Err(error) => {
                 if let Some(stats) = error.accumulated_stats() {
                     return ProjectProviderRunResult::claude(
@@ -603,6 +623,26 @@ impl<'a> ProjectProviderRun<'a> {
                     "project Cursor observation catch-up failed",
                 ));
             }
+        }
+        if let Err(error) = persist_host_provider_coverage(
+            self.facade,
+            self.scope,
+            "cursor",
+            if outcome.deferred_units == 0 {
+                HostProviderCoverage::Complete
+            } else {
+                HostProviderCoverage::Partial
+            },
+            outcome.deferred_units,
+        )
+        .await
+        {
+            outcome.add_failure(warn_transcript_catch_up_failure(
+                "cursor",
+                "coverage",
+                &error,
+                "project Cursor coverage persistence failed",
+            ));
         }
         outcome
     }

@@ -39,9 +39,10 @@ use crate::runtime::shared::{
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
 use crate::runtime::source::{
-    MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, SessionDraft,
-    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    collect_files_with_ext_bounded, stream_new_jsonl,
+    HostProviderCoverage, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame,
+    RawJsonlFrameReader, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
+    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded,
+    persist_host_provider_coverage, stream_new_jsonl,
 };
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
@@ -326,6 +327,7 @@ fn cursor_native_with_context(mut native: Value, context: &CursorObservationCont
 /// ([`CursorSweepSource`]); both derive identical session/message ids for the
 /// same file (the hook event's `session_id` always equals the transcript file
 /// stem), so whichever runs second is an idempotent no-op.
+#[hotpath::measure]
 fn parse_cursor_jsonl(
     event: &Value,
     parent_session_id: &str,
@@ -807,9 +809,26 @@ async fn admit_cursor_sweep_observations_with_session_ids(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
     }
-    projection::drain_cursor_observation_projections_with_sessions(admission, &scope, cancellation)
-        .await
-        .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))
+    let outcome = projection::drain_cursor_observation_projections_with_sessions(
+        admission,
+        &scope,
+        cancellation,
+    )
+    .await
+    .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))?;
+    persist_host_provider_coverage(
+        admission,
+        &scope,
+        "cursor",
+        if outcome.stats.source_deferred {
+            HostProviderCoverage::Partial
+        } else {
+            HostProviderCoverage::Complete
+        },
+        u64::from(outcome.stats.source_deferred),
+    )
+    .await?;
+    Ok(outcome)
 }
 
 fn cursor_hook_workspace_roots(event: &Value) -> Vec<PathBuf> {

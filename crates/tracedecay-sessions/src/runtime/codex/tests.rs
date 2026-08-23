@@ -1021,9 +1021,13 @@ mod recent_first_discovery_tests {
             "an over-cap backlog must report truncation so catch-up stays scheduled"
         );
         assert_eq!(
-            pass.report.files_considered,
+            pass.report.files_considered, 121,
+            "files_considered is the exact jsonl tree, including the unvisited backlog"
+        );
+        assert_eq!(
             u64::try_from(pass.report.paths.len()).unwrap(),
-            "Codex files_considered is unique files this pass retained, not the unvisited backlog"
+            16,
+            "retention stays capped; only the considered counter includes the backlog"
         );
     }
 
@@ -1077,6 +1081,10 @@ mod recent_first_discovery_tests {
             "after history rotation visits every file, idle polls must report complete"
         );
         assert_eq!(
+            settled.report.files_considered,
+            u64::try_from(all.len()).unwrap()
+        );
+        assert_eq!(
             settled.next_history_rotation, rotation,
             "an idle complete pass must keep the durable watermark, not restart from zero"
         );
@@ -1106,6 +1114,7 @@ mod recent_first_discovery_tests {
         let pass = CodexSource::with_home(home).discover_transcript_paths_with_rotation(bounds, 0);
 
         assert_eq!(pass.report.paths, vec![b, a], "newest-first ordering");
+        assert_eq!(pass.report.files_considered, 2);
         assert!(!pass.report.is_truncated());
         assert_eq!(
             pass.next_history_rotation, 0,
