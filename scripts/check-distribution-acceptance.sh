@@ -362,6 +362,7 @@ done <"$package_table"
 
 for required_package in \
   tracedecay \
+  tracedecay-cli \
   tracedecay-application \
   tracedecay-api \
   tracedecay-tool-catalog \
@@ -374,6 +375,7 @@ for required_package in \
     die "workspace package required by the distribution gate was not produced: $required_package"
 done
 root_package=${package_dirs[tracedecay]}
+cli_package=${package_dirs[tracedecay-cli]}
 lsp_package=${package_dirs[tracedecay-lsp]}
 code_index_package=${package_dirs[tracedecay-code-index]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
@@ -396,7 +398,7 @@ members = set(metadata["workspace_members"])
 packages = pathlib.Path(sys.argv[2])
 print("[patch.crates-io]")
 for package in sorted(metadata["packages"], key=lambda value: value["name"]):
-    if package["id"] not in members or package["name"] == "tracedecay":
+    if package["id"] not in members:
         continue
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
@@ -412,6 +414,18 @@ verify_feature_wiring \
   "$repo/crates/tracedecay-semantic/Cargo.toml" \
   "$semantic_package/Cargo.toml" \
   "$patch_config"
+
+echo "distribution acceptance: compiling packaged CLI with production features"
+cargo build \
+  --manifest-path "$cli_package/Cargo.toml" \
+  --release \
+  --no-default-features \
+  --features production \
+  --bin tracedecay \
+  --config "$patch_config"
+packaged_cli_bin="$cli_package/target/release/tracedecay"
+[[ -x $packaged_cli_bin ]] ||
+  die "packaged tracedecay CLI build did not produce $packaged_cli_bin"
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
 cargo nextest run \
@@ -481,7 +495,8 @@ CARGO_NET_OFFLINE=true cargo nextest run \
   --no-tests=fail
 
 echo "distribution acceptance: checking packaged MCP tool behavior"
-CARGO_NET_OFFLINE=true cargo nextest run \
+TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
+  CARGO_NET_OFFLINE=true cargo nextest run \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \
@@ -522,7 +537,7 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with production features"
 cargo install \
-  --path "$root_package" \
+  --path "$cli_package" \
   --root "$install_root" \
   --no-default-features \
   --features production \

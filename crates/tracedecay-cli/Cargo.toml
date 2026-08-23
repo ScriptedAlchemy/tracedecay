@@ -3,6 +3,9 @@ name = "tracedecay-cli"
 version = "0.1.0-beta.37"
 publish = false
 edition.workspace = true
+description = "TraceDecay command-line interface and daemon binary"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [[bin]]
 name = "tracedecay"

@@ -101,7 +101,7 @@ jobs:
         working-directory: dashboard
       - run: npm run build
         working-directory: dashboard
-      - run: cargo build --bin tracedecay
+      - run: cargo build -p tracedecay-cli --bin tracedecay
       - run: >-
           cargo nextest run
           --manifest-path crates/tracedecay-sdk/Cargo.toml

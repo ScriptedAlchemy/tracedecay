@@ -22,7 +22,7 @@ resolve_tracedecay_bin() {
     bin="${TRACEDECAY_BIN:-$STOCK_HOST_REPO_ROOT/target/debug/tracedecay}"
     bin="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
     if [[ ! -x "$bin" ]]; then
-        echo "error: tracedecay binary not found at $bin (build with: cargo build --bin tracedecay)" >&2
+        echo "error: tracedecay binary not found at $bin (build with: cargo build -p tracedecay-cli --bin tracedecay)" >&2
         return 1
     fi
     printf '%s\n' "$bin"
