@@ -1353,12 +1353,12 @@ pub(super) fn retention_window_secs(days: u64) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn now_secs_i64() -> Result<i64, &'static str> {
+pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system clock is before the unix epoch")?
+        .map_err(|_| "system_clock_before_unix_epoch")?
         .as_secs();
-    i64::try_from(seconds).map_err(|_| "system clock exceeds retention timestamp range")
+    i64::try_from(seconds).map_err(|_| "system_clock_out_of_range")
 }
 
 #[cfg(test)]

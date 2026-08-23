@@ -62,14 +62,18 @@ pub fn validate_regular_or_missing(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Restrict an existing file to owner read/write (`0o600` on unix).
+///
+/// Call this on a path you just created. Prefer [`tighten_existing_file`]
+/// when the file may be missing (that helper no-ops on `NotFound`).
 #[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> io::Result<()> {
+pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> io::Result<()> {
+pub fn set_owner_private_file_mode(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -85,7 +89,7 @@ pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
             "path is not a regular file",
         ));
     }
-    set_private_file_permissions(path)
+    set_owner_private_file_mode(path)
 }
 
 pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {

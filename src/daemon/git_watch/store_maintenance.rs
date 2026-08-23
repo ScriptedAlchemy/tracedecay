@@ -8,11 +8,11 @@
 //! maintenance owner.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
 
 use super::branch_admin::StoreAdministration;
@@ -125,16 +125,6 @@ pub(super) async fn run_gc(
         );
     }
     true
-}
-
-/// Current unix time in whole seconds, as the `i64` the retention engines
-/// compare row timestamps against.
-fn now_secs_i64() -> Result<i64, &'static str> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system_clock_before_unix_epoch")?
-        .as_secs();
-    i64::try_from(seconds).map_err(|_| "system_clock_out_of_range")
 }
 
 /// Advance one bounded project-wide semantic-vector retention page.

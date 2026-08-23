@@ -140,7 +140,7 @@ fn daemon_tool_json_rejects_zero_or_multiple_payloads() {
     assert!(
         error
             .to_string()
-            .contains("returned multiple JSON payloads (2)")
+            .contains("returned multiple JSON payloads")
     );
 }
 

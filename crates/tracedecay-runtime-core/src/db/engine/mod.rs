@@ -22,7 +22,7 @@ pub use statement::Statement;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use test_support::TestConnection;
 pub use transaction::{Transaction, TransactionBehavior};
-pub use value::{FromValue, Value};
+pub use value::{FromValue, Value, opt_i64, opt_text};
 
 #[cfg(test)]
 mod tests;

@@ -397,27 +397,7 @@ pub(crate) async fn daemon_tool_json(
 }
 
 fn parse_daemon_tool_json_content(result: &Value, tool_name: &str) -> crate::errors::Result<Value> {
-    let payloads = result
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
-        .collect::<Vec<_>>();
-
-    match payloads.as_slice() {
-        [payload] => Ok(payload.clone()),
-        [] => Err(crate::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned no JSON payload"),
-        }),
-        _ => Err(crate::errors::TraceDecayError::Config {
-            message: format!(
-                "daemon tool {tool_name} returned multiple JSON payloads ({})",
-                payloads.len()
-            ),
-        }),
-    }
+    crate::daemon::tool_json_payload(result, tool_name)
 }
 
 pub(crate) async fn daemon_hook_action(
@@ -759,12 +739,6 @@ fn research_block_reason(hint: Option<ToolHint>) -> String {
         || base.clone(),
         |hint| format!("{}\n\n{}", base, format_tool_hint(&hint)),
     )
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[cfg(test)]

@@ -12,6 +12,14 @@ pub enum Value {
     Blob(Vec<u8>),
 }
 
+pub fn opt_text(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |text| Value::Text(text.to_string()))
+}
+
+pub fn opt_i64(value: Option<i64>) -> Value {
+    value.map_or(Value::Null, Value::Integer)
+}
+
 impl Value {
     pub(super) const fn kind(&self) -> &'static str {
         match self {

@@ -79,7 +79,7 @@ use tracedecay_store::observation::ObservationCoverageV1;
 
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
-    engine::{Executor, IntoParams, Params, QueryExecutor, Value, params},
+    engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -156,10 +156,6 @@ fn require_apply_transaction<T>(transaction: Option<T>, message: &'static str) -
         operation: OPERATION.to_string(),
         message: message.to_string(),
     })
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |text| Value::Text(text.to_string()))
 }
 
 /// Per-table retention windows for the observation evidence stores. Released

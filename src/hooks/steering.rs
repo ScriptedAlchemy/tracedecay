@@ -5,7 +5,7 @@ use std::path::Path;
 #[cfg(test)]
 use serde_json::Value;
 
-use super::now_unix_secs;
+use crate::tracedecay::current_timestamp;
 
 /// Model-invocable skills that Cursor ships in its `skills/` directory.
 pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
@@ -257,7 +257,7 @@ pub(super) async fn cursor_index_signals_for_root(root: &Path) -> (Option<String
         .get("last_updated")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
-    let staleness = (last > 0).then(|| cursor_staleness_hint(now_unix_secs() - last));
+    let staleness = (last > 0).then(|| cursor_staleness_hint(current_timestamp() - last));
     let tokens_saved = status
         .get("tokens_saved")
         .and_then(serde_json::Value::as_u64);
