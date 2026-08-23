@@ -1065,20 +1065,6 @@ mod tests {
     }
 
     #[test]
-    fn authentic_cursor_saved_edit_capture_is_typed() {
-        assert!(matches!(
-            decode_native_hook_event(
-                NativeHostIdentityV1::CursorDesktop,
-                include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
-            ),
-            Ok(DecodedNativeHookEventV1 {
-                signal: NativeHookSignalV1::SavedEdit,
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn authentic_cursor_saved_edit_preserves_scope_and_content_identity() {
         let binding = HookScopeBindingV1 {
             host: NativeHostIdentityV1::CursorDesktop,

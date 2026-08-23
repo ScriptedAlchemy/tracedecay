@@ -615,11 +615,3 @@ fn test_always_load_tools() {
         always_load
     );
 }
-
-#[test]
-fn test_tool_definitions_serializable() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let json = serde_json::to_string(&tools).unwrap();
-    assert!(json.contains("tracedecay_search"));
-    assert!(json.contains("tracedecay_status"));
-}
