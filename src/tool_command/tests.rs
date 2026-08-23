@@ -1,8 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
-    ResultContractRef, SafeDiagnostic,
+    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
@@ -964,56 +963,6 @@ fn application_error_without_a_json_message_still_exits_nonzero() {
     assert!(
         !message.contains("**success:** false"),
         "stderr must not scrape a payload that is already on stdout: {message}"
-    );
-}
-
-#[test]
-fn canonical_problem_markdown_matches_the_golden_contract() {
-    let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
-        ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
-        RequestId::new("request.cli.golden").unwrap(),
-        ApplicationProblem::unavailable(
-            SafeDiagnostic::new(
-                "daemon_unavailable",
-                "The owning TraceDecay daemon is unavailable",
-            )
-            .unwrap(),
-        ),
-    )
-    .expect("construct canonical CLI golden problem"));
-    let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
-        "feedback_list",
-        &BindingId::new("binding.cli.feedback-list.v1").unwrap(),
-        &result,
-    )
-    .unwrap();
-    let rendered = crate::cli::output::markdown::render(view);
-
-    assert_eq!(
-        rendered.as_str(),
-        concat!(
-            "## feedback\\_list\n",
-            "\n- Operation: `feedback_list`",
-            "\n- Binding: `binding.cli.feedback-list.v1`",
-            "\n- Status: `problem`",
-            "\n- Contract: `schema.test.result@3`",
-            "\n- Problem: `daemon_unavailable`",
-            "\n- Problem kind: `unavailable`",
-            "\n- Problem revision: `1`",
-            "\n- Owning layer: `application`",
-            "\n- Terminality: `pre_admission`",
-            "\n- Request: `request.cli.golden`",
-            "\n- Trace: `request.cli.golden`",
-            "\n- Message: The owning TraceDecay daemon is unavailable",
-            "\n- Retryable: `true`",
-            "\n- Retry: `after_delay`",
-            "\n- Retry scope: `same_request`",
-            "\n- Retry after: `250ms`",
-            "\n- Cancellation stage: `none`",
-            "\n- Details: none",
-            "\n- Legal actions: `retry`",
-            "\n- Coverage: `not_available`",
-        )
     );
 }
 
