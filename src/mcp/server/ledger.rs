@@ -143,19 +143,19 @@ impl McpServer {
         net_saved_tokens: u64,
         raw_file_tokens: u64,
     ) {
-        let persist = if net_saved_tokens == 0 {
-            None
-        } else {
-            let new_total = self
-                .tokens_saved
-                .fetch_add(net_saved_tokens, Ordering::Relaxed)
-                + net_saved_tokens;
-            Some((
-                std::sync::Arc::clone(&self.cg),
-                self.ledger_sink(),
-                new_total,
-            ))
-        };
+        let persist = self
+            .tokens_saved
+            .as_ref()
+            .filter(|_| net_saved_tokens != 0)
+            .map(|tokens_saved| {
+                let new_total =
+                    tokens_saved.fetch_add(net_saved_tokens, Ordering::Relaxed) + net_saved_tokens;
+                (
+                    std::sync::Arc::clone(&self.cg),
+                    self.ledger_sink(),
+                    new_total,
+                )
+            });
         let monitor_project_root = monitor_project_root.to_path_buf();
         let tool_name = tool_name.to_owned();
         self.spawn_observed_ledger_write(async move {
@@ -265,8 +265,13 @@ impl McpServer {
         // Mark as attempted immediately to prevent re-entry.
         self.last_flush_at.store(now, Ordering::Relaxed);
 
-        let current = self.tokens_saved.load(Ordering::Relaxed);
-        let last_flushed = self.last_flushed_tokens.load(Ordering::Relaxed);
+        let (Some(tokens_saved), Some(last_flushed_tokens)) =
+            (&self.tokens_saved, &self.last_flushed_tokens)
+        else {
+            return;
+        };
+        let current = tokens_saved.load(Ordering::Relaxed);
+        let last_flushed = last_flushed_tokens.load(Ordering::Relaxed);
         if current <= last_flushed {
             return;
         }
@@ -310,7 +315,7 @@ impl McpServer {
         .unwrap_or(false);
 
         if success {
-            self.last_flushed_tokens.store(current, Ordering::Relaxed);
+            last_flushed_tokens.store(current, Ordering::Relaxed);
         }
     }
 

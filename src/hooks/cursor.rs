@@ -704,7 +704,7 @@ async fn notify_cursor_after_shell_event(
     super::notify_hook_event_with_telemetry(
         root,
         DaemonHookEvent::cursor_after_shell_execution(cwd)
-            .with_route(hook_route_metadata_from_parsed(parsed, root)),
+            .with_route(Some(hook_route_metadata_from_parsed(parsed, root))),
         telemetry,
     )
     .await;
@@ -725,7 +725,7 @@ async fn notify_cursor_workspace_open(
     super::notify_hook_event_with_telemetry(
         root,
         DaemonHookEvent::cursor_workspace_open(root.to_path_buf())
-            .with_route(hook_route_metadata_from_parsed(parsed, root)),
+            .with_route(Some(hook_route_metadata_from_parsed(parsed, root))),
         telemetry,
     )
     .await;

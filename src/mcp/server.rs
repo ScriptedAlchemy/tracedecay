@@ -240,8 +240,8 @@ pub struct McpServer {
     /// `Arc` so the retained background-refresh task can hold a cheap
     /// clone and swap in the freshly synced map on completion.
     file_token_map: Arc<std::sync::Mutex<HashMap<String, u64>>>,
-    tokens_saved: AtomicU64,
-    last_flushed_tokens: AtomicU64,
+    tokens_saved: Option<AtomicU64>,
+    last_flushed_tokens: Option<AtomicU64>,
     /// UNIX timestamp of last worldwide flush (`0` = never).
     last_flush_at: AtomicI64,
     /// User-level database tracking all projects (best-effort). Wrapped in
@@ -763,16 +763,22 @@ impl McpServer {
         } = context;
         let file_token_map = HashMap::new();
         let response_handle_project_root = cg.project_root().to_path_buf();
-        // Register this project in the global DB with its current tokens.
-        // A failed read must not upsert 0 as if the project saved nothing.
-        if let Some(ref gdb) = accounting_db {
-            match cg.get_tokens_saved().await {
-                Ok(persisted) => gdb.upsert(cg.project_root(), persisted).await,
-                Err(error) => tracing::warn!(
+        let persisted_tokens_saved = match cg.get_tokens_saved().await {
+            Ok(persisted) => Some(persisted),
+            Err(error) => {
+                tracing::warn!(
                     project_root = %cg.project_root().display(),
                     %error,
-                    "MCP server skipped accounting upsert; tokens_saved is unavailable"
-                ),
+                    "MCP token accounting is unavailable because its durable baseline could not be read"
+                );
+                None
+            }
+        };
+        // Register this project in the global DB with its current tokens.
+        // A failed read must not upsert 0 as if the project saved nothing.
+        if let Some(gdb) = accounting_db.as_ref() {
+            if let Some(persisted) = persisted_tokens_saved {
+                gdb.upsert(cg.project_root(), persisted).await;
             }
         } else if global_db.is_none() {
             // Name the gap where it is created. Every later savings and
@@ -949,8 +955,8 @@ impl McpServer {
             diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
             diagnostics_lsp,
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
-            tokens_saved: AtomicU64::new(persisted),
-            last_flushed_tokens: AtomicU64::new(persisted),
+            tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
+            last_flushed_tokens: persisted_tokens_saved.map(AtomicU64::new),
             last_flush_at: AtomicI64::new(0),
             global_db,
             accounting_db,
@@ -1302,18 +1308,22 @@ impl McpServer {
                 "tool_calls_per_jsonrpc_message": ratio(tool_calls),
                 "errors_per_jsonrpc_message": ratio(errors),
             },
-            "approx_tokens_saved": self.tokens_saved.load(Ordering::Relaxed),
+            "approx_tokens_saved": self.tokens_saved.as_ref().map(|tokens| tokens.load(Ordering::Relaxed)),
         });
 
-        if let Some(ref gdb) = self.accounting_db
+        let local_tokens_saved = self
+            .tokens_saved
+            .as_ref()
+            .map(|tokens| tokens.load(Ordering::Relaxed));
+        if let Some(local) = local_tokens_saved
+            && let Some(ref gdb) = self.accounting_db
             && let Some(global_total) = gdb.global_tokens_saved().await
         {
-            let local = self.tokens_saved.load(Ordering::Relaxed);
             stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
-        } else if let Some(ref gdb) = self.global_db
+        } else if let Some(local) = local_tokens_saved
+            && let Some(ref gdb) = self.global_db
             && let Some(global_total) = gdb.global_tokens_saved().await
         {
-            let local = self.tokens_saved.load(Ordering::Relaxed);
             stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
         }
 

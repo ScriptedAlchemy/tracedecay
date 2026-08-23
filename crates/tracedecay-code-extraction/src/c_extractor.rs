@@ -232,7 +232,7 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
         let metrics = count_complexity(node, &C_COMPLEXITY, &state.source);
 
         let graph_node = Node {
@@ -350,7 +350,7 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
@@ -416,7 +416,7 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Static, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Static, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
@@ -925,8 +925,13 @@ impl CExtractor {
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Struct, name, start_line);
-        let signature = find_direct_child_by_kind(spec_node, "field_declaration_list")
-            .map(|body| state.text_before(spec_node, body.start_byte()).trim().to_string());
+        let signature =
+            find_direct_child_by_kind(spec_node, "field_declaration_list").map(|body| {
+                state
+                    .text_before(spec_node, body.start_byte())
+                    .trim()
+                    .to_string()
+            });
 
         let graph_node = Node {
             id: id.clone(),
@@ -982,8 +987,13 @@ impl CExtractor {
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Union, name, start_line);
-        let signature = find_direct_child_by_kind(spec_node, "field_declaration_list")
-            .map(|body| state.text_before(spec_node, body.start_byte()).trim().to_string());
+        let signature =
+            find_direct_child_by_kind(spec_node, "field_declaration_list").map(|body| {
+                state
+                    .text_before(spec_node, body.start_byte())
+                    .trim()
+                    .to_string()
+            });
 
         let graph_node = Node {
             id: id.clone(),
@@ -1039,8 +1049,12 @@ impl CExtractor {
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Enum, name, start_line);
-        let signature = find_direct_child_by_kind(spec_node, "enumerator_list")
-            .map(|body| state.text_before(spec_node, body.start_byte()).trim().to_string());
+        let signature = find_direct_child_by_kind(spec_node, "enumerator_list").map(|body| {
+            state
+                .text_before(spec_node, body.start_byte())
+                .trim()
+                .to_string()
+        });
 
         let graph_node = Node {
             id: id.clone(),

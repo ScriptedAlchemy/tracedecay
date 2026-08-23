@@ -4,7 +4,7 @@
 //! context, so handlers stay silent unless they intend to block (exit code 2
 //! with stderr sent back to the model).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;

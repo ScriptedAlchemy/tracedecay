@@ -84,9 +84,9 @@ impl DaemonSessionSyncService {
         let task = tokio::spawn(async move {
             let worker = async {
                 loop {
-                    if service.shutdown.is_cancelled() {
-                        return;
-                    }
+                    let journal_changed = service.journal_changed.notified();
+                    tokio::pin!(journal_changed);
+                    let _ = journal_changed.as_mut().enable();
                     match context
                         .registry
                         .read_session_sync_journal(&primary_key)
@@ -175,7 +175,26 @@ impl DaemonSessionSyncService {
                             return;
                         }
                     }
-                    tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL).await;
+                    tokio::select! {
+                        interruption = service.wait_for_interruption_parts(
+                            &cancellation,
+                            &journal.deadline,
+                        ) => {
+                            if let Some(termination) = interruption.termination() {
+                                let _ = service
+                                    .persist_interruption_with_project_sessions(
+                                        &context,
+                                        &project_sessions,
+                                        &key,
+                                        termination,
+                                    )
+                                    .await;
+                            }
+                            return;
+                        }
+                        () = &mut journal_changed => {}
+                        () = tokio::time::sleep(COALESCED_JOURNAL_RECHECK_INTERVAL) => {}
+                    }
                 }
             };
             worker.await;
@@ -438,7 +457,6 @@ impl SessionSyncProjectContext {
         journal_key: &str,
         admitted_at: UtcMicros,
         request: &SessionSyncRequestV1,
-        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
         let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
@@ -573,7 +591,14 @@ impl SessionSyncProjectContext {
             }
         };
         tokio::pin!(pass);
-        let mut interrupted = None;
+        let (outcomes, interrupted) = tokio::select! {
+            biased;
+            outcomes = &mut pass => (outcomes, None),
+            interruption = service.wait_for_interruption(request) => {
+                cancellation.cancel();
+                (pass.await, Some(interruption))
+            }
+        };
         let (
             project,
             user,
@@ -582,23 +607,7 @@ impl SessionSyncProjectContext {
             source_frontiers,
             project_frontiers,
             project_progress_failed,
-        ) = loop {
-            tokio::select! {
-                outcomes = &mut pass => break outcomes,
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if shutdown.is_cancelled() {
-                        cancellation.cancel();
-                        interrupted = Some(SessionSyncInterruption::Shutdown);
-                    } else if request.cancellation().is_cancelled() {
-                        cancellation.cancel();
-                        interrupted = Some(SessionSyncInterruption::Cancelled);
-                    } else if request.deadline().is_elapsed_at(now_micros()) {
-                        cancellation.cancel();
-                        interrupted = Some(SessionSyncInterruption::TimedOut);
-                    }
-                }
-            }
-        };
+        ) = outcomes;
         let committed = project.scheduling_state_written
             || user
                 .as_ref()
@@ -639,19 +648,15 @@ impl SessionSyncProjectContext {
 
     pub(super) async fn synchronize_git(
         &self,
+        service: &DaemonSessionSyncService,
         request: &SessionSyncRequestV1,
         options: SessionGitSyncV1,
-        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
-        if shutdown.is_cancelled() {
-            return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Shutdown);
-        }
-        if request.cancellation().is_cancelled() {
-            return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Cancelled);
-        }
-        if request.deadline().is_elapsed_at(now_micros()) {
-            return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::TimedOut);
+        if let Some(interruption) =
+            service.observed_interruption(request.cancellation(), request.deadline())
+        {
+            return SessionSyncWorkResult::Interrupted(interruption);
         }
         let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
         let control = tracedecay_sessions::runtime::git_correlation::BoundedGitControl::new(
@@ -669,28 +674,18 @@ impl SessionSyncProjectContext {
         };
         let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
         tokio::pin!(backfill);
-        let mut requested_interruption = None;
-        let result = loop {
-            tokio::select! {
-                result = &mut backfill => break result,
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if shutdown.is_cancelled() {
-                        cancellation.cancel();
-                        requested_interruption = Some(SessionSyncInterruption::Shutdown);
-                    } else if request.cancellation().is_cancelled() {
-                        cancellation.cancel();
-                        requested_interruption = Some(SessionSyncInterruption::Cancelled);
-                    } else if request.deadline().is_elapsed_at(now_micros()) {
-                        cancellation.cancel();
-                        requested_interruption = Some(SessionSyncInterruption::TimedOut);
-                    }
-                }
+        let (result, mut requested_interruption) = tokio::select! {
+            biased;
+            result = &mut backfill => (result, None),
+            interruption = service.wait_for_interruption(request) => {
+                cancellation.cancel();
+                (backfill.await, Some(interruption))
             }
         };
         let topology_result =
             if result.is_ok() && requested_interruption.is_none() && !options.dry_run() {
                 match self
-                    .publish_git_topology(request, shutdown, project_sessions)
+                    .publish_git_topology(service, request, project_sessions)
                     .await
                 {
                     super::git_topology::GitTopologySyncOutcome::Finished(result) => result,

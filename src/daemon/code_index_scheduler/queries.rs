@@ -6,10 +6,10 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
-use std::sync::LazyLock;
 #[cfg(test)]
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use tracedecay_application::retrieval::{
@@ -588,12 +588,8 @@ fn bounded_result<T>(
         .collect();
     // `first_page` rejects `returned > total`. Both numbers are store readings
     // on a live query, so disagreement is a stale count, not a caller error.
-    let page_state = PageState::first_page(
-        CALLABLE_CODE_SORT_CONTRACT.clone(),
-        1,
-        page.total,
-        returned,
-    );
+    let page_state =
+        PageState::first_page(CALLABLE_CODE_SORT_CONTRACT.clone(), 1, page.total, returned);
     let mut page_state = match page_state {
         Ok(page_state) => page_state,
         Err(error) => {
@@ -1102,6 +1098,7 @@ fn symbol_signature_line<'a>(
     let chunk_position = latest.record_index().chunk_position_for_symbol(symbol)?;
     latest.generation.chunks().chunks()[chunk_position]
         .sanitized_text
+        .as_str()
         .lines()
         .find(|line| !line.trim().is_empty())
         .map(str::trim)
@@ -2051,7 +2048,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                         .returns
                         .as_ref()
                         .is_some_and(|returns| !signature.contains(returns))
-                        || request.params.iter().any(|param| !signature.contains(param))
+                        || request
+                            .params
+                            .iter()
+                            .any(|param| !signature.contains(param))
                     {
                         return None;
                     }

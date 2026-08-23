@@ -335,8 +335,7 @@ impl McpServer {
                     let registered = self.dispatch_authority.cancellation_registered().notified();
                     tokio::pin!(registered);
                     registered.as_mut().enable();
-                    if self.cancel_application_surface_request(cancellation_id, &connection_scope)
-                    {
+                    if self.cancel_application_surface_request(cancellation_id, &connection_scope) {
                         return;
                     }
                     registered.await;
@@ -597,7 +596,7 @@ impl McpServer {
         });
 
         let mut connection_route = self.new_connection_route_state()?;
-        let mut pending_lines = VecDeque::new();
+        let mut pending_lines: VecDeque<QueuedRequestLine> = VecDeque::new();
         let mut pending_cancellations = HashSet::new();
 
         'connection: loop {
@@ -891,48 +890,57 @@ impl McpServer {
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
-        let tokens_saved = self.tokens_saved.load(Ordering::Relaxed);
+        let tokens_saved = self
+            .tokens_saved
+            .as_ref()
+            .map(|tokens| tokens.load(Ordering::Relaxed));
 
         let cg = self.cg_snapshot().await;
-        if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
-            tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
-            failures.push(format!("persist tokens saved: {e}"));
-        }
+        if let Some(tokens_saved) = tokens_saved {
+            if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
+                tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
+                failures.push(format!("persist tokens saved: {e}"));
+            }
 
-        if let Some(ref gdb) = self.accounting_db {
-            gdb.upsert(cg.project_root(), tokens_saved).await;
-            gdb.checkpoint().await;
-        } else if let Some(ref gdb) = self.global_db {
-            gdb.upsert(cg.project_root(), tokens_saved).await;
-            gdb.checkpoint().await;
-        }
+            if let Some(ref gdb) = self.accounting_db {
+                gdb.upsert(cg.project_root(), tokens_saved).await;
+                gdb.checkpoint().await;
+            } else if let Some(ref gdb) = self.global_db {
+                gdb.upsert(cg.project_root(), tokens_saved).await;
+                gdb.checkpoint().await;
+            }
 
-        // Flush remaining delta to worldwide counter (what periodic flushes missed)
-        let last_flushed = self.last_flushed_tokens.load(Ordering::Relaxed);
-        if (self.accounting_db.is_some() || self.global_db.is_some()) && tokens_saved > last_flushed
-        {
-            let delta = tokens_saved - last_flushed;
-            match self.canonical_upload_enabled().await {
-                Ok(upload_enabled) => {
-                    let mut config = crate::user_config::UserConfig::load();
-                    config.pending_upload += delta;
-                    if upload_enabled
-                        && let Some(_total) = crate::cloud::flush_pending(config.pending_upload)
-                    {
-                        config.pending_upload = 0;
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        config.last_upload_at = now;
-                    }
-                    if let Err(err) = config.save() {
-                        tracing::warn!(error = %err, "could not save upload config during shutdown");
+            // Flush remaining delta to worldwide counter (what periodic flushes missed).
+            if let Some(last_flushed_tokens) = self.last_flushed_tokens.as_ref() {
+                let last_flushed = last_flushed_tokens.load(Ordering::Relaxed);
+                if (self.accounting_db.is_some() || self.global_db.is_some())
+                    && tokens_saved > last_flushed
+                {
+                    let delta = tokens_saved - last_flushed;
+                    match self.canonical_upload_enabled().await {
+                        Ok(upload_enabled) => {
+                            let mut config = crate::user_config::UserConfig::load();
+                            config.pending_upload += delta;
+                            if upload_enabled
+                                && let Some(_total) =
+                                    crate::cloud::flush_pending(config.pending_upload)
+                            {
+                                config.pending_upload = 0;
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                config.last_upload_at = now;
+                            }
+                            if let Err(err) = config.save() {
+                                tracing::warn!(error = %err, "could not save upload config during shutdown");
+                            }
+                        }
+                        Err(error) => failures.push(format!(
+                            "worldwide counter upload configuration unavailable: {error}"
+                        )),
                     }
                 }
-                Err(error) => failures.push(format!(
-                    "worldwide counter upload configuration unavailable: {error}"
-                )),
             }
         }
 
@@ -945,7 +953,7 @@ impl McpServer {
         if failures.is_empty() {
             tracing::info!(
                 tool_calls,
-                tokens_saved,
+                ?tokens_saved,
                 uptime_secs = uptime.as_secs(),
                 "MCP server shutdown complete"
             );

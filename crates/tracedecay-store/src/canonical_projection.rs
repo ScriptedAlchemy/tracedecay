@@ -18,9 +18,10 @@ use crate::{
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
-    let envelope = CanonicalObservationEnvelopeV1::deserialize(observation.payload()).map_err(
-        |_| ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload),
-    )?;
+    let envelope =
+        CanonicalObservationEnvelopeV1::deserialize(observation.payload()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
     envelope
         .validate()
         .map_err(ProjectionStoreError::Contract)?;
@@ -298,6 +299,7 @@ fn serialize_metadata_map(
     }
 }
 
+#[cfg(test)]
 fn canonical_session_metadata(
     provider: &str,
     session: Option<&CanonicalSessionFields>,
