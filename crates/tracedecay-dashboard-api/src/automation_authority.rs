@@ -494,6 +494,20 @@ mod tests {
     }
 
     #[test]
+    fn authority_unavailable_remains_service_unavailable_at_the_http_boundary() {
+        let (status, Json(payload)) =
+            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::unavailable(
+                "dashboard automation authority is not mounted",
+            ));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            payload["detail"],
+            serde_json::json!("dashboard automation authority is not mounted")
+        );
+    }
+
+    #[test]
     fn authority_denial_remains_forbidden_at_the_http_boundary() {
         let (status, Json(payload)) =
             automation_authority_error_response(DashboardAutomationAuthorityErrorV1::Denied {

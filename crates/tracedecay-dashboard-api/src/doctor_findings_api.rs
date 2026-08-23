@@ -366,7 +366,10 @@ mod tests {
         // Absent producer -> unsupported, never complete_zero_findings/ready.
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
         assert!(envelope.payload.entries.is_empty());
-        assert_eq!(envelope.payload.known_families.len(), 7);
+        assert_eq!(
+            envelope.payload.known_families.len(),
+            KNOWN_DOCTOR_FINDING_FAMILIES.len()
+        );
         assert_eq!(envelope.payload.family_filter, None);
         assert_eq!(envelope.payload.note, DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE);
         assert_eq!(
