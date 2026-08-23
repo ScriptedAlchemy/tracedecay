@@ -23,18 +23,18 @@ pub mod hint_outcomes;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hook_boundary_failure_matrix;
 mod kiro;
-pub(crate) mod memory_inject;
+pub mod memory_inject;
 mod post_tool_use;
 mod steering;
 mod store_layout;
 pub mod tool_hints;
-pub(crate) use dispatch::NATIVE_HOOK_HOSTS;
-pub(crate) use dispatch::NativeContextScoutLifecycleV1;
+pub use dispatch::NATIVE_HOOK_HOSTS;
+pub use dispatch::NativeContextScoutLifecycleV1;
 pub use dispatch::native_capture_material;
-pub(crate) use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators;
-pub(crate) use dispatch::project_id_for_layout as hook_project_id_for_layout;
-pub(crate) use dispatch::protected_session_id_for_native as protected_native_session_id;
-pub(crate) use dispatch::publish_daemon_bindings as publish_hook_bindings;
+pub use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators;
+pub use dispatch::project_id_for_layout as hook_project_id_for_layout;
+pub use dispatch::protected_session_id_for_native as protected_native_session_id;
+pub use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
@@ -68,67 +68,20 @@ pub use steering::{
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
-pub(crate) use analytics::HookCompletedReadinessDistributions;
 use analytics::mint_hint_id;
-#[cfg(test)]
-pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
+pub use analytics::{
+    HookCompletedReadinessDistributions, host_hook_telemetry_contract,
+    measure_host_event_payload_bytes,
+};
 use analytics::{
     record_hint_analytics, record_hint_emitted, record_hook_analytics, record_hook_invoked,
     record_hook_invoked_parsed, record_other_hook_invoked, record_workspace_status_analytics,
 };
 
-pub(crate) fn aggregate_hook_completed_readiness(
-    rows: &[Value],
-) -> HookCompletedReadinessDistributions {
+pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadinessDistributions {
     analytics::aggregate_hook_completed_readiness(rows)
 }
 
-struct RootHookReadinessProjection;
-
-impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookReadinessProjection {
-    fn aggregate_hook_completed_readiness(&self, rows: &[Value]) -> Value {
-        let distribution = aggregate_hook_completed_readiness(rows);
-        match serde_json::to_value(distribution) {
-            Ok(value) => value,
-            // The port contract is a plain `Value`, so a serialization failure
-            // is reported in the port's typed unavailable shape rather than
-            // panicking inside the dashboard readiness projection.
-            Err(error) => serde_json::json!({
-                "schema_version": 1,
-                "source_event": "hook_completed",
-                "collection_status": "unavailable",
-                "input_rows_received": rows.len(),
-                "input_rows_processed": 0,
-                "input_rows_dropped_at_cap": 0,
-                "events_considered": 0,
-                "events_skipped_non_completed": rows.len(),
-                "unavailable_metrics": [{
-                    "metric": "hook_readiness",
-                    "status": "unavailable",
-                    "blocker": format!(
-                        "hook readiness distribution failed to serialize: {error}"
-                    ),
-                }]
-            }),
-        }
-    }
-}
-
-pub(crate) fn install_dashboard_hook_readiness_projection() -> crate::errors::Result<()> {
-    static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
-        std::sync::LazyLock::new(|| {
-            tracedecay_dashboard_api::hooks::install_hook_readiness_projection(std::sync::Arc::new(
-                RootHookReadinessProjection,
-            ))
-            .map_err(|_| "dashboard hook readiness projection is already installed".to_owned())
-        });
-    INSTALLATION
-        .as_ref()
-        .map_err(|message| crate::errors::TraceDecayError::Config {
-            message: message.clone(),
-        })
-        .copied()
-}
 use tool_hints::{HintAgent, ToolHint};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
@@ -378,7 +331,7 @@ async fn native_event_project_root(event: &str) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    crate::config::discover_project_root_with_identity(&start).await
+    crate::ports::hook_runtime::resolve_project_root_with_identity(&start).await
 }
 
 pub(crate) async fn daemon_tool_json(
@@ -386,18 +339,7 @@ pub(crate) async fn daemon_tool_json(
     tool_name: &str,
     arguments: Value,
 ) -> crate::errors::Result<Value> {
-    let handshake = crate::daemon::DaemonHandshake::for_current_client(
-        project_root.map(Path::to_path_buf),
-        None,
-        false,
-        false,
-    )?;
-    let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
-    parse_daemon_tool_json_content(&result, tool_name)
-}
-
-fn parse_daemon_tool_json_content(result: &Value, tool_name: &str) -> crate::errors::Result<Value> {
-    crate::daemon::tool_json_payload(result, tool_name)
+    crate::ports::hook_runtime::daemon_tool_json(project_root, tool_name, arguments, false).await
 }
 
 pub(crate) async fn daemon_hook_action(
@@ -414,25 +356,14 @@ pub(crate) async fn daemon_hook_action(
         }
         return result;
     }
-    let handshake = match crate::daemon::DaemonHandshake::for_current_client(
-        project_root.map(Path::to_path_buf),
-        None,
-        false,
-        project_root.is_some(),
-    ) {
-        Ok(handshake) => handshake,
-        Err(error) => {
-            let err = Err(error);
-            if let Some(telemetry) = telemetry {
-                telemetry.note_daemon_result(&err);
-            }
-            return err;
-        }
-    };
     let started = std::time::Instant::now();
-    let result = crate::daemon::call_default_tool(&handshake, "tracedecay_hook_runtime", arguments)
-        .await
-        .and_then(|result| parse_daemon_tool_json_content(&result, "tracedecay_hook_runtime"));
+    let result = crate::ports::hook_runtime::daemon_tool_json(
+        project_root,
+        "tracedecay_hook_runtime",
+        arguments,
+        project_root.is_some(),
+    )
+    .await;
     if let Some(telemetry) = telemetry {
         telemetry.note_completed_daemon_call(
             payload_bytes,
@@ -647,7 +578,7 @@ pub(crate) async fn notify_hook_event_with_telemetry(
     telemetry: &analytics::HookTimingSpan,
 ) {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    crate::daemon::notify_hook_event(project_root, event).await;
+    crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
 }
 
@@ -661,7 +592,7 @@ pub(crate) async fn notify_hook_event_with_optional_telemetry(
             notify_hook_event_with_telemetry(project_root, event, telemetry).await;
         }
         None => {
-            let _ = crate::daemon::notify_hook_event(project_root, event).await;
+            crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
         }
     }
 }
@@ -686,7 +617,10 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         });
     let project_root = match cwd {
         Some(cwd) => {
-            crate::config::discover_project_root_with_identity(std::path::Path::new(&cwd)).await
+            crate::ports::hook_runtime::resolve_project_root_with_identity(std::path::Path::new(
+                &cwd,
+            ))
+            .await
         }
         None => None,
     };
@@ -749,7 +683,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     0
 }
 
-pub(crate) async fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
+pub async fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
     let hint = daemon_hook_action(
         None,
         serde_json::json!({
@@ -772,7 +706,8 @@ Only use agents for code exploration if you have already tried tracedecay and it
 cannot answer the question.";
 
 fn research_block_reason(hint: Option<ToolHint>) -> String {
-    let base = crate::config::brand_env("RESEARCH_BLOCK_REASON")
+    let base = std::env::var("TRACEDECAY_RESEARCH_BLOCK_REASON")
+        .ok()
         .unwrap_or_else(|| TRACEDECAY_RESEARCH_BLOCK_REASON.to_string());
     hint.map_or_else(
         || base.clone(),
@@ -834,8 +769,17 @@ struct TestDaemonHookActionState {
 }
 
 #[cfg(test)]
-static TEST_DAEMON_HOOK_ACTION: std::sync::LazyLock<std::sync::Mutex<TestDaemonHookActionState>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(TestDaemonHookActionState::default()));
+struct TestDaemonHookActionSlot {
+    state: std::sync::Mutex<TestDaemonHookActionState>,
+    available: std::sync::Condvar,
+}
+
+#[cfg(test)]
+static TEST_DAEMON_HOOK_ACTION: std::sync::LazyLock<TestDaemonHookActionSlot> =
+    std::sync::LazyLock::new(|| TestDaemonHookActionSlot {
+        state: std::sync::Mutex::new(TestDaemonHookActionState::default()),
+        available: std::sync::Condvar::new(),
+    });
 
 #[cfg(test)]
 pub(crate) struct TestDaemonHookActionGuard {
@@ -847,12 +791,13 @@ impl TestDaemonHookActionGuard {
     pub(crate) fn install(responses: impl IntoIterator<Item = Value>) -> Self {
         let owner = std::thread::current().id();
         let mut state = TEST_DAEMON_HOOK_ACTION
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            state.owner.is_none(),
-            "daemon hook test responder is in use"
-        );
+        state = TEST_DAEMON_HOOK_ACTION
+            .available
+            .wait_while(state, |state| state.owner.is_some())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.owner = Some(owner);
         state.responses = responses.into_iter().collect();
         state.calls.clear();
@@ -861,6 +806,7 @@ impl TestDaemonHookActionGuard {
 
     pub(crate) fn calls(&self) -> Vec<(Option<PathBuf>, Value)> {
         let state = TEST_DAEMON_HOOK_ACTION
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(state.owner, Some(self.owner));
@@ -872,10 +818,12 @@ impl TestDaemonHookActionGuard {
 impl Drop for TestDaemonHookActionGuard {
     fn drop(&mut self) {
         let mut state = TEST_DAEMON_HOOK_ACTION
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.owner == Some(self.owner) {
             *state = TestDaemonHookActionState::default();
+            TEST_DAEMON_HOOK_ACTION.available.notify_one();
         }
     }
 }
@@ -886,6 +834,7 @@ fn take_test_daemon_hook_action(
     arguments: &Value,
 ) -> Option<crate::errors::Result<Value>> {
     let mut state = TEST_DAEMON_HOOK_ACTION
+        .state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if state.owner != Some(std::thread::current().id()) {
@@ -1131,7 +1080,7 @@ fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
 /// events carry `cwd`.
 async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::config::discover_project_root_with_identity(&cwd).await
+    crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {

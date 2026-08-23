@@ -8,8 +8,6 @@ fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
     crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
     let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
-    crate::config::bootstrap_runtime_configuration(project_root, &layout)
-        .expect("publish hook test runtime configuration");
     layout.data_root
 }
 
@@ -121,7 +119,7 @@ fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
 /// real hook while `hook_invoked` kept being written. Absence must behave
 /// like the invocation half; only an authority that says off turns it off.
 #[test]
-fn timing_span_follows_the_published_snapshot_and_defaults_to_recording() {
+fn timing_span_defaults_to_recording_without_a_registered_authority() {
     let project = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
     let span = HookTimingSpan::new(
@@ -135,71 +133,6 @@ fn timing_span_follows_the_published_snapshot_and_defaults_to_recording() {
         span.enabled,
         "no published snapshot must not silence the completion half of the span"
     );
-
-    publish_telemetry_timings(&project_root, "project.hook-timings-disabled", false);
-    let disabled = HookTimingSpan::new(
-        Some(&project_root),
-        HintAgent::Claude,
-        "disabledConfiguration",
-        None,
-        None,
-    );
-    assert!(
-        !disabled.enabled,
-        "an authority that disables timings must disable the span"
-    );
-
-    publish_telemetry_timings(&project_root, "project.hook-timings-enabled", true);
-    let enabled = HookTimingSpan::new(
-        Some(&project_root),
-        HintAgent::Claude,
-        "enabledConfiguration",
-        None,
-        None,
-    );
-    assert!(
-        enabled.enabled,
-        "an authority that enables timings must enable the span"
-    );
-}
-
-fn publish_telemetry_timings(project_root: &Path, project_id: &str, timings: bool) {
-    use std::collections::BTreeMap;
-    use tracedecay_domain::configuration::{
-        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
-        TELEMETRY_TIMINGS_SETTING_KEY,
-    };
-
-    let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).unwrap();
-    let revision_id =
-        ConfigurationRevisionId::new(format!("revision.{project_id}.timings")).unwrap();
-    let snapshot = crate::config::resolver::resolve_configuration(
-        &crate::config::registry::ConfigurationRegistry::core().unwrap(),
-        &[crate::config::resolver::ConfigurationLayerV1 {
-            layer: ConfigurationLayerIdV1::Project {
-                project_id: project_id.clone(),
-            },
-            revision_id: revision_id.clone(),
-            entries: BTreeMap::from([(
-                SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
-                ConfigurationValueV1::Boolean(timings),
-            )]),
-        }],
-    )
-    .unwrap()
-    .snapshot;
-    crate::config::install_pinned_runtime_configuration(
-        crate::config::PinnedRuntimeConfiguration::new(
-            crate::config::RuntimeConfigurationTarget {
-                project_id,
-                project_root: project_root.to_path_buf(),
-            },
-            revision_id,
-            snapshot,
-        )
-        .unwrap(),
-    )
-    .unwrap();
 }
 
 #[test]
@@ -1237,44 +1170,28 @@ fn telemetry_contract_separates_host_ipc_rtt_from_daemon_processing() {
     );
 }
 
-/// The dashboard's diagnostics summary must carry a *measured* readiness
-/// aggregate, and must never echo untrusted row values back out.
-///
-/// `tracedecay-dashboard-api` owns the summary but not the aggregation: it
-/// calls the readiness projection through a port this crate installs
-/// (`install_dashboard_hook_readiness_projection`). Only that composition can
-/// answer `measured`, so the safety contract is proven here, over the real
-/// projection, rather than in the dashboard crate's own lib tests where the
-/// port is never mounted.
+/// The canonical readiness aggregate must report measured rows without ever
+/// echoing attacker-controlled dimensions back into the dashboard projection.
 #[test]
-fn dashboard_diagnostics_summary_aggregates_hook_completed_rows_safely() {
-    crate::hooks::install_dashboard_hook_readiness_projection()
-        .expect("dashboard hook readiness projection installs");
-
-    let hook_analytics = tracedecay_dashboard_api::analytics_api::HookAnalyticsRows {
-        rows: vec![serde_json::json!({
-            "event": "hook_completed",
-            "agent": "untrusted-host",
-            "hook_name": "privateHookName",
-            "hook_wall_time_us": 0,
-            "daemon_rtt_us": null,
-            "payload_bytes": 0,
-            "daemon_ipc_payload_bytes": null,
-            "timeout": {"budget_ms": null, "timed_out": null},
-            "disposition": {
-                "class": "untrusted-class",
-                "status": "untrusted-status",
-                "retryable": null,
-                "reason_code": "private-reason"
-            }
-        })],
-        sources: Vec::new(),
-        window: tracedecay_dashboard_api::analytics_api::HookAnalyticsWindow::default(),
-    };
-
-    let summary =
-        crate::dashboard::analytics_api::diagnostics_summary_from_parts(0, &hook_analytics, None);
-    let readiness = &summary["hook_readiness"];
+fn readiness_aggregate_bounds_untrusted_hook_dimensions() {
+    let rows = vec![serde_json::json!({
+        "event": "hook_completed",
+        "agent": "untrusted-host",
+        "hook_name": "privateHookName",
+        "hook_wall_time_us": 0,
+        "daemon_rtt_us": null,
+        "payload_bytes": 0,
+        "daemon_ipc_payload_bytes": null,
+        "timeout": {"budget_ms": null, "timed_out": null},
+        "disposition": {
+            "class": "untrusted-class",
+            "status": "untrusted-status",
+            "retryable": null,
+            "reason_code": "private-reason"
+        }
+    })];
+    let readiness = serde_json::to_value(aggregate_hook_completed_readiness(&rows))
+        .expect("readiness aggregate encodes");
 
     assert_eq!(readiness["collection_status"], "measured");
     assert_eq!(readiness["events_considered"], 1);
@@ -1296,7 +1213,7 @@ fn dashboard_diagnostics_summary_aggregates_hook_completed_rows_safely() {
         "unknown"
     );
 
-    let encoded = serde_json::to_string(readiness).expect("readiness encodes");
+    let encoded = serde_json::to_string(&readiness).expect("readiness encodes");
     for forbidden in [
         "untrusted-host",
         "privateHookName",

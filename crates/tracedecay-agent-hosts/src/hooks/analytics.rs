@@ -140,8 +140,8 @@ impl HookTimingSpan {
         // never finished. Only an authority that explicitly says timings are
         // off suppresses the completion row.
         let enabled = root
-            .and_then(|root| crate::config::cached_telemetry_config(root).ok())
-            .is_none_or(|telemetry| telemetry.timings);
+            .and_then(crate::ports::hook_runtime::hook_timings_enabled)
+            .unwrap_or(true);
         Self {
             root: root.map(Path::to_path_buf),
             agent,
@@ -171,6 +171,7 @@ impl HookTimingSpan {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn note_daemon_result(&self, result: &Result<Value, TraceDecayError>) {
         note_result(&mut self.state(), result);
     }
@@ -345,8 +346,7 @@ fn disposition_severity(disposition: &HookDispositionTelemetry) -> u8 {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn host_hook_telemetry_contract() -> Value {
+pub fn host_hook_telemetry_contract() -> Value {
     let mut hosts = tracedecay_domain::HostIntegrationIdV1::ALL
         .into_iter()
         .map(tracedecay_domain::HostIntegrationIdV1::as_str)
@@ -410,7 +410,7 @@ pub(crate) fn host_hook_telemetry_contract() -> Value {
 }
 
 /// Length-only host-event size. The bytes themselves are never retained.
-pub(crate) fn measure_host_event_payload_bytes(event_json: &str) -> Option<u64> {
+pub fn measure_host_event_payload_bytes(event_json: &str) -> Option<u64> {
     u64::try_from(event_json.len()).ok()
 }
 
@@ -686,9 +686,7 @@ mod readiness;
 
 #[cfg(test)]
 pub(crate) use readiness::empty_hook_completed_readiness_distributions;
-pub(crate) use readiness::{
-    HookCompletedReadinessDistributions, aggregate_hook_completed_readiness,
-};
+pub use readiness::{HookCompletedReadinessDistributions, aggregate_hook_completed_readiness};
 #[cfg(test)]
 use readiness::{
     LATENCY_BUCKET_UPPER_US, MAX_DISPOSITION_SERIES, MAX_READINESS_INPUT_ROWS, MetricAvailability,

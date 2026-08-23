@@ -249,7 +249,9 @@ pub(crate) async fn lookup_registered_context_scout_native_session(
         let mut resolved: Option<SessionId> = None;
         while let Some(row) = rows.next().await.ok()? {
             let raw_session_id = row.get::<String>(0).ok()?;
-            if crate::hooks::protected_native_session_id(&raw_session_id) != protected_session_id {
+            if tracedecay_agent_hosts::hooks::protected_native_session_id(&raw_session_id)
+                != protected_session_id
+            {
                 continue;
             }
             let candidate = SessionId::new(raw_session_id).ok()?;

@@ -12,9 +12,6 @@ use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
 use super::steering::{HookWorkspaceStatus, index_status_line};
-// Only `codex_session_context_with_root` consumes these, and it is test-gated.
-#[cfg(test)]
-use super::steering::{build_codex_session_context_for_workspace, cursor_index_signals_for_root};
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
     additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
@@ -160,39 +157,6 @@ async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option
         append_tool_hint(&mut context, &hint);
     }
     context
-}
-
-/// Builds Codex session/prompt context.
-#[cfg(test)]
-async fn codex_session_context_for_event(event_json: &str) -> (String, HookWorkspaceStatus) {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
-    codex_session_context_with_root(&parsed, root.as_deref()).await
-}
-
-/// Builds Codex session/prompt context from an already-resolved root.
-///
-/// Gated with `codex_session_context_for_event`, its only caller.
-#[cfg(test)]
-async fn codex_session_context_with_root(
-    parsed: &Value,
-    root: Option<&Path>,
-) -> (String, HookWorkspaceStatus) {
-    let cwd = event_cwd_from_parsed(parsed);
-    let session_id = event_session_id(parsed);
-    let status = codex_workspace_status(root, cwd.as_deref());
-    record_workspace_status_analytics(root, status, session_id.as_deref());
-    let staleness = match (status, root) {
-        (HookWorkspaceStatus::Initialized, Some(r)) => {
-            let (staleness, _) = cursor_index_signals_for_root(r).await;
-            staleness
-        }
-        _ => None,
-    };
-    (
-        build_codex_session_context_for_workspace(status, staleness.as_deref()),
-        status,
-    )
 }
 
 /// Codex `SubagentStart` hook handler.
@@ -454,7 +418,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
 pub async fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let root = event_project_root_with_identity(&parsed).await?;
-    let layout = crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(&root)
+    let layout = crate::ports::hook_runtime::resolve_store_layout(&root)
         .await
         .ok()?;
     let path = layout.data_root.join("codex_subagent_starts.json");
@@ -837,56 +801,6 @@ mod tests {
             context.len() < 1_024,
             "turn-local hints must stay smaller than session bootstrap: {} bytes",
             context.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn codex_session_context_resolves_global_only_and_preserves_nudge() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::storage::default_profile_root().unwrap();
-        let project_dir = tempfile::tempdir().unwrap();
-        let project_root = project_dir.path().canonicalize().unwrap();
-        let project_id = "proj_codex_identity";
-        let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-            &profile_root,
-            &project_root,
-            tracedecay_domain::ProjectId::new(project_id).unwrap(),
-        )
-        .await
-        .unwrap();
-        let graph = gdb
-            .initialize_project_graph_for_test(
-                &project_root,
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .unwrap();
-        drop(graph);
-        // Nothing lives in the working tree: the project's durable anchors
-        // are the `.git/` repository identity marker and the registry row
-        // that initialization published.
-        assert!(
-            !project_root.join(".tracedecay").exists(),
-            "initialization must not create working-tree project state"
-        );
-
-        let event = serde_json::json!({ "cwd": project_root.to_string_lossy() }).to_string();
-        let (_context, status) = codex_session_context_for_event(&event).await;
-        assert_eq!(
-            status,
-            HookWorkspaceStatus::Initialized,
-            "a registered, graph-db-backed global-only repo must report Initialized"
-        );
-
-        let unindexed = tempfile::tempdir().unwrap();
-        let unindexed_root = unindexed.path().canonicalize().unwrap();
-        std::fs::write(unindexed_root.join("Cargo.toml"), b"[package]\n").unwrap();
-        let bogus = serde_json::json!({ "cwd": unindexed_root.to_string_lossy() }).to_string();
-        let (_bogus_context, bogus_status) = codex_session_context_for_event(&bogus).await;
-        assert_eq!(
-            bogus_status,
-            HookWorkspaceStatus::UnindexedProject,
-            "an unindexed project-like cwd must still report UnindexedProject"
         );
     }
 }

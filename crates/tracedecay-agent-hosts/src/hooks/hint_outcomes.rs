@@ -103,7 +103,7 @@ enum Resolution {
 /// appends `hint_outcome` observations through the application port. Store
 /// failures remain typed so the daemon can surface the failed stage rather
 /// than fabricating an empty successful pass.
-pub(crate) async fn correlate_hint_outcomes(
+pub async fn correlate_hint_outcomes(
     port: &dyn HintOutcomeCorrelationPort,
     project_id: &str,
     now_secs: i64,

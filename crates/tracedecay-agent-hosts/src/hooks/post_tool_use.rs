@@ -32,7 +32,7 @@ pub(super) async fn notify_edited_paths(
     empty_paths: EmptyPathPolicy,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) {
-    if !crate::tracedecay::TraceDecay::is_initialized(project_root) {
+    if !crate::ports::hook_runtime::is_project_initialized(project_root) {
         return;
     }
     let rels = rel_paths();

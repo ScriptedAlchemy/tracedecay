@@ -21,7 +21,7 @@ fn hook_notice_registration_is_released_with_the_published_owner() {
         Some(RefId::new(scope.branch_ref.clone()).expect("ref")),
     )
     .expect("scope");
-    let (project, worktree) = crate::hooks::hook_scope_locators(&resolved);
+    let (project, worktree) = tracedecay_agent_hosts::hooks::hook_scope_locators(&resolved);
     let first = AdvisoryHookNoticeQueueV1::new(scope.clone());
     assert!(register_advisory_hook_notice_queue(
         project, worktree, &first

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::hooks::{
+use tracedecay_agent_hosts::hooks::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, HookCompletedReadinessDistributions,
     aggregate_hook_completed_readiness, host_hook_telemetry_contract,
     measure_host_event_payload_bytes,

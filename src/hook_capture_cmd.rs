@@ -223,7 +223,9 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
             ) {
                 Ok(Some(layout)) => match current_time() {
                     Some(now) => {
-                        match tracedecay::hooks::native_capture_material(source, &payload, now) {
+                        match tracedecay_agent_hosts::hooks::native_capture_material(
+                            source, &payload, now,
+                        ) {
                             Ok(material) => {
                                 let outcome = tracedecay_hooks::capture_native_event_for_replay(
                                     &layout.data_root,

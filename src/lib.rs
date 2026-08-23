@@ -83,7 +83,7 @@ pub mod git_intelligence;
 pub use tracedecay_usecases::git_query;
 pub mod global_db;
 pub mod graph;
-pub mod hooks;
+mod hooks;
 #[cfg(test)]
 mod host_admission_test;
 pub mod lifecycle_lease;
@@ -114,7 +114,6 @@ pub mod serve;
 #[path = "sessions/ingest_tests.rs"]
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
-mod shell;
 mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;

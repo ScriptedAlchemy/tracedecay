@@ -65,7 +65,7 @@ impl HookDispatch {
     }
 }
 
-pub(crate) const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
+pub const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
     HookHostV1::ClaudeCode,
     HookHostV1::Codex,
     HookHostV1::CursorDesktop,
@@ -75,7 +75,7 @@ pub(crate) const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
     HookHostV1::OpenCode,
 ];
 
-pub(crate) fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8; 16]> {
+pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8; 16]> {
     layout
         .identity
         .project_id
@@ -83,9 +83,7 @@ pub(crate) fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Opt
         .map(|project_id| domain_hash16(project_id, "project"))
 }
 
-pub(crate) fn publish_daemon_bindings(
-    layout: &crate::storage::StoreLayout,
-) -> crate::errors::Result<()> {
+pub fn publish_daemon_bindings(layout: &crate::storage::StoreLayout) -> crate::errors::Result<()> {
     let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
         crate::errors::TraceDecayError::Config {
             message: "cannot publish Hook binding without typed project identity".to_owned(),
@@ -96,13 +94,11 @@ pub(crate) fn publish_daemon_bindings(
             message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
-    let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
-        &layout.project_root,
-        &typed_project_id,
-    )
-    .map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("cannot resolve Hook repository/worktree scope: {error}"),
-    })?;
+    let scope =
+        crate::ports::hook_runtime::resolve_hook_scope(&layout.project_root, &typed_project_id)
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: format!("cannot resolve Hook repository/worktree scope: {error}"),
+            })?;
     let now = now_utc();
     let revision = now.0.max(1) as u64;
     let (project_id, repository_id, worktree_id, worktree_epoch) =
@@ -163,9 +159,7 @@ fn binding_identity_from_scope(
     )
 }
 
-pub(crate) fn project_and_worktree_locators_for_scope(
-    scope: &ResolvedScope,
-) -> ([u8; 16], [u8; 16]) {
+pub fn project_and_worktree_locators_for_scope(scope: &ResolvedScope) -> ([u8; 16], [u8; 16]) {
     (
         domain_hash16(scope.project_id.as_str(), "project"),
         domain_hash16(scope.worktree_id.as_str(), "worktree"),
@@ -258,14 +252,14 @@ struct NativeIdentityReceipt {
 /// them. Paths and payloads remain unrepresentable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct NativeContextScoutLifecycleV1 {
-    pub(crate) session_id: SessionId,
-    pub(crate) call_id: ObservationId,
-    pub(crate) event_id: [u8; 16],
+pub struct NativeContextScoutLifecycleV1 {
+    pub session_id: SessionId,
+    pub call_id: ObservationId,
+    pub event_id: [u8; 16],
 }
 
 impl NativeContextScoutLifecycleV1 {
-    pub(crate) fn new(session_id: &str, call_id: &str, event_id: [u8; 16]) -> Option<Self> {
+    pub fn new(session_id: &str, call_id: &str, event_id: [u8; 16]) -> Option<Self> {
         Some(Self {
             session_id: SessionId::new(session_id.to_owned()).ok()?,
             call_id: ObservationId::new(call_id.to_owned()).ok()?,
@@ -273,7 +267,7 @@ impl NativeContextScoutLifecycleV1 {
         })
     }
 
-    pub(crate) fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+    pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         matches!(
             envelope.producer,
             HookHostV1::KimiCode | HookHostV1::OpenCode
@@ -814,9 +808,6 @@ fn append_for_replay(
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    if std::fs::create_dir_all(&root).is_err() {
-        return SpoolAppendOutcomeV1::Unavailable;
-    }
     let Ok((mut spool, _)) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) else {
         return SpoolAppendOutcomeV1::Unavailable;
     };
@@ -976,7 +967,7 @@ fn hash32(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-pub(crate) fn protected_session_id_for_native(session_id: &str) -> [u8; 32] {
+pub fn protected_session_id_for_native(session_id: &str) -> [u8; 32] {
     hash32(session_id.as_bytes())
 }
 

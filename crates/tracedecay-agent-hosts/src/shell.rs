@@ -1,9 +1,9 @@
 //! Shared shell-command parsing helpers for hooks and analytics classifiers.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ShellInvocation {
-    pub(crate) base: String,
-    pub(crate) args: Vec<String>,
+pub struct ShellInvocation {
+    pub base: String,
+    pub args: Vec<String>,
 }
 
 /// Splits a shell command line into words.
@@ -12,11 +12,11 @@ pub(crate) struct ShellInvocation {
 /// shell word parsing. Windows keeps the local fallback because unquoted paths
 /// such as `C:\Users\me\repo` are common in hook payloads and POSIX parsers
 /// interpret those backslashes as escapes.
-pub(crate) fn shell_words(command: &str) -> Vec<String> {
+pub fn shell_words(command: &str) -> Vec<String> {
     shell_words_for_platform(command, cfg!(windows))
 }
 
-pub(crate) fn shell_invocations(command: &str) -> Vec<ShellInvocation> {
+pub fn shell_invocations(command: &str) -> Vec<ShellInvocation> {
     let tokens = shell_words(command);
     let mut invocations = Vec::new();
     let mut idx = 0;

@@ -5,7 +5,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
     // capture source: Claude exposes no machine-verifiable compacted payload,
     // so the daemon records the boundary and reports typed unavailable.
     if matches!(command, Commands::HookClaudePostCompact) {
-        exit_if_nonzero(tracedecay::hooks::hook_claude_post_compact().await);
+        exit_if_nonzero(tracedecay_agent_hosts::hooks::hook_claude_post_compact().await);
         return Ok(());
     }
     // Codex PostCompact is likewise a daemon-owned pressure probe rather than
@@ -14,38 +14,44 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
     // compression journey at the pressure boundary, which a deferred spool
     // replay cannot honor.
     if matches!(command, Commands::HookCodexPostCompact) {
-        exit_if_nonzero(tracedecay::hooks::hook_codex_post_compact().await);
+        exit_if_nonzero(tracedecay_agent_hosts::hooks::hook_codex_post_compact().await);
         return Ok(());
     }
     let native_response_code = match &command {
-        Commands::HookStop => Some(tracedecay::hooks::hook_stop().await),
+        Commands::HookStop => Some(tracedecay_agent_hosts::hooks::hook_stop().await),
         Commands::HookClaudeSessionStart => {
-            Some(tracedecay::hooks::hook_claude_session_start().await)
+            Some(tracedecay_agent_hosts::hooks::hook_claude_session_start().await)
         }
         Commands::HookClaudePostToolUse => {
-            Some(tracedecay::hooks::hook_claude_post_tool_use().await)
+            Some(tracedecay_agent_hosts::hooks::hook_claude_post_tool_use().await)
         }
         Commands::HookCursorSessionStart => {
-            Some(tracedecay::hooks::hook_cursor_session_start().await)
+            Some(tracedecay_agent_hosts::hooks::hook_cursor_session_start().await)
         }
         Commands::HookCursorPostToolUse => {
-            Some(tracedecay::hooks::hook_cursor_post_tool_use().await)
+            Some(tracedecay_agent_hosts::hooks::hook_cursor_post_tool_use().await)
         }
         Commands::HookCodexSessionStart => {
-            Some(tracedecay::hooks::hook_codex_session_start().await)
+            Some(tracedecay_agent_hosts::hooks::hook_codex_session_start().await)
         }
         Commands::HookCodexUserPromptSubmit => {
-            Some(tracedecay::hooks::hook_codex_user_prompt_submit().await)
+            Some(tracedecay_agent_hosts::hooks::hook_codex_user_prompt_submit().await)
         }
-        Commands::HookCodexPostToolUse => Some(tracedecay::hooks::hook_codex_post_tool_use().await),
+        Commands::HookCodexPostToolUse => {
+            Some(tracedecay_agent_hosts::hooks::hook_codex_post_tool_use().await)
+        }
         Commands::HookHermesTerminalReceipt => {
-            Some(tracedecay::hooks::hook_hermes_terminal_receipt().await)
+            Some(tracedecay_agent_hosts::hooks::hook_hermes_terminal_receipt().await)
         }
-        Commands::HookKiroPromptSubmit => Some(tracedecay::hooks::hook_kiro_prompt_submit().await),
-        Commands::HookKimiEvent => Some(tracedecay::hooks::hook_kimi_event().await),
-        Commands::HookOpenCodeEvent => Some(tracedecay::hooks::hook_opencode_event().await),
+        Commands::HookKiroPromptSubmit => {
+            Some(tracedecay_agent_hosts::hooks::hook_kiro_prompt_submit().await)
+        }
+        Commands::HookKimiEvent => Some(tracedecay_agent_hosts::hooks::hook_kimi_event().await),
+        Commands::HookOpenCodeEvent => {
+            Some(tracedecay_agent_hosts::hooks::hook_opencode_event().await)
+        }
         Commands::HookOpenCodeToolAfter => {
-            Some(tracedecay::hooks::hook_opencode_tool_after().await)
+            Some(tracedecay_agent_hosts::hooks::hook_opencode_tool_after().await)
         }
         _ => None,
     };

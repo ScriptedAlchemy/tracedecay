@@ -24,7 +24,7 @@ use crate::analytics_bridge::HookImportSource;
 use crate::global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
 };
-use crate::hooks::hint_outcomes::HintOutcomeStats;
+use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 
 pub(crate) struct RegisteredHintOutcomeCorrelationPort<'a> {
     analytics: &'a RegisteredGlobalDb,
@@ -156,7 +156,7 @@ pub(crate) async fn correlate_registered_hint_outcomes(
     project_id: &str,
     now_secs: i64,
 ) -> Result<HintOutcomeStats, HintOutcomePortError> {
-    crate::hooks::hint_outcomes::correlate_hint_outcomes(
+    tracedecay_agent_hosts::hooks::hint_outcomes::correlate_hint_outcomes(
         &RegisteredHintOutcomeCorrelationPort::new(analytics, sessions),
         project_id,
         now_secs,

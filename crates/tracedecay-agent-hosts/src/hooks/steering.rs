@@ -8,23 +8,7 @@ use serde_json::Value;
 use crate::tracedecay::current_timestamp;
 
 /// Model-invocable skills that Cursor ships in its `skills/` directory.
-pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
-    "assessing-impact",
-    "code-health",
-    "diagnosing-analytics",
-    "discovering-tracedecay",
-    "editing-safely",
-    "exploring-code",
-    "fixing-build-and-type-errors",
-    "inspecting-managed-skills",
-    "investigating-unexpected-changes",
-    "managing-session-context",
-    "project-memory",
-    "reviewing-changes",
-    "tracing-functions",
-    "using-the-cli",
-    "using-tracedecay",
-];
+pub use crate::agents::cursor::CURSOR_PLUGIN_SKILLS;
 
 pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
     s.push_str(

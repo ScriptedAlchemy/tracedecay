@@ -6,7 +6,8 @@ use super::*;
 #[test]
 fn cursor_compaction_response_matches_hook_contract() {
     let value = cursor_compact_skipped("no messages to compact");
-    let outcome: crate::hooks::CursorPreCompactOutcome = serde_json::from_value(value).unwrap();
+    let outcome: tracedecay_agent_hosts::hooks::CursorPreCompactOutcome =
+        serde_json::from_value(value).unwrap();
     assert_eq!(outcome.status, "skipped");
     assert_eq!(outcome.reason, "no messages to compact");
     assert_eq!(outcome.summary_nodes_created, 0);

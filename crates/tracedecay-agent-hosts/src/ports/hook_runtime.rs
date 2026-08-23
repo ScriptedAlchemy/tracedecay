@@ -1,28 +1,30 @@
 //! The daemon-backed hook runtime that host integrations call into.
 //!
-//! **Registered ports.** The `hooks/` daemon-side handlers stay in the root
-//! crate: they own the daemon handshake, the client
-//! identity, and the memory-injection settings read. Host installers here need
-//! three narrow answers from that runtime, each expressed below.
+//! **Registered ports.** Hook and host behavior lives in this crate. The root
+//! still owns daemon handshakes, registered project identity, resolved daemon
+//! scope, legacy daemon-event publication, and cached application
+//! configuration. Those capabilities are inverted through the narrow slots
+//! below so the host crate never depends back on the application binary.
 //!
-//! Root wiring: the root registers all three during startup, before any
-//! install/update/doctor path runs — [`register_daemon_tool_invoker`] with
-//! `hooks::daemon_tool_json`, [`register_memory_injection_gate`] with
-//! `hooks::memory_inject::memory_injection_enabled`, and
-//! [`register_cursor_catch_up_ingest_max_bytes`] with
-//! `hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES`.
+//! Root wiring: `src/runtime_ports.rs` registers every slot during startup,
+//! before any install, hook, ingest, or doctor path runs.
 //!
-//! Each port fails closed when the root never registers: an unwired build
-//! reports the daemon as unavailable, treats memory injection as disabled, and
-//! reads the ingest ceiling as unbounded so doctor never fabricates a
-//! backlog warning it cannot substantiate.
+//! Each port has a conservative unregistered result: daemon and scope calls
+//! fail closed, identity discovery yields no project, notification is inert,
+//! telemetry has no authoritative override, project initialization uses the
+//! kernel's durable local markers, memory injection is disabled, and the
+//! ingest ceiling is unbounded so doctor never fabricates a backlog warning.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::OnceLock;
 
 use serde_json::Value;
+use tracedecay_application::ResolvedScope;
+use tracedecay_domain::ProjectId;
+use tracedecay_hooks::DaemonHookEvent;
+use tracedecay_runtime_core::storage::StoreLayout;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -31,8 +33,30 @@ pub type DaemonToolInvoker = for<'a> fn(
     Option<&'a Path>,
     &'a str,
     Value,
+    bool,
 )
     -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
+
+/// Resolves a checkout through the root's registered identity authority.
+pub type ProjectRootResolver =
+    for<'a> fn(&'a Path) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>>;
+
+/// Resolves the typed project/repository/worktree scope used by Hook bindings.
+pub type HookScopeResolver = fn(&Path, &ProjectId) -> std::result::Result<ResolvedScope, String>;
+
+/// Publishes one legacy daemon hook event through the root daemon runtime.
+pub type HookEventNotifier =
+    for<'a> fn(&'a Path, DaemonHookEvent) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+/// Reads the daemon-published telemetry timing decision without store I/O.
+pub type HookTimingGate = fn(&Path) -> Option<bool>;
+
+/// Reports whether one checkout has an initialized canonical store.
+pub type ProjectInitializationGate = fn(&Path) -> bool;
+
+/// Resolves the canonical store layout through registered project identity.
+pub type StoreLayoutResolver =
+    for<'a> fn(&'a Path) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>>;
 
 /// Reports whether memory injection is enabled for the active profile.
 pub type MemoryInjectionGate = fn() -> bool;
@@ -41,6 +65,12 @@ pub type MemoryInjectionGate = fn() -> bool;
 pub type CursorCatchUpIngestMaxBytes = fn() -> u64;
 
 static DAEMON_TOOL_INVOKER: OnceLock<DaemonToolInvoker> = OnceLock::new();
+static PROJECT_ROOT_RESOLVER: OnceLock<ProjectRootResolver> = OnceLock::new();
+static HOOK_SCOPE_RESOLVER: OnceLock<HookScopeResolver> = OnceLock::new();
+static HOOK_EVENT_NOTIFIER: OnceLock<HookEventNotifier> = OnceLock::new();
+static HOOK_TIMING_GATE: OnceLock<HookTimingGate> = OnceLock::new();
+static PROJECT_INITIALIZATION_GATE: OnceLock<ProjectInitializationGate> = OnceLock::new();
+static STORE_LAYOUT_RESOLVER: OnceLock<StoreLayoutResolver> = OnceLock::new();
 static MEMORY_INJECTION_GATE: OnceLock<MemoryInjectionGate> = OnceLock::new();
 static CURSOR_CATCH_UP_INGEST_MAX_BYTES: OnceLock<CursorCatchUpIngestMaxBytes> = OnceLock::new();
 
@@ -50,6 +80,30 @@ static CURSOR_CATCH_UP_INGEST_MAX_BYTES: OnceLock<CursorCatchUpIngestMaxBytes> =
 /// initialisation cannot fight over it.
 pub fn register_daemon_tool_invoker(invoker: DaemonToolInvoker) {
     let _ = DAEMON_TOOL_INVOKER.set(invoker);
+}
+
+pub fn register_project_root_resolver(resolver: ProjectRootResolver) {
+    let _ = PROJECT_ROOT_RESOLVER.set(resolver);
+}
+
+pub fn register_hook_scope_resolver(resolver: HookScopeResolver) {
+    let _ = HOOK_SCOPE_RESOLVER.set(resolver);
+}
+
+pub fn register_hook_event_notifier(notifier: HookEventNotifier) {
+    let _ = HOOK_EVENT_NOTIFIER.set(notifier);
+}
+
+pub fn register_hook_timing_gate(gate: HookTimingGate) {
+    let _ = HOOK_TIMING_GATE.set(gate);
+}
+
+pub fn register_project_initialization_gate(gate: ProjectInitializationGate) {
+    let _ = PROJECT_INITIALIZATION_GATE.set(gate);
+}
+
+pub fn register_store_layout_resolver(resolver: StoreLayoutResolver) {
+    let _ = STORE_LAYOUT_RESOLVER.set(resolver);
 }
 
 /// Registers the root crate's memory-injection settings read.
@@ -71,6 +125,7 @@ pub async fn daemon_tool_json(
     project_root: Option<&Path>,
     tool_name: &str,
     arguments: Value,
+    require_project_identity: bool,
 ) -> Result<Value> {
     let Some(invoker) = DAEMON_TOOL_INVOKER.get() else {
         return Err(TraceDecayError::Config {
@@ -79,7 +134,53 @@ pub async fn daemon_tool_json(
             ),
         });
     };
-    invoker(project_root, tool_name, arguments).await
+    invoker(project_root, tool_name, arguments, require_project_identity).await
+}
+
+pub async fn resolve_project_root_with_identity(start: &Path) -> Option<PathBuf> {
+    let resolver = PROJECT_ROOT_RESOLVER.get()?;
+    resolver(start).await
+}
+
+pub fn resolve_hook_scope(
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> std::result::Result<ResolvedScope, String> {
+    HOOK_SCOPE_RESOLVER.get().map_or_else(
+        || Err("no Hook scope resolver is registered".to_owned()),
+        |resolver| resolver(project_root, project_id),
+    )
+}
+
+pub async fn notify_hook_event(project_root: &Path, event: DaemonHookEvent) {
+    if let Some(notifier) = HOOK_EVENT_NOTIFIER.get() {
+        notifier(project_root, event).await;
+    }
+}
+
+#[must_use]
+pub fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
+    HOOK_TIMING_GATE.get().and_then(|gate| gate(project_root))
+}
+
+#[must_use]
+pub fn is_project_initialized(project_root: &Path) -> bool {
+    PROJECT_INITIALIZATION_GATE.get().map_or_else(
+        || {
+            crate::config::has_project_database(project_root)
+                || crate::storage::has_repository_identity_marker(project_root)
+        },
+        |gate| gate(project_root),
+    )
+}
+
+pub async fn resolve_store_layout(project_root: &Path) -> Result<StoreLayout> {
+    let Some(resolver) = STORE_LAYOUT_RESOLVER.get() else {
+        return Err(TraceDecayError::Config {
+            message: "no Hook store-layout resolver is registered".to_owned(),
+        });
+    };
+    resolver(project_root).await
 }
 
 /// Whether memory injection is enabled, or `false` when the root never

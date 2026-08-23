@@ -9,7 +9,7 @@
 /// wins when set, otherwise the user configuration applies.
 pub fn memory_injection_enabled() -> bool {
     injection_enabled_from(
-        crate::config::brand_env("MEMORY_INJECTION").as_deref(),
+        std::env::var("TRACEDECAY_MEMORY_INJECTION").ok().as_deref(),
         crate::user_config::UserConfig::load().memory_injection_enabled,
     )
 }

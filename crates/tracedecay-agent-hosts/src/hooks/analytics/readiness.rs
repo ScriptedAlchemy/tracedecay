@@ -157,7 +157,7 @@ pub(crate) struct ReadinessAggregationBounds {
 /// Bounded, privacy-safe readiness distributions over real `hook_completed` rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HookCompletedReadinessDistributions {
+pub struct HookCompletedReadinessDistributions {
     pub(crate) schema_version: u32,
     pub(crate) source_event: String,
     pub(crate) collection_status: MetricAvailability,
@@ -291,9 +291,7 @@ type MutableDispositionCounts = BTreeMap<DispositionSeriesKey, DispositionSeries
 /// Missing or invalid dispositions fold into closed typed `unknown` values — never
 /// default-success. Hook names and reason codes are not emitted. Daemon processing
 /// duration is reported unavailable (upstream blocker).
-pub(crate) fn aggregate_hook_completed_readiness(
-    rows: &[Value],
-) -> HookCompletedReadinessDistributions {
+pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadinessDistributions {
     let input_rows_received = u64::try_from(rows.len()).unwrap_or(u64::MAX);
     let input_rows_processed =
         u64::try_from(rows.len().min(MAX_READINESS_INPUT_ROWS)).unwrap_or(u64::MAX);
