@@ -33,7 +33,7 @@ use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageRequest,
     PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
@@ -995,14 +995,29 @@ async fn dispatch_admitted(
             request,
             storage_status
         ),
-        PrimitiveRequest::DiagnosticsRead(request) => dispatch_extended!(
-            runtime,
-            &context,
-            &operation,
-            observed_at,
-            request,
-            diagnostics
-        ),
+        PrimitiveRequest::DiagnosticsRead(request) => {
+            let outcome = runtime
+                .project_runtime
+                .extended
+                .diagnostics(retrieval_context(&context, &operation), &request)
+                .await;
+            // A diagnostics read that reached no publishing authority has no
+            // evidence to report. Returning the evidence envelope anyway made
+            // the surface answer `success` with an empty page — indistinguishable
+            // from "this workspace is clean". The authority's own omission reason
+            // is the actionable state, so it is surfaced as a typed problem.
+            if let RetrievalPortOutcome::Unavailable(evidence) = &outcome
+                && evidence.payload.is_none()
+                && evidence.page.returned == 0
+            {
+                return diagnostics_unavailable_problem(
+                    &context,
+                    &operation,
+                    evidence.omissions.first().map(|omission| omission.reason),
+                );
+            }
+            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
+        }
         PrimitiveRequest::RecentTestResults(page) => {
             recent_test_results(runtime, &context, &operation, &page, observed_at).await
         }
@@ -1807,6 +1822,59 @@ fn problem<T>(
     )?))
 }
 
+/// Renders an unavailable diagnostics read as an actionable typed state.
+///
+/// The distinction that matters to a caller is "no diagnostics exist" versus
+/// "no authority answered". Both used to render as an empty success page, so
+/// the reason the authority reported is carried into the problem code here and
+/// the retry directive follows it: a stale or absent producer is worth
+/// retrying, an unsupported scope never is.
+fn diagnostics_unavailable_problem<T>(
+    context: &RequestContext,
+    operation: &ApplicationOperation,
+    reason: Option<OmissionReason>,
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
+    problem(context, operation, diagnostics_absence_problem(reason)?)
+}
+
+/// Maps the diagnostic authority's own omission reason onto the typed state a
+/// caller can act on. An unsupported scope is terminal; every other absence is
+/// worth retrying once a producer publishes.
+fn diagnostics_absence_problem(
+    reason: Option<OmissionReason>,
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let (code, message) = match reason {
+        Some(OmissionReason::Stale) => (
+            "application.diagnostics.stale",
+            "The diagnostic authority has not published a result for the current code generation.",
+        ),
+        Some(OmissionReason::Unsupported) => (
+            "application.diagnostics.unsupported",
+            "No diagnostic producer is configured for this scope.",
+        ),
+        Some(OmissionReason::Redacted) => (
+            "application.diagnostics.redacted",
+            "The diagnostic result for this scope is not disclosable.",
+        ),
+        _ => (
+            "application.diagnostics.unavailable",
+            "The diagnostic authority is unavailable; no diagnostics were read.",
+        ),
+    };
+    let diagnostic = SafeDiagnostic::new(code, message)?;
+    let problem = if matches!(reason, Some(OmissionReason::Unsupported)) {
+        ApplicationProblem::Unsupported {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    } else {
+        ApplicationProblem::unavailable(diagnostic)
+    };
+    problem.validate()?;
+    Ok(problem)
+}
+
 fn contract_problem<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -1824,9 +1892,9 @@ fn contract_problem<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtendedPrimitivePort, PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest,
-        StorageStatusPrimitiveRequest, pre_admission_problem, valid_owned_primitive_request,
-        validate_admitted_root_uri,
+        ExtendedPrimitivePort, OmissionReason, PrimitiveCapacity, PrimitiveDispatch,
+        PrimitiveRequest, StorageStatusPrimitiveRequest, diagnostics_absence_problem,
+        pre_admission_problem, valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
@@ -1881,6 +1949,65 @@ mod tests {
             pre_admission_problem(&request_id, &operation, UtcMicros(100), &deadline, &active)
                 .expect("active problem construction")
                 .is_none()
+        );
+    }
+
+    /// A diagnostics read that reached no publishing authority must not render
+    /// as an empty success page: "no diagnostics exist" and "no authority
+    /// answered" are different answers, and only the second is retryable.
+    #[test]
+    fn absent_diagnostics_authority_is_a_typed_state_not_an_empty_success() {
+        for (reason, kind, code) in [
+            (
+                None,
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.unavailable",
+            ),
+            (
+                Some(OmissionReason::Unavailable),
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.unavailable",
+            ),
+            (
+                Some(OmissionReason::Stale),
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.stale",
+            ),
+            (
+                Some(OmissionReason::Redacted),
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.redacted",
+            ),
+            (
+                Some(OmissionReason::Unsupported),
+                ApplicationProblemKind::Unsupported,
+                "application.diagnostics.unsupported",
+            ),
+        ] {
+            let problem = diagnostics_absence_problem(reason).expect("typed diagnostics absence");
+            assert_eq!(problem.kind(), kind, "reason {reason:?}");
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(code),
+                "reason {reason:?}"
+            );
+        }
+
+        // Only an unsupported scope is terminal; the rest invite a retry once a
+        // producer publishes.
+        assert!(
+            diagnostics_absence_problem(Some(OmissionReason::Unsupported))
+                .expect("unsupported")
+                .legal_actions()
+                .is_empty()
+        );
+        assert!(
+            !diagnostics_absence_problem(Some(OmissionReason::Stale))
+                .expect("stale")
+                .legal_actions()
+                .is_empty()
         );
     }
 
