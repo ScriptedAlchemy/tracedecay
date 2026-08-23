@@ -33,7 +33,7 @@ use crate::tests::harness::{
     open_registered_test_database_fixture,
 };
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
 
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -813,7 +813,7 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
 /// `session_temporal_observation_effects` requires: its insert guard aborts
 /// unless `(observation_id, observation_sequence, receipt_id)` already names a
 /// committed observation.
-async fn seed_effect_observation(conn: &TestConnection, observation: &DurableObservationV1) -> u64 {
+async fn seed_effect_observation(conn: &impl Executor, observation: &DurableObservationV1) -> u64 {
     let receipt = observation.receipt();
     conn.execute(
         "INSERT INTO sanitization_receipts
@@ -990,4 +990,189 @@ async fn canonical_effect_replay_rejects_a_divergent_durable_row() {
             7,
         ))
     );
+}
+
+const HISTORY_ONLY_EFFECTS: u64 = 24;
+
+const HEAD_GROUPING_SET_SQL: &str = "
+    SELECT COUNT(*)
+    FROM session_temporal_observation_effects AS effect
+    LEFT JOIN session_refresh_operations AS running
+      ON running.session_id = effect.session_id
+     AND running.state = 'running'
+    WHERE running.session_id IS NULL
+";
+
+const FILTERED_DISCOVERY_SQL: &str = "
+    WITH active AS (
+        SELECT session_id, frozen_watermarks_json
+        FROM session_temporal_generations
+        WHERE state = 'active'
+    )
+    SELECT COUNT(*)
+    FROM session_temporal_observation_effects AS effect
+    LEFT JOIN active ON active.session_id = effect.session_id
+    LEFT JOIN session_refresh_operations AS running
+      ON running.session_id = effect.session_id
+     AND running.state = 'running'
+    WHERE running.session_id IS NULL
+      AND effect.output_count > 0
+      AND effect.observation_sequence > COALESCE(
+            CAST(json_extract(
+                active.frozen_watermarks_json,
+                '$.projection_frontier'
+            ) AS INTEGER),
+            0
+      )
+";
+
+async fn count_effects(runtime: &HostAdmissionTestRuntimeV1, sql: &str) -> u64 {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("effect-count snapshot");
+    let mut rows = snapshot.query(sql, ()).await.expect("effect-count query");
+    let value: i64 = rows
+        .next()
+        .await
+        .expect("effect-count row")
+        .expect("effect-count missing row")
+        .get(0)
+        .expect("effect-count column");
+    u64::try_from(value).expect("effect-count fits u64")
+}
+
+async fn seed_output_session_with_history_only_effects(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+    history_only: u64,
+) {
+    let (observation, write) = fixture_observation(session_id, 0, None, false);
+    Box::pin(persist_fixture(runtime, observation, write)).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("history-only effect transaction");
+    for ordinal in 1..=history_only {
+        let (observation, _) = fixture_observation(session_id, ordinal, None, false);
+        let sequence = seed_effect_observation(&transaction, &observation).await;
+        record_canonical_observation_effect(
+            &transaction,
+            sequence,
+            &observation,
+            &ObservationProjection::Skipped(ProjectionSkipReason::NonConversationalRecord),
+        )
+        .await
+        .expect("history-only effect");
+    }
+    transaction
+        .commit()
+        .await
+        .expect("commit history-only effects");
+}
+
+/// History-only no-progress retries must not admit a projection snapshot or
+/// visit observation-effect rows, even when an explicit wake would find work.
+#[tokio::test]
+async fn history_only_retry_does_not_admit_discovery_snapshot() {
+    let _guard = crate::hotpath_observe::lock_counters_for_test();
+    crate::hotpath_observe::reset_counters_for_test();
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.history-only-retry");
+    Box::pin(seed_output_session_with_history_only_effects(
+        &runtime,
+        &session_id,
+        HISTORY_ONLY_EFFECTS,
+    ))
+    .await;
+    let grouping_set = count_effects(&runtime, HEAD_GROUPING_SET_SQL).await;
+    let filtered = count_effects(&runtime, FILTERED_DISCOVERY_SQL).await;
+    assert!(
+        grouping_set > filtered,
+        "setup must leave history-only rows in the HEAD grouping set ({grouping_set} <= {filtered})"
+    );
+    assert!(
+        filtered > 0,
+        "setup must leave output-producing work for an explicit wake"
+    );
+
+    crate::hotpath_observe::reset_counters_for_test();
+    let store = temporal_store(&runtime);
+    let pending = store
+        .pending_session_temporal_refresh_requests_for_wake(
+            crate::hotpath_observe::SessionTemporalDiscoveryWake::HistoryOnlyRetry,
+            128,
+        )
+        .await
+        .unwrap();
+    let after = crate::hotpath_observe::snapshot_counters();
+
+    assert!(pending.is_empty(), "{pending:?}");
+    assert_eq!(after.snapshot_admissions, 0);
+    assert_eq!(after.rows_visited, 0);
+    assert_eq!(after.sort_work, 0);
+    assert_eq!(after.output_sessions, 0);
+    assert_eq!(after.full_scan_work, 0);
+}
+
+/// HEAD grouped every historical effect for a pending session. Discovery must
+/// visit only output-producing rows past the frontier, not the history-only
+/// prefix on the same session.
+#[tokio::test]
+async fn explicit_discovery_visits_only_output_effects_past_frontier() {
+    let _guard = crate::hotpath_observe::lock_counters_for_test();
+    crate::hotpath_observe::reset_counters_for_test();
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.filtered-discovery");
+    Box::pin(seed_output_session_with_history_only_effects(
+        &runtime,
+        &session_id,
+        HISTORY_ONLY_EFFECTS,
+    ))
+    .await;
+    let grouping_set = count_effects(&runtime, HEAD_GROUPING_SET_SQL).await;
+    let filtered = count_effects(&runtime, FILTERED_DISCOVERY_SQL).await;
+    assert!(
+        grouping_set >= filtered.saturating_add(HISTORY_ONLY_EFFECTS),
+        "HEAD grouping set {grouping_set} must include the {HISTORY_ONLY_EFFECTS} history-only rows plus filtered {filtered}"
+    );
+    assert_eq!(filtered, 1, "one output-producing effect is pending");
+
+    crate::hotpath_observe::reset_counters_for_test();
+    let store = temporal_store(&runtime);
+    let pending = store
+        .pending_session_temporal_refresh_requests_for_wake(
+            crate::hotpath_observe::SessionTemporalDiscoveryWake::ExplicitProjectionRequest,
+            128,
+        )
+        .await
+        .unwrap();
+    let after = crate::hotpath_observe::snapshot_counters();
+
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session_id(), &session_id);
+    assert_eq!(after.snapshot_admissions, 1);
+    assert_eq!(
+        after.rows_visited, filtered,
+        "discovery visited {0} rows; HEAD grouping set is {grouping_set}",
+        after.rows_visited
+    );
+    assert_ne!(
+        after.rows_visited, grouping_set,
+        "discovery still visited the HEAD grouping set of all historical effects"
+    );
+    assert_eq!(after.output_sessions, 1);
+    assert_eq!(after.sort_work, 1);
+    assert_eq!(after.full_scan_work, 0);
 }

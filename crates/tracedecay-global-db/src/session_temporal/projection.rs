@@ -12,6 +12,7 @@ use super::super::RegisteredGlobalDb;
 use super::query::{PERSIST_OPERATION, storage, storage_message};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use super::relations::SessionRelationError;
+use crate::hotpath_observe::{self, SessionTemporalDiscoveryWake};
 
 mod derived;
 mod materialize;
@@ -37,15 +38,42 @@ const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
 const MAX_BASELINE_RELATION_ITEMS: usize = 100_000;
 
 impl RegisteredGlobalDb {
+    /// Discovers sessions that need temporal projection.
+    ///
+    /// This is an explicit projection request. History-only no-progress retries
+    /// must call [`Self::pending_session_temporal_refresh_requests_for_wake`]
+    /// with [`SessionTemporalDiscoveryWake::HistoryOnlyRetry`] so they never
+    /// admit a snapshot or scan historical effects.
+    #[hotpath::measure]
     pub async fn pending_session_temporal_refresh_requests_result(
         &self,
         limit: usize,
     ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
+        self.pending_session_temporal_refresh_requests_for_wake(
+            SessionTemporalDiscoveryWake::ExplicitProjectionRequest,
+            limit,
+        )
+        .await
+    }
+
+    #[hotpath::measure]
+    pub async fn pending_session_temporal_refresh_requests_for_wake(
+        &self,
+        wake: SessionTemporalDiscoveryWake,
+        limit: usize,
+    ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
+        hotpath_observe::record_discovery_wake(wake);
+        if wake == SessionTemporalDiscoveryWake::HistoryOnlyRetry {
+            return Ok(Vec::new());
+        }
         let snapshot = self
             .read_snapshot()
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        hotpath_observe::record_snapshot_admissions(1);
         let limit = i64::try_from(limit).map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        // Visit only output-producing effects past each session's projection
+        // frontier. History-only (`output_count = 0`) rows never enter grouping.
         let mut rows = snapshot
             .query(
                 "WITH active AS (
@@ -66,22 +94,21 @@ impl RegisteredGlobalDb {
                                 '$.projection_frontier'
                             ) AS INTEGER),
                             0
-                        )
+                        ),
+                        COUNT(*)
                  FROM session_temporal_observation_effects AS effect
                  LEFT JOIN active ON active.session_id = effect.session_id
                  LEFT JOIN running ON running.session_id = effect.session_id
                  WHERE running.session_id IS NULL
+                   AND effect.output_count > 0
+                   AND effect.observation_sequence > COALESCE(
+                        CAST(json_extract(
+                            active.frozen_watermarks_json,
+                            '$.projection_frontier'
+                        ) AS INTEGER),
+                        0
+                   )
                  GROUP BY effect.session_id
-                 HAVING MAX(CASE
-                     WHEN effect.output_count > 0 THEN effect.observation_sequence
-                     ELSE NULL
-                 END) > COALESCE(
-                    CAST(json_extract(
-                        active.frozen_watermarks_json,
-                        '$.projection_frontier'
-                    ) AS INTEGER),
-                    0
-                )
                  ORDER BY effect.session_id
                  LIMIT ?1",
                 params![limit],
@@ -89,6 +116,7 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
         let mut requests = Vec::new();
+        let mut rows_visited = 0u64;
         while let Some(row) = rows
             .next()
             .await
@@ -109,14 +137,24 @@ impl RegisteredGlobalDb {
                     .map_err(|error| storage(DISCOVER_REFRESH, error))?,
             )
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            let visited = u64::try_from(
+                row.get::<i64>(3)
+                    .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+            )
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            rows_visited = rows_visited.saturating_add(visited);
             requests.push(SessionRefreshBeginOrJoinRequestV1::new(
                 session_id,
                 SessionRefreshFrontierV1::new(observed_through, committed_through)?,
             ));
         }
+        hotpath_observe::record_rows_visited(rows_visited);
+        hotpath_observe::record_sort_work(1);
+        hotpath_observe::record_output_sessions(u64::try_from(requests.len()).unwrap_or(u64::MAX));
         Ok(requests)
     }
 
+    #[hotpath::measure]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -126,6 +164,7 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        hotpath_observe::record_snapshot_admissions(1);
         let baseline_copy_count =
             if recovery.restart_state() == SessionRefreshRestartStateV1::BeginProjection {
                 let (scope, relation_store) = self
@@ -191,6 +230,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
+    #[hotpath::measure]
     pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,
@@ -199,6 +239,10 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        hotpath_observe::record_transaction_rows(1);
+        hotpath_observe::record_transaction_bytes(
+            u64::try_from(batch.item_count()).unwrap_or(u64::MAX),
+        );
         let receipt =
             persist_session_temporal_projection_batch_in_transaction(&transaction, &batch).await?;
         transaction

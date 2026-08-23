@@ -90,6 +90,17 @@ impl<'a> GlobalDbSessionTemporalStore<'a> {
         self.db.running_session_refreshes_result().await
     }
 
+    #[cfg(test)]
+    pub async fn pending_session_temporal_refresh_requests_for_wake(
+        &self,
+        wake: crate::hotpath_observe::SessionTemporalDiscoveryWake,
+        limit: usize,
+    ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
+        self.db
+            .pending_session_temporal_refresh_requests_for_wake(wake, limit)
+            .await
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn materialize_session_temporal_refresh_batch_for_test(
         &self,
