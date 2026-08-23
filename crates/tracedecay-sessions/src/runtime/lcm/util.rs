@@ -2,6 +2,15 @@ use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Value, para
 
 use super::LcmError;
 
+/// SQLite bind-list chunk size shared by LCM `IN (...)` batch reads/writes.
+pub const SQLITE_IN_BATCH_SIZE: usize = 500;
+
+pub fn sql_in_placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(unix)]
 pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
     use std::os::unix::fs::MetadataExt;

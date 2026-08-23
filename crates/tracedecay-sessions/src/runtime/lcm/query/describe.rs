@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
-
-const SQLITE_IN_BATCH_SIZE: usize = 500;
+use super::super::util::{SQLITE_IN_BATCH_SIZE, sql_in_placeholders};
 
 pub(super) async fn raw_message_overviews(
     conn: &(impl QueryExecutor + ?Sized),
@@ -204,10 +203,6 @@ async fn describe_summary_sources(
         }
     }
     Ok(out)
-}
-
-fn sql_in_placeholders(len: usize) -> String {
-    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
 
 async fn load_describe_raw_messages(

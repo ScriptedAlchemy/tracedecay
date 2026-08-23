@@ -153,7 +153,7 @@ fn active_replay_value(message: &LcmRawMessage) -> Option<Value> {
 }
 
 fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
-    let mut tokens = crate::lcm::estimate_tokens(&message.content);
+    let mut tokens = crate::lcm::lcm_budget_tokens(&message.content);
     if let Some(mut replay) = active_replay_value(message) {
         if let Some(object) = replay.as_object_mut() {
             object.remove("content");

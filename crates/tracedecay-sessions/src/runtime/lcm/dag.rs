@@ -15,7 +15,7 @@ use tracedecay_runtime_core::privacy::{
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{
     LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmRawMessageMetadata, LcmSourceRef,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, raw,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
 };
 
 #[derive(Clone)]
@@ -467,40 +467,43 @@ async fn load_raw_messages_by_store_ids(
     if unique_store_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let placeholders = std::iter::repeat_n("?", unique_store_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
     let select_columns = if include_content {
         raw::RAW_MESSAGE_SELECT_COLUMNS
     } else {
         raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
     };
-    let sql = format!(
-        "SELECT {select_columns}
-         FROM lcm_raw_messages
-         WHERE store_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_store_ids
-                .iter()
-                .map(|store_id| Value::Integer(*store_id))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
     let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let raw = if include_content {
-            RawMessageRow::Hydrated(raw::verified_raw_message_from_row(&row)?)
-        } else {
-            RawMessageRow::Metadata(raw::raw_message_metadata_from_row(&row)?)
-        };
-        let store_id = match &raw {
-            RawMessageRow::Hydrated(raw) => raw.store_id,
-            RawMessageRow::Metadata(raw) => raw.store_id,
-        };
-        out.insert(store_id, raw);
+    for chunk in unique_store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "SELECT {select_columns}
+             FROM lcm_raw_messages
+             WHERE store_id IN ({})",
+            util::sql_in_placeholders(chunk.len())
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                chunk
+                    .iter()
+                    .map(|store_id| Value::Integer(*store_id))
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let raw = if include_content {
+                RawMessageRow::Hydrated(raw::verified_raw_message_from_row(&row)?)
+            } else {
+                RawMessageRow::Metadata(raw::raw_message_metadata_from_row(&row)?)
+            };
+            let store_id = match &raw {
+                RawMessageRow::Hydrated(raw) => raw.store_id,
+                RawMessageRow::Metadata(raw) => raw.store_id,
+            };
+            out.insert(store_id, raw);
+        }
     }
     Ok(out)
 }
@@ -519,65 +522,68 @@ async fn load_summary_nodes_by_ids(
     if unique_node_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let placeholders = std::iter::repeat_n("?", unique_node_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
     let summary_text = if include_content {
         "summary_text"
     } else {
         "'' AS summary_text"
     };
-    let node_sql = format!(
-        "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
-                summary_hash, summary_token_count, source_token_count, source_time_start,
-                source_time_end, expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE node_id IN ({placeholders})"
-    );
-    let values = unique_node_ids
-        .iter()
-        .map(|node_id| Value::Text(node_id.clone()))
-        .collect::<Vec<_>>();
-    let mut node_rows = conn.query(&node_sql, values.clone()).await?;
     let mut nodes = BTreeMap::new();
-    while let Some(row) = node_rows.next().await? {
-        let node_id: String = row.get(0)?;
-        let node = LcmSummaryNode {
-            node_id: node_id.clone(),
-            provider: row.get(1)?,
-            conversation_id: row.get(2)?,
-            session_id: row.get(3)?,
-            depth: row.get(4)?,
-            summary_text: row.get(5)?,
-            summary_hash: row.get(6)?,
-            summary_token_count: row.get(7)?,
-            source_token_count: row.get(8)?,
-            source_time_start: row.get(9)?,
-            source_time_end: row.get(10)?,
-            expand_hint: row.get(11)?,
-            metadata_json: row.get(12)?,
-            created_at: row.get(13)?,
-            source_refs: Vec::new(),
-        };
-        if include_content {
-            verify_summary_content(&node.summary_text, &node.summary_hash)?;
+    for chunk in unique_node_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
         }
-        nodes.insert(node_id, node);
-    }
-    let source_sql = format!(
-        "SELECT node_id, source_kind, source_id
-         FROM lcm_summary_sources
-         WHERE node_id IN ({placeholders})
-         ORDER BY node_id, ordinal"
-    );
-    let mut source_rows = conn.query(&source_sql, values).await?;
-    while let Some(row) = source_rows.next().await? {
-        let node_id: String = row.get(0)?;
-        let source_kind: String = row.get(1)?;
-        let source_id: String = row.get(2)?;
-        if let Some(node) = nodes.get_mut(&node_id) {
-            node.source_refs
-                .push(source_ref_from_db(&source_kind, &source_id)?);
+        let placeholders = util::sql_in_placeholders(chunk.len());
+        let node_sql = format!(
+            "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
+                    summary_hash, summary_token_count, source_token_count, source_time_start,
+                    source_time_end, expand_hint, metadata_json, created_at
+             FROM lcm_summary_nodes
+             WHERE node_id IN ({placeholders})"
+        );
+        let values = chunk
+            .iter()
+            .map(|node_id| Value::Text(node_id.clone()))
+            .collect::<Vec<_>>();
+        let mut node_rows = conn.query(&node_sql, values.clone()).await?;
+        while let Some(row) = node_rows.next().await? {
+            let node_id: String = row.get(0)?;
+            let node = LcmSummaryNode {
+                node_id: node_id.clone(),
+                provider: row.get(1)?,
+                conversation_id: row.get(2)?,
+                session_id: row.get(3)?,
+                depth: row.get(4)?,
+                summary_text: row.get(5)?,
+                summary_hash: row.get(6)?,
+                summary_token_count: row.get(7)?,
+                source_token_count: row.get(8)?,
+                source_time_start: row.get(9)?,
+                source_time_end: row.get(10)?,
+                expand_hint: row.get(11)?,
+                metadata_json: row.get(12)?,
+                created_at: row.get(13)?,
+                source_refs: Vec::new(),
+            };
+            if include_content {
+                verify_summary_content(&node.summary_text, &node.summary_hash)?;
+            }
+            nodes.insert(node_id, node);
+        }
+        let source_sql = format!(
+            "SELECT node_id, source_kind, source_id
+             FROM lcm_summary_sources
+             WHERE node_id IN ({placeholders})
+             ORDER BY node_id, ordinal"
+        );
+        let mut source_rows = conn.query(&source_sql, values).await?;
+        while let Some(row) = source_rows.next().await? {
+            let node_id: String = row.get(0)?;
+            let source_kind: String = row.get(1)?;
+            let source_id: String = row.get(2)?;
+            if let Some(node) = nodes.get_mut(&node_id) {
+                node.source_refs
+                    .push(source_ref_from_db(&source_kind, &source_id)?);
+            }
         }
     }
     Ok(nodes)

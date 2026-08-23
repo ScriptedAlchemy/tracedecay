@@ -1,4 +1,5 @@
 use super::*;
+use super::super::util;
 
 pub async fn load_session(
     conn: &(impl QueryExecutor + ?Sized),
@@ -15,9 +16,7 @@ pub async fn load_session(
     let mut role_clause = String::new();
     let roles = normalized_strings(&request.roles);
     if !roles.is_empty() {
-        let placeholders = std::iter::repeat_n("?", roles.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let placeholders = util::sql_in_placeholders(roles.len());
         role_clause = format!(" AND role IN ({placeholders})");
         values.extend(roles.into_iter().map(Value::Text));
     }

@@ -45,6 +45,13 @@ pub(crate) fn gc_prefix_like_patterns() -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn gc_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
+    GC_PREFIXES
+        .iter()
+        .map(|prefix| format!("%{prefix}%{payload_ref}%"))
+        .collect()
+}
+
 pub(crate) fn live_prefix_like_patterns() -> Vec<String> {
     LIVE_PREFIX_REWRITES
         .iter()

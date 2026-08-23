@@ -11,7 +11,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlV
 
 use super::{
     LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS, LcmError, LcmGcConfig, maintenance, payload,
-    schema,
+    schema, util,
 };
 
 mod orphan_scan;
@@ -25,7 +25,8 @@ pub use pending_delete::{
 pub(crate) use placeholder_scan::{
     PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
     bind_placeholder_like_patterns, count_placeholder_text_rows, gc_prefix_like_patterns,
-    live_prefix_like_patterns, placeholder_text_like_sql, scan_placeholder_text_rows,
+    gc_prefix_ref_like_patterns, live_prefix_like_patterns, placeholder_text_like_sql,
+    scan_placeholder_text_rows,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -37,7 +38,6 @@ const LIVE_PREFIX_REWRITES: [(&str, &str); 3] = [
 ];
 const GC_PREFIXES: [&str; 2] = [GC_PAYLOAD_PREFIX, GC_TOOL_OUTPUT_PREFIX];
 const MAX_SAMPLES: usize = 20;
-const SQLITE_IN_BATCH_SIZE: usize = 500;
 const GC_MARK_UPSERT_BINDS_PER_ROW: usize = 4;
 
 pub(crate) fn is_known_payload_placeholder_prefix(value: &str) -> bool {
@@ -46,19 +46,6 @@ pub(crate) fn is_known_payload_placeholder_prefix(value: &str) -> bool {
         .iter()
         .any(|(prefix, _)| lower.starts_with(prefix))
         || GC_PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
-}
-
-pub(crate) fn gc_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
-    GC_PREFIXES
-        .iter()
-        .map(|prefix| format!("%{prefix}%{payload_ref}%"))
-        .collect()
-}
-
-fn sql_in_placeholders(len: usize) -> String {
-    std::iter::repeat_n("?", len)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,18 +399,9 @@ async fn payload_metadata_bytes(
     Ok(bytes)
 }
 
+/// Read-only payload GC preview. Mutation runs through
+/// [`run_payload_gc_in_transaction`]; this entry point never writes.
 pub async fn run_payload_gc(
-    conn: &(impl QueryExecutor + ?Sized),
-    storage_root: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-    cfg: &LcmGcConfig,
-    now: i64,
-) -> Result<LcmGcReport, LcmError> {
-    run_payload_gc_preview(conn, storage_root, provider, session_id, cfg, now).await
-}
-
-async fn run_payload_gc_preview(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -493,7 +471,7 @@ pub async fn run_payload_gc_with_apply(
     now: i64,
 ) -> Result<LcmGcReport, LcmError> {
     if !apply {
-        return run_payload_gc_preview(conn, storage_root, provider, session_id, cfg, now).await;
+        return run_payload_gc(conn, storage_root, provider, session_id, cfg, now).await;
     }
 
     let transaction = conn
@@ -1133,14 +1111,14 @@ async fn delete_gc_marks(
     conn: &(impl Executor + ?Sized),
     payload_refs: &[String],
 ) -> Result<(), LcmError> {
-    for chunk in payload_refs.chunks(SQLITE_IN_BATCH_SIZE) {
+    for chunk in payload_refs.chunks(util::SQLITE_IN_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
         let sql = format!(
             "DELETE FROM lcm_gc_marks
              WHERE payload_ref IN ({})",
-            sql_in_placeholders(chunk.len())
+            util::sql_in_placeholders(chunk.len())
         );
         conn.execute(
             &sql,
@@ -1160,14 +1138,14 @@ async fn delete_gc_marks_in_state(
     payload_refs: &[String],
     state: &str,
 ) -> Result<(), LcmError> {
-    for chunk in payload_refs.chunks(SQLITE_IN_BATCH_SIZE) {
+    for chunk in payload_refs.chunks(util::SQLITE_IN_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
         let sql = format!(
             "DELETE FROM lcm_gc_marks
              WHERE state = ? AND payload_ref IN ({})",
-            sql_in_placeholders(chunk.len())
+            util::sql_in_placeholders(chunk.len())
         );
         let mut values = vec![SqlValue::Text(state.to_string())];
         values.extend(chunk.iter().cloned().map(SqlValue::Text));
@@ -1201,7 +1179,7 @@ pub(crate) async fn gc_marks(
     payload_refs: &[String],
 ) -> Result<HashMap<String, (String, i64)>, LcmError> {
     let mut marks = HashMap::new();
-    for chunk in payload_refs.chunks(SQLITE_IN_BATCH_SIZE) {
+    for chunk in payload_refs.chunks(util::SQLITE_IN_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
@@ -1209,7 +1187,7 @@ pub(crate) async fn gc_marks(
             "SELECT payload_ref, state, first_seen_at
              FROM lcm_gc_marks
              WHERE payload_ref IN ({})",
-            sql_in_placeholders(chunk.len())
+            util::sql_in_placeholders(chunk.len())
         );
         let mut rows = conn
             .query(
@@ -1234,7 +1212,7 @@ async fn upsert_gc_marks(
     state: &str,
     now: i64,
 ) -> Result<(), LcmError> {
-    let chunk_size = (SQLITE_IN_BATCH_SIZE / GC_MARK_UPSERT_BINDS_PER_ROW).max(1);
+    let chunk_size = (util::SQLITE_IN_BATCH_SIZE / GC_MARK_UPSERT_BINDS_PER_ROW).max(1);
     for chunk in payload_refs.chunks(chunk_size) {
         if chunk.is_empty() {
             continue;

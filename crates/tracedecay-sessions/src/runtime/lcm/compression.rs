@@ -24,7 +24,6 @@ use super::{
     payload, raw, replay_transactions, security, util,
 };
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
-const SQLITE_IN_BATCH_SIZE: usize = 500;
 const PRESERVED_TODO_CONTEXT_PREFIX: &str =
     "[Your active task list was preserved across context compression]";
 const PRESERVED_OBJECTIVE_CONTEXT_PREFIX: &str =
@@ -1164,7 +1163,7 @@ fn assemble_replay_messages(
         Some(cap) => {
             let used = anchors
                 .iter()
-                .map(|message| crate::lcm::estimate_tokens(&message.content))
+                .map(|message| crate::lcm::lcm_budget_tokens(&message.content))
                 .sum::<i64>();
             let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
             let mut summary_budget = (cap - used - tail_tokens).max(0);
@@ -1174,7 +1173,7 @@ fn assemble_replay_messages(
                         if already_preserved {
                             return Some((store_id, part, already_preserved));
                         }
-                        let part_tokens = crate::lcm::estimate_tokens(&part);
+                        let part_tokens = crate::lcm::lcm_budget_tokens(&part);
                         if part_tokens <= summary_budget {
                             summary_budget -= part_tokens;
                             Some((store_id, part, already_preserved))
@@ -1344,7 +1343,7 @@ fn select_budget_summaries(
     let mut selected = vec![false; summaries.len()];
     let mut used = 0i64;
     for idx in by_depth {
-        let summary_tokens = crate::lcm::estimate_tokens(&summaries[idx].node.summary_text);
+        let summary_tokens = crate::lcm::lcm_budget_tokens(&summaries[idx].node.summary_text);
         if used + summary_tokens > summary_budget {
             continue;
         }
@@ -1454,7 +1453,7 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
 fn replay_token_estimate(messages: &[Value]) -> i64 {
     messages
         .iter()
-        .map(|message| crate::lcm::estimate_tokens(&message_content(message)))
+        .map(|message| crate::lcm::lcm_budget_tokens(&message_content(message)))
         .sum()
 }
 
@@ -1499,7 +1498,7 @@ fn summary_draft(
         summary_text: summary_text.to_string(),
         source_refs,
         source_token_count,
-        summary_token_count: crate::lcm::estimate_tokens(summary_text),
+        summary_token_count: crate::lcm::lcm_budget_tokens(summary_text),
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} raw messages", backlog.len())),
@@ -1542,7 +1541,7 @@ fn condensation_draft(
         summary_text: summary_text.to_string(),
         source_refs,
         source_token_count,
-        summary_token_count: crate::lcm::estimate_tokens(summary_text),
+        summary_token_count: crate::lcm::lcm_budget_tokens(summary_text),
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} summary nodes", children.len())),
@@ -1973,11 +1972,11 @@ async fn message_ids_for_store_ids(
     store_ids: &[i64],
 ) -> Result<HashMap<i64, String>, LcmError> {
     let mut message_ids = HashMap::new();
-    for chunk in store_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+    for chunk in store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
-        let placeholders = sql_placeholders(chunk.len());
+        let placeholders = util::sql_in_placeholders(chunk.len());
         let sql = format!(
             "SELECT store_id, message_id
              FROM lcm_raw_messages
@@ -1994,10 +1993,6 @@ async fn message_ids_for_store_ids(
         }
     }
     Ok(message_ids)
-}
-
-fn sql_placeholders(len: usize) -> String {
-    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
 
 fn message_content_value(message: &Value) -> Value {
@@ -2142,11 +2137,11 @@ async fn existing_active_message_states(
     message_ids: &[String],
 ) -> Result<HashMap<String, ExistingActiveMessageState>, LcmError> {
     let mut states = HashMap::new();
-    for chunk in message_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+    for chunk in message_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
-        let placeholders = sql_placeholders(chunk.len());
+        let placeholders = util::sql_in_placeholders(chunk.len());
         let sql = format!(
             "SELECT message_id, session_id, role, timestamp, ordinal, content_hash, metadata_json
              FROM lcm_raw_messages
@@ -2263,7 +2258,7 @@ fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
 fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
     backlog
         .iter()
-        .map(|message| crate::lcm::estimate_tokens(&message.content))
+        .map(|message| crate::lcm::lcm_budget_tokens(&message.content))
         .sum::<i64>()
 }
 
