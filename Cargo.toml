@@ -158,6 +158,7 @@ hotpath = [
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-automation/hotpath",
+    "tracedecay-capture/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-dashboard-api/hotpath",
@@ -188,6 +189,7 @@ hotpath-alloc = [
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
@@ -218,6 +220,7 @@ hotpath-cpu = [
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
@@ -413,6 +416,7 @@ tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts", version = "0.
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "crates/tracedecay-automation", version = "0.1.0" }
+tracedecay-capture = { path = "crates/tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "crates/tracedecay-dashboard-api", version = "0.1.0" }
