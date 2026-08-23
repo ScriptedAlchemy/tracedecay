@@ -2993,7 +2993,6 @@ dependencies = [
  "cfg-if",
  "crossbeam-channel",
  "flate2",
- "futures-channel",
  "futures-util",
  "hdrhistogram",
  "hotpath-macros",
