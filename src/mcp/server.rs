@@ -762,11 +762,18 @@ impl McpServer {
             host_admission_test_runtime,
         } = context;
         let file_token_map = HashMap::new();
-        let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
-        // Register this project in the global DB with its current tokens
+        // Register this project in the global DB with its current tokens.
+        // A failed read must not upsert 0 as if the project saved nothing.
         if let Some(ref gdb) = accounting_db {
-            gdb.upsert(cg.project_root(), persisted).await;
+            match cg.get_tokens_saved().await {
+                Ok(persisted) => gdb.upsert(cg.project_root(), persisted).await,
+                Err(error) => tracing::warn!(
+                    project_root = %cg.project_root().display(),
+                    %error,
+                    "MCP server skipped accounting upsert; tokens_saved is unavailable"
+                ),
+            }
         } else if global_db.is_none() {
             // Name the gap where it is created. Every later savings and
             // analytics write from this server is a no-op (see

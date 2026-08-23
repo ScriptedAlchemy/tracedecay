@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
+use std::sync::LazyLock;
 #[cfg(test)]
 use std::path::Path;
 use std::pin::Pin;
@@ -60,6 +61,23 @@ use tracedecay_query::retrieval::{
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
+
+/// Validated once per process. Live query pages and the unavailable
+/// constructor share this identifier; do not rebuild it on the failure path.
+static CALLABLE_CODE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
+    SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id"))
+});
+
+fn empty_callable_page() -> PageState {
+    PageState {
+        sort_contract_id: CALLABLE_CODE_SORT_CONTRACT.clone(),
+        sort_revision: 1,
+        total: Some(0),
+        returned: 0,
+        cursor: None,
+        expires_at: None,
+    }
+}
 
 mod graph_control;
 use graph_control::{CallableGraphExecutionControl, current_utc_micros, graph_budget_for_request};
@@ -481,13 +499,7 @@ fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOut
         omissions: Vec::new(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(
-            SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id")),
-            1,
-            None,
-            0,
-        )
-        .unwrap_or_else(|_| panic!("empty application page")),
+        page: empty_callable_page(),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -577,7 +589,7 @@ fn bounded_result<T>(
     // `first_page` rejects `returned > total`. Both numbers are store readings
     // on a live query, so disagreement is a stale count, not a caller error.
     let page_state = PageState::first_page(
-        SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id")),
+        CALLABLE_CODE_SORT_CONTRACT.clone(),
         1,
         page.total,
         returned,
