@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::automation::artifacts::sha256_json;
 use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
