@@ -28,7 +28,7 @@ use super::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_protocol_problem,
 };
-use crate::clock::now_micros;
+use crate::clock::try_now_micros;
 use crate::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, AuthorityReceipt, Deadline,
     RequestId, ResolvedScope, ResultContractRef,
@@ -406,8 +406,11 @@ pub struct SystemRemoteQueryClockV1;
 
 impl RemoteQueryClockPortV1 for SystemRemoteQueryClockV1 {
     fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
-        // Canonical saturating wall-clock semantics shared by every runtime.
-        Ok(now_micros())
+        // Deadlines, authorization stamps, and receipt ordering all read this
+        // port. Saturating a clock that reads before the Unix epoch or past
+        // `i64::MAX` microseconds would report clock failure as deadline or
+        // receipt behaviour, so the failure stays typed.
+        try_now_micros().map_err(|_| RemoteExactObservationQueryErrorV1::ClockUnavailable)
     }
 }
 
@@ -888,6 +891,8 @@ pub enum RemoteExactObservationQueryErrorV1 {
     PolicyUnavailable,
     #[error("remote exact observation query authority is unavailable")]
     AuthorityUnavailable,
+    #[error("remote exact observation query authoritative clock is unavailable")]
+    ClockUnavailable,
     #[error("remote exact observation query budget was exceeded")]
     BudgetExceeded,
     #[error("remote exact observation query deadline elapsed")]
@@ -930,6 +935,7 @@ pub(super) fn query_protocol_failure(
         RemoteExactObservationQueryErrorV1::Credential(_)
         | RemoteExactObservationQueryErrorV1::PolicyUnavailable
         | RemoteExactObservationQueryErrorV1::AuthorityUnavailable
+        | RemoteExactObservationQueryErrorV1::ClockUnavailable
         | RemoteExactObservationQueryErrorV1::ReceiptMismatch
         | RemoteExactObservationQueryErrorV1::BudgetExceeded
         | RemoteExactObservationQueryErrorV1::DeadlineElapsed => {

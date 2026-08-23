@@ -9,7 +9,7 @@ use super::composition::{
     PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
     RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
-use super::protocol::{RemoteProtocolPortV1, RemoteProtocolRequestV1};
+use super::protocol::{RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1};
 use super::query::{
     REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1, REMOTE_QUERY_SCHEMA_REVISION_V1,
     RemoteExactObservationQueryCommandV1, RemoteExactObservationQueryErrorV1,
@@ -17,7 +17,8 @@ use super::query::{
     RemoteExactObservationQueryReadPortV1, RemoteExactObservationQueryServiceV1,
     RemoteExactObservationResultV1, RemoteQueryAuthorizationEvidenceV1,
     RemoteQueryAuthorizationPortV1, RemoteQueryClockPortV1, RemoteQueryCompleteValueV1,
-    RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1, query_protocol_failure,
+    RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1, SystemRemoteQueryClockV1,
+    query_protocol_failure,
     remote_exact_observation_query_result_contract_v1, validate_composition,
     validate_protocol_authority_binding, validate_result_identity, validate_returned_authority,
     validate_returned_observation_identity, validate_returned_provenance,
@@ -552,6 +553,62 @@ impl RemoteQueryClockPortV1 for FixedClock {
     fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
         Ok(self.0)
     }
+}
+
+struct UnavailableClock;
+
+impl RemoteQueryClockPortV1 for UnavailableClock {
+    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
+        Err(RemoteExactObservationQueryErrorV1::ClockUnavailable)
+    }
+}
+
+#[test]
+fn clock_failure_is_typed_rather_than_a_fabricated_stamp() {
+    // A host clock before the Unix epoch or past `i64::MAX` microseconds must
+    // reach the caller as a clock failure, never as a deadline or receipt
+    // verdict computed from a fabricated timestamp.
+    assert_eq!(
+        query_protocol_failure(RemoteExactObservationQueryErrorV1::ClockUnavailable),
+        RemoteProtocolFailureV1::AuthorityUnavailable
+    );
+
+    let service = RemoteExactObservationQueryServiceV1::new_with_clock(
+        Arc::new(UnavailableCredentials),
+        Arc::new(UnreachableAuthorization),
+        Arc::new(UnreachableRead),
+        Arc::new(UnavailableClock),
+    );
+    let adapter = RemoteExactObservationQueryProtocolAdapterV1::new(service);
+    let response = adapter
+        .execute(
+            protocol_request(UtcMicros(10)),
+            OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
+        )
+        .unwrap();
+
+    assert!(response.result.is_err());
+    // Not a `Partial` stamped with a fabricated `UtcMicros(0)`/`i64::MAX`
+    // reading, and not a deadline or receipt verdict derived from one.
+    assert!(
+        matches!(
+            response.authority,
+            CurrentRemoteAuthorityStateV1::Unavailable { .. }
+        ),
+        "clock failure must surface as unavailable authority, got {:?}",
+        response.authority
+    );
+}
+
+#[test]
+fn system_query_clock_reads_a_representable_instant() {
+    let now = SystemRemoteQueryClockV1
+        .now()
+        .expect("a plausible host clock is representable");
+
+    // 2020-01-01T00:00:00Z. Neither saturating sentinel is a real reading.
+    assert!(now.0 > 1_577_836_800_000_000);
+    assert!(now.0 < i64::MAX);
 }
 
 fn protocol_request(sent_at: UtcMicros) -> RemoteProtocolRequestV1<RemoteQueryRequestV1> {
