@@ -27,34 +27,61 @@ const SOURCE_UNAVAILABLE_STATES: &[&str] = &[
     "unavailable",
 ];
 
+struct LoadedSummarySource {
+    session_id: String,
+    source_horizon_json: String,
+    publication_json: String,
+    summary_anchor_id: String,
+    owner_json: String,
+}
+
 pub(super) async fn prepare_sources(
     conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
 ) -> Result<Vec<PreparedSource>, LcmError> {
-    let mut sources = Vec::with_capacity(publication.draft.source_refs.len());
     let now = unixepoch(conn).await?;
+    let mut store_ids = Vec::new();
+    let mut summary_ids = Vec::new();
+    for source in &publication.draft.source_refs {
+        match source {
+            LcmSourceRef::RawMessage { store_id } => store_ids.push(*store_id),
+            LcmSourceRef::SummaryNode { node_id } => summary_ids.push(node_id.as_str()),
+        }
+    }
+    let raw_by_store_id = raw_messages_by_store_id(conn, &store_ids).await?;
+    let summary_by_id = summary_nodes_by_id(conn, &summary_ids).await?;
+    let mut sources = Vec::with_capacity(publication.draft.source_refs.len());
     for source in &publication.draft.source_refs {
         match source {
             LcmSourceRef::RawMessage { store_id } => {
-                sources.push(prepare_raw_source(conn, publication, *store_id, now).await?);
+                let Some(raw) = raw_by_store_id.get(store_id) else {
+                    return Err(LcmError::SummarySourceNotOwnedBySession);
+                };
+                sources.push(prepare_raw_source(conn, publication, *store_id, raw, now).await?);
             }
             LcmSourceRef::SummaryNode { node_id } => {
-                sources.push(prepare_summary_source(conn, publication, node_id).await?);
+                let Some(node) = summary_by_id.get(node_id.as_str()) else {
+                    return Err(LcmError::SummaryNodeNotFound);
+                };
+                sources.push(prepare_summary_source(conn, publication, node_id, node).await?);
             }
         }
     }
     Ok(sources)
 }
 
-async fn prepare_raw_source(
+async fn raw_messages_by_store_id(
     conn: &impl Executor,
-    publication: &LcmImmutableSummaryPublication,
-    store_id: i64,
-    now: i64,
-) -> Result<PreparedSource, LcmError> {
+    store_ids: &[i64],
+) -> Result<BTreeMap<i64, Value>, LcmError> {
+    if store_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_ids =
+        serde_json::to_string(store_ids).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT json_object(
+            "SELECT store_id, json_object(
                     'provider', provider,
                     'session_id', session_id,
                     'timestamp', timestamp,
@@ -64,16 +91,62 @@ async fn prepare_raw_source(
                     'metadata', metadata_json,
                     'message_id', message_id
                 )
-             FROM lcm_raw_messages WHERE store_id = ?1",
-            params![store_id],
+             FROM lcm_raw_messages
+             WHERE store_id IN (SELECT value FROM json_each(?1))",
+            params![encoded_ids],
         )
         .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    };
-    let encoded = row.get::<String>(0)?;
-    let raw: serde_json::Value =
-        serde_json::from_str(&encoded).map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut messages = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let encoded = row.get::<String>(1)?;
+        let raw: Value =
+            serde_json::from_str(&encoded).map_err(|error| LcmError::Db(error.to_string()))?;
+        messages.entry(store_id).or_insert(raw);
+    }
+    Ok(messages)
+}
+
+async fn summary_nodes_by_id(
+    conn: &impl Executor,
+    summary_ids: &[&str],
+) -> Result<BTreeMap<String, LoadedSummarySource>, LcmError> {
+    if summary_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_ids =
+        serde_json::to_string(summary_ids).map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT node.summary_id, node.session_id, node.source_horizon_json,
+                    node.publication_json, node.summary_anchor_id, anchor.owner_json
+             FROM session_summary_nodes node
+             JOIN retrieval_anchors anchor ON anchor.anchor_id = node.summary_anchor_id
+             WHERE node.summary_id IN (SELECT value FROM json_each(?1))",
+            params![encoded_ids],
+        )
+        .await?;
+    let mut nodes = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let summary_id: String = row.get(0)?;
+        nodes.entry(summary_id).or_insert(LoadedSummarySource {
+            session_id: row.get(1)?,
+            source_horizon_json: row.get(2)?,
+            publication_json: row.get(3)?,
+            summary_anchor_id: row.get(4)?,
+            owner_json: row.get(5)?,
+        });
+    }
+    Ok(nodes)
+}
+
+async fn prepare_raw_source(
+    conn: &impl Executor,
+    publication: &LcmImmutableSummaryPublication,
+    store_id: i64,
+    raw: &Value,
+    now: i64,
+) -> Result<PreparedSource, LcmError> {
     let string = |field: &str| {
         raw[field]
             .as_str()
@@ -135,30 +208,15 @@ async fn prepare_summary_source(
     conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
     node_id: &str,
+    node: &LoadedSummarySource,
 ) -> Result<PreparedSource, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT node.session_id, node.source_horizon_json, node.publication_json,
-                    node.summary_anchor_id, anchor.owner_json
-             FROM session_summary_nodes node
-             JOIN retrieval_anchors anchor ON anchor.anchor_id = node.summary_anchor_id
-             WHERE node.summary_id = ?1",
-            params![node_id],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummaryNodeNotFound);
-    };
-    if row.get::<String>(0)? != publication.draft.session_id {
+    if node.session_id != publication.draft.session_id {
         return Err(LcmError::SummarySourceNotOwnedBySession);
     }
-    let manifest_raw: String = row.get(2)?;
-    let manifest: CanonicalPublicationManifest =
-        serde_json::from_str(&manifest_raw).map_err(|_| LcmError::ImmutableSummaryConflict {
+    let manifest: CanonicalPublicationManifest = serde_json::from_str(&node.publication_json)
+        .map_err(|_| LcmError::ImmutableSummaryConflict {
             summary_id: node_id.to_string(),
         })?;
-    let summary_anchor_id: String = row.get(3)?;
-    let owner_json: String = row.get(4)?;
     let expected_owner_json = session_owner_json(
         conn,
         &publication.draft.provider,
@@ -167,16 +225,15 @@ async fn prepare_summary_source(
     .await?;
     if manifest.session_id != publication.draft.session_id
         || manifest.provider != publication.draft.provider
-        || manifest.summary_anchor_id != summary_anchor_id
+        || manifest.summary_anchor_id != node.summary_anchor_id
         || manifest.owner_json != expected_owner_json
-        || manifest.owner_json != owner_json
+        || manifest.owner_json != node.owner_json
         || manifest.depth >= publication.draft.depth
     {
         return Err(LcmError::SummarySourceNotOwnedBySession);
     }
     ensure_source_summary_available(conn, &publication.draft.session_id, node_id).await?;
-    let horizon: String = row.get(1)?;
-    let timestamp = serde_json::from_str::<Value>(&horizon)
+    let timestamp = serde_json::from_str::<Value>(&node.source_horizon_json)
         .ok()
         .and_then(|value| value.get("knowledge_through").and_then(Value::as_i64))
         .ok_or_else(|| unavailable(node_id, "unverifiable_source_horizon"))?;
