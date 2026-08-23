@@ -121,18 +121,67 @@ fn placeholder_scan_scope_sql(scope: &PlaceholderScanScope<'_>) -> (String, Vec<
     }
 }
 
+/// Whether a keyset scan keeps paging after the visitor saw a row.
+enum PlaceholderScanFlow {
+    Continue,
+    Stop,
+}
+
+/// Aggregates every prefiltered candidate row. Callers that only need to know
+/// whether *one* row qualifies must use [`any_placeholder_text_row`] instead:
+/// this retains the full result in memory.
 pub(crate) async fn scan_placeholder_text_rows(
     conn: &(impl QueryExecutor + ?Sized),
     scope: PlaceholderScanScope<'_>,
     like_patterns: &[String],
 ) -> Result<Vec<PlaceholderTextRow>, LcmError> {
+    let mut rows_out = Vec::new();
+    drive_placeholder_text_scan(conn, scope, like_patterns, |row| {
+        rows_out.push(row);
+        PlaceholderScanFlow::Continue
+    })
+    .await?;
+    Ok(rows_out)
+}
+
+/// Streams the same prefiltered candidate rows and stops at the first row
+/// `confirm` accepts, retaining none of them.
+///
+/// The `LIKE` patterns are only a prefilter, so `confirm` stays the authority
+/// over what a match means; the early exit changes when the scan stops, never
+/// what it decides. An existence question about one payload therefore costs one
+/// page of candidates instead of the store's whole placeholder history.
+pub(crate) async fn any_placeholder_text_row(
+    conn: &(impl QueryExecutor + ?Sized),
+    scope: PlaceholderScanScope<'_>,
+    like_patterns: &[String],
+    mut confirm: impl FnMut(&PlaceholderTextRow) -> bool,
+) -> Result<bool, LcmError> {
+    let mut confirmed = false;
+    drive_placeholder_text_scan(conn, scope, like_patterns, |row| {
+        if confirm(&row) {
+            confirmed = true;
+            PlaceholderScanFlow::Stop
+        } else {
+            PlaceholderScanFlow::Continue
+        }
+    })
+    .await?;
+    Ok(confirmed)
+}
+
+async fn drive_placeholder_text_scan(
+    conn: &(impl QueryExecutor + ?Sized),
+    scope: PlaceholderScanScope<'_>,
+    like_patterns: &[String],
+    mut visit: impl FnMut(PlaceholderTextRow) -> PlaceholderScanFlow,
+) -> Result<(), LcmError> {
     if like_patterns.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let (scope_sql, scope_values) = placeholder_scan_scope_sql(&scope);
     let like_sql = placeholder_text_like_sql(like_patterns.len());
     let like_values = bind_placeholder_like_patterns(like_patterns);
-    let mut rows_out = Vec::new();
     let mut after_store_id = 0_i64;
     loop {
         let sql = format!(
@@ -176,17 +225,20 @@ pub(crate) async fn scan_placeholder_text_rows(
             }
             after_store_id = store_id;
             page_rows += 1;
-            rows_out.push(PlaceholderTextRow {
+            let visited = PlaceholderTextRow {
                 store_id,
                 content: row.get(1).unwrap_or(None),
                 snippet_text: row.get(2)?,
                 index_text: row.get(3)?,
                 metadata_json: row.get(4).unwrap_or(None),
-            });
+            };
+            if matches!(visit(visited), PlaceholderScanFlow::Stop) {
+                return Ok(());
+            }
         }
         drop(rows);
         if page_rows == 0 {
-            return Ok(rows_out);
+            return Ok(());
         }
     }
 }

@@ -331,16 +331,16 @@ async fn tombstoned_raw_ref_exists(
     conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
 ) -> Result<bool, LcmError> {
-    let rows = gc::scan_placeholder_text_rows(
+    gc::any_placeholder_text_row(
         conn,
         gc::PlaceholderScanScope::Unscoped,
         &gc::gc_prefix_ref_like_patterns(payload_ref),
+        |row| {
+            row.texts()
+                .any(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
+        },
     )
-    .await?;
-    Ok(rows.iter().any(|row| {
-        row.texts()
-            .any(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
-    }))
+    .await
 }
 
 async fn ensure_current_raw_payload_ref(
@@ -435,3 +435,7 @@ pub async fn load_payload_metadata(
 #[cfg(test)]
 #[path = "payload/rollback_tests.rs"]
 mod rollback_tests;
+
+#[cfg(test)]
+#[path = "payload/tombstone_probe_tests.rs"]
+mod tombstone_probe_tests;
