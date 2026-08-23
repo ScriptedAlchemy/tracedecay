@@ -88,6 +88,27 @@ pub async fn handle_user_lcm_tool(
     }
 }
 
+pub(crate) async fn handle_projectless_registry_tool(
+    tool_name: &str,
+    args: Value,
+    global_db: &GlobalDb,
+) -> Result<crate::mcp::tools::ToolResult> {
+    match tool_name {
+        "tracedecay_project_list" => {
+            info::handle_project_list(None, args, Some(global_db), false).await
+        }
+        "tracedecay_project_search" => {
+            info::handle_project_search(None, args, Some(global_db), false).await
+        }
+        "tracedecay_project_context" => {
+            info::handle_project_context(None, args, Some(global_db), false).await
+        }
+        _ => Err(TraceDecayError::Config {
+            message: format!("unsupported projectless registry tool: {tool_name}"),
+        }),
+    }
+}
+
 use super::ToolResult;
 use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
@@ -449,7 +470,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
         "tracedecay_project_list" => {
             info::handle_project_list(
-                cg,
+                Some(cg),
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,
@@ -458,7 +479,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_project_search" => {
             info::handle_project_search(
-                cg,
+                Some(cg),
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,
@@ -467,7 +488,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_project_context" => {
             info::handle_project_context(
-                cg,
+                Some(cg),
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,

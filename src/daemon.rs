@@ -3566,6 +3566,28 @@ async fn projectless_tools_call_response(
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
+    if matches!(
+        tool_name,
+        "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
+    ) {
+        let global_db = match store_administration
+            .global_database(&client_identity.global_db_path)
+            .await
+        {
+            Ok(global_db) => global_db,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        return match crate::mcp::tools::handle_projectless_registry_tool(
+            tool_name, arguments, &global_db,
+        )
+        .await
+        {
+            Ok(result) => JsonRpcResponse::success(id, result.value),
+            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        };
+    }
     JsonRpcResponse::error(
         id,
         ErrorCode::InternalError,

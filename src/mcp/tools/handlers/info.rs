@@ -450,8 +450,8 @@ async fn open_project_registry_read_only(
     Ok(Some((path, ProjectRegistryDb::Owned(Box::new(db)))))
 }
 
-fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
-    render_registry_result(Some(cg.project_root()), args, payload)
+fn project_registry_result(cg: Option<&TraceDecay>, args: &Value, payload: &Value) -> ToolResult {
+    render_registry_result(cg.map(TraceDecay::project_root), args, payload)
 }
 
 fn registry_result(args: &Value, payload: &Value) -> ToolResult {
@@ -510,7 +510,8 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
 /// Resolves the active project's registry id by looking up `cg`'s project
 /// root in the registry, the same identity lookup the `tracedecay projects`
 /// CLI performs for its own `active_project_id` (see `src/project_cmd.rs`).
-async fn active_project_id(cg: &TraceDecay, db: &ProjectRegistryDb<'_>) -> Option<String> {
+async fn active_project_id(cg: Option<&TraceDecay>, db: &ProjectRegistryDb<'_>) -> Option<String> {
+    let cg = cg?;
     let project_root = cg.project_root();
     let git_common_dir = crate::worktree::git_common_dir(project_root);
     db.db()
@@ -521,7 +522,7 @@ async fn active_project_id(cg: &TraceDecay, db: &ProjectRegistryDb<'_>) -> Optio
 
 /// Handles `tracedecay_project_list` tool calls.
 pub(super) async fn handle_project_list(
-    cg: &TraceDecay,
+    cg: Option<&TraceDecay>,
     args: Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
@@ -569,7 +570,7 @@ pub(super) async fn handle_project_list(
 
 /// Handles `tracedecay_project_search` tool calls.
 pub(super) async fn handle_project_search(
-    cg: &TraceDecay,
+    cg: Option<&TraceDecay>,
     args: Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
@@ -624,23 +625,23 @@ pub(super) async fn handle_project_search(
     ))
 }
 
-fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> (PathBuf, bool) {
+fn project_context_alias_path(cg: Option<&TraceDecay>, args: &Value) -> Option<(PathBuf, bool)> {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return (cg.project_root().to_path_buf(), true);
+        return cg.map(|cg| (cg.project_root().to_path_buf(), true));
     };
     let path = Path::new(path);
     let allow_git_identity =
         GlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
     if path.is_absolute() {
-        (path.to_path_buf(), allow_git_identity)
+        Some((path.to_path_buf(), allow_git_identity))
     } else {
-        (cg.project_root().join(path), allow_git_identity)
+        cg.map(|cg| (cg.project_root().join(path), allow_git_identity))
     }
 }
 
 /// Handles `tracedecay_project_context` tool calls.
 pub(super) async fn handle_project_context(
-    cg: &TraceDecay,
+    cg: Option<&TraceDecay>,
     args: Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
@@ -657,14 +658,17 @@ pub(super) async fn handle_project_context(
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
         db.db().project_registry_context_by_id(project_id).await
     } else {
-        let (alias_path, allow_git_identity) = project_context_alias_path(cg, &args);
-        if let Some(context) = db.db().project_registry_context_by_alias(&alias_path).await {
-            Some(context)
-        } else if allow_git_identity {
-            let git_common_dir = crate::worktree::git_common_dir(&alias_path);
-            db.db()
-                .project_registry_context_by_identity(&alias_path, git_common_dir.as_deref())
-                .await
+        if let Some((alias_path, allow_git_identity)) = project_context_alias_path(cg, &args) {
+            if let Some(context) = db.db().project_registry_context_by_alias(&alias_path).await {
+                Some(context)
+            } else if allow_git_identity {
+                let git_common_dir = crate::worktree::git_common_dir(&alias_path);
+                db.db()
+                    .project_registry_context_by_identity(&alias_path, git_common_dir.as_deref())
+                    .await
+            } else {
+                None
+            }
         } else {
             None
         }

@@ -3592,6 +3592,55 @@ async fn socket_client_rejects_tool_calls_without_project() {
         .expect("projectless client shutdown should be clean");
 }
 
+#[tokio::test]
+async fn projectless_registry_tools_use_the_client_project_registry() {
+    let temp = TempDir::new().expect("temp profile");
+    let project = temp.path().join("alpha-project");
+    std::fs::create_dir_all(&project).expect("project root");
+    let client_identity = test_client_identity_for(temp.path().to_path_buf());
+    let global_db = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
+        .await
+        .expect("open client registry");
+    global_db
+        .upsert_code_project("proj_alpha", &project, None, None, Some("main"))
+        .await
+        .expect("register project");
+    drop(global_db);
+    let store_administration = StoreAdministration::default();
+    let calls = [
+        ("tracedecay_project_list", json!({"format": "json"})),
+        (
+            "tracedecay_project_search",
+            json!({"query": "alpha", "format": "json"}),
+        ),
+        (
+            "tracedecay_project_context",
+            json!({"project_id": "proj_alpha", "format": "json"}),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (id, (tool_name, arguments)) in calls.into_iter().enumerate() {
+        let params = json!({"name": tool_name, "arguments": arguments});
+        let response = super::projectless_tools_call_response(
+            json!(id),
+            Some(&params),
+            &client_identity,
+            &store_administration,
+        )
+        .await;
+        let response = serde_json::to_value(response).expect("serialize response");
+        if let Some(error) = response.get("error") {
+            failures.push(format!("{tool_name}: {error}"));
+            continue;
+        }
+        assert!(
+            response["result"].to_string().contains("proj_alpha"),
+            "{tool_name} omitted the registered project: {response}"
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("; "));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias() {
