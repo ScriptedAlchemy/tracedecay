@@ -1,4 +1,8 @@
-use std::collections::HashMap;
+#[cfg(any(test, feature = "hotpath"))]
+use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BinaryHeap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
@@ -75,14 +79,79 @@ pub const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 pub const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_HASH_CHUNK_BYTES: usize = 64 * 1024;
-const UNCHANGED_PREFIX_MEMO_CAP: usize = 4096;
+const UNCHANGED_GENERATION_CACHE_CAP: usize = 4096;
 
+/// Process-local proof that one exact durable checkpoint already reached EOF.
+///
+/// Entries are minted only after revalidation succeeds. A miss or any native
+/// identity, size, high-resolution token, or checkpoint mismatch falls back to
+/// byte-exact prefix validation; this cache never becomes a durable authority.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct UnchangedPrefixMemoKey {
-    file_identity: u64,
+struct UnchangedGenerationCacheKey {
+    native_identity: JsonlNativeFileIdentity,
     size: u64,
     change: JsonlFileChangeToken,
+    position: u64,
+    generation: u64,
+    stable_file_identity: u64,
     fingerprint: u64,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct JsonlNativeFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn jsonl_native_file_identity(
+    _file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+) -> Option<JsonlNativeFileIdentity> {
+    Some(JsonlNativeFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct JsonlNativeFileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[cfg(windows)]
+fn jsonl_native_file_identity(
+    file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+) -> Option<JsonlNativeFileIdentity> {
+    let information = tracedecay_runtime_core::windows_file::information(file).ok()?;
+    Some(JsonlNativeFileIdentity {
+        volume_serial_number: information.volume_serial_number,
+        file_index: information.file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct JsonlNativeFileIdentity {
+    created_nanos: u128,
+}
+
+#[cfg(not(any(unix, windows)))]
+fn jsonl_native_file_identity(
+    _file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+) -> Option<JsonlNativeFileIdentity> {
+    let created_nanos = metadata
+        .created()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(JsonlNativeFileIdentity { created_nanos })
 }
 
 #[cfg(unix)]
@@ -166,27 +235,233 @@ impl JsonlFileChangeToken {
     }
 }
 
-fn unchanged_prefix_memo() -> &'static Mutex<HashMap<UnchangedPrefixMemoKey, ()>> {
-    static MEMO: std::sync::OnceLock<Mutex<HashMap<UnchangedPrefixMemoKey, ()>>> =
-        std::sync::OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CacheAdmission<N> {
+    priority: u64,
+    native_identity: N,
 }
 
-fn unchanged_prefix_memo_hit(key: UnchangedPrefixMemoKey) -> bool {
-    unchanged_prefix_memo()
+impl<N: Ord> PartialOrd for CacheAdmission<N> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<N: Ord> Ord for CacheAdmission<N> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        #[cfg(test)]
+        CACHE_HEAP_COMPARISONS.with(|count| count.set(count.get().saturating_add(1)));
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| self.native_identity.cmp(&other.native_identity))
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CACHE_HEAP_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct BoundedLatestProofCache<N, P> {
+    capacity: usize,
+    entries: HashMap<N, P>,
+    admissions: BinaryHeap<CacheAdmission<N>>,
+}
+
+impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::with_capacity(capacity),
+            admissions: BinaryHeap::with_capacity(capacity),
+        }
+    }
+
+    fn contains(&self, native_identity: &N, proof: &P) -> bool {
+        self.entries.get(native_identity) == Some(proof)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn admission_len(&self) -> usize {
+        self.admissions.len()
+    }
+
+    fn insert(&mut self, native_identity: N, proof: P) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(current) = self.entries.get_mut(&native_identity) {
+            *current = proof;
+            return;
+        }
+        let admission = CacheAdmission {
+            priority: stable_cache_priority(&native_identity),
+            native_identity,
+        };
+        if self.entries.len() < self.capacity {
+            self.entries.insert(native_identity, proof);
+            self.admissions.push(admission);
+            return;
+        }
+        let Some(highest_admission) = self.admissions.peek() else {
+            return;
+        };
+        if admission >= *highest_admission {
+            return;
+        }
+        let Some(evicted) = self.admissions.pop() else {
+            return;
+        };
+        self.entries.remove(&evicted.native_identity);
+        self.entries.insert(native_identity, proof);
+        self.admissions.push(admission);
+    }
+}
+
+fn stable_cache_priority(value: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+type UnchangedGenerationCache =
+    BoundedLatestProofCache<JsonlNativeFileIdentity, UnchangedGenerationCacheKey>;
+
+fn unchanged_generation_cache() -> &'static Mutex<UnchangedGenerationCache> {
+    static CACHE: std::sync::OnceLock<Mutex<UnchangedGenerationCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP)))
+}
+
+fn unchanged_generation_cache_hit(key: UnchangedGenerationCacheKey) -> bool {
+    unchanged_generation_cache()
         .lock()
-        .map(|memo| memo.contains_key(&key))
+        .map(|cache| cache.contains(&key.native_identity, &key))
         .unwrap_or(false)
 }
 
-fn remember_unchanged_prefix(key: UnchangedPrefixMemoKey) {
-    let Ok(mut memo) = unchanged_prefix_memo().lock() else {
+fn remember_unchanged_generation(key: UnchangedGenerationCacheKey) {
+    let Ok(mut cache) = unchanged_generation_cache().lock() else {
         return;
     };
-    if memo.len() >= UNCHANGED_PREFIX_MEMO_CAP {
-        memo.clear();
+    cache.insert(key.native_identity, key);
+}
+
+fn unchanged_generation_cache_key(
+    file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+    previous: StoredCursor,
+    resume: JsonlResumeState,
+) -> Option<UnchangedGenerationCacheKey> {
+    if previous.position == 0
+        || previous.position != metadata.len()
+        || previous.file_id != resume.generation
+    {
+        return None;
     }
-    memo.insert(key, ());
+    Some(UnchangedGenerationCacheKey {
+        native_identity: jsonl_native_file_identity(file, metadata)?,
+        size: metadata.len(),
+        change: trusted_jsonl_cache_change_token(metadata)?,
+        position: previous.position,
+        generation: resume.generation,
+        stable_file_identity: resume.file_identity,
+        fingerprint: resume.fingerprint,
+    })
+}
+
+#[cfg(unix)]
+fn trusted_jsonl_cache_change_token(metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
+    Some(jsonl_file_change_token(metadata))
+}
+
+#[cfg(not(unix))]
+fn trusted_jsonl_cache_change_token(_metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
+    None
+}
+
+#[cfg(any(test, feature = "hotpath"))]
+struct ScanPayloadMeter(Cell<u64>);
+
+#[cfg(not(any(test, feature = "hotpath")))]
+struct ScanPayloadMeter;
+
+impl ScanPayloadMeter {
+    fn new() -> Self {
+        #[cfg(any(test, feature = "hotpath"))]
+        {
+            Self(Cell::new(0))
+        }
+        #[cfg(not(any(test, feature = "hotpath")))]
+        {
+            Self
+        }
+    }
+
+    fn get(&self) -> u64 {
+        #[cfg(any(test, feature = "hotpath"))]
+        {
+            self.0.get()
+        }
+        #[cfg(not(any(test, feature = "hotpath")))]
+        {
+            0
+        }
+    }
+}
+
+struct MeasuredJsonlFile<'a> {
+    inner: std::fs::File,
+    #[cfg(any(test, feature = "hotpath"))]
+    meter: &'a ScanPayloadMeter,
+    #[cfg(not(any(test, feature = "hotpath")))]
+    meter: std::marker::PhantomData<&'a ScanPayloadMeter>,
+}
+
+impl<'a> MeasuredJsonlFile<'a> {
+    fn new(inner: std::fs::File, meter: &'a ScanPayloadMeter) -> Self {
+        #[cfg(any(test, feature = "hotpath"))]
+        {
+            Self { inner, meter }
+        }
+        #[cfg(not(any(test, feature = "hotpath")))]
+        {
+            let _ = meter;
+            Self {
+                inner,
+                meter: std::marker::PhantomData,
+            }
+        }
+    }
+
+    fn inner(&self) -> &std::fs::File {
+        &self.inner
+    }
+
+    fn inner_mut(&mut self) -> &mut std::fs::File {
+        &mut self.inner
+    }
+}
+
+impl Read for MeasuredJsonlFile<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        #[cfg(any(test, feature = "hotpath"))]
+        self.meter
+            .0
+            .set(self.meter.0.get().saturating_add(read as u64));
+        Ok(read)
+    }
+}
+
+impl Seek for MeasuredJsonlFile<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +537,7 @@ fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
 }
 
 fn jsonl_prefix_digest(
-    file: &mut std::fs::File,
+    file: &mut MeasuredJsonlFile<'_>,
     extent: u64,
 ) -> std::io::Result<(ResumeDigest, u64)> {
     file.seek(SeekFrom::Start(0))?;
@@ -292,7 +567,7 @@ fn jsonl_prefix_digest(
 fn memoized_jsonl_snapshot_fingerprint(
     cache: &mut Option<u64>,
     hashed_bytes: &mut u64,
-    file: &mut std::fs::File,
+    file: &mut MeasuredJsonlFile<'_>,
     extent: u64,
 ) -> std::io::Result<u64> {
     if let Some(fingerprint) = *cache {
@@ -305,7 +580,7 @@ fn memoized_jsonl_snapshot_fingerprint(
 }
 
 fn bounded_jsonl_snapshot_fingerprint(
-    file: &mut std::fs::File,
+    file: &mut MeasuredJsonlFile<'_>,
     extent: u64,
 ) -> std::io::Result<(u64, u64)> {
     file.seek(SeekFrom::Start(0))?;
@@ -745,8 +1020,11 @@ fn try_stream_new_jsonl_raw_with_policy(
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
 ) -> TranscriptIngestResult<RawNewJsonl> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| TranscriptIngestError::scan_io("open", path, error))?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
+    };
+    crate::runtime::pipeline_metrics::record_file_opened();
     try_stream_new_jsonl_raw_from_file(
         path,
         file,
@@ -779,10 +1057,10 @@ struct JsonlScanGeneration {
     replacement: bool,
 }
 
-struct PreparedJsonlScan {
-    file: std::fs::File,
+struct PreparedJsonlScan<'a> {
+    file: MeasuredJsonlFile<'a>,
     generation: JsonlScanGeneration,
-    io: JsonlIoAccounting,
+    cached_unchanged: Option<UnchangedGenerationCacheKey>,
     /// Prefix digest already computed while validating the resume checkpoint,
     /// with the exact extent it covers. `RawJsonlBatchScanner::start` needs the
     /// same digest to seed the reader, so carrying it forward keeps one scan to
@@ -790,27 +1068,35 @@ struct PreparedJsonlScan {
     validated_prefix: Option<(u64, ResumeDigest)>,
 }
 
-impl PreparedJsonlScan {
+impl<'a> PreparedJsonlScan<'a> {
     #[hotpath::measure]
     fn capture(
         path: &Path,
-        mut file: std::fs::File,
+        mut file: MeasuredJsonlFile<'a>,
         previous: StoredCursor,
         resume_state: Option<JsonlResumeState>,
         after_generation_capture: impl FnOnce(),
+        io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<Self> {
         let metadata = file
+            .inner()
             .metadata()
             .map_err(|error| TranscriptIngestError::scan_io("fstat", path, error))?;
         let file_size = metadata.len();
         let mtime = file_mtime_secs(&metadata);
-        let (file_identity, identity_window_bytes) = stable_jsonl_file_id(&mut file, &metadata)
-            .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        crate::runtime::pipeline_metrics::record_file_opened();
-        let mut io = JsonlIoAccounting {
-            identity_window_bytes,
-            ..JsonlIoAccounting::default()
+        let cached_unchanged = resume_state
+            .and_then(|resume| {
+                unchanged_generation_cache_key(file.inner(), &metadata, previous, resume)
+            })
+            .filter(|key| unchanged_generation_cache_hit(*key));
+        let (file_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
+            (key.stable_file_identity, 0)
+        } else {
+            let (identity, read) = stable_jsonl_file_id(file.inner_mut(), &metadata)
+                .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            (identity, read)
         };
+        io.identity_window_bytes = identity_window_bytes;
         // The snapshot fingerprint hashes the whole extent, so it is captured
         // lazily: only rewrite-marker minting and scans that will actually
         // read bytes pay for it. A no-change poll whose cursor already sits
@@ -824,18 +1110,8 @@ impl PreparedJsonlScan {
                 && previous.file_id == resume_state.generation
                 && file_size >= previous.position
                 && file_identity == resume_state.file_identity;
-            let memo_key = UnchangedPrefixMemoKey {
-                file_identity,
-                size: file_size,
-                change: jsonl_file_change_token(&metadata),
-                fingerprint: resume_state.fingerprint,
-            };
-            // A later unchanged poll with the same identity, size, and
-            // high-resolution change token can skip the prefix walk. Unix
-            // ctime additionally detects attempts to restore mtime after an
-            // in-place rewrite.
             let resume_matches = identity_matches
-                && ((file_size == previous.position && unchanged_prefix_memo_hit(memo_key))
+                && (cached_unchanged.is_some()
                     || match jsonl_prefix_digest(&mut file, previous.position) {
                         Ok((digest, hashed)) => {
                             io.prefix_validation_bytes =
@@ -844,9 +1120,6 @@ impl PreparedJsonlScan {
                                 digest.fingerprint(previous.position) == resume_state.fingerprint;
                             if matched {
                                 validated_prefix = Some((previous.position, digest));
-                                if file_size == previous.position {
-                                    remember_unchanged_prefix(memo_key);
-                                }
                             }
                             matched
                         }
@@ -930,6 +1203,8 @@ impl PreparedJsonlScan {
         let replacement = file_id != file_identity || (seek_to == 0 && previous.position > 0);
         io.change = if replacement {
             JsonlChangeKind::Rewritten
+        } else if previous.position == 0 {
+            JsonlChangeKind::Cold
         } else if seek_to >= file_size {
             JsonlChangeKind::Unchanged
         } else {
@@ -947,7 +1222,7 @@ impl PreparedJsonlScan {
                 seek_to,
                 replacement,
             },
-            io,
+            cached_unchanged,
             validated_prefix,
         })
     }
@@ -956,9 +1231,66 @@ impl PreparedJsonlScan {
         self.generation.seek_to >= self.generation.file_size
     }
 
-    fn into_empty_outcome(self) -> RawNewJsonl {
+    fn into_empty_outcome(
+        mut self,
+        path: &Path,
+        io: &mut JsonlIoAccounting,
+    ) -> TranscriptIngestResult<RawNewJsonl> {
+        let metadata = self
+            .file
+            .inner()
+            .metadata()
+            .map_err(|error| TranscriptIngestError::scan_io("fstat", path, error))?;
+        if let Some(expected) = self.cached_unchanged {
+            let observed_native = jsonl_native_file_identity(self.file.inner(), &metadata);
+            if observed_native != Some(expected.native_identity)
+                || metadata.len() != expected.size
+                || jsonl_file_change_token(&metadata) != expected.change
+            {
+                crate::runtime::pipeline_metrics::record_scan_generation_changed();
+                return Err(TranscriptIngestError::ScanGenerationChanged {
+                    path: path.to_path_buf(),
+                });
+            }
+        } else {
+            let (final_file_identity, identity_window_bytes) =
+                stable_jsonl_file_id(self.file.inner_mut(), &metadata)
+                    .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            io.identity_window_bytes = io
+                .identity_window_bytes
+                .saturating_add(identity_window_bytes);
+            if final_file_identity != self.generation.file_identity
+                || metadata.len() != self.generation.file_size
+                || jsonl_file_change_token(&metadata) != self.generation.change
+            {
+                crate::runtime::pipeline_metrics::record_scan_generation_changed();
+                return Err(TranscriptIngestError::ScanGenerationChanged {
+                    path: path.to_path_buf(),
+                });
+            }
+            if let Some((extent, digest)) = self.validated_prefix
+                && extent == self.generation.seek_to
+                && extent == metadata.len()
+            {
+                let cursor = StoredCursor {
+                    position: extent,
+                    mtime: file_mtime_secs(&metadata),
+                    file_id: self.generation.file_id,
+                };
+                let resume = JsonlResumeState {
+                    generation: self.generation.file_id,
+                    file_identity: self.generation.file_identity,
+                    fingerprint: digest.fingerprint(extent),
+                };
+                if let Some(key) =
+                    unchanged_generation_cache_key(self.file.inner(), &metadata, cursor, resume)
+                {
+                    remember_unchanged_generation(key);
+                }
+            }
+        }
         let generation = self.generation;
-        RawNewJsonl {
+        Ok(RawNewJsonl {
             frames: Vec::new(),
             skipped: Vec::new(),
             start_offset: generation.seek_to,
@@ -971,8 +1303,8 @@ impl PreparedJsonlScan {
             },
             replacement_generation: generation.replacement,
             deferred: None,
-            io: self.io,
-        }
+            io: *io,
+        })
     }
 }
 
@@ -981,8 +1313,8 @@ enum JsonlScanStep {
     Stop(Option<JsonlFrameDeferral>),
 }
 
-struct RawJsonlBatchScanner {
-    reader: RawJsonlFrameReader<BufReader<std::fs::File>>,
+struct RawJsonlBatchScanner<'a> {
+    reader: RawJsonlFrameReader<BufReader<MeasuredJsonlFile<'a>>>,
     generation: JsonlScanGeneration,
     max_new_bytes: Option<u64>,
     scan_end: Option<u64>,
@@ -995,20 +1327,19 @@ struct RawJsonlBatchScanner {
     continuing_oversized: bool,
     frame_count: usize,
     deferred: Option<JsonlFrameDeferral>,
-    io: JsonlIoAccounting,
 }
 
-impl RawJsonlBatchScanner {
+impl<'a> RawJsonlBatchScanner<'a> {
     #[hotpath::measure]
     fn start(
         path: &Path,
-        prepared: PreparedJsonlScan,
+        prepared: PreparedJsonlScan<'a>,
         max_new_bytes: Option<u64>,
         max_record_bytes: usize,
+        io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<Self> {
         let generation = prepared.generation;
         let mut file = prepared.file;
-        let mut io = prepared.io;
         let resume_digest = match prepared.validated_prefix {
             // `capture` already walked exactly this prefix to check the resume
             // checkpoint, and the digest it produced is the one this reader
@@ -1022,12 +1353,11 @@ impl RawJsonlBatchScanner {
                 digest
             }
         };
+        let continuing_oversized = Self::starts_inside_record(path, &mut file, generation.seek_to)?;
         let mut reader = BufReader::new(file);
         reader
             .seek(SeekFrom::Start(generation.seek_to))
             .map_err(|error| TranscriptIngestError::scan_io("seek", path, error))?;
-        let continuing_oversized =
-            Self::starts_inside_record(path, &mut reader, generation.seek_to)?;
         let frame_limit = if continuing_oversized {
             0
         } else {
@@ -1056,27 +1386,23 @@ impl RawJsonlBatchScanner {
             continuing_oversized,
             frame_count: 0,
             deferred: None,
-            io,
         })
     }
 
     fn starts_inside_record(
         path: &Path,
-        reader: &mut BufReader<std::fs::File>,
+        file: &mut MeasuredJsonlFile<'_>,
         seek_to: u64,
     ) -> TranscriptIngestResult<bool> {
         if seek_to == 0 {
             return Ok(false);
         }
         let mut previous = [0_u8; 1];
-        reader
-            .seek(SeekFrom::Start(seek_to - 1))
+        file.seek(SeekFrom::Start(seek_to - 1))
             .map_err(|error| TranscriptIngestError::scan_io("seek", path, error))?;
-        reader
-            .read_exact(&mut previous)
+        file.read_exact(&mut previous)
             .map_err(|error| TranscriptIngestError::scan_io("read", path, error))?;
-        reader
-            .seek(SeekFrom::Start(seek_to))
+        file.seek(SeekFrom::Start(seek_to))
             .map_err(|error| TranscriptIngestError::scan_io("seek", path, error))?;
         Ok(previous[0] != b'\n')
     }
@@ -1085,6 +1411,7 @@ impl RawJsonlBatchScanner {
         mut self,
         path: &Path,
         oversized_policy: MalformedJsonlPolicy,
+        io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<Self> {
         loop {
             if let Some(step) = self.boundary_step() {
@@ -1099,6 +1426,7 @@ impl RawJsonlBatchScanner {
             self.read_through = self
                 .read_through
                 .max(self.offset.saturating_add(frame.byte_len()));
+            io.content_bytes = io.content_bytes.saturating_add(frame.byte_len());
             self.frame_count = self.frame_count.saturating_add(1);
             let resume_fingerprint = self
                 .reader
@@ -1296,16 +1624,20 @@ impl RawJsonlBatchScanner {
         }
     }
 
-    fn revalidate(self, path: &Path) -> TranscriptIngestResult<RawNewJsonl> {
+    fn revalidate(
+        self,
+        path: &Path,
+        io: &mut JsonlIoAccounting,
+    ) -> TranscriptIngestResult<RawNewJsonl> {
         let scan_fingerprint = self.reader.resume_fingerprint(self.read_through);
         let mut file = self.reader.into_inner().into_inner();
         let final_metadata = file
+            .inner()
             .metadata()
             .map_err(|error| TranscriptIngestError::scan_io("fstat", path, error))?;
         let (final_file_id, identity_window_bytes) =
-            stable_jsonl_file_id(&mut file, &final_metadata)
+            stable_jsonl_file_id(file.inner_mut(), &final_metadata)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        let mut io = self.io;
         io.identity_window_bytes = io
             .identity_window_bytes
             .saturating_add(identity_window_bytes);
@@ -1319,7 +1651,6 @@ impl RawJsonlBatchScanner {
         } else {
             false
         };
-        io.content_bytes = self.read_through.saturating_sub(self.generation.seek_to);
         // Scans that minted a snapshot (a rewrite was already observed) compare
         // it. Every scan compares identity, size, and the high-resolution
         // change token:
@@ -1366,6 +1697,23 @@ impl RawJsonlBatchScanner {
                 path: path.to_path_buf(),
             });
         }
+        if self.offset == final_metadata.len() && self.deferred.is_none() {
+            let resume = JsonlResumeState {
+                generation: self.generation.file_id,
+                file_identity: self.generation.file_identity,
+                fingerprint: scan_fingerprint,
+            };
+            let cursor = StoredCursor {
+                position: self.offset,
+                mtime: file_mtime_secs(&final_metadata),
+                file_id: self.generation.file_id,
+            };
+            if let Some(key) =
+                unchanged_generation_cache_key(file.inner(), &final_metadata, cursor, resume)
+            {
+                remember_unchanged_generation(key);
+            }
+        }
         Ok(RawNewJsonl {
             frames: self.frames,
             skipped: self.skipped,
@@ -1379,7 +1727,7 @@ impl RawJsonlBatchScanner {
             },
             replacement_generation: self.generation.replacement,
             deferred: self.deferred,
-            io,
+            io: *io,
         })
     }
 }
@@ -1398,24 +1746,99 @@ fn try_stream_new_jsonl_raw_from_file(
         max_record_bytes,
         resume_state,
     } = request;
-    let prepared =
-        PreparedJsonlScan::capture(path, file, previous, resume_state, after_generation_capture)?;
-    let raw = if prepared.is_complete() {
-        prepared.into_empty_outcome()
-    } else {
-        RawJsonlBatchScanner::start(path, prepared, max_new_bytes, max_record_bytes)?
-            .scan(path, oversized_policy)?
-            .revalidate(path)?
-    };
-    crate::runtime::pipeline_metrics::record_jsonl_io(&raw.io);
-    Ok(raw)
+    let scan_payload_reads = ScanPayloadMeter::new();
+    let file = MeasuredJsonlFile::new(file, &scan_payload_reads);
+    let mut io = JsonlIoAccounting::default();
+    let mut classified = false;
+    let result = (|| {
+        let prepared = PreparedJsonlScan::capture(
+            path,
+            file,
+            previous,
+            resume_state,
+            after_generation_capture,
+            &mut io,
+        )?;
+        classified = true;
+        if prepared.is_complete() {
+            prepared.into_empty_outcome(path, &mut io)
+        } else {
+            RawJsonlBatchScanner::start(path, prepared, max_new_bytes, max_record_bytes, &mut io)?
+                .scan(path, oversized_policy, &mut io)?
+                .revalidate(path, &mut io)
+        }
+    })();
+    io.scan_payload_read_bytes = scan_payload_reads.get();
+    crate::runtime::pipeline_metrics::record_jsonl_io(&io, classified.then_some(io.change));
+    result.map(|mut raw| {
+        raw.io = io;
+        raw
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
+
+    #[test]
+    fn bounded_generation_cache_keeps_one_latest_proof_with_logarithmic_admission_work() {
+        let mut cache = BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP);
+        let native_identity_count = UNCHANGED_GENERATION_CACHE_CAP + 17;
+        let native_identities = 0..native_identity_count as u64;
+        CACHE_HEAP_COMPARISONS.with(|count| count.set(0));
+        for native_identity in native_identities.clone() {
+            cache.insert(native_identity, 0_u64);
+        }
+
+        let first_pass_comparisons = CACHE_HEAP_COMPARISONS.with(Cell::get);
+        let heap_levels =
+            usize::BITS as usize - UNCHANGED_GENERATION_CACHE_CAP.leading_zeros() as usize;
+        let logarithmic_bound =
+            native_identity_count.saturating_mul(heap_levels.saturating_mul(4).saturating_add(1));
+        assert!(
+            first_pass_comparisons <= logarithmic_bound,
+            "{first_pass_comparisons} heap comparisons exceeded {logarithmic_bound}"
+        );
+        assert_eq!(cache.len(), UNCHANGED_GENERATION_CACHE_CAP);
+        assert_eq!(cache.admission_len(), UNCHANGED_GENERATION_CACHE_CAP);
+
+        for generation in 1..=8_u64 {
+            CACHE_HEAP_COMPARISONS.with(|count| count.set(0));
+            for native_identity in native_identities.clone() {
+                cache.insert(native_identity, generation);
+            }
+            let churn_comparisons = CACHE_HEAP_COMPARISONS.with(Cell::get);
+            assert_eq!(
+                churn_comparisons,
+                native_identity_count - UNCHANGED_GENERATION_CACHE_CAP,
+                "generation {generation} performed more than one admission check per rejected native file"
+            );
+            assert_eq!(
+                native_identities
+                    .clone()
+                    .filter(|native_identity| cache.contains(native_identity, &generation))
+                    .count(),
+                UNCHANGED_GENERATION_CACHE_CAP
+            );
+            assert_eq!(
+                native_identities
+                    .clone()
+                    .filter(|native_identity| {
+                        cache.contains(native_identity, &generation.saturating_sub(1))
+                    })
+                    .count(),
+                0,
+                "generation {generation} left stale proofs in the cache"
+            );
+            assert_eq!(cache.len(), UNCHANGED_GENERATION_CACHE_CAP);
+            assert_eq!(cache.admission_len(), UNCHANGED_GENERATION_CACHE_CAP);
+        }
+    }
 
     #[test]
     fn rename_after_generation_capture_scans_one_handle_then_resets_replacement() {
@@ -1570,8 +1993,9 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn unchanged_resume_hashes_the_full_prefix_and_reads_zero_content() {
+    fn settled_unchanged_resume_reads_zero_file_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("unchanged.jsonl");
         std::fs::write(&path, b"{\"v\":0}\n{\"v\":1}\n").unwrap();
@@ -1588,7 +2012,6 @@ mod tests {
             file_identity: first.file_identity,
             fingerprint: first.frames.last().unwrap().resume_fingerprint,
         };
-        let prefix = first.new_cursor.position;
         let second = try_stream_new_jsonl_raw_strict_with_resume(
             &path,
             first.new_cursor,
@@ -1606,32 +2029,54 @@ mod tests {
             second.io.snapshot_hash_bytes, 0,
             "EOF resume skips the whole-file snapshot hash"
         );
-        assert_eq!(
-            second.io.prefix_validation_bytes, prefix,
-            "the first unchanged poll still verifies the stored prefix"
-        );
-        assert!(
-            second.io.identity_window_bytes > 0,
-            "file identity still reads the head window"
-        );
-        let third = try_stream_new_jsonl_raw_strict_with_resume(
+        assert_eq!(second.io.prefix_validation_bytes, 0);
+        assert_eq!(second.io.identity_window_bytes, 0);
+        assert_eq!(second.io.scan_payload_read_bytes, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_cache_miss_returns_complete_empty_scan_accounting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata-change.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n").unwrap();
+        let first = try_stream_new_jsonl_raw_strict_with_resume(
             &path,
-            second.new_cursor,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(permissions.mode() ^ 0o100);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let second = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            first.new_cursor,
             None,
             MAX_JSONL_RECORD_BYTES,
             Some(checkpoint),
         )
         .unwrap();
-        assert_eq!(third.io.change, JsonlChangeKind::Unchanged);
-        assert_eq!(third.io.content_bytes, 0);
+
+        assert_eq!(second.io.change, JsonlChangeKind::Unchanged);
+        assert_eq!(second.io.prefix_validation_bytes, first.new_cursor.position);
         assert_eq!(
-            third.io.prefix_validation_bytes, 0,
-            "a later unchanged poll with the same identity/size/mtime skips the prefix walk"
+            second.io.identity_window_bytes,
+            first.io.identity_window_bytes
         );
+        assert!(second.io.scan_payload_read_bytes >= first.new_cursor.position);
     }
 
     #[test]
-    fn memoized_unchanged_prefix_revalidates_an_in_place_tail_rewrite() {
+    fn cached_unchanged_generation_revalidates_an_in_place_tail_rewrite() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memo-rewrite.jsonl");
         let original = b"{\"v\":0}\n".repeat(3_000);
@@ -1680,6 +2125,88 @@ mod tests {
         assert_ne!(rescanned.new_cursor.file_id, checkpoint.generation);
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cached_unchanged_generation_rejects_inode_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("active.jsonl");
+        let old = dir.path().join("old.jsonl");
+        let replacement = dir.path().join("replacement.jsonl");
+        let contents = b"{\"v\":0}\n";
+        std::fs::write(&path, contents).unwrap();
+        let first = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+
+        std::fs::write(&replacement, contents).unwrap();
+        std::fs::rename(&path, &old).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let rescanned = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            first.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(checkpoint),
+        )
+        .unwrap();
+        assert_eq!(rescanned.start_offset, 0);
+        assert_ne!(rescanned.new_cursor.file_id, checkpoint.generation);
+        assert_eq!(rescanned.frames.len(), 1);
+    }
+
+    #[test]
+    fn cached_unchanged_generation_rejects_concurrent_same_handle_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.jsonl");
+        let original = b"{\"v\":0}\n";
+        let replacement = b"{\"v\":1}\n";
+        std::fs::write(&path, original).unwrap();
+        let first = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+        let handle = std::fs::File::open(&path).unwrap();
+
+        let outcome = try_stream_new_jsonl_raw_from_file(
+            &path,
+            handle,
+            RawJsonlScanRequest {
+                previous: first.new_cursor,
+                max_new_bytes: None,
+                oversized_policy: MalformedJsonlPolicy::Defer,
+                max_record_bytes: MAX_JSONL_RECORD_BYTES,
+                resume_state: Some(checkpoint),
+            },
+            || std::fs::write(&path, replacement).unwrap(),
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(TranscriptIngestError::ScanGenerationChanged { path: changed })
+                if changed == path
+        ));
+    }
+
     #[test]
     fn one_append_hashes_prefix_once_and_reads_appended_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1718,6 +2245,11 @@ mod tests {
         let appended_len = u64::try_from(appended.len()).unwrap();
         assert_eq!(second.io.change, JsonlChangeKind::Appended);
         assert_eq!(second.io.content_bytes, appended_len);
+        assert_eq!(
+            second.io.scan_payload_read_bytes,
+            prefix + 1 + appended_len,
+            "the canonical handle reads one exact prefix proof, one frame-boundary byte, and only the delta"
+        );
         assert_eq!(
             second.io.prefix_validation_bytes, prefix,
             "one append verifies the stored prefix once and reuses that digest"

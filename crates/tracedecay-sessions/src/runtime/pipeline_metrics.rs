@@ -11,6 +11,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 pub enum JsonlChangeKind {
     #[default]
     Unchanged,
+    Cold,
     Appended,
     Rewritten,
 }
@@ -22,7 +23,8 @@ pub enum JsonlChangeKind {
 /// already walked the same extent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct JsonlIoAccounting {
-    /// First-line / head-window bytes hashed for file identity.
+    /// Logical first-line / head-window bytes hashed for file identity. This
+    /// is not a count of physical bytes fetched by the buffered reader.
     pub identity_window_bytes: u64,
     /// Prefix bytes hashed to verify or seed the resume digest.
     pub prefix_validation_bytes: u64,
@@ -30,6 +32,9 @@ pub struct JsonlIoAccounting {
     pub snapshot_hash_bytes: u64,
     /// Frame bytes actually consumed past the resume offset.
     pub content_bytes: u64,
+    /// Bytes returned by instrumented prefix, snapshot, framing, and boundary
+    /// reads on the canonical handle. Identity-window reads remain separate.
+    pub scan_payload_read_bytes: u64,
     pub change: JsonlChangeKind,
 }
 
@@ -55,7 +60,7 @@ fn add_usize(name: &'static str, delta: usize) {
 }
 
 #[inline(always)]
-pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting) {
+pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting, change: Option<JsonlChangeKind>) {
     #[cfg(feature = "hotpath")]
     {
         add(
@@ -68,14 +73,21 @@ pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting) {
         );
         add("sessions.jsonl.snapshot_hash_bytes", io.snapshot_hash_bytes);
         add("sessions.jsonl.content_bytes", io.content_bytes);
-        match io.change {
-            JsonlChangeKind::Unchanged => add("sessions.jsonl.files.unchanged", 1),
-            JsonlChangeKind::Appended => add("sessions.jsonl.files.appended", 1),
-            JsonlChangeKind::Rewritten => add("sessions.jsonl.files.rewritten", 1),
+        add(
+            "sessions.jsonl.scan_payload_read_bytes",
+            io.scan_payload_read_bytes,
+        );
+        add("sessions.jsonl.files.scanned", 1);
+        match change {
+            None => {}
+            Some(JsonlChangeKind::Unchanged) => add("sessions.jsonl.files.unchanged", 1),
+            Some(JsonlChangeKind::Cold) => add("sessions.jsonl.files.cold", 1),
+            Some(JsonlChangeKind::Appended) => add("sessions.jsonl.files.appended", 1),
+            Some(JsonlChangeKind::Rewritten) => add("sessions.jsonl.files.rewritten", 1),
         }
     }
     #[cfg(not(feature = "hotpath"))]
-    let _ = io;
+    let _ = (io, change);
 }
 
 #[inline(always)]

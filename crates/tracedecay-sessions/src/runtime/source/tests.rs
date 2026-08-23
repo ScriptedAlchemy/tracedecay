@@ -1110,13 +1110,67 @@ fn cold_full_file_scan_does_not_hash_the_whole_file() {
     )
     .unwrap();
 
-    // The scan really consumed the file, so the charge below is not vacuous.
     assert_eq!(scan.frames.len(), records);
     assert_eq!(scan.io.content_bytes, (record.len() * records) as u64);
+    assert_eq!(scan.io.snapshot_hash_bytes, 0);
+    assert_eq!(scan.io.change, JsonlChangeKind::Cold);
+}
+
+/// A settled re-poll of an unchanged transcript performs zero content reads
+/// after a fully verified scan has populated the generation cache.
+///
+/// The canonical handle is still opened so native identity and high-resolution
+/// metadata can be checked. The production read meter proves that neither
+/// identity hashing nor prefix validation touched its contents.
+#[cfg(unix)]
+#[test]
+fn unchanged_settled_repoll_reads_zero_file_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warm.jsonl");
+    let record = b"{\"v\":0}\n";
+    std::fs::write(&path, record.repeat(8)).unwrap();
+
+    let first = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+    assert_eq!(first.frames.len(), 8, "the cold pass must read the file");
+    let checkpoint = JsonlResumeState {
+        generation: first.new_cursor.file_id,
+        file_identity: first.file_identity,
+        fingerprint: first.frames.last().unwrap().resume_fingerprint,
+    };
+
+    let second = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint),
+    )
+    .unwrap();
+
+    assert!(second.frames.is_empty(), "nothing was appended");
     assert_eq!(
-        scan.io.snapshot_hash_bytes, 0,
-        "a first-sight scan must not hash the extent it is already reading"
+        second.new_cursor, first.new_cursor,
+        "the cursor must not move"
     );
+    assert_eq!(second.file_identity, first.file_identity);
+    assert_eq!(
+        second.io.identity_window_bytes, 0,
+        "identity must come from the checkpoint, not from re-hashing a head window"
+    );
+    assert_eq!(
+        second.io.prefix_validation_bytes, 0,
+        "an unchanged file must not re-walk its prefix"
+    );
+    assert_eq!(second.io.content_bytes, 0);
+    assert_eq!(second.io.scan_payload_read_bytes, 0);
+    assert_eq!(second.io.change, JsonlChangeKind::Unchanged);
 }
 
 #[cfg(any(unix, windows))]
