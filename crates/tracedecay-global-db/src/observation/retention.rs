@@ -404,12 +404,6 @@ pub async fn run_observation_retention(
         live_payload_count(&reader, &anchor_payload_count_sql(), generation).await?;
     let observation_payloads_before =
         live_payload_count(&reader, &observation_payload_count_sql(), generation).await?;
-    crate::hotpath_observe::record_rows_visited(
-        anchor_payloads_before.saturating_add(observation_payloads_before),
-    );
-    if generation.is_none() {
-        crate::hotpath_observe::record_full_scan_work(1);
-    }
     let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await?;
     let freelist_before = pragma_u64(&reader, "freelist_count").await?;
     let page_count_before = pragma_u64(&reader, "page_count").await?;

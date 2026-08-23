@@ -241,7 +241,6 @@ impl RegisteredGlobalDb {
             .await?;
         }
         let recovered = u64::try_from(pending.len()).unwrap_or(u64::MAX);
-        crate::hotpath_observe::record_rows_visited(recovered);
         crate::hotpath_observe::record_output_sessions(recovered);
         Ok(pending.len())
     }

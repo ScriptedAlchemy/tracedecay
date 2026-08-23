@@ -12,7 +12,7 @@ use super::super::RegisteredGlobalDb;
 use super::query::{PERSIST_OPERATION, storage, storage_message};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use super::relations::SessionRelationError;
-use crate::hotpath_observe::{self, SessionTemporalDiscoveryWake};
+use crate::hotpath_observe;
 
 mod derived;
 mod materialize;
@@ -40,32 +40,11 @@ const MAX_BASELINE_RELATION_ITEMS: usize = 100_000;
 impl RegisteredGlobalDb {
     /// Discovers sessions that need temporal projection.
     ///
-    /// This is an explicit projection request. History-only no-progress retries
-    /// must call [`Self::pending_session_temporal_refresh_requests_for_wake`]
-    /// with [`SessionTemporalDiscoveryWake::HistoryOnlyRetry`] so they never
-    /// admit a snapshot or scan historical effects.
     #[hotpath::measure]
     pub async fn pending_session_temporal_refresh_requests_result(
         &self,
         limit: usize,
     ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
-        self.pending_session_temporal_refresh_requests_for_wake(
-            SessionTemporalDiscoveryWake::ExplicitProjectionRequest,
-            limit,
-        )
-        .await
-    }
-
-    #[hotpath::measure]
-    pub async fn pending_session_temporal_refresh_requests_for_wake(
-        &self,
-        wake: SessionTemporalDiscoveryWake,
-        limit: usize,
-    ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
-        hotpath_observe::record_discovery_wake(wake);
-        if wake == SessionTemporalDiscoveryWake::HistoryOnlyRetry {
-            return Ok(Vec::new());
-        }
         let snapshot = self
             .read_snapshot()
             .await
@@ -94,8 +73,7 @@ impl RegisteredGlobalDb {
                                 '$.projection_frontier'
                             ) AS INTEGER),
                             0
-                        ),
-                        COUNT(*)
+                        )
                  FROM session_temporal_observation_effects AS effect
                  LEFT JOIN active ON active.session_id = effect.session_id
                  LEFT JOIN running ON running.session_id = effect.session_id
@@ -116,7 +94,6 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
         let mut requests = Vec::new();
-        let mut rows_visited = 0u64;
         while let Some(row) = rows
             .next()
             .await
@@ -137,19 +114,11 @@ impl RegisteredGlobalDb {
                     .map_err(|error| storage(DISCOVER_REFRESH, error))?,
             )
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-            let visited = u64::try_from(
-                row.get::<i64>(3)
-                    .map_err(|error| storage(DISCOVER_REFRESH, error))?,
-            )
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-            rows_visited = rows_visited.saturating_add(visited);
             requests.push(SessionRefreshBeginOrJoinRequestV1::new(
                 session_id,
                 SessionRefreshFrontierV1::new(observed_through, committed_through)?,
             ));
         }
-        hotpath_observe::record_rows_visited(rows_visited);
-        hotpath_observe::record_sort_work(1);
         hotpath_observe::record_output_sessions(u64::try_from(requests.len()).unwrap_or(u64::MAX));
         Ok(requests)
     }

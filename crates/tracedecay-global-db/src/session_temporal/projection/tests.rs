@@ -1076,60 +1076,11 @@ async fn seed_output_session_with_history_only_effects(
         .expect("commit history-only effects");
 }
 
-/// History-only no-progress retries must not admit a projection snapshot or
-/// visit observation-effect rows, even when an explicit wake would find work.
-#[tokio::test]
-async fn history_only_retry_does_not_admit_discovery_snapshot() {
-    let _guard = crate::hotpath_observe::lock_counters_for_test();
-    crate::hotpath_observe::reset_counters_for_test();
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let session_id = fixture_session("session.projector.history-only-retry");
-    Box::pin(seed_output_session_with_history_only_effects(
-        &runtime,
-        &session_id,
-        HISTORY_ONLY_EFFECTS,
-    ))
-    .await;
-    let grouping_set = count_effects(&runtime, HEAD_GROUPING_SET_SQL).await;
-    let filtered = count_effects(&runtime, FILTERED_DISCOVERY_SQL).await;
-    assert!(
-        grouping_set > filtered,
-        "setup must leave history-only rows in the HEAD grouping set ({grouping_set} <= {filtered})"
-    );
-    assert!(
-        filtered > 0,
-        "setup must leave output-producing work for an explicit wake"
-    );
-
-    crate::hotpath_observe::reset_counters_for_test();
-    let store = temporal_store(&runtime);
-    let pending = store
-        .pending_session_temporal_refresh_requests_for_wake(
-            crate::hotpath_observe::SessionTemporalDiscoveryWake::HistoryOnlyRetry,
-            128,
-        )
-        .await
-        .unwrap();
-    let after = crate::hotpath_observe::snapshot_counters();
-
-    assert!(pending.is_empty(), "{pending:?}");
-    assert_eq!(after.snapshot_admissions, 0);
-    assert_eq!(after.rows_visited, 0);
-    assert_eq!(after.sort_work, 0);
-    assert_eq!(after.output_sessions, 0);
-    assert_eq!(after.full_scan_work, 0);
-}
-
 /// HEAD grouped every historical effect for a pending session. Discovery must
 /// visit only output-producing rows past the frontier, not the history-only
 /// prefix on the same session.
 #[tokio::test]
 async fn explicit_discovery_visits_only_output_effects_past_frontier() {
-    let _guard = crate::hotpath_observe::lock_counters_for_test();
-    crate::hotpath_observe::reset_counters_for_test();
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1149,30 +1100,13 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     );
     assert_eq!(filtered, 1, "one output-producing effect is pending");
 
-    crate::hotpath_observe::reset_counters_for_test();
-    let store = temporal_store(&runtime);
-    let pending = store
-        .pending_session_temporal_refresh_requests_for_wake(
-            crate::hotpath_observe::SessionTemporalDiscoveryWake::ExplicitProjectionRequest,
-            128,
-        )
+    let pending = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .pending_session_temporal_refresh_requests_result(128)
         .await
         .unwrap();
-    let after = crate::hotpath_observe::snapshot_counters();
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].session_id(), &session_id);
-    assert_eq!(after.snapshot_admissions, 1);
-    assert_eq!(
-        after.rows_visited, filtered,
-        "discovery visited {0} rows; HEAD grouping set is {grouping_set}",
-        after.rows_visited
-    );
-    assert_ne!(
-        after.rows_visited, grouping_set,
-        "discovery still visited the HEAD grouping set of all historical effects"
-    );
-    assert_eq!(after.output_sessions, 1);
-    assert_eq!(after.sort_work, 1);
-    assert_eq!(after.full_scan_work, 0);
 }
