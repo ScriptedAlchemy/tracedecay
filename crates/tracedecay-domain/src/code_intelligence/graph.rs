@@ -6,6 +6,23 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Byte-wise `&str` equality usable during `const` evaluation, where
+/// `PartialEq` is not. Only the `ALL` totality guards in this module call it.
+const fn same_wire_str(left: &str, right: &str) -> bool {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
     File,
@@ -87,6 +104,161 @@ pub enum NodeKind {
 
 #[allow(clippy::should_implement_trait)]
 impl NodeKind {
+    /// Every variant paired with the wire string [`NodeKind::as_str`] emits and
+    /// [`NodeKind::from_str`] accepts.
+    ///
+    /// The pairing is a persistence contract, not a display detail: node IDs
+    /// are `"{wire}:{hash}"` (see [`generate_node_id`]), so a renamed string
+    /// invalidates every stored ID for that kind. Callers that need to iterate
+    /// or exhaustively test the kind space should drive off this table rather
+    /// than hand-maintaining a list. [`NodeKind::wire_str_from_all`] keeps it
+    /// total.
+    pub const ALL: [(NodeKind, &'static str); 63] = [
+        (Self::File, "file"),
+        (Self::Module, "module"),
+        (Self::Struct, "struct"),
+        (Self::Enum, "enum"),
+        (Self::EnumVariant, "enum_variant"),
+        (Self::Trait, "trait"),
+        (Self::Function, "function"),
+        (Self::Method, "method"),
+        (Self::Impl, "impl"),
+        (Self::Const, "const"),
+        (Self::Static, "static"),
+        (Self::TypeAlias, "type_alias"),
+        (Self::Field, "field"),
+        (Self::Macro, "macro"),
+        (Self::Use, "use"),
+        (Self::Class, "class"),
+        (Self::Interface, "interface"),
+        (Self::Constructor, "constructor"),
+        (Self::Annotation, "annotation"),
+        (Self::AnnotationUsage, "annotation_usage"),
+        (Self::Package, "package"),
+        (Self::InnerClass, "inner_class"),
+        (Self::InitBlock, "init_block"),
+        (Self::AbstractMethod, "abstract_method"),
+        (Self::InterfaceType, "interface_type"),
+        (Self::StructMethod, "struct_method"),
+        (Self::GoPackage, "go_package"),
+        (Self::StructTag, "struct_tag"),
+        (Self::ScalaObject, "object"),
+        (Self::CaseClass, "case_class"),
+        (Self::ScalaPackage, "scala_package"),
+        (Self::ValField, "val"),
+        (Self::VarField, "var"),
+        (Self::GenericParam, "generic_param"),
+        (Self::ArrowFunction, "arrow_function"),
+        (Self::Decorator, "decorator"),
+        (Self::Export, "export"),
+        (Self::Namespace, "namespace"),
+        (Self::Union, "union"),
+        (Self::Typedef, "typedef"),
+        (Self::Include, "include"),
+        (Self::PreprocessorDef, "preprocessor_def"),
+        (Self::Template, "template"),
+        (Self::DataClass, "data_class"),
+        (Self::SealedClass, "sealed_class"),
+        (Self::CompanionObject, "companion_object"),
+        (Self::KotlinObject, "kotlin_object"),
+        (Self::KotlinPackage, "kotlin_package"),
+        (Self::Property, "property"),
+        (Self::Mixin, "mixin"),
+        (Self::Extension, "extension"),
+        (Self::Library, "library"),
+        (Self::Delegate, "delegate"),
+        (Self::Event, "event"),
+        (Self::Record, "record"),
+        (Self::CSharpProperty, "csharp_property"),
+        (Self::Procedure, "procedure"),
+        (Self::PascalUnit, "pascal_unit"),
+        (Self::PascalProgram, "pascal_program"),
+        (Self::PascalRecord, "pascal_record"),
+        (Self::ProtoMessage, "proto_message"),
+        (Self::ProtoService, "proto_service"),
+        (Self::ProtoRpc, "proto_rpc"),
+    ];
+
+    /// Compile-time totality proof for [`NodeKind::ALL`]. Never called at
+    /// runtime; it exists so the table cannot silently fall behind the enum.
+    ///
+    /// The match is exhaustive, so a new variant does not compile until it is
+    /// named here, and each arm has to name a real `ALL` slot — the slot count
+    /// is part of `ALL`'s type, so the natural next index does not compile
+    /// until the variant is also appended to `ALL`. The `const` block below
+    /// then rejects any arm that points at the wrong slot.
+    ///
+    /// [`NodeKind::as_str`] keeps its own literals instead of delegating here:
+    /// it is on the node-ID hot path and must not depend on indexing a
+    /// 63-entry table.
+    const fn wire_str_from_all(&self) -> &'static str {
+        match self {
+            Self::File => Self::ALL[0].1,
+            Self::Module => Self::ALL[1].1,
+            Self::Struct => Self::ALL[2].1,
+            Self::Enum => Self::ALL[3].1,
+            Self::EnumVariant => Self::ALL[4].1,
+            Self::Trait => Self::ALL[5].1,
+            Self::Function => Self::ALL[6].1,
+            Self::Method => Self::ALL[7].1,
+            Self::Impl => Self::ALL[8].1,
+            Self::Const => Self::ALL[9].1,
+            Self::Static => Self::ALL[10].1,
+            Self::TypeAlias => Self::ALL[11].1,
+            Self::Field => Self::ALL[12].1,
+            Self::Macro => Self::ALL[13].1,
+            Self::Use => Self::ALL[14].1,
+            Self::Class => Self::ALL[15].1,
+            Self::Interface => Self::ALL[16].1,
+            Self::Constructor => Self::ALL[17].1,
+            Self::Annotation => Self::ALL[18].1,
+            Self::AnnotationUsage => Self::ALL[19].1,
+            Self::Package => Self::ALL[20].1,
+            Self::InnerClass => Self::ALL[21].1,
+            Self::InitBlock => Self::ALL[22].1,
+            Self::AbstractMethod => Self::ALL[23].1,
+            Self::InterfaceType => Self::ALL[24].1,
+            Self::StructMethod => Self::ALL[25].1,
+            Self::GoPackage => Self::ALL[26].1,
+            Self::StructTag => Self::ALL[27].1,
+            Self::ScalaObject => Self::ALL[28].1,
+            Self::CaseClass => Self::ALL[29].1,
+            Self::ScalaPackage => Self::ALL[30].1,
+            Self::ValField => Self::ALL[31].1,
+            Self::VarField => Self::ALL[32].1,
+            Self::GenericParam => Self::ALL[33].1,
+            Self::ArrowFunction => Self::ALL[34].1,
+            Self::Decorator => Self::ALL[35].1,
+            Self::Export => Self::ALL[36].1,
+            Self::Namespace => Self::ALL[37].1,
+            Self::Union => Self::ALL[38].1,
+            Self::Typedef => Self::ALL[39].1,
+            Self::Include => Self::ALL[40].1,
+            Self::PreprocessorDef => Self::ALL[41].1,
+            Self::Template => Self::ALL[42].1,
+            Self::DataClass => Self::ALL[43].1,
+            Self::SealedClass => Self::ALL[44].1,
+            Self::CompanionObject => Self::ALL[45].1,
+            Self::KotlinObject => Self::ALL[46].1,
+            Self::KotlinPackage => Self::ALL[47].1,
+            Self::Property => Self::ALL[48].1,
+            Self::Mixin => Self::ALL[49].1,
+            Self::Extension => Self::ALL[50].1,
+            Self::Library => Self::ALL[51].1,
+            Self::Delegate => Self::ALL[52].1,
+            Self::Event => Self::ALL[53].1,
+            Self::Record => Self::ALL[54].1,
+            Self::CSharpProperty => Self::ALL[55].1,
+            Self::Procedure => Self::ALL[56].1,
+            Self::PascalUnit => Self::ALL[57].1,
+            Self::PascalProgram => Self::ALL[58].1,
+            Self::PascalRecord => Self::ALL[59].1,
+            Self::ProtoMessage => Self::ALL[60].1,
+            Self::ProtoService => Self::ALL[61].1,
+            Self::ProtoRpc => Self::ALL[62].1,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             NodeKind::File => "file",
@@ -240,6 +412,23 @@ impl NodeKind {
     }
 }
 
+/// Rejects a [`NodeKind::wire_str_from_all`] arm that points at the wrong
+/// [`NodeKind::ALL`] slot, which is the only way a variant could be named in
+/// the totality match yet be absent from (or misplaced in) the table.
+const _: () = {
+    let mut slot = 0;
+    while slot < NodeKind::ALL.len() {
+        assert!(
+            same_wire_str(
+                NodeKind::ALL[slot].0.wire_str_from_all(),
+                NodeKind::ALL[slot].1
+            ),
+            "NodeKind::wire_str_from_all points at the wrong NodeKind::ALL slot"
+        );
+        slot += 1;
+    }
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
     Contains,
@@ -256,6 +445,39 @@ pub enum EdgeKind {
 
 #[allow(clippy::should_implement_trait)]
 impl EdgeKind {
+    /// Every variant paired with the wire string [`EdgeKind::as_str`] emits and
+    /// [`EdgeKind::from_str`] accepts. Kept total by
+    /// [`EdgeKind::wire_str_from_all`], exactly as [`NodeKind::ALL`] is.
+    pub const ALL: [(EdgeKind, &'static str); 10] = [
+        (Self::Contains, "contains"),
+        (Self::Calls, "calls"),
+        (Self::Uses, "uses"),
+        (Self::Implements, "implements"),
+        (Self::TypeOf, "type_of"),
+        (Self::Returns, "returns"),
+        (Self::DerivesMacro, "derives_macro"),
+        (Self::Extends, "extends"),
+        (Self::Annotates, "annotates"),
+        (Self::Receives, "receives"),
+    ];
+
+    /// Compile-time totality proof for [`EdgeKind::ALL`]; see
+    /// [`NodeKind::wire_str_from_all`] for how the guard works.
+    const fn wire_str_from_all(&self) -> &'static str {
+        match self {
+            Self::Contains => Self::ALL[0].1,
+            Self::Calls => Self::ALL[1].1,
+            Self::Uses => Self::ALL[2].1,
+            Self::Implements => Self::ALL[3].1,
+            Self::TypeOf => Self::ALL[4].1,
+            Self::Returns => Self::ALL[5].1,
+            Self::DerivesMacro => Self::ALL[6].1,
+            Self::Extends => Self::ALL[7].1,
+            Self::Annotates => Self::ALL[8].1,
+            Self::Receives => Self::ALL[9].1,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             EdgeKind::Contains => "contains",
@@ -288,6 +510,22 @@ impl EdgeKind {
     }
 }
 
+/// Rejects an [`EdgeKind::wire_str_from_all`] arm that points at the wrong
+/// [`EdgeKind::ALL`] slot.
+const _: () = {
+    let mut slot = 0;
+    while slot < EdgeKind::ALL.len() {
+        assert!(
+            same_wire_str(
+                EdgeKind::ALL[slot].0.wire_str_from_all(),
+                EdgeKind::ALL[slot].1
+            ),
+            "EdgeKind::wire_str_from_all points at the wrong EdgeKind::ALL slot"
+        );
+        slot += 1;
+    }
+};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Visibility {
     Pub,
@@ -298,6 +536,29 @@ pub enum Visibility {
 }
 
 impl Visibility {
+    /// Every variant paired with the wire string [`Visibility::as_str`] emits.
+    /// [`Visibility::from_str`] also accepts `"pub"` as an inbound alias for
+    /// `"public"`, which is deliberately not part of this table: `ALL` records
+    /// what is written, the alias only widens what is read. Kept total by
+    /// [`Visibility::wire_str_from_all`], as [`NodeKind::ALL`] is.
+    pub const ALL: [(Visibility, &'static str); 4] = [
+        (Self::Pub, "public"),
+        (Self::PubCrate, "pub_crate"),
+        (Self::PubSuper, "pub_super"),
+        (Self::Private, "private"),
+    ];
+
+    /// Compile-time totality proof for [`Visibility::ALL`]; see
+    /// [`NodeKind::wire_str_from_all`] for how the guard works.
+    const fn wire_str_from_all(&self) -> &'static str {
+        match self {
+            Self::Pub => Self::ALL[0].1,
+            Self::PubCrate => Self::ALL[1].1,
+            Self::PubSuper => Self::ALL[2].1,
+            Self::Private => Self::ALL[3].1,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pub => "public",
@@ -318,6 +579,22 @@ impl Visibility {
         }
     }
 }
+
+/// Rejects a [`Visibility::wire_str_from_all`] arm that points at the wrong
+/// [`Visibility::ALL`] slot.
+const _: () = {
+    let mut slot = 0;
+    while slot < Visibility::ALL.len() {
+        assert!(
+            same_wire_str(
+                Visibility::ALL[slot].0.wire_str_from_all(),
+                Visibility::ALL[slot].1
+            ),
+            "Visibility::wire_str_from_all points at the wrong Visibility::ALL slot"
+        );
+        slot += 1;
+    }
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
