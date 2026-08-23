@@ -29,7 +29,7 @@ use super::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_protocol_problem, remote_replay_result_contract_v1,
 };
-use crate::clock::now_micros;
+use crate::clock::try_now_micros;
 use crate::{
     ApplicationContractError, ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt, PolicyDecisionRef,
@@ -456,8 +456,7 @@ pub struct SystemRemoteReplayClockV1;
 
 impl RemoteReplayClockPortV1 for SystemRemoteReplayClockV1 {
     fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
-        // Canonical saturating wall-clock semantics shared by every runtime.
-        Ok(now_micros())
+        try_now_micros().map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
     }
 }
 
