@@ -58,6 +58,7 @@ grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["
 grafeo-common = { version = "=0.5.42", default-features = false }
 grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 
 [package]
 name = "tracedecay"
