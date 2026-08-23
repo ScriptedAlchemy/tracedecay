@@ -47,6 +47,7 @@ impl CandidatePlan {
     }
 }
 
+#[hotpath::measure]
 pub fn plan_scope_candidates() -> CandidatePlan {
     CandidatePlan {
         clauses: vec![
@@ -68,6 +69,7 @@ pub fn plan_scope_candidates() -> CandidatePlan {
     }
 }
 
+#[hotpath::measure]
 pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
     CandidatePlan {
         clauses: vec![CandidateClause {
@@ -78,6 +80,7 @@ pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
     }
 }
 
+#[hotpath::measure]
 pub fn plan_candidates(query: &str) -> CandidatePlan {
     let query = query.trim();
     if query.is_empty() {

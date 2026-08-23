@@ -216,6 +216,7 @@ pub struct HydrationBatch {
     pub unavailable: Vec<UnavailableHydration>,
 }
 
+#[hotpath::measure]
 pub async fn hydrate_selected(
     port: &impl TemporalHydrationPort,
     snapshot: &TemporalExecutionSnapshot,

@@ -19,6 +19,7 @@ use super::{
     VersionedTokenEstimator,
 };
 
+#[hotpath::measure]
 pub fn assemble_context_with_frames_controlled(
     hydration: &HydrationBatch,
     grain: RetrievalGrainV1,
