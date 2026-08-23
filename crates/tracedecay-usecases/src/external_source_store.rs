@@ -364,65 +364,6 @@ impl RuntimeExternalSourceStore {
         Self { runtime }
     }
 
-    /// The production consumer of `SourceCaptureApplicationV1::capture_sanitized`.
-    ///
-    /// Admission and the store reducer remain separate owners, but this method
-    /// makes the handoff atomic at the daemon's canonical writer boundary.
-    pub(crate) async fn capture_and_commit_sanitized(
-        &self,
-        capture: &SourceCaptureApplicationV1,
-        request: RuntimeSourceCaptureRequestV1<'_>,
-    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
-        let requested_binding = request.binding.immutable_identity().map_err(invalid)?;
-        if let Some(state) = self.read_state(requested_binding.clone()).await? {
-            if state.definition() != &request.definition || state.binding() != &request.binding {
-                return Err(RuntimeExternalSourceErrorV1::Invalid(
-                    "external source replay authority differs from durable definition or binding"
-                        .to_owned(),
-                ));
-            }
-            if let Some(receipt) = self
-                .read_receipt(requested_binding.clone(), request.idempotency_key.clone())
-                .await?
-            {
-                if receipt.request_digest() != &request.request_digest {
-                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
-                }
-                return self.finish_capture(requested_binding, receipt).await;
-            }
-        }
-        let (binding_identity, commit) = prepare_sanitized_commit(capture, request)?;
-        let payload = RepositoryWritePayloadV1::ExternalSource(Box::new(commit.clone()));
-        let request = runtime_submit_request(
-            self.runtime.binding(),
-            payload,
-            &commit,
-            commit.idempotency_key(),
-            tracedecay_store::OperationPriorityV1::Foreground,
-        )?;
-        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
-        match self
-            .runtime
-            .dispatch_submit(request, probe)
-            .await
-            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
-        {
-            RuntimeSubmitOutcomeV1::Committed { .. }
-            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-            | RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
-                let receipt = self
-                    .read_receipt(binding_identity.clone(), commit.idempotency_key().clone())
-                    .await?
-                    .ok_or(RuntimeExternalSourceErrorV1::Unavailable)?;
-                self.finish_capture(binding_identity, receipt).await
-            }
-            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
-            }
-            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
-        }
-    }
-
     pub(crate) async fn capture_host_observations(
         &self,
         receipts: &[tracedecay_store::ObservationCommitReceipt],
@@ -558,22 +499,6 @@ impl RuntimeExternalSourceStore {
             .into_iter()
             .next()
             .ok_or(RuntimeExternalSourceErrorV1::Unavailable)
-    }
-
-    async fn finish_capture(
-        &self,
-        binding: tracedecay_domain::SourceBindingIdentityV1,
-        receipt: SourceCommitReceiptV1,
-    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
-        if self
-            .read_pending_projection(Some(binding.clone()))
-            .await?
-            .is_some()
-        {
-            Ok(RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt))
-        } else {
-            Ok(RuntimeSourceCaptureOutcomeV1::Projected(receipt))
-        }
     }
 
     /// The daemon-owned host-admission drain invokes this bounded operation;
