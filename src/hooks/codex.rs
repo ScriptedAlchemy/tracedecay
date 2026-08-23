@@ -13,6 +13,7 @@ use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 use super::claude::is_code_research_prompt;
 use super::steering::{
     HookWorkspaceStatus, build_codex_session_context_for_workspace, cursor_index_signals_for_root,
+    index_status_line,
 };
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -144,7 +145,15 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
 /// resolved the identity-aware project root, so the registry probe runs once
 /// per event.
 async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option<&Path>) -> String {
-    let (mut context, status) = codex_session_context_with_root(parsed, root).await;
+    let cwd = event_cwd_from_parsed(parsed);
+    let session_id = event_session_id(parsed);
+    let status = codex_workspace_status(root, cwd.as_deref());
+    record_workspace_status_analytics(root, status, session_id.as_deref());
+    let mut context = if matches!(status, HookWorkspaceStatus::UnindexedProject) {
+        index_status_line(false, None)
+    } else {
+        String::new()
+    };
     if !matches!(status, HookWorkspaceStatus::Generic)
         && let Some(hint) = codex_prompt_hint(parsed)
     {
@@ -803,6 +812,28 @@ mod tests {
         assert!(
             codex_prompt_hint(&event).is_none(),
             "Codex should use shared per-session hint dedupe for prompt hints"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_context_does_not_repeat_the_session_bootstrap() {
+        let project = tempfile::tempdir().unwrap();
+        let event = serde_json::json!({
+            "session_id": "codex-prompt-compact-context",
+            "cwd": project.path(),
+            "prompt": "continue"
+        });
+
+        let context =
+            codex_user_prompt_submit_context_with_root(&event, Some(project.path())).await;
+
+        assert!(!context.contains("Agents:"));
+        assert!(!context.contains("Before `cargo check`"));
+        assert!(!context.contains("tracedecay tool <name>"));
+        assert!(
+            context.len() < 1_024,
+            "turn-local hints must stay smaller than session bootstrap: {} bytes",
+            context.len()
         );
     }
 
