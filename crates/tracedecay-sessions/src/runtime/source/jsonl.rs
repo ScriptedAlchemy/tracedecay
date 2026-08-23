@@ -104,6 +104,20 @@ fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken
     }
 }
 
+#[cfg(unix)]
+impl JsonlFileChangeToken {
+    /// The data-modification half of the token.
+    ///
+    /// The whole token also carries ctime, which moves for metadata-only
+    /// operations: a rename bumps it while every byte stays put. Only mtime
+    /// answers "were this file's contents written", so the two halves are
+    /// asked separately — ctime is enough to suspect a change, mtime is what
+    /// proves one.
+    fn data_stamp(self) -> (i64, i64) {
+        (self.mtime_seconds, self.mtime_nanos)
+    }
+}
+
 #[cfg(windows)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct JsonlFileChangeToken {
@@ -114,6 +128,15 @@ struct JsonlFileChangeToken {
 fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         last_write_time: metadata.last_write_time(),
+    }
+}
+
+#[cfg(windows)]
+impl JsonlFileChangeToken {
+    /// See the Unix definition: this platform's token is already
+    /// data-modification only, so the whole token is the data stamp.
+    fn data_stamp(self) -> u64 {
+        self.last_write_time
     }
 }
 
@@ -131,6 +154,15 @@ fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|duration| duration.as_nanos()),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+impl JsonlFileChangeToken {
+    /// See the Unix definition: this platform's token is already
+    /// data-modification only, so the whole token is the data stamp.
+    fn data_stamp(self) -> Option<u128> {
+        self.modified_nanos
     }
 }
 
@@ -1294,19 +1326,26 @@ impl RawJsonlBatchScanner {
         //
         // * identity covers the inode and the head window;
         // * a length below what was read means the file shrank under the scan;
-        // * a changed token without growth rejects conservatively, including a
-        //   same-size rewrite whose mtime was restored;
-        // * growth is accepted only after the prefix actually consumed by the
-        //   scan still hashes to the digest accumulated while parsing it. That
-        //   distinguishes a normal append from a prefix rewrite plus append.
+        // * a moved change token means the inode was touched — but not what
+        //   was done to it. Length cannot tell the cases apart: a rename moves
+        //   ctime without writing a byte, an append writes only past what this
+        //   scan consumed, and a same-size rewrite replaces everything. So
+        //   rather than infer from length, prove the bytes this scan actually
+        //   consumed still hash to the digest accumulated while parsing them.
         //
         // The common unchanged cold scan performs no extra extent hash. The
-        // one-pass prefix proof is paid only when the file changed while open.
-        let generation_changed = jsonl_file_change_token(&final_metadata) != self.generation.change;
-        let changed_without_growth =
-            generation_changed && final_metadata.len() <= self.generation.file_size;
+        // one-pass proof is paid only when the token moved while the file was
+        // open, and covers only the consumed prefix, never the whole extent.
+        let final_change = jsonl_file_change_token(&final_metadata);
+        let generation_changed = final_change != self.generation.change;
+        // Data was written and the file did not grow, so the bytes this scan
+        // consumed were replaced. Rejected without the proof below, which
+        // cannot see a rewrite that landed before the read began.
+        let wrote_without_growing = final_change.data_stamp()
+            != self.generation.change.data_stamp()
+            && final_metadata.len() <= self.generation.file_size;
         let changed_consumed_prefix = if generation_changed
-            && final_metadata.len() > self.generation.file_size
+            && !wrote_without_growing
             && self.generation.snapshot_fingerprint.is_none()
         {
             let (digest, hashed) = jsonl_prefix_digest(&mut file, self.read_through)
@@ -1318,7 +1357,7 @@ impl RawJsonlBatchScanner {
         };
         if final_file_id != self.generation.file_identity
             || snapshot_changed
-            || changed_without_growth
+            || wrote_without_growing
             || changed_consumed_prefix
             || final_metadata.len() < self.read_through
         {
