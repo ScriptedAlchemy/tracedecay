@@ -38,6 +38,28 @@ const LIVE_PREFIX_REWRITES: [(&str, &str); 3] = [
 const GC_PREFIXES: [&str; 2] = [GC_PAYLOAD_PREFIX, GC_TOOL_OUTPUT_PREFIX];
 const MAX_SAMPLES: usize = 20;
 const SQLITE_IN_BATCH_SIZE: usize = 500;
+const GC_MARK_UPSERT_BINDS_PER_ROW: usize = 4;
+
+pub(crate) fn is_known_payload_placeholder_prefix(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    LIVE_PREFIX_REWRITES
+        .iter()
+        .any(|(prefix, _)| lower.starts_with(prefix))
+        || GC_PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
+}
+
+pub(crate) fn gc_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
+    GC_PREFIXES
+        .iter()
+        .map(|prefix| format!("%{prefix}%{payload_ref}%"))
+        .collect()
+}
+
+fn sql_in_placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmGcPhaseReport {
@@ -799,19 +821,26 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         remaining,
         report,
     } = request;
+    let still_referenced = metadata_refs
+        .intersection(referenced)
+        .cloned()
+        .collect::<Vec<_>>();
+    let candidates = metadata_refs
+        .difference(referenced)
+        .cloned()
+        .collect::<Vec<_>>();
     if apply {
-        let still_referenced = metadata_refs
-            .intersection(referenced)
-            .cloned()
-            .collect::<Vec<_>>();
         delete_gc_marks_in_state(conn, &still_referenced, "unreferenced").await?;
     }
+    let marks = gc_marks(conn, &candidates).await?;
+    let mut marks_to_upsert = Vec::new();
+    let mut stale_marks = Vec::new();
 
-    for payload_ref in metadata_refs.difference(referenced) {
-        let mark = gc_mark(conn, payload_ref).await?;
+    for payload_ref in &candidates {
+        let mark = marks.get(payload_ref);
         let Some((state, first_seen_at)) = mark else {
             if apply {
-                upsert_gc_mark(conn, payload_ref, "unreferenced", now).await?;
+                marks_to_upsert.push(payload_ref.clone());
             }
             report.deferred.count += 1;
             report
@@ -822,11 +851,11 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         };
         if state != "unreferenced" {
             if apply {
-                upsert_gc_mark(conn, payload_ref, "unreferenced", now).await?;
+                marks_to_upsert.push(payload_ref.clone());
             }
             continue;
         }
-        if now.saturating_sub(first_seen_at) < cfg.grace_seconds as i64 {
+        if now.saturating_sub(*first_seen_at) < cfg.grace_seconds as i64 {
             report.deferred.count += 1;
             report
                 .deferred
@@ -856,11 +885,7 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
                     report.totals.placeholders_rewritten += outcome.placeholders_rewritten;
                 }
                 Err(LcmError::StillReferenced) => {
-                    conn.execute(
-                        "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
-                        params![payload_ref.as_str()],
-                    )
-                    .await?;
+                    stale_marks.push(payload_ref.clone());
                     continue;
                 }
                 Err(LcmError::PayloadIntegrityMismatch) => {
@@ -879,6 +904,10 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         }
         report.unreferenced.add(payload_ref, bytes);
         *remaining -= 1;
+    }
+    if apply {
+        upsert_gc_marks(conn, &marks_to_upsert, "unreferenced", now).await?;
+        delete_gc_marks(conn, &stale_marks).await?;
     }
     Ok(())
 }
@@ -911,6 +940,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     } = request;
     let dir = payload::existing_payload_dir_opt(storage_root)?;
     let mut present_refs = Vec::new();
+    let mut missing_refs = Vec::new();
     for payload_ref in metadata_refs.intersection(referenced) {
         let file_present = match payload_file_present(dir.as_deref(), payload_ref) {
             Ok(present) => present,
@@ -926,14 +956,23 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
             continue;
         }
         report.missing.add(payload_ref, 0);
-        if !apply || !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
-            continue;
+        if apply && cfg.reap_missing_enabled && cfg.reap_missing_after != 0 {
+            missing_refs.push(payload_ref.clone());
         }
-        let mark = gc_mark(conn, payload_ref).await?;
-        let first_seen_at = match mark {
-            Some((state, first_seen_at)) if state == "missing" => first_seen_at,
+    }
+    if apply {
+        delete_gc_marks_in_state(conn, &present_refs, "missing").await?;
+    }
+    if missing_refs.is_empty() {
+        return Ok(());
+    }
+    let marks = gc_marks(conn, &missing_refs).await?;
+    let mut marks_to_upsert = Vec::new();
+    for payload_ref in &missing_refs {
+        let first_seen_at = match marks.get(payload_ref) {
+            Some((state, first_seen_at)) if state == "missing" => *first_seen_at,
             _ => {
-                upsert_gc_mark(conn, payload_ref, "missing", now).await?;
+                marks_to_upsert.push(payload_ref.clone());
                 continue;
             }
         };
@@ -971,7 +1010,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
         *remaining -= 1;
     }
     if apply {
-        delete_gc_marks_in_state(conn, &present_refs, "missing").await?;
+        upsert_gc_marks(conn, &marks_to_upsert, "missing", now).await?;
     }
     Ok(())
 }
@@ -1090,6 +1129,32 @@ fn tombstone_text_for_refs(text: &str, payload_refs: &BTreeSet<String>) -> (Stri
     (out, changed)
 }
 
+async fn delete_gc_marks(
+    conn: &(impl Executor + ?Sized),
+    payload_refs: &[String],
+) -> Result<(), LcmError> {
+    for chunk in payload_refs.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "DELETE FROM lcm_gc_marks
+             WHERE payload_ref IN ({})",
+            sql_in_placeholders(chunk.len())
+        );
+        conn.execute(
+            &sql,
+            chunk
+                .iter()
+                .cloned()
+                .map(SqlValue::Text)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn delete_gc_marks_in_state(
     conn: &(impl Executor + ?Sized),
     payload_refs: &[String],
@@ -1099,12 +1164,10 @@ async fn delete_gc_marks_in_state(
         if chunk.is_empty() {
             continue;
         }
-        let placeholders = std::iter::repeat_n("?", chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
         let sql = format!(
             "DELETE FROM lcm_gc_marks
-             WHERE state = ? AND payload_ref IN ({placeholders})"
+             WHERE state = ? AND payload_ref IN ({})",
+            sql_in_placeholders(chunk.len())
         );
         let mut values = vec![SqlValue::Text(state.to_string())];
         values.extend(chunk.iter().cloned().map(SqlValue::Text));
@@ -1113,6 +1176,7 @@ async fn delete_gc_marks_in_state(
     Ok(())
 }
 
+#[cfg(test)]
 async fn gc_mark(
     conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
@@ -1141,13 +1205,11 @@ pub(crate) async fn gc_marks(
         if chunk.is_empty() {
             continue;
         }
-        let placeholders = std::iter::repeat_n("?", chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
         let sql = format!(
             "SELECT payload_ref, state, first_seen_at
              FROM lcm_gc_marks
-             WHERE payload_ref IN ({placeholders})"
+             WHERE payload_ref IN ({})",
+            sql_in_placeholders(chunk.len())
         );
         let mut rows = conn
             .query(
@@ -1166,19 +1228,37 @@ pub(crate) async fn gc_marks(
     Ok(marks)
 }
 
-async fn upsert_gc_mark(
+async fn upsert_gc_marks(
     conn: &(impl Executor + ?Sized),
-    payload_ref: &str,
+    payload_refs: &[String],
     state: &str,
     now: i64,
 ) -> Result<(), LcmError> {
-    conn.execute(
-    "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
-     VALUES (?1, ?2, ?3, ?3)
-     ON CONFLICT(payload_ref) DO UPDATE SET state = excluded.state, first_seen_at = excluded.first_seen_at, updated_at = excluded.updated_at",
-    params![payload_ref, state, now],
-)
-.await?;
+    let chunk_size = (SQLITE_IN_BATCH_SIZE / GC_MARK_UPSERT_BINDS_PER_ROW).max(1);
+    for chunk in payload_refs.chunks(chunk_size) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let values_sql = std::iter::repeat_n("(?, ?, ?, ?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
+             VALUES {values_sql}
+             ON CONFLICT(payload_ref) DO UPDATE SET
+                state = excluded.state,
+                first_seen_at = excluded.first_seen_at,
+                updated_at = excluded.updated_at"
+        );
+        let mut values = Vec::with_capacity(chunk.len() * GC_MARK_UPSERT_BINDS_PER_ROW);
+        for payload_ref in chunk {
+            values.push(SqlValue::Text(payload_ref.clone()));
+            values.push(SqlValue::Text(state.to_string()));
+            values.push(SqlValue::Integer(now));
+            values.push(SqlValue::Integer(now));
+        }
+        conn.execute(&sql, values).await?;
+    }
     Ok(())
 }
 

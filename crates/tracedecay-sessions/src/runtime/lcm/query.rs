@@ -224,7 +224,15 @@ pub async fn describe(
 ) -> Result<LcmDescribeResponse, LcmError> {
     let provider = request.provider.as_str();
     let session_id = request.session_id.as_str();
-    let raw_message_count = count_raw_messages(conn, provider, Some(session_id)).await?;
+    let session_store = if matches!(request.target, LcmDescribeTarget::Session) {
+        Some(store_status(conn, provider, Some(session_id)).await?)
+    } else {
+        None
+    };
+    let raw_message_count = match session_store.as_ref() {
+        Some(store) => store.messages,
+        None => count_raw_messages(conn, provider, Some(session_id)).await?,
+    };
     let summary_node_count = count_summary_nodes(conn, provider, Some(session_id)).await?;
     let external_payload_count = count_external_payloads(conn, provider, Some(session_id)).await?;
     let (first_store_id, last_store_id) = raw_store_bounds(conn, provider, session_id).await?;
@@ -253,15 +261,12 @@ pub async fn describe(
         ),
     };
 
-    let session_token_estimate = if target == "session" {
-        let store = store_status(conn, provider, Some(session_id)).await?;
+    let session_token_estimate = session_store.and_then(|store| {
         store
             .token_estimate
             .complete
             .then_some(store.estimated_tokens)
-    } else {
-        None
-    };
+    });
     Ok(LcmDescribeResponse {
         target,
         provider: provider.to_string(),
@@ -883,12 +888,13 @@ fn like_predicate_sql(term_count: usize, columns: &[&str]) -> String {
 }
 
 fn match_centered_snippet(text: &str, terms: &[String]) -> String {
+    let lower_text = text.to_ascii_lowercase();
     let mut best_match = None;
     for term in terms {
         if term.is_empty() {
             continue;
         }
-        if let Some(byte_idx) = find_term(text, term) {
+        if let Some(byte_idx) = find_term(text, &lower_text, term) {
             best_match = Some((byte_idx, term.chars().count().max(1)));
             break;
         }
@@ -915,9 +921,8 @@ fn match_centered_snippet(text: &str, terms: &[String]) -> String {
     raw::derived_text_for_snippet(&snippet)
 }
 
-fn find_term(text: &str, term: &str) -> Option<usize> {
+fn find_term(text: &str, lower_text: &str, term: &str) -> Option<usize> {
     if term.is_ascii() {
-        let lower_text = text.to_ascii_lowercase();
         let lower_term = term.to_ascii_lowercase();
         return lower_text.find(&lower_term);
     }

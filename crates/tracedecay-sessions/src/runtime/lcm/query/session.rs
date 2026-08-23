@@ -260,10 +260,9 @@ async fn replay_slice_summary_nodes(
 
 fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
     let text = text.trim();
-    if text.chars().nth(max_chars).is_none() {
-        (text.to_string(), false)
-    } else {
-        (text.chars().take(max_chars).collect(), true)
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => (text[..end].to_string(), true),
+        None => (text.to_string(), false),
     }
 }
 

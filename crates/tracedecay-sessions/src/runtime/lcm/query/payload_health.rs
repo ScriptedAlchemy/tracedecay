@@ -187,14 +187,7 @@ pub async fn payload_health_detail(
             continue;
         }
 
-        if deep
-            && payload_has_integrity_mismatch(
-                storage_root,
-                payload_ref,
-                metadata_refs.contains(payload_ref),
-                conn,
-            )
-            .await?
+        if deep && payload_has_integrity_mismatch(storage_root, payload_ref, conn).await?
         {
             integrity_mismatch_count += 1;
             if integrity_mismatch_refs.len() < sample_limit {
@@ -668,7 +661,6 @@ fn payload_file_present_strict(dir: &Path, payload_ref: &str) -> Result<bool, Lc
 async fn payload_has_integrity_mismatch(
     storage_root: &Path,
     payload_ref: &str,
-    _exists_in_metadata: bool,
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<bool, LcmError> {
     let metadata = match payload::load_payload_metadata(conn, payload_ref).await {

@@ -76,16 +76,7 @@ pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
 }
 
 fn is_external_payload_placeholder(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    [
-        "[externalized payload:",
-        "[gc'd externalized payload:",
-        "[externalized lcm ingest payload:",
-        "[externalized tool output:",
-        "[gc'd externalized tool output:",
-    ]
-    .iter()
-    .any(|prefix| lower.starts_with(prefix))
+    gc::is_known_payload_placeholder_prefix(value)
 }
 
 pub struct ExternalPayloadWrite<'a> {
@@ -343,7 +334,7 @@ async fn tombstoned_raw_ref_exists(
     let rows = gc::scan_placeholder_text_rows(
         conn,
         gc::PlaceholderScanScope::Unscoped,
-        &gc::gc_prefix_like_patterns(),
+        &gc::gc_prefix_ref_like_patterns(payload_ref),
     )
     .await?;
     Ok(rows.iter().any(|row| {
