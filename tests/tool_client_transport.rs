@@ -68,6 +68,12 @@ fn init_project(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).expect("create project source");
     std::fs::write(project.join("src/lib.rs"), "pub fn marker() {}\n")
         .expect("write project source");
+    let git = Command::new(common::git_program())
+        .current_dir(project)
+        .args(["init", "--quiet"])
+        .status()
+        .expect("initialize fixture repository");
+    assert!(git.success(), "initialize fixture repository");
     crate::common::initialize_tracedecay_cli_project(home, project);
     // These journeys speak to a scripted daemon on an explicit socket; retire
     // the init daemon so its authority record cannot outrank that endpoint.
