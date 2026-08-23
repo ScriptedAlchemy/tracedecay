@@ -1103,7 +1103,7 @@ fn admit_dashboard_http_control(
     admission: DashboardHttpAdmission,
     headers: HeaderMap,
     mut request: Request<Body>,
-) -> Result<(Request<Body>, DashboardHttpCancellationGuard), Response> {
+) -> std::result::Result<(Request<Body>, DashboardHttpCancellationGuard), Response> {
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
