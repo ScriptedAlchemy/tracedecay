@@ -4,6 +4,8 @@
 //! these tests pin the descriptor-scoped behavior at the public surface.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use tempfile::tempdir;
@@ -41,8 +43,6 @@ fn reports_an_absent_candidate_without_error() {
 #[cfg(unix)]
 #[test]
 fn refuses_a_symlinked_final_component() {
-    use std::os::unix::fs::symlink;
-
     let project = tempdir().expect("project root");
     let outside = tempdir().expect("outside root");
     let secret = outside.path().join("secret.rs");
@@ -57,8 +57,6 @@ fn refuses_a_symlinked_final_component() {
 #[cfg(unix)]
 #[test]
 fn refuses_a_symlinked_parent_component() {
-    use std::os::unix::fs::symlink;
-
     let project = tempdir().expect("project root");
     let outside = tempdir().expect("outside root");
     fs::write(outside.path().join("lib.rs"), b"outside").expect("seed outside file");

@@ -12,6 +12,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -2392,7 +2396,6 @@ fn path_still_names_open_file(
 fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         if left.dev() != right.dev()
             || left.ino() != right.ino()
             || left.ctime() != right.ctime()
@@ -2404,7 +2407,6 @@ fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
         if left.volume_serial_number() != right.volume_serial_number()
             || left.file_index() != right.file_index()
             || left.number_of_links() != right.number_of_links()
@@ -2446,7 +2448,6 @@ fn open_files_match_generation_identity(
         })?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         if left_metadata.dev() == right_metadata.dev()
             && left_metadata.ino() == right_metadata.ino()
         {
@@ -2469,8 +2470,10 @@ fn open_files_match_generation_identity(
             return Ok(false);
         }
         if left_read == 0 {
-            return Ok(encode_lowercase_hex(&left_hasher.finalize()) == expected_digest
-                && encode_lowercase_hex(&right_hasher.finalize()) == expected_digest);
+            return Ok(
+                encode_lowercase_hex(&left_hasher.finalize()) == expected_digest
+                    && encode_lowercase_hex(&right_hasher.finalize()) == expected_digest,
+            );
         }
         left_hasher.update(&left_buffer[..left_read]);
         right_hasher.update(&right_buffer[..right_read]);
@@ -4512,8 +4515,7 @@ mod tests {
                 "chunks": [],
             }))
             .expect("serialize generation fixture");
-            let state_digest =
-                encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
+            let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
             let file = format!(
                 "generation-{}.json",
                 state_digest.strip_prefix("sha256:").expect("digest prefix")

@@ -11,6 +11,13 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1,
     SessionId, TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_sessions::runtime::lcm::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
+};
+use tracedecay_temporal_query::TemporalKernelResult;
+use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::harness::{
@@ -28,13 +35,6 @@ use crate::session::{
     SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
-use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use tracedecay_sessions::runtime::lcm::{
-    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
-};
-use tracedecay_temporal_query::TemporalKernelResult;
-use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ranking::DiversityLimits;
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 

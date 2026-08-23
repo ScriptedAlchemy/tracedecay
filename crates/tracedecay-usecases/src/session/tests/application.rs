@@ -9,6 +9,9 @@ use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros,
     WorktreeId,
 };
+use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::harness::{EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PROJECT_ID, RegisteredTemporalHarness};
@@ -23,9 +26,6 @@ use crate::session::{
     SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
-use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ranking::DiversityLimits;
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 

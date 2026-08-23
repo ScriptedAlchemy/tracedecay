@@ -7,6 +7,8 @@
 //! `analytics_events` so one durable table answers adoption questions, using
 //! per-file byte cursors in `parse_offsets` to stay idempotent across runs.
 
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -265,9 +267,7 @@ fn import_cursor_key(path: &Path) -> String {
 }
 
 fn read_from_offset(path: &Path, offset: u64) -> Result<String, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file =
-        std::fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
+    let mut file = File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|err| format!("seek {}: {err}", path.display()))?;
     let mut text = String::new();

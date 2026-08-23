@@ -8,6 +8,16 @@ use tracedecay_domain::{
     ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
     SessionId, TemporalModeV1,
 };
+use tracedecay_temporal_query::context::{ContextBudget, ContextError, VersionedTokenEstimator};
+use tracedecay_temporal_query::cursor::CursorError;
+use tracedecay_temporal_query::hydration::HydrationError;
+use tracedecay_temporal_query::ports::{
+    ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalCandidateFilterV1,
+    TemporalPortError, TemporalRetrievalScope,
+};
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::resolution::SummaryLineageRejection;
+use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 use crate::context::{
     PolicyDigest, ResolvedSessionIdentity, SessionOwner, application_observed_at,
@@ -21,16 +31,6 @@ use crate::session::types::{
     SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
-use tracedecay_temporal_query::context::{ContextBudget, ContextError, VersionedTokenEstimator};
-use tracedecay_temporal_query::cursor::CursorError;
-use tracedecay_temporal_query::hydration::HydrationError;
-use tracedecay_temporal_query::ports::{
-    ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalCandidateFilterV1,
-    TemporalPortError, TemporalRetrievalScope,
-};
-use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_temporal_query::resolution::SummaryLineageRejection;
-use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 mod task_session;
 pub use task_session::TaskSessionRetrievalOutcomeV1;

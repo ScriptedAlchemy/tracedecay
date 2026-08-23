@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -133,7 +135,6 @@ impl DeliveryRecorderSpoolV1 {
         options.read(true).write(true).create(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
         let lease = options
@@ -300,7 +301,6 @@ fn ensure_root(root: &Path) -> Result<(), DeliveryRecorderSpoolError> {
     fs::create_dir_all(root).map_err(|_| DeliveryRecorderSpoolError::Io)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(root, fs::Permissions::from_mode(0o700))
             .map_err(|_| DeliveryRecorderSpoolError::Io)?;
     }
