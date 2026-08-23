@@ -9,6 +9,31 @@ description = "In-process structural code search for TraceDecay"
 include = ["/src/**"]
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-graph-db/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+]
 default = [
     "lite",
     "medium",
@@ -62,6 +87,7 @@ lang-lean = ["tracedecay-code-extraction/lang-lean"]
 [dependencies]
 ast-grep-core = "0.44"
 hex = "0.4"
+hotpath.workspace = true
 ignore = "0.4"
 rayon = "1"
 regex = "1"

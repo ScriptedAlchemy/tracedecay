@@ -9,6 +9,52 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
 # Explicit opt-in (same policy as the query kernel): exposes the registered
 # global-db harness to dependent crates' test builds only.
 test-helpers = ["tracedecay-runtime-core/test-helpers", "dep:tempfile"]
@@ -19,6 +65,7 @@ futures-util = "0.3.33"
 getrandom = "0.2"
 hex = "0.4"
 hmac = { version = "0.13.0", features = ["zeroize"] }
+hotpath.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }

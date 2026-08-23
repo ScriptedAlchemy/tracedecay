@@ -7,9 +7,37 @@ license = "MIT"
 description = "Store-free LSP diagnostics support for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+]
+
 [dependencies]
 constant_time_eq = "0.5.0"
 futures-util = { version = "0.3", features = ["sink"] }
+hotpath.workspace = true
 lsp-types = "0.97.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

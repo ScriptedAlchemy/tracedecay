@@ -15,6 +15,79 @@ description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and
 include = ["/src/**"]
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-host-integration/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-integration/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-integration/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+]
 default = []
 # Mirrors the root crate's `semantic-fastembed`: gates the embedded fastembed
 # provider wiring inside `semantic_runtime`.
@@ -41,6 +114,7 @@ gix = { version = "=0.86.0", default-features = false, features = ["revision", "
 glob = "0.3"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 hex = "0.4"
+hotpath.workspace = true
 same-file = "1"
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }

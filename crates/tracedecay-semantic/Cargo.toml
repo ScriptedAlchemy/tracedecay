@@ -14,6 +14,7 @@ cap-std = "4.0.2"
 fs2 = "0.4"
 getrandom = "0.2"
 hex = "0.4"
+hotpath.workspace = true
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,6 +39,28 @@ hf-hub = { version = "0.5", optional = true, default-features = false, features 
 fsys = "1.1.0"
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-query/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+]
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally
 # verified artifact bytes; daemon-owned acquisition uses hf-hub against the

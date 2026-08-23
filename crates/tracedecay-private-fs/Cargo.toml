@@ -7,6 +7,16 @@ description = "Cross-platform owner-private filesystem authority for TraceDecay 
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
+
+[dependencies]
+hotpath.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 

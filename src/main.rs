@@ -292,7 +292,26 @@ fn async_main() -> tracedecay::errors::Result<()> {
         .map_err(|e| tracedecay::errors::TraceDecayError::Config {
             message: format!("failed to start async runtime: {e}"),
         })?;
-    let result = runtime.block_on(run(cli));
+    // Opt-in profiling. The guard owns the profiler lifetime and prints its
+    // report on drop, so it is created once, here, and held until the process
+    // exits. `main` cannot carry `#[hotpath::main]`: this binary builds its own
+    // multi-thread runtime above instead of using `#[tokio::main]`, so the
+    // guard is constructed explicitly and the runtime handle is registered by
+    // hand. Both calls expand to nothing when no profiling feature is selected,
+    // which is why they need no `cfg` and the call sites stay identical.
+    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay").build();
+    hotpath::tokio_runtime!(runtime.handle());
+    // Process-level runtime shape only. Request, project-server, history, and
+    // projection gauges belong on those authorities — not this bootstrap.
+    hotpath::gauge!("tokio_worker_threads").set(worker_threads);
+    hotpath::gauge!("tokio_blocking_threads").set(MAX_BLOCKING_THREADS);
+    let command_family = cli.command.as_ref().map_or("none", |command| {
+        CommandFamily::for_command(command).as_profile_label()
+    });
+    hotpath::val!("process_command_family").set(&command_family);
+    hotpath::gauge!("process_in_command").set(1);
+    let result = hotpath::measure_block!("process_command", runtime.block_on(run(cli)));
+    hotpath::gauge!("process_in_command").set(0);
     // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
     // can leave OS-backed watcher work behind after their async handles abort,
     // so bound teardown after the command's own graceful shutdown completes.
@@ -459,6 +478,19 @@ enum CommandFamily {
 }
 
 impl CommandFamily {
+    fn as_profile_label(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Runtime => "runtime",
+            Self::Agent => "agent",
+            Self::Hook => "hook",
+            Self::Update => "update",
+            Self::Configuration => "configuration",
+            Self::Diagnostics => "diagnostics",
+            Self::Knowledge => "knowledge",
+        }
+    }
+
     fn for_command(command: &Commands) -> Self {
         match command {
             Commands::Init { .. }

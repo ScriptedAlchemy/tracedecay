@@ -9,6 +9,46 @@ description = "TraceDecay session parsing and retrieval primitives"
 include = ["/src/**", "/tests/**"]
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
 test-helpers = []
@@ -18,6 +58,7 @@ base64 = "0.22"
 dirs = "6"
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
+hotpath.workspace = true
 md-5 = "0.10.6"
 rayon = "1"
 regex = "1"
