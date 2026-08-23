@@ -901,7 +901,7 @@ pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static
 }
 
 fn validate_no_nul(path: &Path) -> Result<()> {
-    if path.to_string_lossy().contains('\0') {
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(TraceDecayError::Config {
             message: format!("path '{}' contains a NUL byte", path.display()),
         });

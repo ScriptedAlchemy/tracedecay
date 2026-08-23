@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+const JSON_RPC_VERSION: &str = "2.0";
+
 fn deserialize_request_id<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<serde_json::Value>, D::Error>
@@ -57,7 +59,7 @@ impl JsonRpcResponse {
     /// Creates a successful JSON-RPC response.
     pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
         Self {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSON_RPC_VERSION.to_owned(),
             id,
             result: Some(result),
             error: None,
@@ -77,7 +79,7 @@ impl JsonRpcResponse {
         data: Option<serde_json::Value>,
     ) -> Self {
         Self {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSON_RPC_VERSION.to_owned(),
             id,
             result: None,
             error: Some(JsonRpcError {

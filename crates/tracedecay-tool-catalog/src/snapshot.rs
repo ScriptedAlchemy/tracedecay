@@ -474,15 +474,15 @@ fn calculate_digest(
         contributions: contributions
             .into_iter()
             .map(|contribution| ContributionDigestEntry {
-                contribution_id: contribution.contribution_id().clone(),
-                depends_on: contribution.depends_on().to_vec(),
+                contribution_id: contribution.contribution_id(),
+                depends_on: contribution.depends_on(),
             })
             .collect(),
-        capabilities: capabilities.values().cloned().collect(),
-        retrieval_primitives: retrieval_primitives.values().cloned().collect(),
-        bindings: bindings.values().cloned().collect(),
-        executable_schemas: executable_schemas.values().cloned().collect(),
-        profiles: profiles.values().cloned().collect(),
+        capabilities: capabilities.values().collect(),
+        retrieval_primitives: retrieval_primitives.values().collect(),
+        bindings: bindings.values().collect(),
+        executable_schemas: executable_schemas.values().collect(),
+        profiles: profiles.values().collect(),
     };
     let document =
         serde_json::to_vec(&document).expect("catalog records serialize without fallible values");
@@ -492,18 +492,18 @@ fn calculate_digest(
 }
 
 #[derive(Serialize)]
-struct SnapshotDigestDocument {
+struct SnapshotDigestDocument<'a> {
     revision: u8,
-    contributions: Vec<ContributionDigestEntry>,
-    capabilities: Vec<CapabilityManifestV1>,
-    retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
-    bindings: Vec<SurfaceBindingV1>,
-    executable_schemas: Vec<ExecutableSchemaAuthority>,
-    profiles: Vec<ProfileDefinition>,
+    contributions: Vec<ContributionDigestEntry<'a>>,
+    capabilities: Vec<&'a CapabilityManifestV1>,
+    retrieval_primitives: Vec<&'a RetrievalPrimitiveManifestV1>,
+    bindings: Vec<&'a SurfaceBindingV1>,
+    executable_schemas: Vec<&'a ExecutableSchemaAuthority>,
+    profiles: Vec<&'a ProfileDefinition>,
 }
 
 #[derive(Serialize)]
-struct ContributionDigestEntry {
-    contribution_id: ContributionId,
-    depends_on: Vec<ContributionId>,
+struct ContributionDigestEntry<'a> {
+    contribution_id: &'a ContributionId,
+    depends_on: &'a [ContributionId],
 }
