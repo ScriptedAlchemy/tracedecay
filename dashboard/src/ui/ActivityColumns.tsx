@@ -8,7 +8,7 @@ export interface ActivityBucket {
 }
 
 /** A calm-density activity column strip: inline SVG, token-driven, direct
- * hover labeling, accessible summary — the plan-11a micro-viz idiom. */
+ * hover labeling, accessible summary. */
 export function ActivityColumns({
   buckets,
   className,

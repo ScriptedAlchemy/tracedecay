@@ -1,4 +1,4 @@
-//! MCP tool definitions for the Plan 36 native-integration journey.
+//! MCP tool definitions for the native-integration journey.
 //!
 //! These live in their own module rather than in `application.rs` so the
 //! journey's schemas evolve without touching the shared Git/feedback

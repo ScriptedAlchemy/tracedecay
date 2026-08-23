@@ -3,10 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VirtualList } from './VirtualList.tsx';
 
 /**
- * Plan 11's list bound: "Virtualization starts above 200 rows, mounts at most
- * 250 row-like elements plus one inspector, preserves focused/selected
- * entities, and always offers a nonvirtualized paginated mode of at most 100
- * rows."
+ * List bound: virtualization starts above 200 rows, mounts at most 250
+ * row-like elements plus one inspector, preserves focused/selected entities,
+ * and always offers a nonvirtualized paginated mode of at most 100 rows.
  *
  * The mount ceiling was previously only a comment in `VirtualList.tsx`. A
  * comment does not fail, and the ceiling is what keeps a large result set from
@@ -19,7 +18,7 @@ import { VirtualList } from './VirtualList.tsx';
  * viewport and also asserts a nonzero mount strictly below the item count.
  */
 
-/** Plan 11: at most 250 row-like elements mounted at once. */
+/** At most 250 row-like elements mounted at once. */
 const MOUNT_CEILING = 250;
 
 /**

@@ -6,8 +6,8 @@
  * physically unable to render. `tracedecay_mcp` carries 6,774 events in the
  * same window in which `workflow_skill` carries 1. Drawn linearly, eleven of
  * the twelve rows are a sliver one pixel tall, and the reader learns nothing
- * they could not have read off the first number. Plan 11a's degenerate-
- * distribution rule applies: the dominance is SAID, and what remains after the
+ * they could not have read off the first number. Degenerate-distribution
+ * rule: the dominance is SAID, and what remains after the
  * leader is drawn on a scale that can hold it.
  */
 

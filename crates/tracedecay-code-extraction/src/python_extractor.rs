@@ -263,7 +263,6 @@ impl PythonExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -273,7 +272,6 @@ impl PythonExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -323,7 +321,6 @@ impl PythonExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -333,10 +330,8 @@ impl PythonExtractor {
             });
         }
 
-        // Extract base classes (inheritance).
         Self::extract_base_classes(state, node, &id);
 
-        // Visit class body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "block") {
@@ -377,7 +372,6 @@ impl PythonExtractor {
             None
         };
 
-        // Extract decorator nodes.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -421,7 +415,6 @@ impl PythonExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Annotates edge from decorator to the decorated item.
                     if let Some((ref kind, ref inner_name, inner_line)) = inner_kind_and_name {
                         let target_id =
                             generate_node_id(&state.file_path, kind, inner_name, inner_line);
@@ -491,7 +484,6 @@ impl PythonExtractor {
             return;
         }
 
-        // Look for individual imported names
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -609,7 +601,6 @@ impl PythonExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (File).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -619,7 +610,6 @@ impl PythonExtractor {
             });
         }
 
-        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: name.to_string(),
@@ -671,7 +661,6 @@ impl PythonExtractor {
                 };
                 state.nodes.push(graph_node);
 
-                // Contains edge from parent.
                 if let Some(parent_id) = state.parent_node_id() {
                     state.edges.push(Edge {
                         source: parent_id.to_string(),
@@ -776,7 +765,6 @@ impl PythonExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "expression_statement" {
-                    // Look for a string child.
                     if let Some(string_node) = find_direct_child_by_kind(child, "string") {
                         let text = state.node_text(string_node);
                         return Some(Self::strip_docstring_quotes(text));
@@ -857,7 +845,6 @@ impl PythonExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into the call for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested function definitions to avoid polluting call sites.

@@ -435,7 +435,6 @@ impl HlslExtractor {
             });
         }
 
-        // Visit cbuffer members as fields.
         if let Some(body) = node.child_by_field_name("body") {
             state.node_stack.push((name, id));
             Self::visit_cbuffer_members(state, body);

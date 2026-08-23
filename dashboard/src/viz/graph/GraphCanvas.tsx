@@ -21,7 +21,7 @@ import { cn } from '../../ui/cn';
 
 export type { GraphCanvasEdge, GraphCanvasEncoding, GraphCanvasNode } from './types.ts';
 
-/** Sigma over Graphology (plan 11a: default connected-graph renderer).
+/** Sigma over Graphology — default connected-graph renderer.
  *
  * Deterministic ForceAtlas2 settle (laid out once, never animated), nodes
  * sized by degree and lit by their real vitality, relations drawn as curved
@@ -408,7 +408,7 @@ export function GraphCanvas({
       </GraphUnavailable>
     );
   }
-  // Scale tier guard (plan 11a graph tiers): this Sigma canvas owns graphs up
+  // Scale tier guard: this Sigma canvas owns graphs up
   // to ~5k nodes. Larger brains (the profile holds stores up to 1.6M nodes)
   // belong to the GPU tier — render the truthful tier state, never a frozen
   // tab pretending to cope.

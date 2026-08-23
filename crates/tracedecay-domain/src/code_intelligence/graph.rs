@@ -88,7 +88,6 @@ pub enum NodeKind {
 
 #[allow(clippy::should_implement_trait)]
 impl NodeKind {
-    /// Returns the string representation of this node kind.
     pub fn as_str(&self) -> &'static str {
         match self {
             NodeKind::File => "file",
@@ -157,7 +156,6 @@ impl NodeKind {
         }
     }
 
-    /// Parses a string into a `NodeKind`, returning `None` for unrecognized values.
     pub fn from_str(s: &str) -> Option<NodeKind> {
         match s {
             "file" => Some(NodeKind::File),
@@ -260,7 +258,6 @@ pub enum EdgeKind {
 
 #[allow(clippy::should_implement_trait)]
 impl EdgeKind {
-    /// Returns the string representation of this edge kind.
     pub fn as_str(&self) -> &'static str {
         match self {
             EdgeKind::Contains => "contains",
@@ -276,7 +273,6 @@ impl EdgeKind {
         }
     }
 
-    /// Parses a string into an `EdgeKind`, returning `None` for unrecognized values.
     pub fn from_str(s: &str) -> Option<EdgeKind> {
         match s {
             "contains" => Some(EdgeKind::Contains),

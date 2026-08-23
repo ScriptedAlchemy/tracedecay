@@ -356,9 +356,9 @@ impl DaemonInvocationState {
                 message: "semantic vector graph provider could not be installed in the mounted code-index authority".to_owned(),
             });
         }
-        // Canonical Plan 26 observability lane. The deferred code-index mount
-        // runs after the project-open delivery mount that owns the producer;
-        // an absent producer leaves the lane uninstalled and nothing records.
+        // The deferred code-index mount runs after the project-open delivery
+        // mount that owns the producer; an absent producer leaves the
+        // observability lane uninstalled and nothing records.
         match self
             .service
             .observability_producer_with_database(Some(&canonical_project_root))

@@ -217,7 +217,6 @@ impl BashExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -227,7 +226,6 @@ impl BashExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -281,7 +279,6 @@ impl BashExtractor {
             };
             state.nodes.push(graph_node);
 
-            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -340,7 +337,6 @@ impl BashExtractor {
                 };
                 state.nodes.push(graph_node);
 
-                // Contains edge from parent.
                 if let Some(parent_id) = state.parent_node_id() {
                     state.edges.push(Edge {
                         source: parent_id.to_string(),
@@ -395,7 +391,6 @@ impl BashExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into command for nested command substitutions.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested function definitions.

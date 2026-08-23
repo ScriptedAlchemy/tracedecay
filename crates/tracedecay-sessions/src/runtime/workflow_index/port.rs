@@ -22,9 +22,6 @@ pub trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send {
 /// The sweep needs an authority check, a watermark it can advance, and a
 /// run/agent upsert; it needs nothing about the registered database that backs
 /// them.
-///
-/// Root wiring: `impl WorkflowIngestSink for GlobalDbWorkflowStore<'_>` in
-/// `src/store/workflow.rs`.
 pub trait WorkflowIngestSink: Sync {
     /// Whether the bound authority is the registered `ProjectSessions` shard
     /// for `project_id`. A mismatch aborts the sweep instead of writing.

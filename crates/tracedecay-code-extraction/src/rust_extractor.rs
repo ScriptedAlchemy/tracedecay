@@ -193,7 +193,6 @@ impl RustExtractor {
             "mod_item" => Self::visit_module(state, node),
             "macro_invocation" => Self::visit_macro_invocation(state, node),
             _ => {
-                // For other node types, recurse into children to find nested items.
                 Self::visit_children(state, node);
             }
         }
@@ -254,7 +253,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -264,10 +262,8 @@ impl RustExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
 
-        // Extract attribute annotations (e.g. #[test], #[inline]).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         // Emit TypeOf refs for parameter types and Returns refs for the return
@@ -332,7 +328,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -342,13 +337,10 @@ impl RustExtractor {
             });
         }
 
-        // Check for derive macros on preceding attribute items.
         Self::extract_derive_macros(state, node, &id);
 
-        // Extract attribute annotations (e.g. #[cfg(...), #[allow(...)]).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Extract fields.
         state.node_stack.push((name, id.clone()));
         Self::extract_fields(state, node);
         state.node_stack.pop();
@@ -395,7 +387,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -405,13 +396,10 @@ impl RustExtractor {
             });
         }
 
-        // Check for derive macros on preceding attribute items.
         Self::extract_derive_macros(state, node, &id);
 
-        // Extract attribute annotations (e.g. #[repr(C)]).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Extract enum variants.
         state.node_stack.push((name, id.clone()));
         Self::extract_enum_variants(state, node);
         state.node_stack.pop();
@@ -457,7 +445,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -467,7 +454,6 @@ impl RustExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         // Supertrait bounds (`trait Leaf: Middle + Base`) — emit one
@@ -575,7 +561,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -597,7 +582,6 @@ impl RustExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         // Visit impl body: functions become Method nodes.
@@ -654,7 +638,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -664,7 +647,6 @@ impl RustExtractor {
             });
         }
 
-        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: path,
@@ -716,7 +698,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -768,7 +749,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -820,7 +800,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -870,7 +849,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -880,7 +858,6 @@ impl RustExtractor {
             });
         }
 
-        // Extract attribute annotations (e.g. #[cfg(test)]).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         state.node_stack.push((name, id));
@@ -1028,7 +1005,6 @@ impl RustExtractor {
         } else if let Some(stripped) = trimmed.strip_prefix("//") {
             stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
         } else if trimmed.starts_with("/*") && trimmed.ends_with("*/") {
-            // Block comment: strip /* and */ and clean each line.
             let inner = &trimmed[2..trimmed.len() - 2];
             inner
                 .lines()
@@ -1114,7 +1090,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the struct).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1186,7 +1161,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1232,7 +1206,6 @@ impl RustExtractor {
                                 });
                             }
                         }
-                        // Also recurse into the call expression for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "macro_invocation" => {
@@ -1251,7 +1224,6 @@ impl RustExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                         });
-                        // Recurse into macro arguments to find nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Inside a macro's token_tree, the grammar does not produce
@@ -1312,7 +1284,6 @@ impl RustExtractor {
                         column: cur.start_position().column as u32,
                         file_path: state.file_path.clone(),
                     });
-                    // Recurse into the argument token_tree for further nested calls.
                     Self::extract_calls_in_token_tree(state, children[i + 1], fn_node_id);
                     i += 2; // skip the token_tree we just handled
                     continue;
@@ -1513,7 +1484,6 @@ impl RustExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Annotates unresolved ref.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id.clone(),
             reference_name: annot_name,
@@ -1523,7 +1493,6 @@ impl RustExtractor {
             file_path: state.file_path.clone(),
         });
 
-        // Direct Annotates edge from the annotation to the target.
         state.edges.push(Edge {
             source: id,
             target: target_id.to_string(),

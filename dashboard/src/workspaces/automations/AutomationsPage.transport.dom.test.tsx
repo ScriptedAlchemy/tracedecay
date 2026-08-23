@@ -10,8 +10,7 @@ import {
 import { AutomationsPage } from "./AutomationsPage.tsx";
 
 /**
- * HTTP fault injection for the Automations workspace (plan 11, "MSW covers
- * HTTP/SSE faults").
+ * HTTP fault injection for the Automations workspace.
  *
  * Automations is the subject for read isolation because it renders five
  * independent reads side by side, and because four of its five panels have an

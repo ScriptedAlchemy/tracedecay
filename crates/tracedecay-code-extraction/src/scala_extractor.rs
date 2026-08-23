@@ -196,7 +196,6 @@ impl ScalaExtractor {
             "var_definition" | "var_declaration" => Self::visit_var(state, node),
             "type_definition" => Self::visit_type_def(state, node),
             _ => {
-                // Recurse into children for any unhandled node types.
                 Self::visit_children(state, node);
             }
         }
@@ -262,7 +261,6 @@ impl ScalaExtractor {
             });
         }
 
-        // If the package clause has a body, visit it.
         if let Some(body) = node.child_by_field_name("body") {
             Self::visit_children(state, body);
         }
@@ -602,7 +600,6 @@ impl ScalaExtractor {
         Self::extract_annotations(state, node, &id);
         Self::extract_type_parameters(state, node, &id);
 
-        // Visit enum body to extract enum cases.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -753,7 +750,6 @@ impl ScalaExtractor {
 
         Self::extract_annotations(state, node, &id);
 
-        // Extract call sites from the body.
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -879,7 +875,6 @@ impl ScalaExtractor {
 
         Self::extract_annotations(state, node, &id);
 
-        // Extract call sites from the value expression.
         if let Some(value) = node.child_by_field_name("value") {
             Self::extract_call_sites(state, value, &id);
         }
@@ -1479,7 +1474,6 @@ impl ScalaExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Annotates unresolved ref.
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: id.clone(),
                         reference_name: annot_name,
@@ -1489,7 +1483,6 @@ impl ScalaExtractor {
                         file_path: state.file_path.clone(),
                     });
 
-                    // Direct Annotates edge from the annotation to the target.
                     state.edges.push(Edge {
                         source: id,
                         target: target_id.to_string(),

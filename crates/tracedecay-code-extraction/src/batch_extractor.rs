@@ -273,7 +273,6 @@ impl BatchExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -351,7 +350,6 @@ impl BatchExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -445,7 +443,6 @@ impl BatchExtractor {
             }
         }
 
-        // Recurse into children.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {

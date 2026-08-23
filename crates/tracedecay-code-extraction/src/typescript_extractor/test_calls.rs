@@ -177,7 +177,6 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
     };
     state.nodes.push(graph_node);
 
-    // Contains edge from the enclosing parent (File or outer describe).
     if let Some(parent_id) = state.parent_node_id() {
         state.edges.push(Edge {
             source: parent_id.to_string(),
@@ -193,7 +192,6 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
         return;
     };
 
-    // Descend into the callback body under this test node.
     state.node_stack.push((title, id.clone()));
     if let Some(body) = find_direct_child_by_kind(callback, "statement_block") {
         visit_test_body(state, body, &id);

@@ -1,7 +1,6 @@
 /**
- * CORTEX — the macro sheet of the structure LENS (plan 11b `:134`, `:214`,
- * `:229` "Synthesis: ONE navigable space. Far = CORTEX. Touch a symbol = TRACE
- * floods. Enter a file = CORE SAMPLE").
+ * CORTEX — the macro sheet of the structure LENS. One navigable space:
+ * Far = CORTEX. Touch a symbol = TRACE floods. Enter a file = CORE SAMPLE.
  *
  * This is the far end of the same continuum the LENS ruler already carries, not
  * a page of its own: it renders inside the `cortex` position above the

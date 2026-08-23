@@ -223,7 +223,6 @@ impl ElixirExtractor {
         }
 
         state.node_stack.push((name, id));
-        // Recurse into the do_block body.
         if let Some(body) = Self::find_do_block(node) {
             Self::visit_children(state, body);
         }
@@ -243,7 +242,6 @@ impl ElixirExtractor {
             Visibility::Pub
         };
 
-        // Extract @doc attribute from preceding attribute call.
         let docstring = Self::extract_doc(state, node);
 
         let graph_node = Node {
@@ -452,7 +450,6 @@ impl ElixirExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "arguments" {
-                    // First named child of arguments.
                     if let Some(arg) = child.named_child(0) {
                         return Some(state.node_text(arg));
                     }

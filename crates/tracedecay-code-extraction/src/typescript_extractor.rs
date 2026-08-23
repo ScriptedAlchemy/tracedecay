@@ -269,10 +269,8 @@ impl TypeScriptExtractor {
         let prev_in_export = state.in_export;
         state.in_export = true;
 
-        // Also create an Export node to track the export itself.
         let start_line = node.start_position().row as u32;
 
-        // Recurse into children to find the actual declaration.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -383,7 +381,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -393,7 +390,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, node, &id);
 
         // Extract call sites from the function body. Function declarations
@@ -492,7 +488,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -502,7 +497,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, arrow_node, &id);
 
         // Extract call sites from the arrow function body. Block-bodied arrows
@@ -559,7 +553,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -619,7 +612,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -629,13 +621,10 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract decorators from the class declaration itself.
         Self::extract_decorators(state, node, &id);
 
-        // Extract extends/implements from class_heritage.
         Self::extract_class_heritage(state, node, &id);
 
-        // Recurse into class_body for methods and fields.
         if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_class_body(state, body);
@@ -674,7 +663,6 @@ impl TypeScriptExtractor {
             NodeKind::Method
         };
 
-        // Check for accessibility_modifier (public/private/protected).
         let visibility = Self::extract_ts_accessibility(state, node);
         let is_async = Self::has_child_kind(node, "async");
         let signature = Some(Self::extract_signature(state, node));
@@ -714,7 +702,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the class).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -724,10 +711,8 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -775,7 +760,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the class).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -830,7 +814,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -840,7 +823,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract methods from interface body.
         if let Some(body) = find_direct_child_by_kind(node, "interface_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_interface_body(state, body);
@@ -905,7 +887,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the interface).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -961,7 +942,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -971,7 +951,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract enum members from enum_body.
         if let Some(body) = find_direct_child_by_kind(node, "enum_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_enum_body(state, body);
@@ -1032,7 +1011,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1086,7 +1064,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1142,7 +1119,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1152,7 +1128,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Recurse into the namespace body.
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
             state.node_stack.push((name, id));
             Self::visit_children(state, body);
@@ -1213,7 +1188,6 @@ impl TypeScriptExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Annotates edge from decorator to parent.
                     state.edges.push(Edge {
                         source: id,
                         target: parent_id.to_string(),
@@ -1306,7 +1280,6 @@ impl TypeScriptExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Also recurse into the call expression for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested arrow functions to avoid polluting call sites.

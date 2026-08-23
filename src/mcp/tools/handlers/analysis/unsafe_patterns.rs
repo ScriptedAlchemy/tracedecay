@@ -229,9 +229,6 @@ pub(crate) async fn handle_unsafe_patterns(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_diagnostics
-// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod unsafe_pattern_detection_tests {
     use super::{

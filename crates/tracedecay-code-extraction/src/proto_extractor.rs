@@ -230,7 +230,6 @@ impl ProtoExtractor {
             || "<unknown>".to_string(),
             |n| {
                 let text = state.node_text(n);
-                // Strip surrounding quotes
                 text.trim_matches('"').trim_matches('\'').to_string()
             },
         );
@@ -338,7 +337,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit message body for fields, nested messages, enums, oneofs.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "messageBody") {
             Self::visit_message_body(state, body);
@@ -477,7 +475,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit enum body for variants.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "enumBody") {
             Self::visit_enum_body(state, body);
@@ -607,7 +604,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit service body for rpc methods.
         state.node_stack.push((name, id));
         Self::visit_service_body(state, node);
         state.node_stack.pop();
@@ -644,7 +640,6 @@ impl ProtoExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::ProtoRpc, &name, start_line);
 
-        // Build signature from the full rpc text (first line)
         let text = state.node_text(node);
         let signature = text
             .lines()

@@ -189,7 +189,6 @@ impl PhpExtractor {
             "use_declaration" => Self::visit_use_declaration(state, node),
             "const_declaration" => Self::visit_const_declaration(state, node),
             "property_declaration" => Self::visit_property_declaration(state, node),
-            // Recurse into program / namespace body.
             _ => Self::visit_children(state, node),
         }
     }
@@ -237,7 +236,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -249,7 +247,6 @@ impl PhpExtractor {
 
         Self::extract_annotations(state, node, &id);
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -298,7 +295,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent class/trait/interface.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -310,7 +306,6 @@ impl PhpExtractor {
 
         Self::extract_annotations(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -358,7 +353,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -369,12 +363,9 @@ impl PhpExtractor {
         }
 
         Self::extract_annotations(state, node, &id);
-        // Extract base class (extends) references.
         Self::extract_class_extends(state, node, &id);
-        // Extract interface (implements) references.
         Self::extract_class_implements(state, node, &id);
 
-        // Visit class body members.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
@@ -425,7 +416,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -435,7 +425,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit interface body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
@@ -486,7 +475,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -496,7 +484,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit trait body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
@@ -547,7 +534,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -557,7 +543,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit enum body for cases.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "enum_declaration_list") {
@@ -675,7 +660,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -685,7 +669,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit namespace body (braced namespace) or siblings (unbraced).
         state.node_stack.push((name.clone(), id));
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::visit_children(state, body);
@@ -793,7 +776,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -803,7 +785,6 @@ impl PhpExtractor {
             });
         }
 
-        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: name.to_string(),
@@ -896,7 +877,6 @@ impl PhpExtractor {
                     } else {
                         state.node_text(child)
                     };
-                    // Strip leading $ from variable names.
                     let name = name.trim_start_matches('$').to_string();
 
                     let start_line = child.start_position().row as u32;
@@ -943,7 +923,6 @@ impl PhpExtractor {
                         });
                     }
 
-                    // Extract annotations from the enclosing property_declaration.
                     Self::extract_annotations(state, node, &id);
                 }
                 if !cursor.goto_next_sibling() {
@@ -1072,7 +1051,6 @@ impl PhpExtractor {
     ///
     /// Looks for a preceding sibling or leading `comment` node with `/**` prefix.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        // Walk previous named siblings to find a doc comment immediately before this node.
         let parent = node.parent()?;
         let mut cursor = parent.walk();
         let mut last_comment: Option<String> = None;
@@ -1081,7 +1059,6 @@ impl PhpExtractor {
             loop {
                 let child = cursor.node();
                 if child.id() == node.id() {
-                    // Return the last comment seen immediately before this node.
                     return last_comment;
                 }
                 if child.kind() == "comment" {
@@ -1107,13 +1084,11 @@ impl PhpExtractor {
     /// Strip `/** ... */` markers from a PHP doc comment.
     fn strip_doc_comment(text: &str) -> String {
         let trimmed = text.trim();
-        // Remove /** prefix and */ suffix.
         let inner = trimmed
             .strip_prefix("/**")
             .unwrap_or(trimmed)
             .strip_suffix("*/")
             .unwrap_or(trimmed);
-        // Clean up each line: remove leading * markers.
         inner
             .lines()
             .map(|line| line.trim().trim_start_matches('*').trim().to_string())
@@ -1142,7 +1117,6 @@ impl PhpExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "method_call_expression" | "nullsafe_method_call_expression" => {
@@ -1278,7 +1252,6 @@ impl PhpExtractor {
                                 };
                                 state.nodes.push(graph_node);
 
-                                // Annotates unresolved ref.
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: id.clone(),
                                     reference_name: attr_name,
@@ -1288,7 +1261,6 @@ impl PhpExtractor {
                                     file_path: state.file_path.clone(),
                                 });
 
-                                // Direct Annotates edge from annotation to target.
                                 state.edges.push(Edge {
                                     source: id,
                                     target: target_id.to_string(),

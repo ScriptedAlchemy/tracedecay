@@ -45,8 +45,8 @@ import { currentWorkProductView, type WorkProductView } from './workProductView.
  * which has its own workspace — this channel is the task graph.
  *
  * Six projections over ONE product graph version. The switcher moves the camera and the
- * graph does not change underneath it, which is what makes the plan 11
- * mandate hold: a task selected in any projection stays selected in all of
+ * graph does not change underneath it: a task selected in any projection
+ * stays selected in all of
  * them, because the selection lives in the address and no projection owns it.
  *
  * Three reads feed the page: the product graph always, the attempt list under

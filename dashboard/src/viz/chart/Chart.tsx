@@ -83,8 +83,8 @@ function themedOption(
   };
 }
 
-/** ECharts host (plan 11: the single quantitative charting library, loaded
- * lazily per route). Token-driven: colors resolve from the live theme and
+/** ECharts host — the single quantitative charting library, loaded
+ * lazily per route. Token-driven: colors resolve from the live theme and
  * re-resolve on theme flips; reduced motion disables animation. The
  * surrounding view must keep an accessible textual equivalent.
  *

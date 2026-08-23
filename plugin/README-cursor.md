@@ -56,7 +56,7 @@ workspace folder. It sends URI, document version, range, source, message, and
 safe diagnostic metadata—never document text or arbitrary diagnostic payloads.
 The gateway merges that native upstream lane internally but, in Cursor-native
 mode, publishes only TraceDecay findings back to avoid duplicating Cursor's own
-diagnostics. Multi-root workspaces remain disabled until PR15.
+diagnostics. Multi-root workspaces are not supported.
 
 The component is deployed at
 `~/.cursor/extensions/tracedecay.cursor-native-0.0.0/`; its receipt and

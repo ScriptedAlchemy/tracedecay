@@ -235,7 +235,6 @@ impl KotlinExtractor {
             "property_declaration" => Self::visit_property(state, node),
             "secondary_constructor" => Self::visit_secondary_constructor(state, node),
             _ => {
-                // Recurse into children for any unhandled node types.
                 Self::visit_children(state, node);
             }
         }
@@ -722,7 +721,6 @@ impl KotlinExtractor {
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit enum body to extract enum entries.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "enum_class_body") {
@@ -1024,10 +1022,8 @@ impl KotlinExtractor {
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the body.
         if let Some(body) = find_direct_child_by_kind(node, "function_body") {
             Self::extract_call_sites(state, body, &id);
         }

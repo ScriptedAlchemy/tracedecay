@@ -13,10 +13,6 @@
 //! * the bounded-wire helpers shared by every host input reader,
 //! * the record/spool bounds every provider discovery walk charges against,
 //! * and [`HostAdmission`], the dyn-safe port the root facade implements.
-//!
-//! Root wiring: `src/application/host_admission.rs` must drop its own copies of
-//! these values and re-export them from here, then add
-//! `impl HostAdmission for dyn HostAdmission`.
 
 use std::future::Future;
 use std::path::PathBuf;

@@ -8,10 +8,6 @@
 //! Every one of those is produced from `RegisteredGlobalDb`, which sits above
 //! this crate. Rather than depend on it, ingest states what it needs as this
 //! port and lets the root hand the composed pieces back.
-//!
-//! Root wiring: `impl SessionIngestAuthority for RegisteredGlobalDb`, built
-//! from the existing `src/store/` adapters and
-//! `HostAdmissionAuthorities::{for_project, for_profile}`.
 
 use std::future::Future;
 use std::path::PathBuf;

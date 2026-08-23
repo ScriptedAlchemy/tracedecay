@@ -2623,9 +2623,8 @@ mod tests {
 
     #[test]
     fn exact_lookup_skips_blank_committed_rows() {
-        // Renamed from exact_lookup_rejects_empty_committed_rows: a blank
-        // committed row is benign (Finding 1's scan_jsonl_row fix) and must
-        // be skipped, not treated as ledger corruption.
+        // A blank committed row is benign (scan_jsonl_row treats it as a
+        // skip) and must not be treated as ledger corruption.
         let (_temp, path) =
             write_ledger(&[ledger_line("target", "succeeded", 1), "   ".to_owned()]);
 

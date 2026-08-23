@@ -314,7 +314,6 @@ impl WgslExtractor {
             });
         }
 
-        // Visit struct members.
         if let Some(body) = find_direct_child_by_kind(node, "struct_body_decl") {
             state.node_stack.push((name, id));
             Self::visit_struct_members(state, body);

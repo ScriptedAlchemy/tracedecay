@@ -246,7 +246,6 @@ impl DockerfileExtractor {
             state.register_stage_target(stage_index.to_string(), &id);
             state.register_stage_target(alias_name.clone(), &id);
 
-            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -293,7 +292,6 @@ impl DockerfileExtractor {
             state.nodes.push(graph_node);
             state.register_stage_target(stage_index.to_string(), &id);
 
-            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -368,7 +366,6 @@ impl DockerfileExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -424,7 +421,6 @@ impl DockerfileExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -482,7 +478,6 @@ impl DockerfileExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -550,7 +545,6 @@ impl DockerfileExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),

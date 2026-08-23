@@ -1080,6 +1080,7 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use NativeIntegrationSurfaceUnavailableV1 as Reason;
 
     #[test]
     fn stack_snapshot_schema_requires_exact_registered_scope_set_identity() {
@@ -1205,7 +1206,6 @@ mod tests {
 
     #[test]
     fn every_port_failure_maps_to_a_truthful_unavailable_reason() {
-        use NativeIntegrationSurfaceUnavailableV1 as Reason;
         for (error, expected) in [
             (
                 NativeIntegrationPortError::Unavailable,

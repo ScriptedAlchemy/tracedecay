@@ -370,7 +370,6 @@ impl OcamlExtractor {
                         });
                     }
 
-                    // Recurse into module body.
                     state.node_stack.push((name, id));
                     if let Some(body) = child.child_by_field_name("body") {
                         Self::visit_children(state, body);

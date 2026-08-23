@@ -383,8 +383,8 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     /// timestamp, and trigger so a cancelling query cannot erase a coalesced
     /// foreign wake between independent atomic updates.
     pending_wake: Arc<PendingWakeV1>,
-    /// Canonical Plan 26 observability lane, installed once after project open
-    /// mounts the project-bound producer. Empty means this worktree records no
+    /// Observability lane, installed once after project open mounts the
+    /// project-bound producer. Empty means this worktree records no
     /// canonical index or retrieval observations (never a fabricated zero).
     index_observability: Arc<OnceLock<super::observability::CodeIndexObservabilityV1>>,
     shutting_down: Arc<AtomicBool>,
@@ -2655,10 +2655,10 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(())
     }
 
-    /// Install the canonical Plan 26 observability lane for one mounted
-    /// worktree. Installation is once per mount: a repeated install against
-    /// the same mounted worktree keeps the incumbent lane, and a worktree that
-    /// is not mounted is a typed error so the caller can log the absence.
+    /// Install the observability lane for one mounted worktree. Installation
+    /// is once per mount: a repeated install against the same mounted worktree
+    /// keeps the incumbent lane, and a worktree that is not mounted is a typed
+    /// error so the caller can log the absence.
     pub(in crate::daemon) async fn install_index_observability(
         &self,
         project_root: &Path,

@@ -1,6 +1,5 @@
 /**
- * TRACE — the Code workspace's call-topography drill-in (plan 11b, "Topography
- * round one — coordinator verdict", "Sensory contract", "Rendering strategy").
+ * TRACE — the Code workspace's call-topography drill-in.
  *
  * A selected symbol floods the field: its callers converge from above as
  * tributaries, its callees fan below as a delta, every channel as wide as the

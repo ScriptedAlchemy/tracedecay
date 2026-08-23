@@ -1,5 +1,5 @@
 /**
- * STRATA — `GET /api/plugins/graph/strata` (plan 11b Surface 2).
+ * STRATA — `GET /api/plugins/graph/strata`.
  *
  * The graph's dependency layering: how deep the import/dependency chains run,
  * and which directories form the clusters those chains cross. Where the spine

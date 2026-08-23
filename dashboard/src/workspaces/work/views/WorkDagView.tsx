@@ -17,12 +17,12 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * Strata are the longest path over the Tarjan condensation, the same discipline
  * the Code workspace layers imports with: a task sits one stratum below the
  * deepest thing it declares a dependency on, and a dependency cycle is
- * condensed into one mark rather than broken. Plan 11c calls a backward jump
- * the climb hue and requires the caption to state it is an observation; a
- * declared cycle is a real reading of the plan, not a rendering fault.
+ * condensed into one mark rather than broken. A backward jump uses the climb
+ * hue and the caption must state it is an observation; a declared cycle is a
+ * real reading of the plan, not a rendering fault.
  *
  * The widest channel is the deepest chain of components, and it is UNWEIGHTED.
- * 11c's critical path is weighted by effort, and the effort lives in the
+ * The product critical path is weighted by effort, and the effort lives in the
  * work-product graph rather than in `WorkProjection`, so the two chains are
  * drawn side by side and neither is rescaled by the other: this one is the
  * longest path over the edges THIS PAGE returned, and the authority's is the

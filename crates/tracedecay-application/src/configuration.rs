@@ -36,7 +36,7 @@ use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
 
-/// Typed input for the first configuration read migrated through the daemon
+/// Typed input for the configuration list read through the daemon
 /// invocation boundary.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -48,8 +48,8 @@ pub struct ConfigurationGetRequestV1 {
     pub key: SettingKey,
 }
 
-/// Typed revision-CAS input for the first configuration write migrated through
-/// the daemon invocation boundary.
+/// Typed revision-CAS input for a configuration write through the daemon
+/// invocation boundary.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationSetRequestV1 {

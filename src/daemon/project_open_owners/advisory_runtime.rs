@@ -180,7 +180,7 @@ impl Drop for ScoutHookRegistrationV1 {
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
     /// Resolves the cycle input from the current configuration revision and
-    /// the current sealed code-index generation on every invocation. A Plan 20
+    /// the current sealed code-index generation on every invocation. A
     /// settings PATCH landing after project open (for example enabling the
     /// Context Scout checkbox) therefore remounts the producer path on the
     /// next cycle instead of rejecting every cycle as
@@ -610,8 +610,8 @@ async fn current_feedback_lsp_input(
     .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-input"))
 }
 
-/// One admitted hook boundary's advisory-and-Scout cycle: the Plan 09
-/// one-shot advisory/hook-notice run, then the Scout producer tail —
+/// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
+/// advisory/hook-notice run, then the Scout producer tail —
 /// canonical input assembly from the latest committed publication, daemon-side
 /// delivery selection, `prepare_configured`, and a claim-authority mount for
 /// the enqueued generation. Every early return is a typed fail-closed state;
@@ -682,9 +682,9 @@ async fn run_production_hook_cycle(
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let observed_at = execution.observed_at;
-    // The Scout tail re-pins the current Plan 20 configuration: a revision
-    // that landed while the advisory half ran must not produce guidance
-    // under the superseded control state.
+    // The Scout tail re-pins the current configuration: a revision that
+    // landed while the advisory half ran must not produce guidance under the
+    // superseded control state.
     let Ok(pinned_configuration) = producer
         .graph
         .configuration_runtime()
@@ -1169,9 +1169,9 @@ async fn register_production_advisory_owner(
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
-    // The Plan 20 control pin and the model configuration are read from the
-    // same current snapshot: a settings PATCH that landed after project open
-    // (a deferred mount, or the user enabling the Context Scout checkbox)
+    // The control pin and the model configuration are read from the same
+    // current snapshot: a settings PATCH that landed after project open (a
+    // deferred mount, or the user enabling the Context Scout checkbox)
     // mounts the updated state here instead of failing until reopen.
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&current_configuration)
         .ok_or_else(|| TraceDecayError::Config {

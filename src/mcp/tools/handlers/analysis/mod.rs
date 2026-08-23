@@ -5,9 +5,8 @@
 //! by more than one sibling, and the re-exports the handler dispatcher calls.
 //!
 //! `constructors`, `field_sites`, `imports`, `recursion`, and `unsafe_patterns`
-//! read Rust source with hand-rolled byte scanners built on [`lex`]. That
-//! scanning is scheduled to move onto ast-grep patterns and graph edges — see
-//! the migration notes in `docs/` before extending it. `unmounted_files` is the
+//! read Rust source with hand-rolled byte scanners built on [`lex`]. See the
+//! notes in `docs/` before extending those scanners. `unmounted_files` is the
 //! one source-reading sibling that already parses: a mis-read `mod` line there
 //! would report a compiled file as an orphan (or, worse, hide a real one), so
 //! it uses tree-sitter rather than joining the byte-scanner cohort.

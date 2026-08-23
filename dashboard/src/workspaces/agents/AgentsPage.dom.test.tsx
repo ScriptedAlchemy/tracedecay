@@ -136,7 +136,7 @@ describe('AgentsPage read coverage', () => {
   });
 
   /**
-   * The three plan-11 measures added beside the delegation rollup. The stub
+   * The three measures beside the delegation rollup. The stub
    * `fetch` below answers `/api/work/views` with a dashboard envelope rather
    * than the application envelope that route actually carries, so the graph
    * read is refused as a shape this build cannot decode — which is exactly the

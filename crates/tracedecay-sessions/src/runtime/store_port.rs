@@ -5,10 +5,6 @@
 //! evidence that commits inside the same authoritative transaction — both
 //! expressed purely in session values — so the extension trait belongs here
 //! rather than next to the registered-database adapter that implements it.
-//!
-//! Root wiring: `src/store/mod.rs` must drop its own `TranscriptIngestStore`
-//! definition and re-export this one, keeping
-//! `impl TranscriptIngestStore for GlobalDbTranscriptStore<'_>` where it is.
 
 use std::future::Future;
 use std::path::Path;

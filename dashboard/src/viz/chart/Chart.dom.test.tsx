@@ -152,7 +152,7 @@ describe('Chart theming and motion', () => {
 
 /**
  * The dashboard registers only the series it draws, which is what keeps the
- * ECharts chunk inside plan 11's per-chunk budget. ECharts answers an
+ * ECharts chunk inside the per-chunk budget. ECharts answers an
  * unregistered series with an empty canvas rather than an error, so the cost of
  * that narrowing is a chart-shaped blank standing in for a real measurement.
  *

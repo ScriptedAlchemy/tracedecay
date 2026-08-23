@@ -51,100 +51,96 @@ impl AutomationSkipReasonV1 {
     /// Projects the exact agent-host ledger label into the closed application
     /// terminal. Unknown labels cannot become durable skipped outcomes.
     pub fn from_ledger_reason(reason: &str) -> Option<Self> {
-        use AutomationSkipReasonV1 as Reason;
-
         Some(match reason {
-            "automation_disabled" => Reason::AutomationDisabled,
-            "memory_curator_disabled" => Reason::MemoryCuratorDisabled,
-            "session_reflector_disabled" => Reason::SessionReflectorDisabled,
-            "skill_writer_disabled" => Reason::SkillWriterDisabled,
-            "combined_review_disabled" => Reason::CombinedReviewDisabled,
-            "user_job_disabled" => Reason::UserJobDisabled,
-            "job_commands_disabled" => Reason::JobCommandsDisabled,
-            "delegated_host_mode" => Reason::DelegatedHostMode,
-            "backend_disabled" => Reason::BackendDisabled,
-            "scheduler_lock_active" => Reason::SchedulerLockActive,
-            "task_not_schedulable" => Reason::TaskNotSchedulable,
-            "scheduler_schedule_invalid" => Reason::SchedulerScheduleInvalid,
-            "scheduler_schedule_manual" => Reason::SchedulerScheduleManual,
-            "scheduler_idle_window_active" => Reason::SchedulerIdleWindowActive,
-            "scheduler_non_retryable_failure" => Reason::SchedulerNonRetryableFailure,
-            "scheduler_cooldown_active" => Reason::SchedulerCooldownActive,
-            "scheduler_interval_not_elapsed" => Reason::SchedulerIntervalNotElapsed,
-            "scheduler_cron_not_due" => Reason::SchedulerCronNotDue,
-            "no_new_session_activity" => Reason::NoNewSessionActivity,
-            "similarity_authority_unavailable" => Reason::SimilarityAuthorityUnavailable,
-            "partial_coverage_no_candidates" => Reason::PartialCoverageNoCandidates,
-            "nothing_to_review" => Reason::NothingToReview,
-            "session_evidence_filter_unavailable" => Reason::SessionEvidenceFilterUnavailable,
-            "session_evidence_retrieval_unavailable" => Reason::SessionEvidenceRetrievalUnavailable,
-            "session_evidence_unavailable" => Reason::SessionEvidenceUnavailable,
-            "session_evidence_partial" => Reason::SessionEvidencePartial,
-            "session_evidence_stale" => Reason::SessionEvidenceStale,
-            "session_evidence_denied" => Reason::SessionEvidenceDenied,
-            "session_evidence_locked" => Reason::SessionEvidenceLocked,
-            "session_evidence_reset_required" => Reason::SessionEvidenceResetRequired,
-            "session_cursor_manifest_limit_exceeded" => Reason::SessionCursorManifestLimitExceeded,
-            SESSION_EVIDENCE_BUDGET_EXHAUSTED => Reason::SessionEvidenceBudgetExhausted,
-            SESSION_EVIDENCE_BUDGET_SUPPRESSED => Reason::SessionEvidenceBudgetSuppressed,
-            "session_evidence_cancelled" => Reason::SessionEvidenceCancelled,
-            "no_session_evidence" | "no_skill_writer_evidence" => Reason::NoSessionEvidence,
-            "shipped_fact_proposal_history_retired" => Reason::ShippedFactProposalHistoryRetired,
+            "automation_disabled" => Self::AutomationDisabled,
+            "memory_curator_disabled" => Self::MemoryCuratorDisabled,
+            "session_reflector_disabled" => Self::SessionReflectorDisabled,
+            "skill_writer_disabled" => Self::SkillWriterDisabled,
+            "combined_review_disabled" => Self::CombinedReviewDisabled,
+            "user_job_disabled" => Self::UserJobDisabled,
+            "job_commands_disabled" => Self::JobCommandsDisabled,
+            "delegated_host_mode" => Self::DelegatedHostMode,
+            "backend_disabled" => Self::BackendDisabled,
+            "scheduler_lock_active" => Self::SchedulerLockActive,
+            "task_not_schedulable" => Self::TaskNotSchedulable,
+            "scheduler_schedule_invalid" => Self::SchedulerScheduleInvalid,
+            "scheduler_schedule_manual" => Self::SchedulerScheduleManual,
+            "scheduler_idle_window_active" => Self::SchedulerIdleWindowActive,
+            "scheduler_non_retryable_failure" => Self::SchedulerNonRetryableFailure,
+            "scheduler_cooldown_active" => Self::SchedulerCooldownActive,
+            "scheduler_interval_not_elapsed" => Self::SchedulerIntervalNotElapsed,
+            "scheduler_cron_not_due" => Self::SchedulerCronNotDue,
+            "no_new_session_activity" => Self::NoNewSessionActivity,
+            "similarity_authority_unavailable" => Self::SimilarityAuthorityUnavailable,
+            "partial_coverage_no_candidates" => Self::PartialCoverageNoCandidates,
+            "nothing_to_review" => Self::NothingToReview,
+            "session_evidence_filter_unavailable" => Self::SessionEvidenceFilterUnavailable,
+            "session_evidence_retrieval_unavailable" => Self::SessionEvidenceRetrievalUnavailable,
+            "session_evidence_unavailable" => Self::SessionEvidenceUnavailable,
+            "session_evidence_partial" => Self::SessionEvidencePartial,
+            "session_evidence_stale" => Self::SessionEvidenceStale,
+            "session_evidence_denied" => Self::SessionEvidenceDenied,
+            "session_evidence_locked" => Self::SessionEvidenceLocked,
+            "session_evidence_reset_required" => Self::SessionEvidenceResetRequired,
+            "session_cursor_manifest_limit_exceeded" => Self::SessionCursorManifestLimitExceeded,
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED => Self::SessionEvidenceBudgetExhausted,
+            SESSION_EVIDENCE_BUDGET_SUPPRESSED => Self::SessionEvidenceBudgetSuppressed,
+            "session_evidence_cancelled" => Self::SessionEvidenceCancelled,
+            "no_session_evidence" | "no_skill_writer_evidence" => Self::NoSessionEvidence,
+            "shipped_fact_proposal_history_retired" => Self::ShippedFactProposalHistoryRetired,
             _ => return None,
         })
     }
 
     pub(super) fn matches_task(self, task: AutomationTaskV1) -> bool {
-        use AutomationSkipReasonV1 as Reason;
-
         match self {
-            Reason::MemoryCuratorDisabled
-            | Reason::SimilarityAuthorityUnavailable
-            | Reason::PartialCoverageNoCandidates
-            | Reason::NothingToReview => task == AutomationTaskV1::MemoryCurator,
-            Reason::SessionReflectorDisabled
-            | Reason::NoNewSessionActivity
-            | Reason::ShippedFactProposalHistoryRetired => {
+            Self::MemoryCuratorDisabled
+            | Self::SimilarityAuthorityUnavailable
+            | Self::PartialCoverageNoCandidates
+            | Self::NothingToReview => task == AutomationTaskV1::MemoryCurator,
+            Self::SessionReflectorDisabled
+            | Self::NoNewSessionActivity
+            | Self::ShippedFactProposalHistoryRetired => {
                 task == AutomationTaskV1::SessionReflector
             }
             // Skill writer and combined review retrieve the same session
             // evidence surface as the reflector. A typed evidence skip must
             // remain a skip for those tasks instead of failing settlement.
-            Reason::SessionEvidenceFilterUnavailable
-            | Reason::SessionEvidenceRetrievalUnavailable
-            | Reason::SessionEvidenceUnavailable
-            | Reason::SessionEvidencePartial
-            | Reason::SessionEvidenceStale
-            | Reason::SessionEvidenceDenied
-            | Reason::SessionEvidenceLocked
-            | Reason::SessionEvidenceResetRequired
-            | Reason::SessionCursorManifestLimitExceeded
-            | Reason::SessionEvidenceBudgetExhausted
-            | Reason::SessionEvidenceBudgetSuppressed
-            | Reason::SessionEvidenceCancelled
-            | Reason::NoSessionEvidence => matches!(
+            Self::SessionEvidenceFilterUnavailable
+            | Self::SessionEvidenceRetrievalUnavailable
+            | Self::SessionEvidenceUnavailable
+            | Self::SessionEvidencePartial
+            | Self::SessionEvidenceStale
+            | Self::SessionEvidenceDenied
+            | Self::SessionEvidenceLocked
+            | Self::SessionEvidenceResetRequired
+            | Self::SessionCursorManifestLimitExceeded
+            | Self::SessionEvidenceBudgetExhausted
+            | Self::SessionEvidenceBudgetSuppressed
+            | Self::SessionEvidenceCancelled
+            | Self::NoSessionEvidence => matches!(
                 task,
                 AutomationTaskV1::SessionReflector
                     | AutomationTaskV1::SkillWriter
                     | AutomationTaskV1::CombinedReview
             ),
-            Reason::SkillWriterDisabled => task == AutomationTaskV1::SkillWriter,
-            Reason::CombinedReviewDisabled => task == AutomationTaskV1::CombinedReview,
-            Reason::UserJobDisabled | Reason::JobCommandsDisabled => {
+            Self::SkillWriterDisabled => task == AutomationTaskV1::SkillWriter,
+            Self::CombinedReviewDisabled => task == AutomationTaskV1::CombinedReview,
+            Self::UserJobDisabled | Self::JobCommandsDisabled => {
                 task == AutomationTaskV1::UserJob
             }
-            Reason::AutomationDisabled
-            | Reason::DelegatedHostMode
-            | Reason::BackendDisabled
-            | Reason::SchedulerLockActive
-            | Reason::TaskNotSchedulable
-            | Reason::SchedulerScheduleInvalid
-            | Reason::SchedulerScheduleManual
-            | Reason::SchedulerIdleWindowActive
-            | Reason::SchedulerNonRetryableFailure
-            | Reason::SchedulerCooldownActive
-            | Reason::SchedulerIntervalNotElapsed
-            | Reason::SchedulerCronNotDue => true,
+            Self::AutomationDisabled
+            | Self::DelegatedHostMode
+            | Self::BackendDisabled
+            | Self::SchedulerLockActive
+            | Self::TaskNotSchedulable
+            | Self::SchedulerScheduleInvalid
+            | Self::SchedulerScheduleManual
+            | Self::SchedulerIdleWindowActive
+            | Self::SchedulerNonRetryableFailure
+            | Self::SchedulerCooldownActive
+            | Self::SchedulerIntervalNotElapsed
+            | Self::SchedulerCronNotDue => true,
         }
     }
 }

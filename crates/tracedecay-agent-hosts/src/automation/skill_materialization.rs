@@ -272,12 +272,12 @@ impl FileProvenance {
         self.managed_by.as_deref() == Some(MATERIALIZED_SKILL_MANAGED_BY)
     }
 
-    /// Legacy (pre-package-hash, PR #362) fork check: the recorded
-    /// `content-hash` was the body-only hash, so a file is a fork when the body
-    /// on disk no longer hashes to it. Only meaningful for the body-hash domain;
-    /// callers first try [`recompute_on_disk_package`] for the package-hash
-    /// domain (PR #366+). A managed file missing a content-hash is treated as
-    /// forked so we never silently overwrite something we cannot verify.
+    /// Legacy (pre-package-hash) fork check: the recorded `content-hash` was
+    /// the body-only hash, so a file is a fork when the body on disk no longer
+    /// hashes to it. Only meaningful for the body-hash domain; callers first
+    /// try [`recompute_on_disk_package`] for the package-hash domain. A managed
+    /// file missing a content-hash is treated as forked so we never silently
+    /// overwrite something we cannot verify.
     fn is_legacy_forked(&self) -> bool {
         match (&self.content_hash, &self.body_hash) {
             (Some(recorded), Some(actual)) => recorded != actual,
@@ -341,7 +341,7 @@ fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> 
 }
 
 /// Recomputes the package hash of a manifest-less managed package directly from
-/// disk (PR #366+ package-hash domain). Reconstructs the render placeholder by
+/// disk (package-hash domain). Reconstructs the render placeholder by
 /// swapping the recorded `content-hash` back to `<package-hash>`, folds in the
 /// on-disk support files exactly as [`ManagedSkill::materialized_package_hash`]
 /// does, and — when the result matches the recorded hash — returns a re-derived

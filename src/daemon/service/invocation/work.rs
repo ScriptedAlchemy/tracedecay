@@ -23,6 +23,7 @@ use outcome::{
 };
 pub(super) use outcome::{work_background_context, work_blocked_interval_recovery_context};
 pub(super) use workflow_dispatch::execute_workflow_application;
+use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
 use workflow_fan_out::reconcile_active_workflow_fan_out;
 
 pub(super) fn application_problem(
@@ -159,14 +160,11 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
     }
 }
 
-/// Observes one placement target through the native Git authority.
 fn observe_placement_target(
     project_root: Option<&std::path::Path>,
     target: &tracedecay_domain::WorkPlacementTargetV1,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::WorkPlacementObservationV1, ApplicationProblem> {
-    use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
-
     let unreadable = tracedecay_domain::WorkPlacementObservationV1 {
         dirty_tracked_paths: 0,
         untracked_paths: 0,

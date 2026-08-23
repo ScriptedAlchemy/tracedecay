@@ -374,21 +374,12 @@ where
     }
 }
 
-// Work proposal *generation* is mounted once, on the Work family:
+// Work proposal generation is mounted once, on the Work family:
 // `WorkOperation::GenerateProposal` -> `WorkService::generate_proposal`
-// (crates/tracedecay-application/src/work.rs) -> `WorkProposalEvaluatorV1`
-// (crates/tracedecay-policy/src/work_loop.rs). A second, unmounted
-// generator port and service used to live here. Plan 06 forbids both halves
-// of that: "No slice lands a standalone schema, trait, registry, fixture
-// framework, or policy phase without its production caller", and "Remove any
-// route, score, fallback, or replan decision duplicated in a surface,
-// provider adapter, dashboard, graph projector, or runtime handler." The
-// shape/sizing/decomposition/route planner Plan 06 mandates is still owed;
-// it lands with its production caller, not as a port ahead of one.
-//
-// This module keeps the read side only: evidence selection/expansion and
-// history. Client-supplied proposals still enter through the mounted
-// mutation path (`DecideWorkProposalRequestV1` in `mutation.rs`).
+// -> `WorkProposalEvaluatorV1`. This module keeps the read side only:
+// evidence selection/expansion and history. Client-supplied proposals
+// enter through the mounted mutation path (`DecideWorkProposalRequestV1`
+// in `mutation.rs`).
 
 fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
     context: &RequestContext,

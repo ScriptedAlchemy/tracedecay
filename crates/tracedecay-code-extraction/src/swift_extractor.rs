@@ -244,7 +244,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -334,7 +333,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -344,13 +342,10 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract inheritance (class Foo: Bar).
         Self::extract_inheritance(state, node, &id);
 
-        // Extract attribute annotations (e.g. @objc, @available).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit class body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -399,7 +394,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -409,10 +403,8 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit struct body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -461,7 +453,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -471,7 +462,6 @@ impl SwiftExtractor {
             });
         }
 
-        // Visit enum body (enum_class_body with enum_entry children).
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -552,7 +542,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -611,7 +600,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -621,7 +609,6 @@ impl SwiftExtractor {
             });
         }
 
-        // Visit extension body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -677,7 +664,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -687,10 +673,9 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit protocol body. Protocol functions are protocol_function_declaration.
+        // Protocol functions are `protocol_function_declaration`.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -765,7 +750,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -837,7 +821,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -847,10 +830,8 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
 
-        // Extract attribute annotations (e.g. @discardableResult, @objc).
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
 
@@ -899,7 +880,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -909,10 +889,8 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract call sites from the init body.
         Self::extract_call_sites(state, node, &id);
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
 
@@ -967,7 +945,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -977,7 +954,6 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
 
@@ -1029,7 +1005,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1230,7 +1205,6 @@ impl SwiftExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into the call for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested definitions to avoid polluting call sites.
@@ -1374,7 +1348,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Annotates unresolved ref.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id.clone(),
             reference_name: annot_name,
@@ -1384,7 +1357,6 @@ impl SwiftExtractor {
             file_path: state.file_path.clone(),
         });
 
-        // Direct Annotates edge from the annotation to the target.
         state.edges.push(Edge {
             source: id,
             target: target_id.to_string(),

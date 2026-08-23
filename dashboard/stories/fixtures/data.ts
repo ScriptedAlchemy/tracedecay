@@ -1,7 +1,7 @@
 /**
  * Canonical fixture payloads for the dashboard `/api` surfaces. These stand in
  * for a running daemon so the visual audit and DOM/MSW tests never require the
- * live API to be up (plan 11a). Both the MSW handlers (`handlers.ts`) and the
+ * live API to be up. Both the MSW handlers (`handlers.ts`) and the
  * Playwright route interceptor (`route.ts`) resolve from this single source, so
  * fixtures stay consistent across test transports.
  *
@@ -197,9 +197,8 @@ const SYNTHETIC_REPOS: ReadonlyArray<{
     // owner's profile) rather than the flat `['main']` this fixture used to
     // give every repository. The Delivery field's y axis is a log of this
     // number; with every repo on one branch the axis was a single line and the
-    // scale was never exercised (plan 11a real-profile finding 4). Cycled on a
-    // different period from `mass` so branch count and indexed mass stay
-    // independent measurements.
+    // scale was never exercised. Cycled on a different period from `mass` so
+    // branch count and indexed mass stay independent measurements.
     branches: [1, 3, 71, 8, 242, 20, 2, 56, 5, 36, 10][index % 11]!,
   }));
 
@@ -2391,7 +2390,7 @@ const capabilities: Record<string, unknown> = {
  * The Loom weave's two sources, mirrored from a real daemon response captured
  * on 2026-07-25 (`tracedecay dashboard --port 7341`, profile-sharded store,
  * 6,053 sessions). Shapes are exact; the population is shaped to the same
- * DISTRIBUTION the real store has, per plan 11a real-profile finding 4 —
+ * DISTRIBUTION the real store has —
  * fixtures that differ only in size systematically under-test the surface:
  *
  *   - Message counts are heavily skewed (a handful in the hundreds, a long

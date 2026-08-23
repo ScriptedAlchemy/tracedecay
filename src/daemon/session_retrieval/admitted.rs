@@ -73,7 +73,7 @@ pub(crate) type SessionApplicationRetrievalFutureV1<'a> =
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
 
-/// Application-level Plan 23 retrieval over one already-mounted session root.
+/// Application-level retrieval over one already-mounted session root.
 ///
 /// The caller has already crossed its application admission boundary. This
 /// port therefore accepts the original immutable context and never routes

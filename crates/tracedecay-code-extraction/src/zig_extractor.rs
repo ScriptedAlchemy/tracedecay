@@ -265,7 +265,6 @@ impl ZigExtractor {
         builtin_node: TsNode<'_>,
         name: &str,
     ) {
-        // Extract the module path from the string argument.
         let module_name =
             Self::extract_import_module(state, builtin_node).unwrap_or_else(|| name.to_string());
 
@@ -303,7 +302,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -373,7 +371,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -383,7 +380,6 @@ impl ZigExtractor {
             });
         }
 
-        // Visit struct body for fields, methods, etc.
         state.node_stack.push((name.to_string(), id));
         state.class_depth += 1;
         Self::visit_struct_body(state, struct_node);
@@ -456,7 +452,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -466,7 +461,6 @@ impl ZigExtractor {
             });
         }
 
-        // Visit enum body for variants.
         state.node_stack.push((name.to_string(), id));
         Self::visit_enum_body(state, enum_node);
         state.node_stack.pop();
@@ -528,7 +522,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -581,7 +574,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -637,7 +629,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (struct).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -709,7 +700,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -719,7 +709,6 @@ impl ZigExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -777,7 +766,6 @@ impl ZigExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -787,7 +775,6 @@ impl ZigExtractor {
             });
         }
 
-        // Extract call sites from the test body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -896,7 +883,6 @@ impl ZigExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into the call for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested function/test definitions to avoid polluting call sites.

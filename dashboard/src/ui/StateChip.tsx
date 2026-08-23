@@ -20,8 +20,8 @@ import {
 } from 'lucide-react';
 import { cn } from './cn';
 
-/** The nineteen-state domain taxonomy (plan 11). Token + icon + label —
- * never color alone. */
+/** The nineteen-state domain taxonomy. Token + icon + label — never color
+ * alone. */
 export type DomainStateKind =
   | 'loading'
   | 'complete_zero_findings'

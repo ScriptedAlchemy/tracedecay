@@ -119,9 +119,9 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
             )
         }
         WorkflowApplicationInvocation::ActivateDefinition(request) => {
-            // Plan 32: catalog admission rejects before the lifecycle
-            // command is journaled; a denial is the same canonical problem
-            // effect every other refused mutation records.
+            // Catalog admission rejects before the lifecycle command is
+            // journaled; a denial is the same canonical problem effect every
+            // other refused mutation records.
             let prepared = match services
                 .definitions()
                 .admit_activation(&request.definition_id, request.definition_version)

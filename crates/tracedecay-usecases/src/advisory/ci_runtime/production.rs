@@ -1432,6 +1432,7 @@ mod discovery_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use tracedecay_application::feedback::CiFailureLocalizationPortOutcomeV1;
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
@@ -1442,6 +1443,8 @@ mod discovery_tests {
         RetrievalAnchorId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use crate::advisory::{CiReadOnlyEvidenceSource, DaemonCiReadOnlyEvidenceSourceV1};
 
     use super::*;
 
@@ -1905,9 +1908,6 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn localization_reader_preserves_rate_limit_and_failed_outcomes() {
-        use crate::advisory::{CiReadOnlyEvidenceSource, DaemonCiReadOnlyEvidenceSourceV1};
-        use tracedecay_application::feedback::CiFailureLocalizationPortOutcomeV1;
-
         let fixture =
             crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);

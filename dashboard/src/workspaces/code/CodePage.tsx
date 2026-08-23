@@ -335,7 +335,7 @@ export function CodePage() {
           // reading down the column mean "aggregation decreases", the same
           // sentence the lens ruler above prints.
           <div className="flex min-h-full flex-col">
-            {/* Far = CORTEX (plan 11b `:229`). The macro underlay comes first
+            {/* Far = CORTEX. The macro underlay comes first
               * because it is the farthest position on the continuum, and it is
               * handed the current focus so the terrain can ring the region the
               * traced symbol actually lives in. */}

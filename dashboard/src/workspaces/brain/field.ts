@@ -382,9 +382,9 @@ export function composeRegistryField(
  * honest scale, but on a real registry it is also a lopsided one: forty of
  * forty-four projects hold between four and thirteen units while one holds two
  * hundred and forty-seven, so the bodies bunch along the bottom and the upper
- * axis looks like a drawing error. It is not — it is the distribution, and per
- * plan 11a's degenerate rule the view states that rather than leaving the
- * reader to conclude the frame is broken.
+ * axis looks like a drawing error. It is not — it is the distribution, and
+ * the view states that rather than leaving the reader to conclude the frame
+ * is broken.
  */
 function summarizeMass(
   projects: readonly ProjectRegistryEntry[],

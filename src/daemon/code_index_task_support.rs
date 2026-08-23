@@ -1,5 +1,7 @@
 //! Owned task settlement and exact-source cursor helpers for code-index search.
 
+use tracedecay_query::code_search;
+
 use super::code_index_scheduler;
 
 pub(super) fn code_index_search_unavailable_for_generation(
@@ -7,8 +9,6 @@ pub(super) fn code_index_search_unavailable_for_generation(
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
     semantic_reason: &'static str,
 ) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    use tracedecay_query::code_search;
-
     code_search::CodeIndexSearchOutcomeV1::Unavailable(code_search::CodeIndexSearchUnavailableV1 {
         code_generation,
         reason,

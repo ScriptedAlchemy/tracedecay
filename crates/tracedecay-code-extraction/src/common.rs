@@ -150,7 +150,6 @@ pub(crate) fn extract_call_expression_sites(
                     });
                 }
             }
-            // Recurse for nested calls.
             extract_call_expression_sites(source, file_path, unresolved_refs, child, fn_node_id);
             if !cursor.goto_next_sibling() {
                 break;

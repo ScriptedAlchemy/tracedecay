@@ -17,13 +17,15 @@ use crate::error::ApplicationContractError;
 use crate::storage::findings::truncate_at_char_boundary;
 
 use super::sources::{
-    AdvisoryFeedbackDoctorPort, CodeIndexMountDoctorPort, ConfigurationAuthorityDoctorPort,
+    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
+    CodeIndexMountReadV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
     DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, HostIntegrationDoctorPort,
-    LanguageServerDoctorPort, ObservabilityDoctorPort, OperationalAuditDoctorPort,
-    RuntimeHealthDoctorPort, StorageDoctorPort, advisory_feedback_findings, code_index_finding,
-    configuration_finding, host_integration_finding, ingest_refusal_finding,
-    language_server_finding, observability_finding, operational_audit_findings,
-    runtime_health_finding,
+    HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
+    ObservabilityReadV1, OperationalAuditDoctorPort, ProfileAuthorityReadV1,
+    RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+    advisory_feedback_findings, code_index_finding, configuration_finding,
+    host_integration_finding, ingest_refusal_finding, language_server_finding,
+    observability_finding, operational_audit_findings, runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -527,13 +529,20 @@ impl<'a> DoctorReportComposerV1<'a> {
             return unwired_family(DoctorFindingFamilyV1::Configuration);
         };
         let read = port.configuration_health(context).await;
-        use super::sources::ConfigurationAuthorityReadV1 as Read;
         let consultation = match read {
-            Read::Resolved { .. } => DoctorFamilyConsultationV1::Consulted,
-            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            ConfigurationAuthorityReadV1::Resolved { .. } => DoctorFamilyConsultationV1::Consulted,
+            ConfigurationAuthorityReadV1::Unsupported => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+            }
+            ConfigurationAuthorityReadV1::Absent => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+            }
+            ConfigurationAuthorityReadV1::Denied => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Denied)
+            }
+            ConfigurationAuthorityReadV1::Unknown => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+            }
         };
         let finding = configuration_finding(&read)?;
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
@@ -551,13 +560,16 @@ impl<'a> DoctorReportComposerV1<'a> {
         let mut consultations = Vec::new();
         if let Some(port) = self.runtime {
             let read = port.runtime_health(context).await;
-            use super::sources::RuntimeHealthReadV1 as Read;
             consultations.push(match read {
-                Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-                Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-                Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-                Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-                Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+                RuntimeHealthReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+                RuntimeHealthReadV1::Unsupported => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+                }
+                RuntimeHealthReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+                RuntimeHealthReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+                RuntimeHealthReadV1::Unknown => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+                }
             });
             entries.push(DoctorReportEntryV1::new(
                 runtime_health_finding(&read)?,
@@ -566,21 +578,21 @@ impl<'a> DoctorReportComposerV1<'a> {
         }
         if let Some(port) = self.operational_audit {
             let read = port.operational_audit(context).await;
-            use super::sources::{
-                ProfileAuthorityReadV1 as Profile, RemoteOperationalReadV1 as Remote,
-            };
             consultations.push(match (&read.remote, &read.profile_authority) {
-                (Remote::Observed { .. }, _) | (_, Profile::Observed { .. }) => {
+                (RemoteOperationalReadV1::Observed { .. }, _)
+                | (_, ProfileAuthorityReadV1::Observed { .. }) => {
                     DoctorFamilyConsultationV1::Consulted
                 }
-                (Remote::Denied, _) | (_, Profile::Denied) => {
+                (RemoteOperationalReadV1::Denied, _) | (_, ProfileAuthorityReadV1::Denied) => {
                     unavailable(DoctorFamilyUnavailableReasonV1::Denied)
                 }
-                (Remote::Unsupported, _) => {
+                (RemoteOperationalReadV1::Unsupported, _) => {
                     unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
                 }
-                (Remote::Unconfigured, _) => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-                (Remote::Unavailable, Profile::Unavailable) => {
+                (RemoteOperationalReadV1::Unconfigured, _) => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+                }
+                (RemoteOperationalReadV1::Unavailable, ProfileAuthorityReadV1::Unavailable) => {
                     unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
                 }
             });
@@ -600,13 +612,14 @@ impl<'a> DoctorReportComposerV1<'a> {
             return unwired_family(DoctorFindingFamilyV1::Advisory);
         };
         let read = port.host_conformance(context).await;
-        use super::sources::HostIntegrationReadV1 as Read;
         let consultation = match read {
-            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            HostIntegrationReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            HostIntegrationReadV1::Unsupported => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+            }
+            HostIntegrationReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            HostIntegrationReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+            HostIntegrationReadV1::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };
         let finding = host_integration_finding(&read)?;
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
@@ -629,13 +642,20 @@ impl<'a> DoctorReportComposerV1<'a> {
         }
         if let Some(port) = self.advisory_feedback {
             let read = port.advisory_feedback(context).await;
-            use super::sources::AdvisoryFeedbackReadV1 as Read;
             let consultation = match &read {
-                Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-                Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-                Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-                Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-                Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+                AdvisoryFeedbackReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+                AdvisoryFeedbackReadV1::Absent => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+                }
+                AdvisoryFeedbackReadV1::Unsupported => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+                }
+                AdvisoryFeedbackReadV1::Denied => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Denied)
+                }
+                AdvisoryFeedbackReadV1::Unknown => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+                }
             };
             for finding in advisory_feedback_findings(&read)? {
                 entries.push(DoctorReportEntryV1::new(finding, None)?);
@@ -654,13 +674,14 @@ impl<'a> DoctorReportComposerV1<'a> {
             return unwired_family(DoctorFindingFamilyV1::SemanticIndex);
         };
         let read = port.code_index_mount(context).await;
-        use super::sources::CodeIndexMountReadV1 as Read;
         let consultation = match read {
-            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            CodeIndexMountReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            CodeIndexMountReadV1::Unsupported => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+            }
+            CodeIndexMountReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            CodeIndexMountReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+            CodeIndexMountReadV1::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };
         let finding = code_index_finding(&read)?;
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
@@ -675,13 +696,14 @@ impl<'a> DoctorReportComposerV1<'a> {
             return unwired_family(DoctorFindingFamilyV1::LanguageServer);
         };
         let read = port.language_server_health(context).await;
-        use super::sources::LanguageServerReadV1 as Read;
         let consultation = match read {
-            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            LanguageServerReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            LanguageServerReadV1::Unsupported => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+            }
+            LanguageServerReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            LanguageServerReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+            LanguageServerReadV1::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };
         let finding = language_server_finding(&read)?;
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
@@ -696,13 +718,14 @@ impl<'a> DoctorReportComposerV1<'a> {
             return unwired_family(DoctorFindingFamilyV1::Observability);
         };
         let read = port.observability_health(context).await;
-        use super::sources::ObservabilityReadV1 as Read;
         let consultation = match read {
-            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            ObservabilityReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            ObservabilityReadV1::Unsupported => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+            }
+            ObservabilityReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            ObservabilityReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+            ObservabilityReadV1::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };
         let finding = observability_finding(&read)?;
         // Durable ingest-coverage refusals are typed outcomes recorded next to

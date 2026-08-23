@@ -7,8 +7,8 @@
  * display size directly above it. And the per-project savings rail drew
  * twenty-five bars of which twenty were the same length, because on a machine
  * where every worktree shares one cache every worktree records almost exactly
- * the same lifetime saving. Per plan 11a's degenerate-distribution rule that
- * flatness is the reading, and it belongs in a sentence.
+ * the same lifetime saving. Degenerate-distribution rule: that flatness is
+ * the reading, and it belongs in a sentence.
  */
 
 export interface ProjectSaving {

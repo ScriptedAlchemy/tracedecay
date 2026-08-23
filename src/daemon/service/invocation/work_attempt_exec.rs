@@ -485,7 +485,7 @@ async fn run_attempt(
     let identity = attempt.identity().clone();
     // The registration-pinned work topology policy carries the concurrency
     // policy this attempt was admitted under; its canonical digest is the
-    // revision a Plan 26 no-progress terminal must name.
+    // revision a no-progress terminal must name.
     let topology_policy_digest = match registered.work_topology_policy.compute_digest() {
         Ok(digest) => Some(digest),
         Err(error) => {
@@ -1192,7 +1192,7 @@ async fn execute_app_server<S>(
     }
 }
 
-/// Offers Plan 26's no-progress terminal for one wall-exhausted attempt. The
+/// Offers the no-progress terminal for one wall-exhausted attempt. The
 /// stall is the monotonic elapsed time from attempt start to the deadline arm
 /// firing; a zero armed budget is refused by the payload contract, and
 /// emission never alters the timed-out product handling.

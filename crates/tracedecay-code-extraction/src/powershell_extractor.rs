@@ -239,7 +239,6 @@ impl PowerShellExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -249,7 +248,6 @@ impl PowerShellExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -264,7 +262,6 @@ impl PowerShellExtractor {
             return;
         };
 
-        // Look for a cast_expression recursively inside the left side.
         let Some(cast) = Self::find_descendant_by_kind(left, "cast_expression") else {
             return;
         };
@@ -275,7 +272,6 @@ impl PowerShellExtractor {
         };
 
         let var_text = state.node_text(var_node);
-        // Strip leading $ from variable name.
         let name = var_text.trim_start_matches('$').to_string();
 
         let start_line = pipeline_node.start_position().row as u32;
@@ -313,7 +309,6 @@ impl PowerShellExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -334,7 +329,6 @@ impl PowerShellExtractor {
             .unwrap_or_default();
 
         if cmd_name == "Import-Module" {
-            // Extract the module name from command_elements.
             if let Some(elements) = node.child_by_field_name("command_elements")
                 && let Some(token) = find_direct_child_by_kind(elements, "generic_token")
             {
@@ -388,7 +382,6 @@ impl PowerShellExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -425,13 +418,11 @@ impl PowerShellExtractor {
             if prev_node.kind() == "comment" {
                 let text = state.node_text(prev_node);
                 let stripped = if text.starts_with("<#") {
-                    // Block comment: strip <# and #> delimiters.
                     text.trim_start_matches("<#")
                         .trim_end_matches("#>")
                         .trim()
                         .to_string()
                 } else {
-                    // Line comment: strip leading #.
                     text.trim_start_matches('#').trim().to_string()
                 };
                 comments.push(stripped);
@@ -466,7 +457,6 @@ impl PowerShellExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into command for nested command substitutions.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested function definitions.

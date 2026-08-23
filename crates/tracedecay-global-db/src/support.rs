@@ -95,8 +95,7 @@ pub fn env_flag(name: &str) -> bool {
 /// Byte-for-byte the root `config::brand_env`, kept local because the branded
 /// prefix is a naming rule with no dependencies — reaching up to root
 /// `src/config.rs` for one `std::env::var` call would be the only reason this
-/// crate needed the composition root. Collapse the two once the kernel owns
-/// the brand prefix.
+/// crate needed the composition root.
 pub(crate) fn brand_env(suffix: &str) -> Option<String> {
     std::env::var(format!("TRACEDECAY_{suffix}")).ok()
 }
@@ -126,7 +125,6 @@ pub fn global_accounting_mode() -> AccountingMode {
     AccountingMode::Default
 }
 
-/// Convenience wrapper over [`global_accounting_mode`].
 pub fn global_accounting_enabled() -> bool {
     global_accounting_mode().enabled()
 }

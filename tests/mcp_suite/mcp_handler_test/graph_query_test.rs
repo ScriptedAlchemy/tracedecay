@@ -1593,7 +1593,6 @@ async fn test_complexity_response_fields() {
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert!(parsed.get("ranking").is_some(), "should have ranking key");
     assert!(parsed.get("formula").is_some(), "should have formula key");
-    // Check ranking items have expected fields
     if let Some(items) = parsed["ranking"].as_array()
         && let Some(first) = items.first()
     {

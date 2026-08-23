@@ -14,7 +14,7 @@ export interface EvidenceFreshness {
   observed_at?: string;
 }
 
-/** Always-visible truth strip (plan 11): coverage with denominator, freshness
+/** Always-visible truth strip: coverage with denominator, freshness
  * age, counts. Unknown denominators NEVER render a percent or a meter. */
 export function EvidenceTruthStrip({
   coverage,

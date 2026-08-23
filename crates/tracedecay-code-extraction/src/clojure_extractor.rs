@@ -281,7 +281,6 @@ impl ClojureExtractor {
             });
         }
 
-        // Collect call sites from the body.
         Self::extract_calls(state, node, &id, 2);
     }
 

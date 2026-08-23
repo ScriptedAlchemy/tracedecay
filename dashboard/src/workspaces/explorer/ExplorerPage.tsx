@@ -39,7 +39,7 @@ export function ExplorerPage() {
   const { select, selected } = explorer;
 
   // Escape closes the inspector and hands focus back to the row that opened
-  // it (plan 11 keyboard model). Bound on the document, as in TraceView,
+  // it. Bound on the document, as in TraceView,
   // because focus while reading the inspector usually sits on its scroll
   // region, not on a control the page owns. A `defaultPrevented` Escape is
   // the search field clearing itself, which must not also close the panel.

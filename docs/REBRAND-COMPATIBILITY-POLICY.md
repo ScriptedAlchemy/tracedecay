@@ -26,10 +26,10 @@ the final product shape.
    legacy spelling must say whether it is retained, reconciled as an owned
    generated artifact, warning-producing, rejected, or externally constrained.
    Tests should cover the chosen category for runtime behavior.
-4. **No silent destructive data move.** A fallback from `.tracedecay/` to
-   `.tracedecay/` is not a license to rename, delete, or rewrite user data. A
-   separately released rebrand data-move utility would require explicit user
-   intent, backups, atomicity, and reversibility; this policy does not create one.
+4. **No silent destructive data move.** A directory-name fallback is not a
+   license to rename, delete, or rewrite user data. A separately released
+   rebrand data-move utility would require explicit user intent, backups,
+   atomicity, and reversibility; this policy does not create one.
 5. **Historical documents are not product surface.** Changelog entries, old plans,
    benchmark outputs, and TraceDecay-era narrative may keep old names when the name
    is part of the historical record.
@@ -42,23 +42,18 @@ history.
 
 ### A1. Existing `.tracedecay/` project data directories
 
-If a project root has `.tracedecay/` and no `.tracedecay/`, TraceDecay must continue
-using `.tracedecay/` as the active data directory **in place**. It must keep reading
-and writing `tracedecay.db`, branch metadata, curation sidecars, diagnostics target
-artifacts, session sidecars, and other data rooted under that directory. It must not
-auto-rename the directory or create a parallel `.tracedecay/` index that makes the
-old index look lost.
-
-If both `.tracedecay/` and `.tracedecay/` exist in the same project, `.tracedecay/`
-is canonical and wins. The legacy directory remains user-owned data and must not be
-deleted unless an explicit destructive command asks for it.
+If a project root has `.tracedecay/`, TraceDecay must continue using it as the
+active data directory **in place**. It must keep reading and writing
+`tracedecay.db`, branch metadata, curation sidecars, diagnostics target
+artifacts, session sidecars, and other data rooted under that directory. It must
+not auto-rename the directory or create a parallel index that makes the existing
+index look lost.
 
 ### A2. Existing `~/.tracedecay/` user data directories
 
-If the user has `~/.tracedecay/` and no `~/.tracedecay/`, TraceDecay must keep using
-`~/.tracedecay/` for user-scoped state such as `global.db` and monitor mmap/lock
-files. New users should default to `~/.tracedecay/`. If both exist,
-`~/.tracedecay/` wins. Provider pricing is not a home-directory cache: reads use
+If the user has `~/.tracedecay/`, TraceDecay must keep using it for user-scoped
+state such as `global.db` and monitor mmap/lock files. New users should default
+to `~/.tracedecay/`. Provider pricing is not a home-directory cache: reads use
 the immutable bundled all-provider table.
 
 ### A3. Legacy project discovery for maintenance commands
@@ -187,9 +182,8 @@ intentional divergence.
 
 ### C2. Legacy disable variable for server opt-out
 
-`DISABLE_TRACEDECAY=true` remains accepted as the legacy spelling for
-`DISABLE_TRACEDECAY=true` and must continue to make `tracedecay serve` exit cleanly
-so hosts do not retry. New docs and examples should use `DISABLE_TRACEDECAY=true`.
+`DISABLE_TRACEDECAY=true` is the exact opt-out spelling that makes
+`tracedecay serve` exit cleanly so hosts do not retry.
 If a warning is emitted, it must not prevent the clean zero-effect exit.
 
 ### C3. Legacy docs-only plugin path claims
@@ -269,15 +263,15 @@ Every audited surface maps to exactly one policy category below.
 
 | Surface | Category | Required behavior |
 |---|---:|---|
-| Project `.tracedecay/` data dir and `tracedecay.db` | A | Use in place when `.tracedecay/` is absent; no auto-migration. |
-| User `~/.tracedecay/` data dir, `global.db`, monitor files | A | Use in place when `~/.tracedecay/` is absent; new users default to `~/.tracedecay/`. |
+| Project `.tracedecay/` data dir and `tracedecay.db` | A | Use in place; no auto-migration. |
+| User `~/.tracedecay/` data dir, `global.db`, monitor files | A | Use in place; new users default to `~/.tracedecay/`. |
 | Project root discovery for `.tracedecay/tracedecay.db` | A | Continue detecting for list/status/wipe-style maintenance. |
 | Branch metadata DB filenames in legacy dirs | A | Keep `tracedecay.db` for legacy active data dirs. |
 | Dashboard curation artifacts under legacy active dir | A | Store under the active data dir, including `.tracedecay/` when that is active. |
 | MCP schema text describing legacy project fallback | B | Keep docs/resources aligned with actual fallback behavior. |
 | Diagnostics target dir under active data dir | A | Use active data dir; legacy projects use `.tracedecay/target`. |
-| Generic `TRACEDECAY_*` / `TRACEDECAY_*` env fallback | C | Accept old as fallback, warn, and let new spelling win. |
-| `DISABLE_TRACEDECAY=true` | C | Accept as clean serve opt-out; prefer `DISABLE_TRACEDECAY=true` in docs. |
+| Generic `TRACEDECAY_*` env prefix | C | `brand_env` reads only `TRACEDECAY_<suffix>`; there is no second-prefix fallback. |
+| `DISABLE_TRACEDECAY=true` | C | Exact-string `true` is the clean serve opt-out. |
 | `TRACEDECAY_GLOBAL_DB` | C | Accept fallback with warning; `TRACEDECAY_GLOBAL_DB` wins. |
 | `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB` | C | Accept fallback with warning; keep test hermeticity for both names. |
 | Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |

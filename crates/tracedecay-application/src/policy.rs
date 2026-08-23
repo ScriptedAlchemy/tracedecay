@@ -22,6 +22,7 @@ use tracedecay_policy::routing::{
     CapabilityRoutingCancellationV1, CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator,
     CapabilityRoutingEvaluatorV1, CapabilityRoutingGrantStateV1, CapabilityRoutingGrantV1,
     CapabilityRoutingRequestV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
+    TruthSourceStateV1::{Fresh, Partial, Stale, Unavailable, Unknown},
 };
 use tracedecay_tool_catalog::{AvailabilityContract, EffectClass, UseCaseId};
 
@@ -76,8 +77,6 @@ impl PolicyEvidenceHorizonV1 {
     /// Conservative routing prerequisite without replacing either recorded
     /// frontier. The full independent states remain on the result.
     pub const fn routing_state(&self) -> TruthSourceStateV1 {
-        use TruthSourceStateV1::{Fresh, Partial, Stale, Unavailable, Unknown};
-
         match (self.local_session.state, self.live_git.state) {
             (Unavailable, _) | (_, Unavailable) => Unavailable,
             (Stale, _) | (_, Stale) => Stale,

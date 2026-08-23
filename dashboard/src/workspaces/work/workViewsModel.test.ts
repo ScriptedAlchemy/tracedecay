@@ -16,7 +16,7 @@ import type { WorkTaskView } from './workProductView.ts';
  * hand.
  *
  * The assertions that matter most are the negative ones. Every projection here
- * is missing at least one channel plan 11c asks it to encode, and the danger is
+ * is missing at least one channel the projections ask it to encode, and the danger is
  * not that a gap renders badly — it is that a gap quietly acquires a value.
  * So each reading is checked to report its absent channels as absent, and the
  * causal readings are checked to keep "both finished, order unread" separate

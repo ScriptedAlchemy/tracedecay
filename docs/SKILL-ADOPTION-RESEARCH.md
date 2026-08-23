@@ -8,12 +8,10 @@ repo sources (`cursor-plugin/`, `codex-plugin/`, `src/hooks/`,
 (`http://127.0.0.1:7341/api/plugins/analytics/*`,
 `~/.tracedecay/projects/proj_<local-id>/hook_analytics.jsonl`).*
 
-> **Status (2026-07-03):** the P1 catalog consolidation recommended in §6 --
-> including the new `using-tracedecay` skill — was implemented by
-> [PR #225](https://github.com/ScriptedAlchemy/tracedecay/pull/225) the day
-> after this snapshot. Skill names, directory counts, and the
-> `memorize-subject` duplication described below refer to the
-> pre-restructure catalog.
+> **Status (2026-07-03):** the catalog consolidation recommended in §6 --
+> including the new `using-tracedecay` skill — landed the day after this
+> snapshot. Skill names, directory counts, and the `memorize-subject`
+> duplication described below refer to the pre-restructure catalog.
 
 ## TL;DR
 

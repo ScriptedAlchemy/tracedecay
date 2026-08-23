@@ -3,7 +3,7 @@ import { render, screen, cleanup } from '@testing-library/react';
 import { StateChip, type DomainStateKind } from './StateChip';
 
 /**
- * Example DOM test (plan 11a R56 / plan 11 R64): every domain state renders a
+ * Every domain state renders a
  * non-color-alone chip — an icon *and* a text label. The `Record` type below is
  * the compile-time exhaustiveness gate: if the taxonomy in StateChip.tsx gains
  * or drops a state, tsc fails here until this table is updated, so the "all

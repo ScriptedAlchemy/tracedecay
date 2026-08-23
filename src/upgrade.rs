@@ -701,7 +701,6 @@ fn update_scoop_metadata(new_version: &str) {
         return;
     }
 
-    // Update the `current` directory junction.
     let current = app_dir.join("current");
     if let Err(err) = std::fs::remove_dir(&current) {
         eprintln!(
@@ -1003,7 +1002,7 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
     let download = preflight_asset_check(&latest, target_is_beta)?;
 
     // Channel switches do not yet run the post-update refresh chain, so the
-    // installed path is unused here (tracked as a follow-up on PR #193).
+    // installed path is unused here.
     let _ = perform_upgrade(&latest, &download, &method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");

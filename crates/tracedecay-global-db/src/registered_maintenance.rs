@@ -100,18 +100,8 @@ impl RegisteredGlobalDb {
     // Root-owned policy, deliberately not driven here: `prune_global_retention`
     // wraps `crate::retention::prune_global_tables` (root `src/retention.rs`,
     // keyed by the root `config::RetentionConfig`) in a write transaction.
-    // Neither the table window policy nor the config type has moved down yet,
-    // and reaching up for them would point this crate back at the composition
+    // Reaching up for those types would point this crate back at the composition
     // root.
-    //
-    // Root wiring: the wrapper is three lines over the public transaction API —
-    //
-    //     let tx = registered.begin_write_transaction().await?;
-    //     let report = retention::prune_global_tables(&tx, config, now).await?;
-    //     tx.commit().await?;
-    //
-    // Restore it here once `retention` + `config::RetentionConfig` land below
-    // the composition root.
 }
 
 /// How one pass disposes of the WAL file, decided purely from the measured

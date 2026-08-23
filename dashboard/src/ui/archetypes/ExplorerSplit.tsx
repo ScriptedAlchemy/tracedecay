@@ -3,8 +3,8 @@ import { ChevronDown } from 'lucide-react';
 import { cn } from '../cn';
 import { WorkspaceHeader } from '../instrument.tsx';
 
-/** Archetype 2 (plan 11a): left filter column, center result list, right
- * inspector. Regions are slots; workspaces own only read-model wiring.
+/** Left filter column, center result list, right inspector. Regions are
+ * slots; workspaces own only read-model wiring.
  *
  * The three columns are divided by hairlines and each carries an engraved
  * legend so the split reads as three instrument bays rather than three
@@ -29,7 +29,6 @@ export function ExplorerSplit({
   filters?: ReactNode;
   list: ReactNode;
   inspector?: ReactNode;
-  /** Full-width workspace controls rendered above the split columns. */
   header?: ReactNode;
   /** Keep filters and inspector reachable by stacking them below `lg`. */
   stackOnNarrow?: boolean;
@@ -45,9 +44,9 @@ export function ExplorerSplit({
   // sync; collapsed by default so narrow viewports keep their vertical budget.
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const mobileFiltersId = useId();
-  // Roving arrows over the result rows (plan 11 keyboard model): rows are
-  // native buttons, so Enter/Space activate for free; arrows, Home, End and
-  // Page keys move focus without forcing a Tab-through of every row.
+  // Roving arrows over the result rows: rows are native buttons, so
+  // Enter/Space activate for free; arrows, Home, End and Page keys move
+  // focus without forcing a Tab-through of every row.
   const onResultsKeyDown = (event: React.KeyboardEvent) => {
     const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp'];
     if (!keys.includes(event.key)) return;
@@ -91,7 +90,6 @@ export function ExplorerSplit({
             // rail's node, so the collapsed copy would make it three.)
             aria-controls={mobileFiltersOpen ? mobileFiltersId : undefined}
             onClick={() => setMobileFiltersOpen((open) => !open)}
-            // The only way to reach filters below `lg`, at 28px tall.
             className="flex min-h-[var(--touch-target-min)] w-full items-center gap-2.5 px-2.5 text-left"
           >
             <span className="td-title">Query</span>
@@ -164,7 +162,7 @@ export function ExplorerSplit({
           className="flex min-h-[var(--pane-min-height)] min-w-0 flex-1 flex-col overflow-hidden"
           onKeyDown={onResultsKeyDown}
         >
-          {/* Named, because Plan 11 licenses internal scrolling for LABELLED
+          {/* Named, because internal scrolling is licensed for LABELLED
             * regions only, and this is the element that actually scrolls — the
             * section around it is `overflow-hidden`, so its own name never
             * reaches the scroll container a reader operates. */}

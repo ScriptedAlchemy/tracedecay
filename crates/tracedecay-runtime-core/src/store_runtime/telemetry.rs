@@ -3,9 +3,6 @@
 //! `ShardRuntime` and the registry own collection. This module only transforms
 //! their already-captured, path-free values; it does not open a store, sample a
 //! metrics backend, retain global state, or derive identity from a locator.
-//!
-//! Dead-code allowance lives on the parent `store_runtime` module until daemon
-//! read surfaces consume the projection.
 
 use std::cmp::Ordering;
 use std::time::Duration;

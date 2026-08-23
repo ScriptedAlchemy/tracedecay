@@ -102,9 +102,6 @@ fn test_fixture_typescript() {
             .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "createUser")
     );
 
-    // Namespace (Auth module — may or may not be detected depending on TS grammar version)
-    // assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Namespace && n.name == "Auth"));
-
     // Call sites
     assert!(
         !result.unresolved_refs.is_empty(),

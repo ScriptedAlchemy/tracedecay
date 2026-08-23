@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::{RequestContext, WorkflowRunStoragePort};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
+use tracedecay_runtime_core::workflow_topology::WorkflowTopologyError;
 
 use crate::daemon_contract::DaemonInvocationProblem;
 
@@ -385,10 +386,7 @@ fn workflow_placement_problem(
     }
 }
 
-fn workflow_topology_problem(
-    error: tracedecay_runtime_core::workflow_topology::WorkflowTopologyError,
-) -> DaemonInvocationProblem {
-    use tracedecay_runtime_core::workflow_topology::WorkflowTopologyError;
+fn workflow_topology_problem(error: WorkflowTopologyError) -> DaemonInvocationProblem {
     match error {
         WorkflowTopologyError::Contract(_) => DaemonInvocationProblem::InvalidRequest,
         WorkflowTopologyError::GenerationMismatch | WorkflowTopologyError::Corrupt(_) => {

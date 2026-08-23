@@ -1215,7 +1215,7 @@ fn registration_seeds_a_candidate_disposition_that_activation_advances() {
     assert_eq!(disposition.state, WorkflowDefinitionLifecycleState::Active);
     assert_eq!(disposition.revision, 3);
 
-    // Plan 32 keeps `candidate -> validated -> active`, so the intermediate
+    // The lifecycle is `candidate -> validated -> active`, so the intermediate
     // state is an immutable history entry of its own.
     let history = WorkflowDefinitionAuthorityPort::transition_history(
         &authority,

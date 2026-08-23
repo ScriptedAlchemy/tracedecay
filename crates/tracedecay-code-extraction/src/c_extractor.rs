@@ -246,7 +246,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -256,7 +255,6 @@ impl CExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -370,7 +368,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -431,7 +428,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -520,7 +516,6 @@ impl CExtractor {
         let text = state.node_text(typedef_node);
         let docstring = Self::extract_docstring(state, typedef_node);
 
-        // Create Typedef node
         let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
         let typedef_id = generate_node_id(
             &state.file_path,
@@ -564,7 +559,6 @@ impl CExtractor {
             });
         }
 
-        // Also create a Struct node if it has a body
         if find_direct_child_by_kind(struct_spec, "field_declaration_list").is_some() {
             let struct_name = find_direct_child_by_kind(struct_spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
@@ -589,7 +583,6 @@ impl CExtractor {
         let text = state.node_text(typedef_node);
         let docstring = Self::extract_docstring(state, typedef_node);
 
-        // Create Typedef node
         let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
         let typedef_id = generate_node_id(
             &state.file_path,
@@ -633,7 +626,6 @@ impl CExtractor {
             });
         }
 
-        // Also create a Union node if it has a body
         if find_direct_child_by_kind(union_spec, "field_declaration_list").is_some() {
             let union_name = find_direct_child_by_kind(union_spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
@@ -658,7 +650,6 @@ impl CExtractor {
         let text = state.node_text(typedef_node);
         let docstring = Self::extract_docstring(state, typedef_node);
 
-        // Create Typedef node
         let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
         let typedef_id = generate_node_id(
             &state.file_path,
@@ -702,7 +693,6 @@ impl CExtractor {
             });
         }
 
-        // Also create an Enum node if it has a body
         if find_direct_child_by_kind(enum_spec, "enumerator_list").is_some() {
             let enum_name = find_direct_child_by_kind(enum_spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
@@ -960,7 +950,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -970,7 +959,6 @@ impl CExtractor {
             });
         }
 
-        // Extract fields.
         state.node_stack.push((name.to_string(), id.clone()));
         Self::extract_struct_fields(state, spec_node);
         state.node_stack.pop();
@@ -1019,7 +1007,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1029,7 +1016,6 @@ impl CExtractor {
             });
         }
 
-        // Extract fields (same as struct).
         state.node_stack.push((name.to_string(), id.clone()));
         Self::extract_struct_fields(state, spec_node);
         state.node_stack.pop();
@@ -1078,7 +1064,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1088,7 +1073,6 @@ impl CExtractor {
             });
         }
 
-        // Extract enum variants.
         state.node_stack.push((name.to_string(), id.clone()));
         Self::extract_enum_variants(state, spec_node);
         state.node_stack.pop();
@@ -1143,7 +1127,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1204,7 +1187,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1279,7 +1261,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the struct/union).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1348,7 +1329,6 @@ impl CExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),

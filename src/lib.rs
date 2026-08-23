@@ -16,8 +16,7 @@
 #![allow(clippy::wildcard_imports)]
 // Pedantic style lints allowed crate-wide (consistent with the allows above):
 // these are non-correctness stylistic findings whose "fixes" are signature or
-// control-flow churn that would ripple across callers on this in-flight
-// redesign branch. Kept as allows rather than risking a co-editor's work.
+// control-flow churn that would ripple across callers.
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::trivially_copy_pass_by_ref)]
 #![allow(clippy::unused_self)]

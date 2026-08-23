@@ -6,9 +6,9 @@
 
 pub(crate) mod hook_events;
 pub(crate) mod project_route;
-/// MCP server implementation.
 pub mod response_handles;
 pub(crate) mod scope;
+/// MCP server implementation.
 pub mod server;
 mod tool_analytics;
 pub(crate) mod tool_call_deadline;

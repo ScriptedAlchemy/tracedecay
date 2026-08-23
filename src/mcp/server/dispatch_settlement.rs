@@ -565,7 +565,7 @@ async fn receive_canonical_result<T>(
 
 /// The one terminal an admitted-but-unsettled dispatch is allowed to report.
 ///
-/// Plan 21: after admission the daemon's operation/effect receipt is
+/// After admission the daemon's operation/effect receipt is
 /// authoritative, and if an effect may have crossed its commit point then
 /// cancellation or a client timeout cannot replace effect-unknown state. The
 /// worker settlement is what decides which of those two worlds the caller is

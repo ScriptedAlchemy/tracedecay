@@ -2,13 +2,10 @@
 //! database-enforced exclusivity of a managed target root, authority
 //! isolation, and restart durability over the registered exact-SQL channel.
 //!
-//! The exclusivity assertion below is the point of this suite. Plan 32
-//! (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,
-//! "Placement, topology, and safe Git effects") calls linked and isolated
-//! placements "canonical, exclusive, fenced"; the application service produces
-//! the typed refusal, but only the partial unique index makes the rule survive
-//! a crash between the service's read and its write, so the rule is tested
-//! where it is enforced.
+//! Linked and isolated placements are exclusive and fenced. The application
+//! service produces the typed refusal, but only the partial unique index makes
+//! the rule survive a crash between the service's read and its write, so the
+//! rule is tested where it is enforced.
 
 mod common;
 mod work_registered_store;

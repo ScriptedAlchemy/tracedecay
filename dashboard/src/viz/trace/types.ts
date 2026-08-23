@@ -1,7 +1,6 @@
 /**
  * Vocabulary for the TRACE surface — the drill-in that floods a selected
- * symbol's call topography (plan 11b, "Topography round one — coordinator
- * verdict").
+ * symbol's call topography.
  *
  * Three modules share these types and nothing else: `model.ts` turns the
  * neighbors wire payload into a `TraceModel` (measurement → layout), `sim.ts`
@@ -87,7 +86,7 @@ export interface TraceChannel {
  * Only emitted when the payload actually carried `contains` edges whose
  * container encloses at least two drawn members; otherwise the surface omits
  * membranes entirely and says so, rather than inventing an enclosure from
- * shared file paths (plan 11b wire-honesty rule).
+ * shared file paths (wire-honesty: do not invent an enclosure).
  */
 export interface TraceMembrane {
   readonly id: string;

@@ -1,6 +1,6 @@
 /**
- * Code-driven story registry: every route surface the shell renders (plan 11a
- * R56-R59). The visual-audit harness (`stories/audit.ts`) walks this list to
+ * Code-driven story registry: every route surface the shell renders.
+ * The visual-audit harness (`stories/audit.ts`) walks this list to
  * screenshot each surface across themes and widths, and the axe pass reports
  * per-surface accessibility violations against the same set.
  *

@@ -8,7 +8,7 @@ import {
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from './cn';
 
-/** Row list virtualization (plan 11 R62). Below the threshold the list renders
+/** Row list virtualization. Below the threshold the list renders
  * plainly — byte-identical DOM to a bare `.map()` so the common case keeps the
  * archetype's exact scroll/selection idiom. Above it, rows are windowed with
  * @tanstack/react-virtual so the mounted count stays bounded (a 36px row over

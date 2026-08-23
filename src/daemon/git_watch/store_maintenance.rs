@@ -170,11 +170,11 @@ pub(super) async fn run_semantic_vector_generation_retention(
             Ok(runtime_configuration)
                 if semantic_retrieval_profiles_disabled(&runtime_configuration.config.semantic) =>
             {
-                // Plan 20 default off: no committed active or rollback
-                // retrieval profile, so no census will ever complete. Pin the
-                // typed unseated read for the code-generation pass and
-                // succeed quietly instead of resetting to Unknown and
-                // re-logging a degraded retry loop every tick.
+                // Default off: no committed active or rollback retrieval
+                // profile, so no census will ever complete. Pin the typed
+                // unseated read for the code-generation pass and succeed
+                // quietly instead of resetting to Unknown and re-logging a
+                // degraded retry loop every tick.
                 observations.record_semantic_vector_retention_unseated(root);
                 true
             }
@@ -260,11 +260,10 @@ pub(super) async fn run_semantic_vector_generation_retention(
     }
 }
 
-/// Plan 20 default-off: semantic retrieval is genuinely disabled only when
-/// the durable configuration commits neither an active nor a rollback
-/// retrieval profile. A committed profile with an unseated activation
-/// coordinator is a transient (or genuinely degraded) state that must stay
-/// retryable, not a quiet pin.
+/// Semantic retrieval is genuinely disabled only when the durable
+/// configuration commits neither an active nor a rollback retrieval profile.
+/// A committed profile with an unseated activation coordinator is a transient
+/// (or genuinely degraded) state that must stay retryable, not a quiet pin.
 fn semantic_retrieval_profiles_disabled(semantic: &crate::config::SemanticConfig) -> bool {
     semantic.active_profile.is_none() && semantic.rollback_profile.is_none()
 }
@@ -1788,7 +1787,7 @@ impl RetainedCompactionStore<'_> {
 
 /// Samples the store's free-page ratio and, when the owner-configured threshold
 /// is met, schedules a bounded incremental vacuum in the deferred background
-/// lane (Plan 38 §6). The placement is structurally forbidden from competing
+/// lane. The placement is structurally forbidden from competing
 /// with foreground writes; the page cap keeps the reclaim off the hot path.
 async fn run_compaction(
     store: RetainedCompactionStore<'_>,

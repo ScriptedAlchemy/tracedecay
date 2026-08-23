@@ -29,7 +29,7 @@ if ! grep -q '"current_acceptance": null' "$index_path"; then
   exit 1
 fi
 
-scratch_root="$repo_root/target/pr6-observation-source"
+scratch_root="$repo_root/target/claude-observation-source"
 mkdir -p "$scratch_root"
 build_root=$(mktemp -d "$scratch_root/archive.XXXXXXXX")
 capture=$(mktemp)

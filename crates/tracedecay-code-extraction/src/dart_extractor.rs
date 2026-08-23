@@ -383,7 +383,6 @@ impl DartExtractor {
             .unwrap_or(sig_node);
         let docstring = Self::extract_docstring(state, doc_anchor);
 
-        // Build signature text from the function_signature node.
         let sig_text = state.node_text(sig_node);
         let signature = Some(sig_text.trim().to_string());
 
@@ -444,12 +443,10 @@ impl DartExtractor {
             });
         }
 
-        // Extract call sites from the body.
         if let Some(body_node) = body {
             Self::extract_call_sites(state, body_node, &id);
         }
 
-        // Extract annotation usages from preceding siblings of the signature.
         Self::extract_annotations_from_modifiers(state, sig_node, &id);
     }
 
@@ -516,7 +513,6 @@ impl DartExtractor {
             });
         }
 
-        // Extract superclass extends reference.
         if let Some(superclass) = node.child_by_field_name("superclass")
             && let Some(type_id) = find_direct_child_by_kind(superclass, "type_identifier")
         {
@@ -531,10 +527,8 @@ impl DartExtractor {
             });
         }
 
-        // Extract annotation usages (e.g. @JsonSerializable).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit class body.
         if let Some(body) = node.child_by_field_name("body") {
             state.node_stack.push((name, id.clone()));
             state.class_depth += 1;
@@ -598,10 +592,8 @@ impl DartExtractor {
             });
         }
 
-        // Extract annotation usages.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit mixin body (it uses class_body).
         if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             state.node_stack.push((name, id.clone()));
             state.class_depth += 1;
@@ -665,7 +657,6 @@ impl DartExtractor {
             });
         }
 
-        // Visit extension body.
         if let Some(body) = node.child_by_field_name("body") {
             state.node_stack.push((name, id.clone()));
             state.class_depth += 1;
@@ -730,10 +721,8 @@ impl DartExtractor {
             });
         }
 
-        // Extract annotation usages.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Extract enum constants and members from enum_body.
         if let Some(body) = node.child_by_field_name("body") {
             state.node_stack.push((name, id.clone()));
             state.class_depth += 1;
@@ -1542,7 +1531,6 @@ impl DartExtractor {
                 | "assert_statement"
                 | "assert_builtin"
                 | "assertion" => {
-                    // Recurse into these container nodes.
                     Self::extract_call_sites(state, child, fn_node_id);
                 }
                 // tree-sitter-dart 0.2 wraps every function call in a
@@ -1561,7 +1549,6 @@ impl DartExtractor {
                             file_path: state.file_path.clone(),
                         });
                     }
-                    // Recurse into arguments to catch nested calls.
                     Self::extract_call_sites(state, child, fn_node_id);
                 }
                 // An identifier node: check if followed by selector with arguments.
@@ -1603,17 +1590,14 @@ impl DartExtractor {
                             });
                         }
                     }
-                    // Also recurse into selectors for nested calls in arguments.
                     Self::extract_call_sites(state, child, fn_node_id);
                 }
                 "argument_part" => {
-                    // Recurse into argument_part for nested calls.
                     Self::extract_call_sites(state, child, fn_node_id);
                 }
                 // Skip nested function expressions to avoid polluting call sites.
                 "function_expression" | "lambda_expression" => {}
                 _ => {
-                    // Recurse into other nodes.
                     Self::extract_call_sites(state, child, fn_node_id);
                 }
             }
@@ -1804,7 +1788,6 @@ impl DartExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Annotates unresolved ref.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id.clone(),
             reference_name: annot_name,
@@ -1814,7 +1797,6 @@ impl DartExtractor {
             file_path: state.file_path.clone(),
         });
 
-        // Direct Annotates edge from the annotation to the target.
         state.edges.push(Edge {
             source: id,
             target: target_id.to_string(),

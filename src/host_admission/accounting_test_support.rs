@@ -149,7 +149,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Reads the registered project's immutable provider-usage observations —
     /// the canonical accounting authority that replaced per-message usage
-    /// metadata (Plan 26: usage is an observation family, not a turn ledger).
+    /// metadata (usage is an observation family, not a turn ledger).
     #[doc(hidden)]
     pub async fn project_provider_usage_for_test(
         &self,

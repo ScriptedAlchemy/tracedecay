@@ -773,7 +773,6 @@ async fn test_changelog_with_real_git() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
-    // Initialize git repo and make a first commit
     git_run(project, &["init"]);
     git_run(project, &["config", "user.email", "test@test.com"]);
     git_run(project, &["config", "user.name", "Test"]);
@@ -782,7 +781,6 @@ async fn test_changelog_with_real_git() {
     git_run(project, &["add", "."]);
     git_run(project, &["commit", "-m", "initial"]);
 
-    // Make a second commit with changes
     fs::write(
         project.join("src/lib.rs"),
         "pub fn original() {}\npub fn added() {}\n",
@@ -804,7 +802,6 @@ async fn test_changelog_with_real_git() {
     .unwrap();
 
     let text = extract_text(&result.value);
-    // Should not report "git diff failed" since it's a real git repo
     assert!(
         !text.contains("git diff failed"),
         "changelog in git repo should not fail, got: {}",
@@ -824,7 +821,6 @@ async fn test_changelog_with_real_git() {
 #[tokio::test]
 async fn test_dead_code_custom_kinds() {
     let (cg, _dir) = setup_project().await;
-    // Ask only for struct dead code
     let result = handle_tool_call(
         &cg,
         "tracedecay_dead_code",
@@ -839,7 +835,6 @@ async fn test_dead_code_custom_kinds() {
         text.contains("dead_code_count"),
         "should have dead_code_count key"
     );
-    // Parse and verify any returned items are structs
     let parsed: Value = serde_json::from_str(text).unwrap_or(json!({}));
     if let Some(items) = parsed["dead_code"].as_array() {
         for item in items {

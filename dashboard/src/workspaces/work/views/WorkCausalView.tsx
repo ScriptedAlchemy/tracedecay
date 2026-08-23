@@ -21,8 +21,8 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * the loud reading is an edge whose dependent carries terminal evidence while
  * the dependency it names carries none. That dependency did not gate the work,
  * or it is not the dependency the plan says it is; either way the coupling
- * that actually held is not written down. Plan 11c calls that hidden coupling
- * in the plan itself, and it is the reading this projection exists to surface.
+ * that actually held is not written down. That hidden coupling in the plan
+ * itself is the reading this projection exists to surface.
  *
  * Half the field is missing. Observed execution order needs attempt
  * timestamps, and the field's other half — an edge that executed but was never

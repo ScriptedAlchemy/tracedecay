@@ -236,7 +236,6 @@ impl JavaExtractor {
                 // handled in the declaration visitors directly.
             }
             _ => {
-                // Recurse into children for any unhandled node types.
                 Self::visit_children(state, node);
             }
         }
@@ -288,7 +287,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the file).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -348,7 +346,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -358,7 +355,6 @@ impl JavaExtractor {
             });
         }
 
-        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: path,
@@ -417,7 +413,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -427,14 +422,11 @@ impl JavaExtractor {
             });
         }
 
-        // Extract extends/implements.
         Self::extract_superclass(state, node, &id);
         Self::extract_super_interfaces(state, node, &id);
 
-        // Extract generic type parameters.
         Self::extract_type_parameters(state, node, &id);
 
-        // Visit class body.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -484,7 +476,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -494,10 +485,9 @@ impl JavaExtractor {
             });
         }
 
-        // Extract type parameters.
         Self::extract_type_parameters(state, node, &id);
 
-        // Visit interface body. Methods inside an interface with no block are AbstractMethod.
+        // Methods inside an interface with no block are AbstractMethod.
         let prev_inside_interface = state.inside_interface;
         state.inside_interface = true;
         state.node_stack.push((name, id));
@@ -550,7 +540,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -560,7 +549,6 @@ impl JavaExtractor {
             });
         }
 
-        // Extract enum constants from the enum_body.
         state.node_stack.push((name, id));
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_enum_constants(state, body);
@@ -621,7 +609,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -672,7 +659,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -740,7 +726,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -750,13 +735,10 @@ impl JavaExtractor {
             });
         }
 
-        // Extract annotations on this method from its modifiers.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Extract type references from parameter and return type.
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the method body.
         if has_body {
             Self::extract_call_sites(state, node, &id);
         }
@@ -803,7 +785,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -813,10 +794,8 @@ impl JavaExtractor {
             });
         }
 
-        // Extract type references from parameter types.
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the constructor body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -879,7 +858,6 @@ impl JavaExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -933,7 +911,6 @@ impl JavaExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1050,7 +1027,6 @@ impl JavaExtractor {
     /// Clean a Javadoc comment block, stripping the /** and */ markers and leading * on each line.
     fn clean_javadoc(comment: &str) -> String {
         let trimmed = comment.trim();
-        // Strip /** prefix and */ suffix.
         let inner = if trimmed.starts_with("/**") && trimmed.ends_with("*/") {
             if trimmed.len() >= 5 {
                 &trimmed[3..trimmed.len() - 2]
@@ -1156,7 +1132,6 @@ impl JavaExtractor {
                         file_path: state.file_path.clone(),
                     });
                 } else if child.kind() == "type_list" {
-                    // Recurse into nested type_list.
                     Self::extract_type_list_as_implements(state, child, class_id);
                 }
                 if !cursor.goto_next_sibling() {
@@ -1235,7 +1210,6 @@ impl JavaExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     state.edges.push(Edge {
                         source: parent_id.to_string(),
                         target: id,
@@ -1384,7 +1358,6 @@ impl JavaExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                         });
-                        // Recurse for nested calls inside arguments, etc.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "object_creation_expression" => {
@@ -1397,7 +1370,6 @@ impl JavaExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                         });
-                        // Recurse for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested method/constructor declarations.

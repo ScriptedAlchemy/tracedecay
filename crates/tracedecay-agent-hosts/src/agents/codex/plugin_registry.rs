@@ -2,7 +2,7 @@
 //!
 //! # What shipped, and what this module adopts
 //!
-//! Plan 27's 2026-08-08 Codex verdict treated plugin activation as
+//! Codex previously treated plugin activation as
 //! interactive-only (reason code `(a)`): `/plugin marketplace add` and
 //! `/plugin install` ran inside a session, so TraceDecay staged the source
 //! and stopped. Codex CLI 0.147.0 now publishes a non-interactive counterpart:

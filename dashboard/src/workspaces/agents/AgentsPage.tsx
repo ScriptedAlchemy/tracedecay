@@ -361,10 +361,9 @@ export function AgentsPage() {
                 </ReadSection>
               </OverviewCard>
 
-              {/* Plan 11's three remaining Agents measures. Handoffs and
-                * attempt failures come off the work-product graph read;
-                * tool activity comes off the diagnostics fold this page
-                * already pays for. */}
+              {/* Handoffs and attempt failures come off the work-product
+                * graph read; tool activity comes off the diagnostics fold
+                * this page already pays for. */}
               <OverviewCard title="Handoff tokens">
                 <AgentHandoffTokens reading={tokenReading} />
               </OverviewCard>

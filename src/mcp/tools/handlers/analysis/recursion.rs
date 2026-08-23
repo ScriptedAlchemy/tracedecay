@@ -57,7 +57,6 @@ pub(crate) async fn handle_recursion(
     cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     cycles.truncate(limit);
 
-    // Resolve node details for each cycle
     let mut cycle_items: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     for cycle in &cycles {

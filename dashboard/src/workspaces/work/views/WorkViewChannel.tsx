@@ -4,7 +4,7 @@ import { cn } from '../../../ui/cn.ts';
 import type { WorkChannel } from '../workChannel.ts';
 
 /**
- * The shared vocabulary of the four plan 11c Work projections.
+ * The shared vocabulary of the four Work projections.
  *
  * Three marks, repeated in every view, so the projections read as one
  * instrument seen from four positions rather than as four pages:
@@ -13,8 +13,8 @@ import type { WorkChannel } from '../workChannel.ts';
  *   ViewCaption     the population, window and cap a projection ran under
  *   EmptyReading    a projection whose input was genuinely empty
  *
- * `ChannelAbsence` is the one that matters. 11c requires absence to be drawn,
- * and every one of these views is missing at least one channel until the
+ * `ChannelAbsence` is the one that matters. Absence must be drawn, and every
+ * one of these views is missing at least one channel until the
  * product-graph read is mounted. Drawing that gap in the projection's own body
  * — rather than in a footnote — is what keeps a hollow weave from reading as a
  * weave of nothing.
@@ -80,8 +80,8 @@ export function ChannelLedger({
 /**
  * What a projection is drawn over, printed on the projection.
  *
- * The Agents-page lesson in 11c: a view that does not state its population and
- * window cannot be told apart from a complete one. `population` is the
+ * A view that does not state its population and window cannot be told
+ * apart from a complete one. `population` is the
  * projection's own sentence — "18 of 312 tasks, capped at 100" — and the
  * daemon's coverage reading is its only source.
  */

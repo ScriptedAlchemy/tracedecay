@@ -245,7 +245,6 @@ impl RExtractor {
             });
         }
 
-        // Collect call sites from the function body.
         if let Some(body) = rhs.child_by_field_name("body") {
             Self::extract_calls(state, body, &id);
         }

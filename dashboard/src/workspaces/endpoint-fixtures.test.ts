@@ -494,7 +494,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
 
     // The weave has to compose the fixture into something with structure in
     // it, or the audit shot is a picture of nothing. These bounds encode the
-    // distribution the real store has (plan 11a finding 4), not just its size.
+    // distribution the real store has, not just its size.
     const weave = composeWeave(sessions);
     expect(weave.hosts).toHaveLength(3);
     expect(weave.threads.length).toBe(sessions.length);

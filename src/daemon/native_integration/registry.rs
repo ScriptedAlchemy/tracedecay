@@ -1,12 +1,12 @@
 //! One retained native-integration transaction authority per daemon-owned
 //! project store.
 //!
-//! The registry composes the four coordinator inputs the Plan 36 deferral
-//! named — the durable store actor, the exact-pair topology resolver, the
-//! native Gix mechanics, and the pinned-policy authorization — completes
-//! durable startup recovery, and only then exposes the owner to invocation
-//! routing. A project without a mounted owner keeps answering the typed
-//! unavailable result; nothing here guesses or falls back to local mutation.
+//! The registry composes the four coordinator inputs — the durable store
+//! actor, the exact-pair topology resolver, the native Gix mechanics, and the
+//! pinned-policy authorization — completes durable startup recovery, and only
+//! then exposes the owner to invocation routing. A project without a mounted
+//! owner keeps answering the typed unavailable result; nothing here guesses
+//! or falls back to local mutation.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

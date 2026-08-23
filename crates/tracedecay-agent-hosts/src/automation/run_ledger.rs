@@ -1919,7 +1919,7 @@ mod tests {
         // A blank line between two committed rows must not be fatal:
         // consecutive newlines (e.g. from an operator edit or a legacy
         // writer) are benign and the pre-rewrite parser explicitly skipped
-        // them. Regression coverage for the scan_jsonl_row fix (Finding 1).
+        // them. Regression coverage for the scan_jsonl_row fix.
         let row1 = ledger_line("run-blank-between-a", 100);
         let row2 = ledger_line("run-blank-between-b", 200);
         let temp = tempfile::TempDir::new().unwrap();
@@ -1948,7 +1948,7 @@ mod tests {
     fn trailing_blank_line_is_skipped_across_tail_page_append_and_summary() {
         // A ledger ending in a trailing blank line ("{row}\n\n") must not
         // permanently break every scan. Regression coverage for the
-        // scan_jsonl_row fix (Finding 1).
+        // scan_jsonl_row fix.
         let row = ledger_line("run-blank-trailing-a", 100);
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(RUN_LEDGER_FILENAME);
@@ -1976,7 +1976,7 @@ mod tests {
     fn whitespace_only_line_is_skipped_by_the_reverse_page_scan() {
         // A pure "\n\n" blank line is absorbed by ReverseJsonlScanner's
         // newline trimming and never reaches scan_jsonl_row, so the two
-        // blank-line tests above exercise the Finding-1 fix only through
+        // blank-line tests above exercise the scan_jsonl_row skip only through
         // ForwardJsonlScanner (append + summary). A whitespace-only line
         // with non-newline bytes ("   \n") DOES reach scan_jsonl_row from
         // the reverse scanner; it must be skipped as benign, not counted
