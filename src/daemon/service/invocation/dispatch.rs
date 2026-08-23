@@ -155,8 +155,16 @@ impl DaemonInvocationService {
         let operation = request.operation();
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
-        // so dispatch sees one consistent view of the project.
-        let canonical_root = project_root.and_then(|root| root.canonicalize().ok());
+        // so dispatch sees one consistent view of the project. A pre-admitted
+        // lease already stored the canonicalize result; reuse it.
+        let canonical_root = match (project_root, project_admission) {
+            (Some(project_root), Some(project_admission)) => project_admission
+                .admitted_canonical_root()
+                .map(ToOwned::to_owned)
+                .or_else(|| project_root.canonicalize().ok()),
+            (Some(project_root), None) => project_root.canonicalize().ok(),
+            (None, _) => None,
+        };
         let runtimes = match (project_root, project_admission) {
             (Some(project_root), Some(project_admission)) => {
                 self.project_runtimes.request_runtimes_with_admission(

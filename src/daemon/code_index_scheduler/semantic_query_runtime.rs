@@ -15,6 +15,7 @@ use tracedecay_domain::{
 };
 
 use super::CodeIndexSchedulerRegistryV1;
+use super::registry::unique_mounted_for_scope;
 use super::query_runtime::{
     ExecutedQuerySearchV1, QuerySearchExecutionErrorV1, QuerySearchExecutionRequestV1,
 };
@@ -328,27 +329,17 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &ResolvedScope,
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
         let mounted = self.mounted.try_lock().ok()?;
-        let mut matched = None;
-        for (project_root, worktree) in mounted.iter() {
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                continue;
-            }
-            let activation =
-                tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(
-                    project_root,
-                );
-            let _activation = activation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
-            if scope_digest != &scope.scope_digest || matched.is_some() {
-                return None;
-            }
-            matched = Some(Arc::clone(authority));
+        let (project_root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+        let activation =
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
+        if scope_digest != &scope.scope_digest {
+            return None;
         }
-        matched
+        Some(Arc::clone(authority))
     }
 
     /// Run canonical query first, then attempt semantic influence against the

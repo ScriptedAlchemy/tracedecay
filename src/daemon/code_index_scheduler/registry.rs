@@ -398,6 +398,87 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) task: tokio::task::JoinHandle<()>,
 }
 
+/// Unique mounted worktree for one admitted repo+worktree scope.
+///
+/// Real mounts key the registry from the same canonical root that derives the
+/// worktree ID, so identity is unique. Missing and ambiguous matches stay
+/// distinct so generation reads can fail closed on a collision instead of
+/// collapsing it into a silent miss.
+pub(super) enum UniqueMountedWorktree<'a> {
+    None,
+    Ambiguous,
+    One {
+        root: &'a PathBuf,
+        worktree: &'a MountedCodeIndexWorktreeV1,
+    },
+}
+
+impl<'a> UniqueMountedWorktree<'a> {
+    pub(super) fn unique(self) -> Option<(&'a PathBuf, &'a MountedCodeIndexWorktreeV1)> {
+        match self {
+            Self::One { root, worktree } => Some((root, worktree)),
+            Self::None | Self::Ambiguous => None,
+        }
+    }
+}
+
+pub(super) fn unique_mounted_for_scope<'a>(
+    mounted: &'a BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>,
+    scope: &tracedecay_application::ResolvedScope,
+) -> UniqueMountedWorktree<'a> {
+    let mut matched = None;
+    for (root, worktree) in mounted {
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            continue;
+        }
+        if matched.is_some() {
+            return UniqueMountedWorktree::Ambiguous;
+        }
+        matched = Some((root, worktree));
+    }
+    match matched {
+        Some((root, worktree)) => UniqueMountedWorktree::One { root, worktree },
+        None => UniqueMountedWorktree::None,
+    }
+}
+
+fn dashboard_freshness_identity(
+    latest: Option<&LatestCompleteCodeIndexV1>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+) {
+    latest.map_or((None, None, None, None, None, None, None), |latest| {
+        let generation = &latest.generation;
+        let snapshot = generation.snapshot();
+        (
+            Some(snapshot.repository.as_str().to_owned()),
+            snapshot
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.as_str().to_owned()),
+            snapshot
+                .reference
+                .as_ref()
+                .map(|reference| reference.as_str().to_owned()),
+            snapshot
+                .source_revision
+                .as_ref()
+                .map(|revision| revision.as_str().to_owned()),
+            Some(generation.manifest().generation_id.as_str().to_owned()),
+            Some(snapshot.content_identity.as_str().to_owned()),
+            Some(generation.manifest().seal.sealed_at.0),
+        )
+    })
+}
+
 pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
@@ -1239,16 +1320,9 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<PendingWakeV1>> {
         let mounted = self.mounted.lock().await;
-        {
-            let mut matched = mounted.values().filter(|worktree| {
-                worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-            });
-            let pending_wake = matched
-                .next()
-                .map(|worktree| Arc::clone(&worktree.pending_wake))?;
-            matched.next().is_none().then_some(pending_wake)
-        }
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .map(|(_, worktree)| Arc::clone(&worktree.pending_wake))
     }
 
     #[cfg(test)]
@@ -2684,22 +2758,9 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<super::observability::CodeIndexObservabilityV1> {
         let mounted = self.mounted.try_lock().ok()?;
-        let mut matched = None;
-        for worktree in mounted.values() {
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                continue;
-            }
-            let Some(observability) = worktree.index_observability.get() else {
-                continue;
-            };
-            if matched.is_some() {
-                return None;
-            }
-            matched = Some(observability.clone());
-        }
-        matched
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .and_then(|(_, worktree)| worktree.index_observability.get().cloned())
     }
 
     /// Install the core and optional semantic query routes as one committed
@@ -2933,29 +2994,18 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<Arc<tracedecay_query::retrieval::QueryAuthorityV1>> {
         self.activate_for_scope(scope);
         let mounted = self.mounted.try_lock().ok()?;
-        let mut matched = None;
-        for worktree in mounted.values() {
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                continue;
-            }
-            let Some((_scope_digest, authority)) = &worktree.query_authority else {
-                // Defensive only: real mounts key the registry and derive the
-                // worktree ID from the same canonical root, so this identity
-                // cannot have an authority-bearing sibling.
-                continue;
-            };
-            if matched.is_some() {
-                return None;
-            }
-            // Same worktree isolation as `latest_matches_scope_identity`: a
-            // mid-session ref switch keeps the mounted ranking authority until
-            // the route remounts. Exact digest is a remount key, not a reason
-            // to deny search after HEAD moved.
-            matched = Some(Arc::clone(authority));
-        }
-        matched
+        // Same worktree isolation as `latest_matches_scope_identity`: a
+        // mid-session ref switch keeps the mounted ranking authority until
+        // the route remounts. Exact digest is a remount key, not a reason
+        // to deny search after HEAD moved.
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .and_then(|(_, worktree)| {
+                worktree
+                    .query_authority
+                    .as_ref()
+                    .map(|(_scope_digest, authority)| Arc::clone(authority))
+            })
     }
 
     #[cfg(test)]
@@ -2972,14 +3022,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<(bool, bool, Option<ConfigurationRevisionId>)> {
         let mounted = self.mounted.lock().await;
-        let mut matches = mounted.values().filter(|worktree| {
-            worktree.repository_id == scope.repository_id
-                && worktree.worktree_id == scope.worktree_id
-        });
-        let worktree = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
+        let (_, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
         Some((
             worktree
                 .query_authority
@@ -3281,31 +3324,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         generation_id,
                         content_identity,
                         sealed,
-                    ) = latest.as_ref().map_or(
-                        (None, None, None, None, None, None, None),
-                        |latest| {
-                            let generation = &latest.generation;
-                            let snapshot = generation.snapshot();
-                            (
-                                Some(snapshot.repository.as_str().to_owned()),
-                                snapshot
-                                    .worktree
-                                    .as_ref()
-                                    .map(|worktree| worktree.as_str().to_owned()),
-                                snapshot
-                                    .reference
-                                    .as_ref()
-                                    .map(|reference| reference.as_str().to_owned()),
-                                snapshot
-                                    .source_revision
-                                    .as_ref()
-                                    .map(|revision| revision.as_str().to_owned()),
-                                Some(generation.manifest().generation_id.as_str().to_owned()),
-                                Some(snapshot.content_identity.as_str().to_owned()),
-                                Some(generation.manifest().seal.sealed_at.0),
-                            )
-                        },
-                    );
+                    ) = dashboard_freshness_identity(latest.as_ref());
                     return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         repository_id,
@@ -3344,30 +3363,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 generation_id,
                 content_identity,
                 sealed,
-            ) = latest
-                .as_ref()
-                .map_or((None, None, None, None, None, None, None), |latest| {
-                    let generation = &latest.generation;
-                    let snapshot = generation.snapshot();
-                    (
-                        Some(snapshot.repository.as_str().to_owned()),
-                        snapshot
-                            .worktree
-                            .as_ref()
-                            .map(|worktree| worktree.as_str().to_owned()),
-                        snapshot
-                            .reference
-                            .as_ref()
-                            .map(|reference| reference.as_str().to_owned()),
-                        snapshot
-                            .source_revision
-                            .as_ref()
-                            .map(|revision| revision.as_str().to_owned()),
-                        Some(generation.manifest().generation_id.as_str().to_owned()),
-                        Some(snapshot.content_identity.as_str().to_owned()),
-                        Some(generation.manifest().seal.sealed_at.0),
-                    )
-                });
+            ) = dashboard_freshness_identity(latest.as_ref());
             let staleness_state = if refreshing {
                 if latest.is_some() {
                     "refreshing"
@@ -3598,18 +3594,10 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
             let mounted = self.mounted.lock().await;
-            let mut matched = None;
-            for (root, worktree) in mounted.iter() {
-                if worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-                {
-                    if matched.is_some() {
-                        return None;
-                    }
-                    matched = Some(root.clone());
-                }
-            }
-            matched?
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
         };
         let latest = self.latest_complete_fresh(&root).await?;
         // Relaxed identity gate, not the exact one. `latest_complete_fresh` is
@@ -3730,18 +3718,10 @@ impl CodeIndexSchedulerRegistryV1 {
         self.activate_for_scope(scope);
         let root = {
             let mounted = self.mounted.try_lock().ok()?;
-            let mut matched = None;
-            for (root, worktree) in mounted.iter() {
-                if worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-                {
-                    if matched.is_some() {
-                        return None;
-                    }
-                    matched = Some(root.clone());
-                }
-            }
-            matched?
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
         };
         let latest = self.latest_complete_ready_with(&root, admission).await?;
         // Checkout-identity gate: the ready ladder verified currency against
@@ -3766,18 +3746,12 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<LatestCompleteCodeIndexV1> {
         let serving_generation = {
             let mounted = self.mounted.lock().await;
-            let mut matched = None;
-            for worktree in mounted.values() {
-                if worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-                {
-                    if matched.is_some() {
-                        return None;
-                    }
-                    matched = Some(Arc::clone(&worktree.serving_generation));
-                }
-            }
-            matched?
+            Arc::clone(
+                &unique_mounted_for_scope(&mounted, scope)
+                    .unique()?
+                    .1
+                    .serving_generation,
+            )
         };
         let latest = serving_generation
             .read()
@@ -3795,16 +3769,9 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> bool {
         let mounted = self.mounted.lock().await;
-        let mut matched = mounted.values().filter(|worktree| {
-            worktree.repository_id == scope.repository_id
-                && worktree.worktree_id == scope.worktree_id
-        });
-        let Some(worktree) = matched.next() else {
+        let Some((_, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
             return false;
         };
-        if matched.next().is_some() {
-            return false;
-        }
         worktree
             .serving_generation
             .read()
@@ -3853,28 +3820,16 @@ impl CodeIndexSchedulerRegistryV1 {
             let Ok(mounted) = self.mounted.try_lock() else {
                 return false;
             };
-            let mut matched = None;
-            for worktree in mounted.values() {
-                if worktree.repository_id != scope.repository_id
-                    || worktree.worktree_id != scope.worktree_id
-                {
-                    continue;
-                }
-                if matched.is_some() {
-                    return false;
-                }
-                matched = Some((
-                    Arc::clone(&worktree.scheduler),
-                    Arc::clone(&worktree.serving_generation),
-                    Arc::clone(&worktree.hints),
-                    Arc::clone(&worktree.wake),
-                    Arc::clone(&worktree.pending_wake),
-                ));
-            }
-            let Some(matched) = matched else {
+            let Some((_, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
                 return false;
             };
-            matched
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake),
+            )
         };
         #[cfg(test)]
         drop(lookup_guard);
@@ -3960,19 +3915,12 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<CodeIndexSemanticEvaluationPublicationLeaseV1> {
         let gate = {
             let mounted = self.mounted.lock().await;
-            let mut matched = None;
-            for worktree in mounted.values() {
-                if worktree.repository_id != scope.repository_id
-                    || worktree.worktree_id != scope.worktree_id
-                {
-                    continue;
-                }
-                if matched.is_some() {
-                    return None;
-                }
-                matched = Some(Arc::clone(&worktree.semantic_evaluation_publication_gate));
-            }
-            matched?
+            Arc::clone(
+                &unique_mounted_for_scope(&mounted, scope)
+                    .unique()?
+                    .1
+                    .semantic_evaluation_publication_gate,
+            )
         };
         let guard = gate.lock_owned().await;
         if self

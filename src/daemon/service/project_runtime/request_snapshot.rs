@@ -63,6 +63,7 @@ impl ProjectRuntimeRegistryV1 {
             inner: Arc::new(super::ProjectRuntimeRequestLeaseInnerV1 {
                 registry: self.clone(),
                 roots: candidate_roots,
+                canonical_root: canonical_root.map(Path::to_path_buf),
             }),
         })
     }

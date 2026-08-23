@@ -586,6 +586,7 @@ pub(in crate::daemon) struct ProjectRuntimeRequestLeaseV1 {
 struct ProjectRuntimeRequestLeaseInnerV1 {
     registry: ProjectRuntimeRegistryV1,
     roots: BTreeSet<PathBuf>,
+    canonical_root: Option<PathBuf>,
 }
 
 impl Clone for ProjectRuntimeRequestLeaseV1 {
@@ -608,6 +609,14 @@ impl ProjectRuntimeRequestLeaseV1 {
                     .canonicalize()
                     .ok()
                     .is_some_and(|canonical| self.inner.roots.contains(&canonical)))
+    }
+
+    /// Prefer the canonicalize result stored when this lease was admitted.
+    pub(in crate::daemon) fn admitted_canonical_root(&self) -> Option<&Path> {
+        self.inner
+            .canonical_root
+            .as_deref()
+            .or_else(|| self.inner.roots.iter().next().map(PathBuf::as_path))
     }
 }
 

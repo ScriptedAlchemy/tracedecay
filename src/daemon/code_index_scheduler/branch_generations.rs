@@ -8,6 +8,7 @@ use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
 use super::{
     CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
     DaemonCodeIndexPublicationStoreV1, LatestCompleteCodeIndexV1,
+    registry::unique_mounted_for_scope,
 };
 
 #[derive(Clone)]
@@ -206,18 +207,13 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
         let scheduler = {
             let mounted = self.mounted.lock().await;
-            let mut matched = None;
-            for worktree in mounted.values() {
-                if worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-                {
-                    if matched.is_some() {
-                        return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
-                    }
-                    matched = Some(Arc::clone(&worktree.scheduler));
-                }
-            }
-            matched.ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+            Arc::clone(
+                &unique_mounted_for_scope(&mounted, scope)
+                    .unique()
+                    .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+                    .1
+                    .scheduler,
+            )
         };
         let base_reference = base_reference.clone();
         let base_revision = base_revision.clone();

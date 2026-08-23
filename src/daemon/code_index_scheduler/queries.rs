@@ -39,7 +39,7 @@ use tracedecay_tool_catalog::SortContractId;
 
 use super::{
     CodeIndexSchedulerRegistryV1, DaemonCodeIndexPublicationStoreV1, LatestCompleteCodeIndexV1,
-    registry::latest_matches_scope_identity,
+    registry::{UniqueMountedWorktree, latest_matches_scope_identity, unique_mounted_for_scope},
 };
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
@@ -229,26 +229,18 @@ impl CodeIndexSchedulerRegistryV1 {
     {
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
-            let mut matched = None;
-            for worktree in mounted.values() {
-                if worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-                {
-                    if matched.is_some() {
-                        return Err(
-                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                        );
-                    }
-                    matched = Some((
-                        std::sync::Arc::clone(&worktree.scheduler),
-                        std::sync::Arc::clone(&worktree.serving_generation),
-                    ));
+            match unique_mounted_for_scope(&mounted, scope) {
+                UniqueMountedWorktree::One { worktree, .. } => (
+                    std::sync::Arc::clone(&worktree.scheduler),
+                    std::sync::Arc::clone(&worktree.serving_generation),
+                ),
+                UniqueMountedWorktree::None => return Ok(None),
+                UniqueMountedWorktree::Ambiguous => {
+                    return Err(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                    );
                 }
             }
-            let Some(matched) = matched else {
-                return Ok(None);
-            };
-            matched
         };
         let scope = scope.clone();
         let generation_id = generation_id.clone();
