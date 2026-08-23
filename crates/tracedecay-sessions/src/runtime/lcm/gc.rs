@@ -993,6 +993,12 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     Ok(())
 }
 
+// Each parameter is a distinct authority for this rewrite — the connection,
+// the payload directory, the two reference sets it compares, the provider and
+// session it is scoped to, whether to apply or only report, and the report it
+// accumulates into. Grouping them would hide which of them the caller is
+// actually choosing.
+#[allow(clippy::too_many_arguments)]
 pub async fn rewrite_dangling_placeholders(
     conn: &(impl Executor + ?Sized),
     dir: Option<&Path>,

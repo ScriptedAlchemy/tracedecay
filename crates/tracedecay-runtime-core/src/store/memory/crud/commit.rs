@@ -299,7 +299,7 @@ async fn fact_identity_matches(
 }
 
 /// The largest `anchor_id IN (...)` batch one referenced-anchor availability
-/// probe binds, kept clear of SQLite's default variable ceiling.
+/// probe binds, kept clear of `SQLite`'s default variable ceiling.
 const REFERENCED_ANCHOR_BATCH: usize = 500;
 
 async fn ensure_referenced_anchors(

@@ -2062,8 +2062,8 @@ fn insert_exact(
     let mut encoded_fields = BTreeMap::new();
     for term in &row.exact_terms {
         let field = exact_field_for_kind(term.kind());
-        if !encoded_fields.contains_key(&field) {
-            encoded_fields.insert(field, encode_exact_field(field)?);
+        if let std::collections::btree_map::Entry::Vacant(slot) = encoded_fields.entry(field) {
+            slot.insert(encode_exact_field(field)?);
         }
         insert_exact_posting(
             transaction,

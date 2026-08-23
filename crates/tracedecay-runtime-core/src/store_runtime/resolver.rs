@@ -305,13 +305,10 @@ impl LocalStoreRuntimeResolverV1 {
         #[cfg(target_os = "linux")]
         {
             let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok();
-            return self.resolve_key_with_filesystem_safety(
-                key,
-                &|path| match mountinfo.as_deref() {
-                    Some(text) => filesystem_safety_from_linux_mountinfo(path, text),
-                    None => undetectable_filesystem(),
-                },
-            );
+            self.resolve_key_with_filesystem_safety(key, &|path| match mountinfo.as_deref() {
+                Some(text) => filesystem_safety_from_linux_mountinfo(path, text),
+                None => undetectable_filesystem(),
+            })
         }
         #[cfg(not(target_os = "linux"))]
         self.resolve_key_with_filesystem_safety(key, &local_filesystem_safety)
