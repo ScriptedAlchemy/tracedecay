@@ -846,7 +846,7 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
 
 thread_local! {
     static CANONICAL_PROJECT_PATH_CACHE: RefCell<HashMap<String, Option<String>>> =
-        const { RefCell::new(HashMap::new()) };
+        RefCell::new(HashMap::new());
 }
 
 /// Resolve a project-path string to its canonical on-disk form, returning
