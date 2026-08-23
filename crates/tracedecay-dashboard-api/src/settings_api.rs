@@ -364,6 +364,7 @@ pub async fn patch_user_settings(
         profile_id,
         UserSettingsMutationV1 {
             upload_enabled: patch.upload_enabled,
+            code_index_workers: patch.code_index_workers,
             watcher_debounce: patch.watcher_debounce,
             extraction_timeout_secs: patch.extraction_timeout_secs,
         },
