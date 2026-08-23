@@ -3,10 +3,33 @@
 //! Labels are compile-time static strings. Error class is the typed
 //! [`ApplicationProblemKind`] name only — never an unbounded message.
 
+use axum::Router;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use tracedecay_application::ApplicationProblemKind;
+
+/// Wrap an application `Router` with hotpath's per-route latency/error-rate
+/// server layer so the `server` report section populates.
+///
+/// Applied after every `.route(..)` call on each router this crate mounts, so
+/// `MatchedPath` is already set for every matched route. `Router::layer` only
+/// changes the router's middleware stack, never its state type `S`, so this
+/// stays a no-op type-wise with the feature off: the router is returned
+/// unchanged and `hotpath::AxumLayer` (which does not exist in that build) is
+/// never named.
+#[cfg(feature = "hotpath")]
+pub(crate) fn with_hotpath_server_layer<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(hotpath::AxumLayer::new())
+}
+
+#[cfg(not(feature = "hotpath"))]
+pub(crate) fn with_hotpath_server_layer<S>(router: Router<S>) -> Router<S> {
+    router
+}
 
 #[cfg(any(feature = "hotpath", test))]
 pub(crate) const fn problem_kind_label(kind: ApplicationProblemKind) -> &'static str {

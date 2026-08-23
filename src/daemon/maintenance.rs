@@ -845,19 +845,22 @@ impl MaintenanceCoordinator {
         }
         let task_owner = coordinator.clone();
         let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
-        let handle = tokio::spawn(async move {
-            task_owner
-                .run(
-                    profile_root,
-                    profile_database,
-                    administration,
-                    code_index_schedulers,
-                    retention,
-                    branch_gc,
-                    interval,
-                )
-                .await;
-        });
+        let handle = tokio::spawn(hotpath::future!(
+            async move {
+                task_owner
+                    .run(
+                        profile_root,
+                        profile_database,
+                        administration,
+                        code_index_schedulers,
+                        retention,
+                        branch_gc,
+                        interval,
+                    )
+                    .await;
+            },
+            label = "daemon.maintenance.retention_loop"
+        ));
         *coordinator.task.lock().await = Some(handle);
         coordinator
     }

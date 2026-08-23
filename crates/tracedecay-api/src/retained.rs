@@ -75,9 +75,8 @@ where
             ),
         );
     }
-    router
-        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
-        .with_state(owner)
+    let router = router.layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES));
+    crate::observe::with_hotpath_server_layer(router).with_state(owner)
 }
 
 async fn invoke<O>(

@@ -2282,7 +2282,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 entry
             }
         };
-        let task = tokio::spawn(async move {
+        let worker_loop = async move {
             // Bounded retry state for activating an already-sealed complete
             // generation. The sealed artifact is immutable and retryable, so a
             // retryable activation failure must not fall through into a
@@ -2659,7 +2659,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // The next coalesced hint wakes this worker after a contained panic.
                 let _ = result;
             }
-        });
+        };
+        let task = tokio::spawn(hotpath::future!(
+            worker_loop,
+            label = "daemon.code_index.scheduler_worker"
+        ));
         entry.insert(MountedCodeIndexWorktreeV1 {
             repository_id,
             worktree_id,

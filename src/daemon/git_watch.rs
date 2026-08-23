@@ -325,9 +325,12 @@ impl GitWatcher {
         #[cfg(test)]
         self.inner.spawn_publication_probe.block_if_armed();
         let watcher = self.clone();
-        let handle = tokio::spawn(async move {
-            backstop::run(watcher).await;
-        });
+        let handle = tokio::spawn(hotpath::future!(
+            async move {
+                backstop::run(watcher).await;
+            },
+            label = "daemon.git_watch.backstop"
+        ));
         *retained = Some(handle);
         #[cfg(test)]
         self.inner.lifecycle_receipts.record_spawn();

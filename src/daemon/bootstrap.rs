@@ -221,22 +221,25 @@ pub async fn run_foreground(
         let invocation = invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
-        clients.spawn(with_connection_admission(permit, async move {
-            Box::pin(serve_windows_broker_client_with_class_and_invocation(
-                stream,
-                &auth_token,
-                &client_lifecycle,
-                store_administration,
-                project_open_gates,
-                invocation,
-                http_application_registry,
-                per_client_admission,
-                admission_class,
-                #[cfg(test)]
-                None,
-            ))
-            .await
-        }));
+        clients.spawn(hotpath::future!(
+            with_connection_admission(permit, async move {
+                Box::pin(serve_windows_broker_client_with_class_and_invocation(
+                    stream,
+                    &auth_token,
+                    &client_lifecycle,
+                    store_administration,
+                    project_open_gates,
+                    invocation,
+                    http_application_registry,
+                    per_client_admission,
+                    admission_class,
+                    #[cfg(test)]
+                    None,
+                ))
+                .await
+            }),
+            label = "daemon.client.broker_connection"
+        ));
     }
     lifecycle.begin_draining();
     drop(listener);
@@ -667,7 +670,10 @@ async fn run_foreground_unix(
             auth_token,
             admission_class,
         ));
-        client_tasks.spawn(with_connection_admission(permit, client));
+        client_tasks.spawn(hotpath::future!(
+            with_connection_admission(permit, client),
+            label = "daemon.client.socket_connection"
+        ));
     }
     engine.lifecycle.begin_draining();
     // Stop accepting and unlink the socket before draining so clients that

@@ -772,7 +772,7 @@ pub fn application_router<O>(owners: O) -> Router
 where
     O: HttpApplicationOwners,
 {
-    Router::new()
+    let router = Router::new()
         .route("/git/{operation}", post(git_read::<O>))
         .route(
             "/github-stack/signal-expand",
@@ -795,8 +795,8 @@ where
             "/native-integration/{operation}",
             post(native_integration_operation::<O>),
         )
-        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
-        .with_state(owners)
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES));
+    crate::observe::with_hotpath_server_layer(router).with_state(owners)
 }
 
 /// Build the dashboard bindings for canonical feedback reads.
@@ -808,10 +808,10 @@ pub fn feedback_application_router<O>(owners: O) -> Router
 where
     O: HttpApplicationOwners,
 {
-    Router::new()
+    let router = Router::new()
         .route("/{operation}", post(feedback_read::<O>))
-        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
-        .with_state(owners)
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES));
+    crate::observe::with_hotpath_server_layer(router).with_state(owners)
 }
 
 /// Build only the canonical configuration routes for an adapter that does not
@@ -825,13 +825,13 @@ pub fn configuration_application_router<O>(owners: O) -> Router
 where
     O: HttpApplicationOwners,
 {
-    Router::new()
+    let router = Router::new()
         .route(
             "/configuration/{operation}",
             post(configuration_operation::<O>),
         )
-        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
-        .with_state(owners)
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES));
+    crate::observe::with_hotpath_server_layer(router).with_state(owners)
 }
 
 fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation> {

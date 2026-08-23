@@ -15,6 +15,7 @@ doctest = false
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "hotpath/hotpath",
+    "hotpath/axum-0-8",
     "tracedecay-application/hotpath",
 ]
 hotpath-alloc = [

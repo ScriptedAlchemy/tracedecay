@@ -721,7 +721,7 @@ impl DaemonEngine {
         #[cfg(test)]
         let exit_barrier = self.automation_scheduler_exit_barrier.lock().await.clone();
         let (published, start) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
+        let scheduler_loop = async move {
             let _ = start.await;
             Box::pin(run_automation_scheduler_loop(
                 project_path,
@@ -745,7 +745,11 @@ impl DaemonEngine {
                     !Arc::ptr_eq(&handle.completion, &completed)
                         || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
                 });
-        });
+        };
+        let task = tokio::spawn(hotpath::future!(
+            scheduler_loop,
+            label = "daemon.automation.scheduler_loop"
+        ));
         schedulers.insert(
             key,
             AutomationSchedulerHandle {

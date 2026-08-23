@@ -690,7 +690,10 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
             let admitted_cancellation = self.admitted_cancellation.clone();
             tokio::spawn(async move {
                 let request_id = request.request_id.clone();
-                let invocation = tokio::spawn(async move { executor.invoke_once(request).await });
+                let invocation = tokio::spawn(hotpath::future!(
+                    async move { executor.invoke_once(request).await },
+                    label = "daemon.invocation.invoke_once"
+                ));
                 settle_in_process_invocation(
                     &request_id,
                     invocation,
