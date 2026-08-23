@@ -890,19 +890,22 @@ fn plan_code_generation_retention_with_verification_cancellable(
         verification,
         is_cancelled,
     )?;
-    let planned_bytes = total_bytes(&collectable_generations).saturating_add(
-        text_artifact_inventory
-            .candidates
-            .iter()
-            .map(|candidate| candidate.size_bytes)
-            .sum::<u64>(),
-    );
-    crate::hotpath_observe::retention_plan(
-        collectable_generations
-            .len()
-            .saturating_add(text_artifact_inventory.candidates.len()),
-        planned_bytes,
-    );
+    #[cfg(feature = "hotpath")]
+    {
+        let planned_bytes = total_bytes(&collectable_generations).saturating_add(
+            text_artifact_inventory
+                .candidates
+                .iter()
+                .map(|candidate| candidate.size_bytes)
+                .sum::<u64>(),
+        );
+        crate::hotpath_observe::retention_plan(
+            collectable_generations
+                .len()
+                .saturating_add(text_artifact_inventory.candidates.len()),
+            planned_bytes,
+        );
+    }
 
     Ok(CodeGenerationRetentionPlanV1 {
         active_generation_id,

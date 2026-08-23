@@ -13,8 +13,10 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
 };
+
+#[cfg(feature = "hotpath")]
+use std::time::Instant;
 
 use thiserror::Error;
 use tracedecay_domain::{CodeGenerationId, WorktreeId};
@@ -181,6 +183,7 @@ struct QueuedProjectionBatchV1 {
     ticket: u64,
     batch: SemanticProjectionBatchV1,
     dispatch: Option<SemanticProjectionDispatchV1>,
+    #[cfg(feature = "hotpath")]
     enqueued_at: Instant,
 }
 
@@ -364,6 +367,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
                 ticket,
                 batch: batch.clone(),
                 dispatch,
+                #[cfg(feature = "hotpath")]
                 enqueued_at: Instant::now(),
             });
         if queue_was_empty
@@ -468,9 +472,12 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
                     publication_claimed: false,
                 },
             );
-            let wait_ns =
-                u64::try_from(queued.enqueued_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            crate::hotpath_observe::semantic_queue_wait_ns(wait_ns);
+            #[cfg(feature = "hotpath")]
+            {
+                let wait_ns =
+                    u64::try_from(queued.enqueued_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                crate::hotpath_observe::semantic_queue_wait_ns(wait_ns);
+            }
             state.observe_hotpath();
             let lease = SemanticProjectionLeaseV1 {
                 ticket: queued.ticket,

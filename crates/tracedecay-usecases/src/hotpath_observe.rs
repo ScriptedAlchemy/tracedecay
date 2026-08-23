@@ -5,6 +5,7 @@
 //! this crate's `hotpath` feature is selected.
 
 #[inline]
+#[cfg(feature = "hotpath")]
 pub(crate) fn retention_plan(candidates: usize, bytes_planned: u64) {
     hotpath::gauge!("usecases.retention.candidates_planned").set(candidates as f64);
     hotpath::gauge!("usecases.retention.bytes_planned").set(bytes_planned as f64);
@@ -67,6 +68,7 @@ pub(crate) fn semantic_queue(
 }
 
 #[inline]
+#[cfg(feature = "hotpath")]
 pub(crate) fn semantic_queue_wait_ns(wait_ns: u64) {
     hotpath::gauge!("usecases.semantic.queue_wait_ns").set(wait_ns as f64);
 }
