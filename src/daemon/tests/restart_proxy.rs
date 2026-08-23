@@ -1004,3 +1004,127 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
         ]
     );
 }
+
+/// A `tracedecay serve` process must not outlive the MCP client that owns it.
+///
+/// RED (before the drain bound): the client disconnects while a request is in
+/// flight, the daemon never answers, and `proxy_host_input_to_daemon` awaited
+/// that request unconditionally — the serve process stayed alive forever,
+/// holding its stdio fds and daemon connection. That is the shape of a
+/// long-lived orphan serve.
+#[cfg(unix)]
+#[tokio::test]
+async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon socket");
+    // A wedged daemon: it keeps accepting, so every liveness probe succeeds,
+    // and it never answers the request it was handed.
+    let daemon = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _addr)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+
+    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon_with_drain_bound(
+            &proxy_socket,
+            &test_handshake_defaults(),
+            None,
+            &mut transport,
+            Some(std::time::Duration::from_millis(250)),
+        )
+        .await
+    });
+
+    sender
+        .send(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list"
+            }))
+            .expect("request json"),
+        )
+        .expect("send request");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The owning MCP client disconnects while that request is still in flight.
+    drop(sender);
+
+    // The property under test is *termination*: before the drain bound this
+    // future never resolved, which is exactly a `tracedecay serve` process
+    // outliving its client and holding its fds and daemon connection.
+    tokio::time::timeout(std::time::Duration::from_secs(5), proxy)
+        .await
+        .expect("a disconnected proxy must shut down instead of outliving its client")
+        .expect("proxy task")
+        .expect("shutdown after a client disconnect is not itself a transport failure");
+
+    // The wedged request is reported truthfully rather than silently dropped.
+    let reported = receiver.recv().await.expect("shutdown reports the request");
+    let reported: Value = serde_json::from_str(reported.trim()).expect("response json");
+    let message = reported["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        message.contains("disconnected"),
+        "shutdown must name the client disconnect, got: {message}"
+    );
+
+    daemon.abort();
+}
+
+/// The post-disconnect drain must still *produce* the response a batch client
+/// asked for. `echo request | tracedecay serve` closes stdin the instant it
+/// finishes writing, so EOF races the in-flight request every time; bounding
+/// that wait must not turn batch usage into a silent no-output run. Runs on the
+/// production entry point, so it also covers the real
+/// `DAEMON_TOOL_RESPONSE_GRACE` default.
+#[cfg(unix)]
+#[tokio::test]
+async fn batch_client_closing_stdin_immediately_still_receives_its_response() {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon socket");
+    let daemon = tokio::spawn(async move { answer_one_proxy_request(listener, 7).await });
+
+    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon(
+            &proxy_socket,
+            &test_handshake_defaults(),
+            None,
+            &mut transport,
+        )
+        .await
+    });
+
+    sender
+        .send(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list"
+            }))
+            .expect("request json"),
+        )
+        .expect("send request");
+    drop(sender);
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("batch response timed out")
+        .expect("batch response");
+    let response: Value = serde_json::from_str(response.trim()).expect("response json");
+    assert_eq!(response["result"]["generation"], json!(7));
+
+    await_test_task(proxy, "batch proxy task")
+        .await
+        .expect("proxy transport");
+    await_test_task(daemon, "batch daemon task").await;
+}

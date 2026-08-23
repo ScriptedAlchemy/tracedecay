@@ -3,6 +3,8 @@
 
 #[cfg(unix)]
 use std::collections::VecDeque;
+#[cfg(unix)]
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -131,6 +133,20 @@ pub async fn proxy_transport_to_daemon(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
 ) -> Result<()> {
+    proxy_transport_to_daemon_with_drain_bound(socket_path, handshake, replay_line, transport, None)
+        .await
+}
+
+/// `drain_bound` overrides the per-request bound derived by
+/// [`disconnect_drain_bound`]; production passes `None` and always derives it.
+#[cfg(unix)]
+pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+    transport: &mut impl McpDuplexTransport,
+    drain_bound: Option<Duration>,
+) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     let (eof_tx, mut eof_rx) = tokio::sync::watch::channel(false);
@@ -158,9 +174,75 @@ pub async fn proxy_transport_to_daemon(
         &mut input_rx,
         &mut eof_rx,
         &mut writer,
+        drain_bound,
     );
     tokio::try_join!(read_host, proxy)?;
     Ok(())
+}
+
+/// How long a disconnected session may still wait for the daemon to settle the
+/// request it has already been handed.
+///
+/// This is *not* a timeout invented here: it is the daemon's own published
+/// dispatch ceiling for that exact request — "nothing may run unbounded", per
+/// [`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
+/// — plus
+/// [`DAEMON_TOOL_RESPONSE_GRACE`](super::DAEMON_TOOL_RESPONSE_GRACE), the grace
+/// this crate already keeps reading for beyond a request deadline. A daemon
+/// honouring its own contract always answers first, so the bound cannot cut
+/// short correct work, including a slow `tools/call` from a batch client. Only a
+/// daemon that has already blown its own ceiling reaches it — and by then the
+/// client that would have received the answer is gone.
+///
+/// A line that is not a `tools/call` (initialize, tools/list, resources/*) has
+/// no tool of its own and takes the ordinary interactive ceiling.
+#[cfg(unix)]
+fn disconnect_drain_bound(line: &str) -> Duration {
+    let ceiling = request_tool_name(line)
+        .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
+        .unwrap_or_else(|| crate::mcp::tools::handlers::tool_dispatch_ceiling(""));
+    ceiling.saturating_add(super::DAEMON_TOOL_RESPONSE_GRACE)
+}
+
+/// The tool a `tools/call` line names, or `None` for any other method.
+#[cfg(unix)]
+fn request_tool_name(line: &str) -> Option<String> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+    if request.method != "tools/call" {
+        return None;
+    }
+    request
+        .params?
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Await an in-flight daemon request *after* the owning MCP client has already
+/// disconnected (EOF on stdin, or the host input channel closing).
+///
+/// The wait itself is still required: a batch client (`echo request |
+/// tracedecay serve`) closes stdin the instant it finishes writing, and its
+/// response must still be produced. What must not survive is an *ownerless*
+/// `tracedecay serve` waiting forever on a daemon that never answers — that is
+/// how a disconnected session turns into a long-lived orphan holding its fds
+/// and daemon connection.
+#[cfg(unix)]
+async fn drain_daemon_request_after_disconnect(
+    daemon_request: impl Future<Output = Result<Vec<String>>>,
+    drain_bound: Duration,
+) -> Result<Vec<String>> {
+    tokio::time::timeout(drain_bound, daemon_request)
+        .await
+        .unwrap_or_else(|_| {
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "the owning MCP client disconnected and the daemon did not settle the \
+                     in-flight request within {drain_bound:?}; shutting down rather than \
+                     outliving the client, and the request outcome is unknown"
+                ),
+            })
+        })
 }
 
 #[cfg(unix)]
@@ -171,6 +253,7 @@ async fn proxy_host_input_to_daemon(
     input: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     eof: &mut tokio::sync::watch::Receiver<bool>,
     writer: &mut impl McpTransportWriter,
+    drain_bound: Option<Duration>,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
     let mut pending = VecDeque::new();
@@ -217,6 +300,7 @@ async fn proxy_host_input_to_daemon(
             continue;
         }
 
+        let request_drain_bound = drain_bound.unwrap_or_else(|| disconnect_drain_bound(&line));
         let result = {
             let daemon_request = send_daemon_request_line_with_project_open_retry(
                 socket_path,
@@ -226,7 +310,11 @@ async fn proxy_host_input_to_daemon(
             tokio::pin!(daemon_request);
             loop {
                 if *eof.borrow() {
-                    break daemon_request.await;
+                    break drain_daemon_request_after_disconnect(
+                        &mut daemon_request,
+                        request_drain_bound,
+                    )
+                    .await;
                 }
                 tokio::select! {
                     result = &mut daemon_request => break result,
@@ -242,7 +330,13 @@ async fn proxy_host_input_to_daemon(
                     }
                     next = input.recv() => {
                         let Some(next) = next else {
-                            break daemon_request.await;
+                            // The host input channel closed: the client is gone
+                            // for the same reason stdin EOF says it is.
+                            break drain_daemon_request_after_disconnect(
+                                &mut daemon_request,
+                                request_drain_bound,
+                            )
+                            .await;
                         };
                         pending.push_back(next);
                     }
@@ -762,5 +856,45 @@ mod tests {
             }
         })
         .to_string()]));
+    }
+
+    /// The post-disconnect drain must never cut short work the daemon is still
+    /// entitled to be doing — a batch client closes stdin immediately, so every
+    /// one of its requests drains under this bound.
+    #[cfg(unix)]
+    #[test]
+    fn disconnect_drain_bound_always_outlives_the_daemon_dispatch_ceiling() {
+        use super::{disconnect_drain_bound, request_tool_name};
+
+        let long = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "tracedecay_run_affected_tests", "arguments": {} }
+        })
+        .to_string();
+        let interactive = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "tracedecay_context", "arguments": {} }
+        })
+        .to_string();
+        let non_tool = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }).to_string();
+
+        for line in [&long, &interactive] {
+            let tool = request_tool_name(line).expect("a tools/call names its tool");
+            let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool)
+                .expect("every tool has a dispatch ceiling");
+            assert!(
+                disconnect_drain_bound(line) > ceiling,
+                "{tool}: the drain must outlive the daemon's own ceiling"
+            );
+        }
+
+        // A tool the daemon lets run longer drains for longer; a method with no
+        // tool of its own takes the ordinary interactive ceiling.
+        assert!(disconnect_drain_bound(&long) > disconnect_drain_bound(&interactive));
+        assert_eq!(
+            disconnect_drain_bound(&non_tool),
+            disconnect_drain_bound(&interactive)
+        );
+        assert_eq!(request_tool_name(&non_tool), None);
     }
 }
