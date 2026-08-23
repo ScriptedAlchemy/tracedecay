@@ -926,6 +926,23 @@ pub(crate) fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
+/// As [`extract_json`], but taking the whole [`ToolResult`] rather than its
+/// inner value, and reporting the envelope on failure.
+///
+/// Tests that hold a `ToolResult` (rather than a already-unwrapped `Value`)
+/// would otherwise each re-implement this two-step unwrap.
+///
+/// Both current call sites (`workflow_query_test.rs`, `git_correlation_test.rs`)
+/// are file-level `#![cfg(feature = "test-transport")]` modules, so without
+/// this same gate the helper is genuinely dead code outside that feature.
+#[cfg(feature = "test-transport")]
+pub(crate) fn extract_tool_result_json(result: &ToolResult) -> Value {
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("tool result should carry text content: {}", result.value));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result should be JSON: {e}\n{text}"))
+}
+
 /// The first content item that parses as JSON.
 ///
 /// The server prepends advisory text blocks (fallback-branch and staleness

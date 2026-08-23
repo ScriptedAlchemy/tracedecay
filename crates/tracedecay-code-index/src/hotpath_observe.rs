@@ -65,6 +65,12 @@ impl PendingWorkQueue {
             PENDING_WORK.fetch_add(depth, Ordering::Relaxed);
             refresh_queue_gauge();
         }
+        // Both the gauge above and the `remaining` field below are gated, so a
+        // plain production build reads `depth` nowhere and `-D warnings` fails
+        // on it. Discard it explicitly rather than renaming the parameter,
+        // which would lose the name at the two call sites that do use it.
+        #[cfg(not(any(feature = "hotpath", test)))]
+        let _ = depth;
         Self {
             #[cfg(any(feature = "hotpath", test))]
             remaining: AtomicUsize::new(depth),
