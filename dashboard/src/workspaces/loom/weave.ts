@@ -236,7 +236,7 @@ export function composeWeave(
   input: readonly WeaveSession[] | { threads: WeaveThread[]; undated: number },
   minGapSeconds = 0,
 ): Weave & { undated: number } {
-  const { threads, undated } = Array.isArray(input) ? threadsFrom(input) : input;
+  const { threads, undated } = 'threads' in input ? input : threadsFrom(input);
   const extent = extentOf(threads);
   const messageCeiling = threads.reduce(
     (max, thread) => Math.max(max, thread.messages),
