@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.37](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.36...v0.1.0-beta.37) (2026-08-22)
+
+
+### Bug Fixes
+
+* **code-index:** preserve active warmup snapshots ([6f5b1c2](https://github.com/ScriptedAlchemy/tracedecay/commit/6f5b1c29dea01daaf8a94dc0a37ded25cbf514bb))
+* **code-index:** preserve active warmup snapshots ([de87992](https://github.com/ScriptedAlchemy/tracedecay/commit/de87992e34d5633537e0310404893b27432f9e56))
+
 ## [0.1.0-beta.36](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.35...v0.1.0-beta.36) (2026-08-22)
 
 
