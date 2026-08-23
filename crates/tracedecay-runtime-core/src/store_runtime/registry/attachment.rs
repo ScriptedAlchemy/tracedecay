@@ -67,14 +67,6 @@ impl PhysicalRuntimeSnapshot {
 pub trait PhysicalRuntimeAttachment: Send + Sync {
     fn snapshot(&self) -> PhysicalRuntimeSnapshot;
 
-    /// Exact rusqlite writer/reader snapshot when this attachment is a
-    /// repository runtime. Other attachments leave this unset.
-    fn writer_telemetry_snapshot(
-        &self,
-    ) -> Option<tracedecay_rusqlite_runtime::repository::RepositoryRuntimePhysicalSnapshot> {
-        None
-    }
-
     /// Physical identity captured from a descriptor held across `SQLite` worker
     /// startup. Implementations must not derive this from a later pathname
     /// stat.

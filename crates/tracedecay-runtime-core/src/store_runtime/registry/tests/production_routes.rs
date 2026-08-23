@@ -224,36 +224,6 @@ async fn assert_health_route(handle: &StoreRuntimeClientLease, writer_expected: 
 }
 
 #[tokio::test]
-async fn client_lease_writer_telemetry_snapshot_is_callable_rusqlite_shape() {
-    let root = TempDir::new().unwrap();
-    let resolver = Arc::new(FileResolver::default());
-    resolver.push(seed_db(&root, "profile.db"));
-    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
-    let profile = open_published(
-        &registry,
-        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
-    )
-    .await;
-
-    let snapshot: RepositoryRuntimePhysicalSnapshot = profile
-        .writer_telemetry_snapshot()
-        .expect("repository lease must expose rusqlite writer/reader telemetry");
-    assert!(snapshot.healthy);
-    assert!(snapshot.writer_present);
-    assert!(snapshot.reader_handles >= 1);
-    let writer = snapshot
-        .writer
-        .expect("mounted writer must carry rusqlite writer telemetry");
-    let _committed_transactions = writer.transactions.committed_transactions;
-    let _reader_wait_micros = snapshot.reader_wait_micros;
-    let _reader_execution_micros = snapshot.reader_execution_micros;
-
-    let physical = profile.physical_snapshot();
-    assert_eq!(physical.writer_present, snapshot.writer_present);
-    assert_eq!(physical.reader_handles, snapshot.reader_handles);
-}
-
-#[tokio::test]
 async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());

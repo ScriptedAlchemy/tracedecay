@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use tracedecay_rusqlite_runtime::repository::{
     RepositoryPhysicalAttachmentFactory, RepositoryRuntimePhysicalAttachment,
-    RepositoryRuntimePhysicalSnapshot,
 };
 use tracedecay_store::{
     AdmissionConfigV1, RuntimeMaintenanceStateV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
@@ -421,10 +420,6 @@ async fn install_final_schema_before_publication(
 }
 
 impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
-    fn writer_telemetry_snapshot(&self) -> Option<RepositoryRuntimePhysicalSnapshot> {
-        Some(RepositoryRuntimePhysicalAttachment::snapshot(self))
-    }
-
     fn snapshot(&self) -> PhysicalRuntimeSnapshot {
         let snapshot = RepositoryRuntimePhysicalAttachment::snapshot(self);
         PhysicalRuntimeSnapshot {

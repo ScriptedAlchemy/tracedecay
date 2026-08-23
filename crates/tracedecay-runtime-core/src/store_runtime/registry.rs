@@ -69,9 +69,6 @@ pub use retirement::{
     StoreRuntimeRetirementCommit, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementRefusal,
     StoreRuntimeRetirementReservation, StoreRuntimeRetirementResult, StoreRuntimeRetirementTarget,
 };
-pub use tracedecay_rusqlite_runtime::repository::{
-    RepositoryRuntimePhysicalSnapshot, RepositoryWriterRuntimeSnapshot,
-};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreRuntimeKey {
     shard_id: StoreShardIdV1,
@@ -881,16 +878,7 @@ impl StoreRuntimeClientLease {
         self.validate_opened_file_identity(operation).map(|_| ())
     }
 
-    /// Exact rusqlite writer/reader telemetry for this retained attachment.
-    ///
-    /// Repository-backed publications return the rusqlite-runtime snapshot.
-    /// Driver stubs and test attachments return `None`.
-    pub fn writer_telemetry_snapshot(&self) -> Option<RepositoryRuntimePhysicalSnapshot> {
-        self.inner.attachment.writer_telemetry_snapshot()
-    }
-
-    /// Bounded, path-free facts sampled from the physical writer/read runtime.
-    pub fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
+    pub(crate) fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
         self.inner.attachment.snapshot()
     }
 
