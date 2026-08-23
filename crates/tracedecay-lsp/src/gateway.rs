@@ -2341,6 +2341,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp_gateway_semantic_request", impl_type = "DaemonLspGateway")]
     pub fn semantic_request(
         &self,
         request_id: &LspRequestId,
