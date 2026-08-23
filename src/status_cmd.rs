@@ -331,9 +331,10 @@ async fn handle_status_command_within(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_status_tool_args, is_truncation_envelope, reject_truncation_envelope,
-        should_fetch_online_status_embellishments, should_print_status_logo,
+        compact_status_tool_args, should_fetch_online_status_embellishments,
+        should_print_status_logo,
     };
+    use crate::commands::daemon::{is_truncation_envelope, reject_truncation_envelope};
     use serde_json::json;
 
     #[test]
