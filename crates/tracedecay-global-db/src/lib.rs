@@ -112,8 +112,7 @@ pub use git_index_transactions::{
 pub use native_integration::{GlobalDbNativeIntegrationStore, ensure_native_integration_schema};
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 use project_registry::project_path_alias_key;
-/// Registry reap contract, moved down beside `plan_registry_reap` — its only
-/// producer — so this crate no longer reaches up into the composition root.
+/// Registry reap contract. Lives beside `plan_registry_reap`, its only producer.
 pub use project_registry::{
     EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
     ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path,
@@ -143,7 +142,7 @@ pub use tracedecay_runtime_core::store_runtime::{
 };
 pub use transcript::TranscriptPersistenceError;
 
-const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
+pub(crate) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,

@@ -104,6 +104,206 @@ macro_rules! occurrence_row_length_bounds {
     };
 }
 
+macro_rules! occurrence_keyset {
+    ($time:literal, $id:literal) => {
+        concat!(
+            "AND (o.knowledge_at < ",
+            $time,
+            " OR (o.knowledge_at = ",
+            $time,
+            " AND o.occurrence_id > ",
+            $id,
+            "))"
+        )
+    };
+}
+
+macro_rules! occurrence_root_keyset {
+    ($time:literal, $session:literal, $id:literal) => {
+        concat!(
+            "AND (
+          o.knowledge_at < ",
+            $time,
+            "
+          OR (
+              o.knowledge_at = ",
+            $time,
+            "
+              AND (
+                  o.session_id > ",
+            $session,
+            "
+                  OR (o.session_id = ",
+            $session,
+            " AND o.occurrence_id > ",
+            $id,
+            ")
+              )
+          )
+      )"
+        )
+    };
+}
+
+macro_rules! root_occurrence_cursor_bound {
+    ($cursor:literal) => {
+        concat!(
+            "AND length(CAST(o.occurrence_id AS BLOB))
+          + length(CAST(o.session_id AS BLOB)) + 9 <= ",
+            $cursor
+        )
+    };
+}
+
+macro_rules! summary_keyset {
+    ($time:literal, $id:literal) => {
+        concat!(
+            "AND (n.created_at < ",
+            $time,
+            " OR (n.created_at = ",
+            $time,
+            " AND n.summary_id > ",
+            $id,
+            "))"
+        )
+    };
+}
+
+macro_rules! summary_root_keyset {
+    ($time:literal, $session:literal, $id:literal) => {
+        concat!(
+            "AND (
+          n.created_at < ",
+            $time,
+            "
+          OR (
+              n.created_at = ",
+            $time,
+            "
+              AND (
+                  n.session_id > ",
+            $session,
+            "
+                  OR (n.session_id = ",
+            $session,
+            " AND n.summary_id > ",
+            $id,
+            ")
+              )
+          )
+      )"
+        )
+    };
+}
+
+// Session-scope summary identity caps. Publication provider stays in JSON.
+macro_rules! summary_row_length_bounds {
+    ($id:literal, $anchor:literal, $text:literal, $sum:literal) => {
+        concat!(
+            "AND length(CAST(n.summary_id AS BLOB)) <= ",
+            $id,
+            "
+      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ",
+            $anchor,
+            "
+      AND length(CAST(n.session_id AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(COALESCE(
+          ",
+            summary_publication_provider!(),
+            ", ''
+      ) AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(n.summary_id AS BLOB))
+          + length(CAST(n.summary_anchor_id AS BLOB))
+          + length(CAST(n.session_id AS BLOB))
+          + length(CAST(COALESCE(
+              ",
+            summary_publication_provider!(),
+            ", ''
+          ) AS BLOB)) <= ",
+            $sum
+        )
+    };
+    (root: $id:literal, $anchor:literal, $text:literal, $sum:literal, $cursor:literal) => {
+        concat!(
+            "AND length(CAST(n.summary_id AS BLOB)) <= ",
+            $id,
+            "
+      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ",
+            $anchor,
+            "
+      AND length(CAST(n.session_id AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(authority_session.provider AS BLOB)) <= ",
+            $text,
+            "
+      AND length(CAST(n.summary_id AS BLOB))
+          + length(CAST(n.summary_anchor_id AS BLOB))
+          + length(CAST(n.session_id AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ",
+            $sum,
+            "
+      AND length(CAST(n.summary_id AS BLOB))
+          + length(CAST(n.session_id AS BLOB)) + 9 <= ",
+            $cursor
+        )
+    };
+}
+
+macro_rules! derived_keyset {
+    ($time:literal, $id:literal) => {
+        concat!(
+            "AND (
+          first_occurrence.knowledge_at < ",
+            $time,
+            "
+          OR (
+              first_occurrence.knowledge_at = ",
+            $time,
+            "
+              AND evidence.evidence_id > ",
+            $id,
+            "
+          )
+      )"
+        )
+    };
+}
+
+macro_rules! derived_root_keyset {
+    ($time:literal, $session:literal, $id:literal) => {
+        concat!(
+            "AND (
+          first_occurrence.knowledge_at < ",
+            $time,
+            "
+          OR (
+              first_occurrence.knowledge_at = ",
+            $time,
+            "
+              AND (
+                  evidence.session_id > ",
+            $session,
+            "
+                  OR (
+                      evidence.session_id = ",
+            $session,
+            "
+                      AND evidence.evidence_id > ",
+            $id,
+            "
+                  )
+              )
+          )
+      )"
+        )
+    };
+}
+
 pub(super) const EXACT_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
@@ -114,7 +314,9 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = concat!(
     WHERE o.session_id = ?1 AND o.generation = ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND instr(o.snippet_text, ?4) > 0
-      AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
+      ",
+    occurrence_keyset!("?5", "?6"),
+    "
       ",
     occurrence_row_length_bounds!("?7", "?8", "?9", "?10"),
     "
@@ -131,7 +333,9 @@ pub(super) const SCOPE_CANDIDATE_QUERY: &str = concat!(
     FROM session_occurrences AS o
     WHERE o.session_id = ?1 AND o.generation = ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
-      AND (o.knowledge_at < ?4 OR (o.knowledge_at = ?4 AND o.occurrence_id > ?5))
+      ",
+    occurrence_keyset!("?4", "?5"),
+    "
       ",
     occurrence_row_length_bounds!("?6", "?7", "?8", "?9"),
     "
@@ -160,23 +364,12 @@ pub(super) const SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
       AND a.availability <> 'unavailable'
-      AND (n.created_at < ?4 OR (n.created_at = ?4 AND n.summary_id > ?5))
-      AND length(CAST(n.summary_id AS BLOB)) <= ?6
-      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
-      AND length(CAST(n.session_id AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(
-          ",
-    summary_publication_provider!(),
-    ", ''
-      ) AS BLOB)) <= ?8
-      AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.summary_anchor_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB))
-          + length(CAST(COALESCE(
-              ",
-    summary_publication_provider!(),
-    ", ''
-          ) AS BLOB)) <= ?9
+      ",
+    summary_keyset!("?4", "?5"),
+    "
+      ",
+    summary_row_length_bounds!("?6", "?7", "?8", "?9"),
+    "
     ORDER BY n.created_at DESC, n.summary_id
     LIMIT ?10"
 );
@@ -231,16 +424,9 @@ pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
       AND ",
     anchor_owner_authority_predicate!(),
     "
-      AND (
-          o.knowledge_at < ?4
-          OR (
-              o.knowledge_at = ?4
-              AND (
-                  o.session_id > ?5
-                  OR (o.session_id = ?5 AND o.occurrence_id > ?6)
-              )
-          )
-      )
+      ",
+    occurrence_root_keyset!("?4", "?5", "?6"),
+    "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?7"
 );
@@ -255,7 +441,9 @@ pub(super) const OCCURRENCE_FTS_QUERY: &str = concat!(
     WHERE o.session_id = ?1 AND o.generation = ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND session_occurrences_fts MATCH ?4
-      AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
+      ",
+    occurrence_keyset!("?5", "?6"),
+    "
       ",
     occurrence_row_length_bounds!("?7", "?8", "?9", "?10"),
     "
@@ -272,7 +460,9 @@ pub(super) const TIME_CANDIDATE_QUERY: &str = concat!(
     WHERE o.session_id = ?1 AND o.generation = ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND o.knowledge_at >= ?4 AND o.knowledge_at < ?5
-      AND (o.knowledge_at < ?6 OR (o.knowledge_at = ?6 AND o.occurrence_id > ?7))
+      ",
+    occurrence_keyset!("?6", "?7"),
+    "
       ",
     occurrence_row_length_bounds!("?8", "?9", "?10", "?11"),
     "
@@ -296,23 +486,12 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = concat!(
     WHERE n.session_id = ?1
       AND session_summary_nodes_fts MATCH ?3
       AND a.availability <> 'unavailable'
-      AND (n.created_at < ?4 OR (n.created_at = ?4 AND n.summary_id > ?5))
-      AND length(CAST(n.summary_id AS BLOB)) <= ?6
-      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
-      AND length(CAST(n.session_id AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(
-          ",
-    summary_publication_provider!(),
-    ", ''
-      ) AS BLOB)) <= ?8
-      AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.summary_anchor_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB))
-          + length(CAST(COALESCE(
-              ",
-    summary_publication_provider!(),
-    ", ''
-          ) AS BLOB)) <= ?9
+      ",
+    summary_keyset!("?4", "?5"),
+    "
+      ",
+    summary_row_length_bounds!("?6", "?7", "?8", "?9"),
+    "
     ORDER BY n.created_at DESC, n.summary_id
     LIMIT ?10"
 );
@@ -338,22 +517,15 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR o.source_provider = ?2)
       AND instr(o.snippet_text, ?3) > 0
-      AND (
-          o.knowledge_at < ?4
-          OR (
-              o.knowledge_at = ?4
-              AND (
-                  o.session_id > ?5
-                  OR (o.session_id = ?5 AND o.occurrence_id > ?6)
-              )
-          )
-      )
+      ",
+    occurrence_root_keyset!("?4", "?5", "?6"),
+    "
       ",
     occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
     "
       AND length(CAST(o.snippet_text AS BLOB)) <= ?12
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
+      ",
+    root_occurrence_cursor_bound!("?11"),
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?13"
 );
@@ -380,21 +552,14 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR o.source_provider = ?2)
       AND session_occurrences_fts MATCH ?3
-      AND (
-          o.knowledge_at < ?4
-          OR (
-              o.knowledge_at = ?4
-              AND (
-                  o.session_id > ?5
-                  OR (o.session_id = ?5 AND o.occurrence_id > ?6)
-              )
-          )
-      )
+      ",
+    occurrence_root_keyset!("?4", "?5", "?6"),
+    "
       ",
     occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
     "
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
+      ",
+    root_occurrence_cursor_bound!("?11"),
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?12"
 );
@@ -420,21 +585,14 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR o.source_provider = ?2)
       AND o.knowledge_at >= ?3 AND o.knowledge_at < ?4
-      AND (
-          o.knowledge_at < ?5
-          OR (
-              o.knowledge_at = ?5
-              AND (
-                  o.session_id > ?6
-                  OR (o.session_id = ?6 AND o.occurrence_id > ?7)
-              )
-          )
-      )
+      ",
+    occurrence_root_keyset!("?5", "?6", "?7"),
+    "
       ",
     occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
     "
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.session_id AS BLOB)) + 9 <= ?12
+      ",
+    root_occurrence_cursor_bound!("?12"),
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?13"
 );
@@ -466,26 +624,12 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     "
       AND session_summary_nodes_fts MATCH ?2
       AND a.availability <> 'unavailable'
-      AND (
-          n.created_at < ?3
-          OR (
-              n.created_at = ?3
-              AND (
-                  n.session_id > ?4
-                  OR (n.session_id = ?4 AND n.summary_id > ?5)
-              )
-          )
-      )
-      AND length(CAST(n.summary_id AS BLOB)) <= ?6
-      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
-      AND length(CAST(n.session_id AS BLOB)) <= ?8
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?8
-      AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.summary_anchor_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?9
-      AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB)) + 9 <= ?10
+      ",
+    summary_root_keyset!("?3", "?4", "?5"),
+    "
+      ",
+    summary_row_length_bounds!(root: "?6", "?7", "?8", "?9", "?10"),
+    "
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
     LIMIT ?11"
 );
@@ -521,31 +665,18 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR authority_session.provider = ?2)
       AND a.availability <> 'unavailable'
-      AND (
-          n.created_at < ?3
-          OR (
-              n.created_at = ?3
-              AND (
-                  n.session_id > ?4
-                  OR (n.session_id = ?4 AND n.summary_id > ?5)
-              )
-          )
-      )
-      AND length(CAST(n.summary_id AS BLOB)) <= ?6
-      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
-      AND length(CAST(n.session_id AS BLOB)) <= ?8
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?8
-      AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.summary_anchor_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?9
-      AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB)) + 9 <= ?10
+      ",
+    summary_root_keyset!("?3", "?4", "?5"),
+    "
+      ",
+    summary_row_length_bounds!(root: "?6", "?7", "?8", "?9", "?10"),
+    "
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
     LIMIT ?11"
 );
 
-pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
+pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
+    "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
            CASE WHEN evidence.member_count = 1
@@ -575,15 +706,12 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
             AND member.evidence_id = evidence.evidence_id
             AND session_occurrences_fts MATCH ?5
       )
-      AND (
-          first_occurrence.knowledge_at < ?6
-          OR (
-              first_occurrence.knowledge_at = ?6
-              AND evidence.evidence_id > ?7
-          )
-      )
+      ",
+    derived_keyset!("?6", "?7"),
+    "
     ORDER BY first_occurrence.knowledge_at DESC, evidence.evidence_id
-    LIMIT ?8";
+    LIMIT ?8"
+);
 
 // Fresh stores have no planner statistics. CROSS JOIN pins authorized sessions
 // as the outer loop so SQLite probes evidence by session/generation/kind instead
@@ -631,19 +759,9 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
       AND ",
     anchor_owner_authority_predicate!(),
     "
-      AND (
-          first_occurrence.knowledge_at < ?5
-          OR (
-              first_occurrence.knowledge_at = ?5
-              AND (
-                  evidence.session_id > ?6
-                  OR (
-                      evidence.session_id = ?6
-                      AND evidence.evidence_id > ?7
-                  )
-              )
-          )
-      )
+      ",
+    derived_root_keyset!("?5", "?6", "?7"),
+    "
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
     LIMIT ?8"
 );

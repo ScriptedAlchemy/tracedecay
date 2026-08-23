@@ -18,7 +18,7 @@ pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
 pub const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
-pub(super) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
+pub(super) use crate::UNIX_TIMESTAMP_MILLIS_THRESHOLD;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct CanonicalSourceBinding {
