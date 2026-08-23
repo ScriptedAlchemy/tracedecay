@@ -608,6 +608,7 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
 /// `expected_recovered_digest`, a verified head's digest, or a digest the
 /// caller computed from the manifest once). Verification never
 /// re-canonicalizes the manifest itself.
+#[hotpath::measure(label = "graph_db.generation.recover.verify")]
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
     manifest: &GraphGenerationManifest,

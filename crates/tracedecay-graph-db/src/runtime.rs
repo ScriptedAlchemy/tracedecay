@@ -171,6 +171,7 @@ impl GraphDb {
     ///
     /// The result identifies this handle's native state only; callers keep
     /// canonical projection inputs independently and can rebuild the index.
+    #[hotpath::measure(label = "graph_db.write.apply", impl_type = "GraphDb")]
     pub fn apply_unverified(
         &self,
         mut batch: GraphWriteBatch,
@@ -218,6 +219,7 @@ impl GraphDb {
         )
     }
 
+    #[hotpath::measure(label = "graph_db.write.replace", impl_type = "GraphDb")]
     fn replace_projection_unverified_inner(
         &self,
         replacement: ProjectionReplacement,
@@ -303,6 +305,7 @@ impl GraphDb {
     ///
     /// This is local replay metadata for a rebuildable graph projection, not
     /// publication to a durable source-of-truth authority.
+    #[hotpath::measure(label = "graph_db.write.publish", impl_type = "GraphDb")]
     pub fn publish_unverified(
         &self,
         mut publication_request: GraphPublication,
@@ -511,6 +514,7 @@ impl GraphDb {
         )
     }
 
+    #[hotpath::measure(label = "graph_db.search.vector", impl_type = "GraphDb")]
     pub fn vector_search(
         &self,
         request: VectorSearchRequest,

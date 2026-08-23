@@ -722,6 +722,7 @@ impl GraphDbRegistry {
         self.recover_verified_snapshot_with_operation(&operation, authority, context, projection)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.recover", impl_type = "GraphDbRegistry")]
     fn recover_verified_snapshot_with_operation(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -754,6 +755,10 @@ impl GraphDbRegistry {
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.recover.historical",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn verified_generation_snapshot(
         &self,
         registration: GraphDbRegistration,

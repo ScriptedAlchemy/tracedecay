@@ -122,6 +122,7 @@ impl GraphDb {
     /// Reads one bounded exact-label page from a projection-scoped native
     /// label index. The total counts only entities carrying this exact label;
     /// reference-only nodes in the same projection are excluded.
+    #[hotpath::measure(label = "graph_db.search.label", impl_type = "GraphDb")]
     pub fn projection_entities_by_label(
         &self,
         namespace: &GraphNamespace,
