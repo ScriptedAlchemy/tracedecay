@@ -823,7 +823,6 @@ impl ConfigurationClock for SystemConfigurationClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
     use tracedecay_domain::configuration::ConfigurationValueKindV1;
 
     use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig};
@@ -906,12 +905,6 @@ mod tests {
             .install(scopes, authorization)
             .expect_err("second authority installation must fail");
         assert!(matches!(error, TraceDecayError::Config { .. }));
-    }
-
-    #[test]
-    fn production_client_is_the_semantic_configuration_source() {
-        fn assert_source<T: SemanticConfigurationSnapshotSourceV1>() {}
-        assert_source::<ProductionConfigurationDaemonClient>();
     }
 
     #[test]

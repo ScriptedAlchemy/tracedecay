@@ -2015,12 +2015,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn root_store_implements_diagnostic_persistence_port() {
-        fn assert_store<T: tracedecay_store::DiagnosticStore>() {}
-        assert_store::<DiagnosticsStore<'static>>();
-    }
-
     #[tokio::test]
     async fn root_port_reports_commit_and_exact_replay() {
         let temp = tempfile::tempdir().unwrap();

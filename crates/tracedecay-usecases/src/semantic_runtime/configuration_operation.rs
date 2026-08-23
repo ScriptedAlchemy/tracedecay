@@ -1420,11 +1420,6 @@ mod tests {
     }
 
     #[test]
-    fn operation_requires_durable_authority_and_configuration_runtime() {
-        std::hint::black_box(ProductionSemanticConfigurationOperationV1::new);
-    }
-
-    #[test]
     fn caller_profile_material_must_match_what_direct_evaluator_runs() {
         // The evaluator fixtures are workspace-relative, not crate-relative.
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))

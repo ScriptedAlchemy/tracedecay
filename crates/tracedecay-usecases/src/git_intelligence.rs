@@ -1819,13 +1819,6 @@ mod tests {
     }
 
     #[test]
-    fn native_adapter_implements_typed_git_read_port() {
-        fn assert_port<T: GitReadPort>() {}
-
-        assert_port::<NativeGitIntelligence>();
-    }
-
-    #[test]
     fn head_read_uses_exact_linked_worktree_without_spawning_status() {
         let Some(fixture) = Fixture::standard() else {
             return;

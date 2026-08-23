@@ -1905,14 +1905,11 @@ mod tests {
         EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
     };
 
-    fn assert_object_safe(_: &dyn PrimitiveDispatch) {}
-    fn assert_extended_object_safe(_: &dyn ExtendedPrimitivePort) {}
-
-    #[test]
-    fn primitive_dispatch_is_object_safe() {
-        let _ = assert_object_safe;
-        let _ = assert_extended_object_safe;
-    }
+    // These anonymous constants are compile-time object-safety contracts:
+    // rustc rejects either `dyn Trait` parameter if the trait stops being
+    // object safe, without adding runtime tests or unused helper items.
+    const _: fn(&dyn PrimitiveDispatch) = |_| {};
+    const _: fn(&dyn ExtendedPrimitivePort) = |_| {};
 
     #[test]
     fn transport_pre_admission_problems_are_canonical() {
