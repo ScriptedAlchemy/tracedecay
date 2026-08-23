@@ -7,7 +7,7 @@
  * render a lane condition rather than deciding one.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   ExplorerQueryRunV1Schema,
   ExplorerReadContextV1Schema,
@@ -15,6 +15,7 @@ import {
   GraphOverviewPayloadV1Schema,
   LcmOverviewPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
+  type DashboardDomainStateV1,
   type ExplorerQueryRunV1,
   type ExplorerReadContextV1,
   type ExplorerSessionSizeV1,
@@ -81,6 +82,33 @@ function readSessionContext(
   );
 }
 
+/* ------------------------------------------------------- run-status polling */
+
+/**
+ * Transport states a repeat read can clear on its own: the daemon was
+ * unreachable, answered a bare non-2xx, or said it had nothing ready yet.
+ *
+ * Every other transport state is a standing condition — a refusal
+ * (`unauthorized`, `denied`), a scope that will not serve the read (`locked`),
+ * a body this client cannot read (`unsupported_schema`) — and re-asking gets
+ * the same answer, so the poll stops and the state is rendered.
+ */
+const RETRYABLE_TRANSPORT_STATES: ReadonlySet<DashboardDomainStateV1> = new Set<
+  DashboardDomainStateV1
+>(['offline', 'error', 'loading']);
+
+/**
+ * Consecutive retryable failures a pending run tolerates before the poll gives
+ * up. Bounded on purpose: an admitted run is the only thing this query is
+ * waiting on, and a daemon that has been unreachable for this many slow ticks
+ * is a condition the reader must see rather than one to keep re-asking.
+ */
+const TRANSPORT_RETRY_LIMIT = 4;
+
+/** The slow tick a retried read uses — long enough for a daemon restart to
+ * finish, slow enough that an offline daemon is not hammered. */
+const TRANSPORT_RETRY_MS = 2000;
+
 /* -------------------------------------------------------------- controller */
 
 export interface ExplorerFacet {
@@ -141,17 +169,33 @@ export function useExplorerController(): ExplorerController {
     },
   });
   const activeRunIdForQuery = activeRunId ?? '';
+  // `fetchEnvelope` reports a transport failure as data rather than throwing,
+  // so react-query's own failure count never moves and cannot bound the retry
+  // below. This is that count, reset by the first read that lands an envelope.
+  const transportFailures = useRef(0);
   const runStatus = useQuery({
     queryKey: ['explorer', 'query-run', activeRunIdForQuery],
-    queryFn: () => readPlannerQuery(activeRunIdForQuery),
+    queryFn: async () => {
+      const result = await readPlannerQuery(activeRunIdForQuery);
+      transportFailures.current = result.outcome === 'transport' ? transportFailures.current + 1 : 0;
+      return result;
+    },
     enabled: activeRunIdForQuery !== '',
     refetchInterval: (queryState) => {
       const result = queryState.state.data;
       // No data yet: the first read has not landed, keep the fast tick.
       if (result === undefined) return 250;
-      // A transport failure (daemon offline, refused read) is a state to
-      // render, not a condition to poll at 4 Hz indefinitely.
-      if (result.outcome === 'transport') return false;
+      if (result.outcome === 'transport') {
+        // This poll is the only thing that resolves an admitted run — run
+        // completion publishes no targeted invalidation — so a transport
+        // failure that a repeat read could clear must not end it, or a run
+        // that is still progressing never surfaces. The retry is slow and
+        // bounded; past the bound, and for any standing refusal, the poll
+        // stops and the failure is left on screen rather than hidden behind
+        // an indefinite spinner.
+        if (!RETRYABLE_TRANSPORT_STATES.has(result.state)) return false;
+        return transportFailures.current >= TRANSPORT_RETRY_LIMIT ? false : TRANSPORT_RETRY_MS;
+      }
       if (runIsTerminal(result.envelope.payload.state)) return false;
       // A long-pending run escalates off the fast tick rather than holding
       // 250 ms for its whole life: 250 ms → 1 s → 2 s.
@@ -242,6 +286,7 @@ export function useExplorerController(): ExplorerController {
     setQuery('');
     setSubmitted('');
     setActiveRunId(null);
+    transportFailures.current = 0;
     planner.reset();
     setFacet(null);
     setSelected(null);
@@ -281,6 +326,9 @@ export function useExplorerController(): ExplorerController {
       if (nextQuery === '') return;
       setSubmitted(nextQuery);
       setActiveRunId(null);
+      // A fresh run gets the whole retry budget: the previous run's failures
+      // are not this one's.
+      transportFailures.current = 0;
       planner.reset();
       planner.mutate(nextQuery);
       setFacet(null);
