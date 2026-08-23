@@ -205,68 +205,62 @@ fn malformed_structured_input_is_quarantined_after_a_best_effort_raw_redaction()
     );
 }
 
-fn assert_structured_input_is_quarantined(raw: &str) {
+fn assert_structured_input_is_quarantined(case: &str, raw: &str) {
     let scanned = sanitize_structured_text(raw).expect("structured scan returns quarantine");
     assert!(
         scanned.quarantine_findings().iter().any(|finding| {
             finding.detector() == PrivacyDetectorV1::MalformedRecord
                 && finding.action() == SanitizationActionV1::Quarantined
         }),
-        "structured-looking input must not downgrade to a raw-only scan"
+        "{case}: structured-looking input must not downgrade to a raw-only scan"
     );
     assert!(
         sanitize_provider_metadata_text(raw).is_none(),
-        "quarantined provider metadata must not be persisted"
+        "{case}: quarantined provider metadata must not be persisted"
     );
 }
 
+/// Every malformed shape that must quarantine rather than degrade to a raw
+/// sweep. Each case carries its format name so a failure still names the shape
+/// that broke. The table is a fixed-size array: it can never iterate empty.
 #[test]
-fn malformed_yaml_with_an_ordinary_sensitive_value_is_quarantined() {
-    let raw = format!("vault_passphrase: {PLACEHOLDER}\n  broken: [unclosed\n");
-    assert!(raw_sweep(&raw).contains(PLACEHOLDER));
+fn malformed_structured_shapes_with_ordinary_sensitive_values_are_quarantined() {
+    let cases: [(&str, String); 6] = [
+        (
+            "malformed yaml (unclosed sequence)",
+            format!("vault_passphrase: {PLACEHOLDER}\n  broken: [unclosed\n"),
+        ),
+        (
+            "malformed toml table",
+            format!("[vault]\nvault_passphrase = {PLACEHOLDER}\nbroken = [\n"),
+        ),
+        (
+            "malformed dotenv assignment",
+            format!("VAULT_PASSPHRASE={PLACEHOLDER}\nthis is not an assignment\n"),
+        ),
+        (
+            "malformed toml assignment",
+            format!("vault_passphrase = \"{PLACEHOLDER}\"\nthis is not TOML\n"),
+        ),
+        (
+            "duplicate json sensitive keys",
+            format!(
+                r#"{{"vault_passphrase":"{PLACEHOLDER}","vault_passphrase":"safe-replacement"}}"#
+            ),
+        ),
+        (
+            "duplicate yaml sensitive keys",
+            format!("vault_passphrase: {PLACEHOLDER}\nvault_passphrase: safe-replacement\n"),
+        ),
+    ];
 
-    assert_structured_input_is_quarantined(&raw);
-}
-
-#[test]
-fn malformed_toml_table_with_an_ordinary_sensitive_value_is_quarantined() {
-    let raw = format!("[vault]\nvault_passphrase = {PLACEHOLDER}\nbroken = [\n");
-    assert!(raw_sweep(&raw).contains(PLACEHOLDER));
-
-    assert_structured_input_is_quarantined(&raw);
-}
-
-#[test]
-fn malformed_dotenv_assignment_with_an_ordinary_sensitive_value_is_quarantined() {
-    let raw = format!("VAULT_PASSPHRASE={PLACEHOLDER}\nthis is not an assignment\n");
-    assert!(raw_sweep(&raw).contains(PLACEHOLDER));
-
-    assert_structured_input_is_quarantined(&raw);
-}
-
-#[test]
-fn malformed_toml_assignment_with_an_ordinary_sensitive_value_is_quarantined() {
-    let raw = format!("vault_passphrase = \"{PLACEHOLDER}\"\nthis is not TOML\n");
-    assert!(raw_sweep(&raw).contains(PLACEHOLDER));
-
-    assert_structured_input_is_quarantined(&raw);
-}
-
-#[test]
-fn duplicate_json_sensitive_keys_are_quarantined_before_value_materialization() {
-    let raw =
-        format!(r#"{{"vault_passphrase":"{PLACEHOLDER}","vault_passphrase":"safe-replacement"}}"#);
-    assert!(raw_sweep(&raw).contains(PLACEHOLDER));
-
-    assert_structured_input_is_quarantined(&raw);
-}
-
-#[test]
-fn duplicate_yaml_sensitive_keys_are_quarantined_before_value_materialization() {
-    let raw = format!("vault_passphrase: {PLACEHOLDER}\nvault_passphrase: safe-replacement\n");
-    assert!(raw_sweep(&raw).contains(PLACEHOLDER));
-
-    assert_structured_input_is_quarantined(&raw);
+    for (format_name, raw) in &cases {
+        assert!(
+            raw_sweep(raw).contains(PLACEHOLDER),
+            "{format_name}: the raw sweep already caught this value, so the parse proves nothing"
+        );
+        assert_structured_input_is_quarantined(format_name, raw);
+    }
 }
 
 #[test]
