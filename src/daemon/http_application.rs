@@ -345,10 +345,12 @@ impl DaemonHttpApplicationRegistry {
             })?
             .clone();
         match remote {
-            Some(remote) => Ok((
-                local.nest("/remote", remote.router),
-                Some(remote.credentials),
-            )),
+            Some(remote) => {
+                let remote_router = crate::application_surface::with_hotpath_server_layer(
+                    Router::new().nest("/remote", remote.router),
+                );
+                Ok((local.merge(remote_router), Some(remote.credentials)))
+            }
             None => Ok((local, None)),
         }
     }
@@ -432,11 +434,14 @@ pub(crate) fn live_remote_operational_status() -> Result<RemoteOperationalStatus
     };
     let origin = format!("http://{endpoint}");
     let url = format!("http://{endpoint}/remote-status");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
-        .build()
-        .into();
+        .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT));
+    #[cfg(feature = "hotpath")]
+    let agent = agent.middleware(hotpath::UreqHttpMiddleware::with_label(
+        "daemon.remote_status",
+    ));
+    let agent: ureq::Agent = agent.build().into();
     let mut response = agent
         .get(&url)
         .header("Authorization", format!("Bearer {auth_token}"))
@@ -772,9 +777,11 @@ impl DaemonHttpApplicationService {
                 Some(RemoteBrainTlsServer {
                     listener,
                     endpoint,
-                    router: Router::new()
-                        .nest("/remote", router)
-                        .layer(middleware::from_fn(force_remote_connection_close)),
+                    router: crate::application_surface::with_hotpath_server_layer(
+                        Router::new()
+                            .nest("/remote", router)
+                            .layer(middleware::from_fn(force_remote_connection_close)),
+                    ),
                     admission,
                     credentials,
                     #[cfg(test)]
@@ -806,18 +813,21 @@ impl DaemonHttpApplicationService {
         active.store(true, Ordering::Release);
         let (shutdown, shutdown_requested) = oneshot::channel();
         let task_active = Arc::clone(&active);
-        let task = tokio::spawn(async move {
-            let result = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_requested.await;
-                })
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("daemon HTTP application service failed: {error}"),
-                });
-            task_active.store(false, Ordering::Release);
-            result
-        });
+        let task = tokio::spawn(hotpath::future!(
+            async move {
+                let result = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_requested.await;
+                    })
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("daemon HTTP application service failed: {error}"),
+                    });
+                task_active.store(false, Ordering::Release);
+                result
+            },
+            label = "daemon.http.application_listener"
+        ));
         let mut remote_tls_endpoint = None;
         let mut remote_tls_shutdown = None;
         let mut remote_tls_task = None;
@@ -834,16 +844,19 @@ impl DaemonHttpApplicationService {
                 remote_tls_egress = Some(server.egress);
             }
             let listener_state = server.credentials;
-            remote_tls_task = Some(tokio::spawn(async move {
-                let result =
-                    serve_remote_brain_tls(server.listener, server.router, shutdown_requested)
-                        .await;
-                match &result {
-                    Ok(()) => listener_state.publish_listener_stopped(),
-                    Err(_) => listener_state.publish_listener_degraded(),
-                }
-                result
-            }));
+            remote_tls_task = Some(tokio::spawn(hotpath::future!(
+                async move {
+                    let result =
+                        serve_remote_brain_tls(server.listener, server.router, shutdown_requested)
+                            .await;
+                    match &result {
+                        Ok(()) => listener_state.publish_listener_stopped(),
+                        Err(_) => listener_state.publish_listener_degraded(),
+                    }
+                    result
+                },
+                label = "daemon.http.remote_tls_listener"
+            )));
         }
         #[cfg(not(test))]
         drop(remote_tls_admission);
@@ -1123,9 +1136,12 @@ async fn serve_remote_brain_tls(
                 if let Some((io, address)) = accepted {
                     let router = router.clone();
                     let graceful = graceful.clone();
-                    connections.spawn(async move {
-                        serve_remote_brain_tls_connection(io, router, graceful, address).await;
-                    });
+                    connections.spawn(hotpath::future!(
+                        async move {
+                            serve_remote_brain_tls_connection(io, router, graceful, address).await;
+                        },
+                        label = "daemon.http.remote_tls_connection"
+                    ));
                 }
             }
         }

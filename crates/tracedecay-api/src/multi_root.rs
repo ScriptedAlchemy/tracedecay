@@ -61,15 +61,15 @@ pub fn multi_root_application_router<O>(owner: O) -> Router
 where
     O: MultiRootApplicationOwner,
 {
-    let router = Router::new()
+    Router::new()
         .route("/multi-root/scope-set/read", post(scope_set_read::<O>))
         .route(
             "/multi-root/scope-set/compare-and-swap",
             post(scope_set_compare_and_swap::<O>),
         )
         .route("/multi-root/execute", post(execute::<O>))
-        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES));
-    crate::observe::with_hotpath_server_layer(router).with_state(owner)
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
+        .with_state(owner)
 }
 
 constant_operation_handlers! {
