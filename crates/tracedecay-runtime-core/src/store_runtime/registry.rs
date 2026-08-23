@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_store::{
@@ -36,6 +36,7 @@ use tracedecay_store::{
 use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
@@ -1511,7 +1512,11 @@ struct StoreRuntimeRegistryInner {
     resolver: Arc<dyn StoreRuntimeResolver>,
     publisher: Arc<dyn ShardRuntimePublisher>,
     config: StoreRuntimeRegistryConfig,
-    state: Mutex<RegistryState>,
+    /// One process-wide lock guarding every registry entry, publication, and
+    /// pin token. Every lookup, open, lease, eviction, and destructive
+    /// reservation funnels through `lock_state`, so it is the coarsest lock in
+    /// the store runtime and the first place cross-shard queueing shows up.
+    state: ProfiledMutex<RegistryState>,
 }
 
 #[derive(Clone)]
@@ -1529,7 +1534,10 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config: StoreRuntimeRegistryConfig::default(),
-                state: Mutex::new(RegistryState::default()),
+                state: hotpath::mutex!(
+                    Mutex::new(RegistryState::default()),
+                    label = "runtime_core.store_runtime.registry_state"
+                ),
             }),
         }
     }
@@ -1557,7 +1565,10 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config,
-                state: Mutex::new(RegistryState::default()),
+                state: hotpath::mutex!(
+                    Mutex::new(RegistryState::default()),
+                    label = "runtime_core.store_runtime.registry_state"
+                ),
             }),
         })
     }
@@ -1774,7 +1785,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, RegistryState> {
+    fn lock_state(&self) -> ProfiledMutexGuard<'_, RegistryState> {
         self.inner
             .state
             .lock()

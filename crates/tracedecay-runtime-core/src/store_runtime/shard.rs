@@ -5,13 +5,14 @@
 //! lifecycle and writer-presence guard.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::UtcMicros;
 
 use super::utc_now;
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 use tracedecay_store::{
     RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, RuntimeMaintenanceTransitionV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
@@ -199,7 +200,6 @@ pub struct ShardRuntimeObservation {
 }
 
 /// The one concrete runtime object retained for a published binding.
-#[derive(Debug)]
 pub struct ShardRuntime {
     binding: StoreRuntimeBindingV1,
     /// Monotonic per-process instance number. Distinguishes a runtime that was
@@ -207,7 +207,22 @@ pub struct ShardRuntime {
     /// the predecessor's address — pointer identity is ABA-prone the moment
     /// the old `Arc` is dropped.
     instance_id: u64,
-    state: Mutex<ShardRuntimeState>,
+    /// Every lease acquire and release, every queue-depth update, and every
+    /// telemetry observation for this shard takes this one lock, so it is the
+    /// per-shard serialization point under concurrent operation load.
+    state: ProfiledMutex<ShardRuntimeState>,
+}
+
+/// Hand-written because the instrumented lock wrapper has no `Debug`; the
+/// state behind the lock is never printed anyway, since formatting it would
+/// have to acquire the lock being described.
+impl std::fmt::Debug for ShardRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardRuntime")
+            .field("binding", &self.binding)
+            .field("instance_id", &self.instance_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -240,27 +255,30 @@ impl ShardRuntime {
         Self {
             binding,
             instance_id: NEXT_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            state: Mutex::new(ShardRuntimeState {
-                maintenance_state: RuntimeMaintenanceStateV1::Closed,
-                pinned_profile,
-                writer_present: false,
-                queued_operations: 0,
-                queued_bytes: 0,
-                general_reader_leases: 0,
-                health_reader_leases: 0,
-                snapshot_leases: 0,
-                watcher_leases: 0,
-                scheduler_leases: 0,
-                client_leases: 0,
-                client_lifetime_leases: BTreeMap::new(),
-                operation_lifetime_leases: BTreeMap::new(),
-                next_lifetime_lease_token: 0,
-                runtime_leases: BTreeMap::new(),
-                wal_bytes: 0,
-                memory_estimate_bytes: 0,
-                last_activity: Instant::now(),
-                health: ShardRuntimeHealth::Unknown,
-            }),
+            state: hotpath::mutex!(
+                Mutex::new(ShardRuntimeState {
+                    maintenance_state: RuntimeMaintenanceStateV1::Closed,
+                    pinned_profile,
+                    writer_present: false,
+                    queued_operations: 0,
+                    queued_bytes: 0,
+                    general_reader_leases: 0,
+                    health_reader_leases: 0,
+                    snapshot_leases: 0,
+                    watcher_leases: 0,
+                    scheduler_leases: 0,
+                    client_leases: 0,
+                    client_lifetime_leases: BTreeMap::new(),
+                    operation_lifetime_leases: BTreeMap::new(),
+                    next_lifetime_lease_token: 0,
+                    runtime_leases: BTreeMap::new(),
+                    wal_bytes: 0,
+                    memory_estimate_bytes: 0,
+                    last_activity: Instant::now(),
+                    health: ShardRuntimeHealth::Unknown,
+                }),
+                label = "runtime_core.store_runtime.shard_state"
+            ),
         }
     }
 
@@ -604,7 +622,7 @@ impl ShardRuntime {
         state.touch();
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, ShardRuntimeState> {
+    fn lock_state(&self) -> ProfiledMutexGuard<'_, ShardRuntimeState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

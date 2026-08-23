@@ -1,18 +1,25 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlReadSnapshot;
 
 use super::{IntoParams, Result, Rows, Value, connection::statement};
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 pub struct ReadSnapshot {
-    runtime: Arc<Mutex<ExactSqlReadSnapshot>>,
+    /// Serializes every read issued against one snapshot. A snapshot handed to
+    /// several concurrent readers funnels all of them through this one lock,
+    /// so a single slow statement stalls the rest.
+    runtime: Arc<ProfiledMutex<ExactSqlReadSnapshot>>,
 }
 
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
         hotpath::gauge!("runtime_core.db.snapshots_active").inc(1.0);
         Self {
-            runtime: Arc::new(Mutex::new(runtime)),
+            runtime: Arc::new(hotpath::mutex!(
+                Mutex::new(runtime),
+                label = "runtime_core.db.read_snapshot_runtime"
+            )),
         }
     }
 
@@ -47,7 +54,7 @@ impl Drop for ReadSnapshot {
     }
 }
 
-fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
+fn lock_runtime<T>(runtime: &ProfiledMutex<T>) -> Result<ProfiledMutexGuard<'_, T>> {
     runtime
         .lock()
         .map_err(|_| super::Error::Runtime("exact SQL read snapshot lock poisoned".to_owned()))
@@ -65,7 +72,7 @@ mod tests {
 
     #[test]
     fn poisoned_snapshot_lock_returns_a_typed_error() {
-        let runtime = Mutex::new(());
+        let runtime = hotpath::mutex!(Mutex::new(()), label = "test.read_snapshot_runtime");
         let _ = std::panic::catch_unwind(|| {
             let _guard = runtime.lock().unwrap();
             panic!("poison snapshot lock");

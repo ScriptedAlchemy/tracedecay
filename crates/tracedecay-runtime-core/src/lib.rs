@@ -92,6 +92,7 @@ pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
 pub mod privacy;
+mod profiled_lock;
 pub mod project_registry;
 pub mod redundancy;
 pub mod resident_memory;

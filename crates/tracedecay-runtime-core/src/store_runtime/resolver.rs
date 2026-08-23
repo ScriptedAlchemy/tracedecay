@@ -16,7 +16,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock};
 
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -30,6 +30,7 @@ use super::registry::{
     ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
     StoreRuntimeRegistryFuture, StoreRuntimeResolver,
 };
+use crate::profiled_lock::{ProfiledRwLock, ProfiledRwLockReadGuard, ProfiledRwLockWriteGuard};
 use crate::storage;
 
 mod graph;
@@ -163,19 +164,42 @@ pub enum LocalCodeStoreAuthorityRegistrationOutcomeV1 {
 /// project sessions database. Worktree/snapshot code shards need a separately
 /// typed graph-scope authority and are returned as unavailable rather than
 /// guessed from a branch name or path.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LocalStoreRuntimeResolverV1 {
     profile_authority: LocalProfileStoreAuthorityV1,
-    project_authorities: Arc<RwLock<BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>>>,
-    code_authorities: Arc<RwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
+    /// Read on every project resolution and written only by enrollment, so a
+    /// read here that waits is a registrant holding the map against the
+    /// resolve path.
+    project_authorities:
+        Arc<ProfiledRwLock<BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>>>,
+    /// Read on every code-shard resolution; also written by retirement, which
+    /// is the writer that can starve concurrent resolves.
+    code_authorities: Arc<ProfiledRwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
+}
+
+/// Hand-written because the instrumented lock wrapper has no `Debug`. The
+/// authority maps are omitted rather than printed, since formatting them would
+/// take the very locks this type exists to hand out.
+impl fmt::Debug for LocalStoreRuntimeResolverV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalStoreRuntimeResolverV1")
+            .field("profile_authority", &self.profile_authority)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalStoreRuntimeResolverV1 {
     pub fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
         Self {
             profile_authority,
-            project_authorities: Arc::new(RwLock::new(BTreeMap::new())),
-            code_authorities: Arc::new(RwLock::new(BTreeMap::new())),
+            project_authorities: Arc::new(hotpath::rw_lock!(
+                RwLock::new(BTreeMap::new()),
+                label = "runtime_core.store_runtime.resolver_project_authorities"
+            )),
+            code_authorities: Arc::new(hotpath::rw_lock!(
+                RwLock::new(BTreeMap::new()),
+                label = "runtime_core.store_runtime.resolver_code_authorities"
+            )),
         }
     }
 
@@ -266,7 +290,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn project_authorities_read(
         &self,
-    ) -> RwLockReadGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
+    ) -> ProfiledRwLockReadGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
         self.project_authorities
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -274,7 +298,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn project_authorities_write(
         &self,
-    ) -> RwLockWriteGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
+    ) -> ProfiledRwLockWriteGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
         self.project_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -282,7 +306,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn code_authorities_read(
         &self,
-    ) -> RwLockReadGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
+    ) -> ProfiledRwLockReadGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
         self.code_authorities
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -290,7 +314,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn code_authorities_write(
         &self,
-    ) -> RwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
+    ) -> ProfiledRwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
         self.code_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
