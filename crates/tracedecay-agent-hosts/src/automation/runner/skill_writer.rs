@@ -41,6 +41,7 @@ pub struct SkillWriterAutomationOptions {
     pub profile_root: Option<PathBuf>,
 }
 
+#[hotpath::measure(label = "automation_run_skill_writer")]
 pub async fn run_skill_writer_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,

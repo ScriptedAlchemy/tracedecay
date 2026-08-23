@@ -475,6 +475,7 @@ pub(crate) fn task_skip_reason(
     None
 }
 
+#[hotpath::measure(label = "automation_scheduler_gate")]
 async fn scheduler_gate_with_lock_retention(
     config: &AutomationConfig,
     dashboard_root: &Path,
@@ -497,6 +498,7 @@ async fn scheduler_gate_with_lock_retention(
     )
     .await?
     else {
+        super::hotpath::observe_skip_reason("scheduler_lock_active");
         let summary = if scheduled {
             Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
         } else {
@@ -524,9 +526,11 @@ async fn scheduler_gate_with_lock_retention(
         schedule_decision(config, task, summary.records(), activity, decision_now_secs)
     };
     if let Some(reason) = scheduler_skip_reason(&decision, task) {
+        super::hotpath::observe_skip_reason(reason);
         return Ok((SchedulerGate::Skip(reason), Some(summary)));
     }
 
+    super::hotpath::observe_due();
     Ok((SchedulerGate::Proceed(lock), Some(summary)))
 }
 
@@ -893,11 +897,13 @@ impl<'a> AgentRunFinalizer<'a> {
         request: &AgentTaskRequest,
         evidence_hash: Option<String>,
     ) -> Result<BackendTaskRun> {
+        let _startup = super::hotpath::DurationGuard::backend_startup();
         let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
         let mut retry_report = AgentTaskRetryReport::default();
-        match run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
-            .await
-        {
+        match hotpath::measure_block!("automation_backend_startup", {
+            run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
+                .await
+        }) {
             Ok(response) => Ok(BackendTaskRun::Response {
                 response,
                 retry_report,

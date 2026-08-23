@@ -12,6 +12,7 @@ pub mod backend_identity;
 pub mod config;
 pub mod hermes_skill_bridge;
 pub mod host_receipts;
+mod hotpath;
 mod job_webhook;
 pub mod jobs;
 mod lifecycle;

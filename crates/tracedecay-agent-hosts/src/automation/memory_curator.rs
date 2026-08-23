@@ -80,6 +80,7 @@ pub struct MemoryCuratorAutomationRun {
     pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
+#[hotpath::measure(label = "automation_run_memory_curator")]
 pub async fn run_memory_curator_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,

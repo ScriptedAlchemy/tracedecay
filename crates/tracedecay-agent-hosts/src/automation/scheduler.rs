@@ -73,6 +73,7 @@ impl SessionActivity {
 /// This reads from the read-only store using bounded indexed timestamp lookups,
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
 /// ingest writers only ever move the value forward.
+#[hotpath::measure(label = "automation_load_session_activity")]
 pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> SessionActivity {
     SessionActivity {
         last_activity_secs: sessions_db.latest_session_activity_secs().await,
@@ -207,6 +208,10 @@ impl AutomationTaskLock {
     /// Acquires a lock under an arbitrary key. User-defined jobs lock per
     /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
     /// fixed-task lock name.
+    #[hotpath::measure(
+        label = "automation_task_lock_acquire",
+        impl_type = "AutomationTaskLock"
+    )]
     pub async fn try_acquire_keyed(
         dashboard_root: &Path,
         key: &str,
@@ -325,6 +330,7 @@ where
     }
 }
 
+#[hotpath::measure(label = "automation_schedule_decision")]
 pub fn schedule_decision(
     config: &AutomationConfig,
     task: AgentTaskKind,

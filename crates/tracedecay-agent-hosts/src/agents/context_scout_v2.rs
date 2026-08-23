@@ -312,6 +312,7 @@ pub enum ContextScoutErrorV1 {
 /// Deterministically choose at most one candidate without invoking a model,
 /// query, database, or network. Equal scores are ordered by stable dedupe key,
 /// category, and text, so replay is repeatable.
+#[hotpath::measure(label = "context_scout_select_deterministic")]
 pub fn select_deterministic_context_scout(
     input: &ContextScoutSelectionInputV1,
     limits: ContextScoutLimitsV1,
@@ -636,6 +637,7 @@ where
 
 /// Run the model adapter only after constructing the deterministic candidate
 /// lane. Invalid/unavailable output falls back without compromising capture.
+#[hotpath::measure(label = "context_scout_select_model")]
 pub async fn select_model_assisted_context_scout(
     input: &ContextScoutSelectionInputV1,
     limits: ContextScoutLimitsV1,

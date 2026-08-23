@@ -229,6 +229,7 @@ const TEXT_FILE_BUSY: i32 = i32::MIN;
 /// rest of the environment is cleared. This lets an isolated-HOME test drive a
 /// real lifecycle without touching the operator's own configuration or
 /// workspace.
+#[hotpath::measure(label = "host_cli_invoke")]
 pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result<HostCliOutcomeV1> {
     // Resolve the executable before admitting the child working directory.
     // A relative PATH entry is relative to the operator's current directory;

@@ -182,6 +182,7 @@ struct CombinedReviewPublication<'a> {
     skill_guard: Option<&'a AutomationRunSettlementGuard>,
 }
 
+#[hotpath::measure(label = "automation_run_user_session")]
 pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
@@ -191,6 +192,8 @@ pub async fn run_user_session_automation_with_backend(
     options: UserSessionAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> AutomationRunResult<UserSessionAutomationRun> {
+    let _run = super::hotpath::RunningGuard::enter();
+    let _duration = super::hotpath::DurationGuard::run();
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_automation_with_backend_and_retrieval(
         profile_root,
@@ -413,6 +416,7 @@ impl RetainedCombinedReviewRun {
 /// dashboard scheduler status stay coherent — sharing the combined request's
 /// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
 /// `prompt_version` set to the combined contract's version.
+#[hotpath::measure(label = "automation_run_combined_review")]
 pub async fn run_combined_review_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -552,6 +556,7 @@ async fn acquire_combined_task_lock(
     })
 }
 
+#[hotpath::measure(label = "automation_run_combined_review_inner")]
 async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -561,6 +566,8 @@ async fn run_combined_review_for_retrieval(
     run_control: &AutomationRunControl,
     publication: CombinedReviewPublication<'_>,
 ) -> Result<CombinedReviewDispatch> {
+    let _run = super::hotpath::RunningGuard::enter();
+    let _duration = super::hotpath::DurationGuard::run();
     let AutomationTaskIo { backend, retrieval } = io;
     let CombinedReviewPublication {
         ledger: ledger_publication,

@@ -782,6 +782,10 @@ where
         }
     }
 
+    #[hotpath::measure(
+        label = "context_scout_assemble_registered",
+        impl_type = "ContextScoutCanonicalInputAssemblerV1"
+    )]
     pub async fn assemble_registered(
         &self,
         hook: &AdmittedContextScoutHookV1,

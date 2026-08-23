@@ -79,6 +79,10 @@ impl ProjectContextScoutOwnerV1 {
         Some(owner)
     }
 
+    #[hotpath::measure(
+        label = "context_scout_owner_startup",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn startup(
         database: Database,
         project_id: [u8; 16],
@@ -119,6 +123,10 @@ impl ProjectContextScoutOwnerV1 {
         &self.startup
     }
 
+    #[hotpath::measure(
+        label = "context_scout_claim_ready",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn claim_ready_guidance(
         &self,
         hook: &HookEventEnvelopeV2,
@@ -221,6 +229,10 @@ impl ProjectContextScoutOwnerV1 {
         self.store.requeue(claim).await
     }
 
+    #[hotpath::measure(
+        label = "context_scout_record_delivery",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn record_delivery(
         &self,
         claim: &ContextScoutDurableClaimV1,
@@ -393,6 +405,10 @@ impl ProjectContextScoutOwnerV1 {
         self.status_for_control(control).await
     }
 
+    #[hotpath::measure(
+        label = "context_scout_recent",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn recent(
         &self,
         protected_session_id: [u8; 32],

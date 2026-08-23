@@ -345,6 +345,7 @@ fn remove_retired_global_cursor_memory_rule(home: &Path) -> Result<bool> {
     Ok(true)
 }
 
+#[hotpath::measure(label = "cursor_plugin_install")]
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     remove_retired_global_cursor_memory_rule(home)?;
     let install_dir = cursor_plugin_install_dir(home);

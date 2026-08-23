@@ -535,6 +535,7 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
+#[hotpath::measure(label = "codex_plugin_install")]
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = install_codex_personal_bootstrap(home, tracedecay_bin)?;
     eprintln!(

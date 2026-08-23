@@ -428,6 +428,7 @@ fn require_claude_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
+#[hotpath::measure(label = "claude_plugin_activate")]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
     let deploy_dir = plugin_deploy_dir(home);
     let deploy_arg = deploy_dir.to_string_lossy().into_owned();
@@ -460,6 +461,7 @@ fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
 
 /// Run one `claude plugin ...` step, converting a failed invocation into the
 /// host's own diagnosis.
+#[hotpath::measure(label = "claude_plugin_registry_step")]
 fn run_claude_plugin_step(claude: &Path, args: &[&str], home: &Path) -> Result<()> {
     super::host_cli::require_host_cli_success(super::host_cli::run_host_cli(claude, args, home)?)
 }
@@ -509,6 +511,7 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 
 /// Deploy every embedded bundle file into the stable marketplace dir,
 /// stamping the plugin version and substituting the binary path.
+#[hotpath::measure(label = "claude_plugin_deploy")]
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     if std::fs::symlink_metadata(home.join(".claude"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())

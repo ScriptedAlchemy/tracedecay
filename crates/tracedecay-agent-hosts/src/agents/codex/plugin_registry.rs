@@ -107,6 +107,7 @@ fn plugin_selector(marketplace_name: &str) -> String {
 /// MCP servers, or hook-trust records. The exact post-command bytes are
 /// recorded through the active host transaction so rollback can restore the
 /// pre-command document when the command fails or a later step rejects it.
+#[hotpath::measure(label = "codex_plugin_registry_step")]
 fn run_codex_plugin_step(
     codex_cli: &Path,
     args: &[&str],
