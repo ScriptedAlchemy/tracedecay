@@ -1094,11 +1094,11 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
                     "FastEmbed could not initialize the verified artifact",
                     &error,
                 );
-                crate::hotpath::record_embed_error(&failure);
+                crate::hotpath_observe::record_embed_error(&failure);
                 failure
             })
         })?;
-        crate::hotpath::record_model_state("ready");
+        crate::hotpath_observe::record_model_state("ready");
         Ok(FastEmbedEmbeddingSession {
             authority: authority.clone(),
             embedding,
@@ -1145,7 +1145,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
                         "FastEmbed inference failed for the verified artifact",
                         &error,
                     );
-                    crate::hotpath::record_embed_error(&failure);
+                    crate::hotpath_observe::record_embed_error(&failure);
                     failure
                 })
         })?;

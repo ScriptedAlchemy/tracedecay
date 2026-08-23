@@ -43,7 +43,7 @@ pub mod embedding_parallelism;
 mod fastembed_adapter;
 pub use fastembed_adapter::{SemanticExecutionAuthority, SemanticExecutionInterruptionV1};
 mod generation_resume;
-mod hotpath;
+mod hotpath_observe;
 pub use generation_resume::SemanticProjectionResumeOutcomeV1;
 use generation_resume::SemanticProjectionResumeV1;
 use generation_resume::{completed_batch_offset, install_candidate_on_success};

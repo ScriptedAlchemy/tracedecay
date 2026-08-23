@@ -21,14 +21,6 @@ use crate::fastembed_adapter::RuntimeFailureKindV1;
 use crate::model_lifecycle::{ModelLifecycleErrorV1, SemanticModelLifecycleStateV1};
 use crate::session_pool::SessionAcquireError;
 
-// Crate-root `mod hotpath` shadows the profiler crate. Re-export the
-// attribute and its expansion surface so `#[hotpath::measure]` on items
-// in `lib.rs` still instruments. Child modules resolve `hotpath::` to the
-// profiler crate directly.
-#[cfg(feature = "hotpath")]
-pub use ::hotpath::functions;
-pub use ::hotpath::measure;
-
 // Gated to match `record_lifecycle_state`, its only caller, which is itself
 // compiled only when profiling is on.
 #[cfg(feature = "hotpath")]

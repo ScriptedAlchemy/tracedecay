@@ -577,7 +577,7 @@ impl SemanticModelLifecycleOwnerV1 {
                 let model = match self.catalog.get(model_id) {
                     Some(model) => model,
                     None => {
-                        crate::hotpath::record_model_failure("catalog_unknown");
+                        crate::hotpath_observe::record_model_failure("catalog_unknown");
                         return Err(CatalogErrorV1::UnknownModel.into());
                     }
                 };
@@ -620,9 +620,9 @@ impl SemanticModelLifecycleOwnerV1 {
         persist_durable(&self.root, &guard.durable)?;
         match guard.durable.state.as_ref() {
             Some(state) => {
-                crate::hotpath::record_lifecycle_state(state);
+                crate::hotpath_observe::record_lifecycle_state(state);
             }
-            None => crate::hotpath::record_model_state("disabled"),
+            None => crate::hotpath_observe::record_model_state("disabled"),
         }
         publish_verified_ready_event(&self.verified_ready, &guard);
         drop(guard);

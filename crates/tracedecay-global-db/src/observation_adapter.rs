@@ -1068,15 +1068,11 @@ fn observation_submit_metadata(
     priority: OperationPriorityV1,
     operation: &'static str,
 ) -> ObservationStoreResult<StoreOperationMetadataV1> {
-    let SubmitCommandIdentity {
-        digest_suffix,
-        command_digest,
-        command_bytes,
-    } = command;
     let binding = runtime.binding();
     Ok(StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!(
-            "operation.host-observation.{digest_suffix}"
+            "operation.host-observation.{}",
+            command.digest_suffix
         ))
         .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
         client_id: StoreClientIdV1::new("client.host-admission")
@@ -1087,12 +1083,14 @@ fn observation_submit_metadata(
         idempotency: IdempotencyIdentityV1 {
             key: StoreIdempotencyKeyV1::new(idempotency_key)
                 .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
-            command_digest: CommandDigestV1::new(command_digest)
+            command_digest: CommandDigestV1::new(command.command_digest)
                 .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
         },
         durability: DurabilityClassV1::Full,
         priority,
-        admission_bytes: u64::try_from(command_bytes).unwrap_or(u64::MAX).max(1),
+        admission_bytes: u64::try_from(command.command_bytes)
+            .unwrap_or(u64::MAX)
+            .max(1),
         admitted_at,
     })
 }

@@ -298,7 +298,7 @@ impl ModelArtifactStore {
                 }) {
                     Ok(response) => response,
                     Err(_) => {
-                        crate::hotpath::record_remote_failure("https_interrupted");
+                        crate::hotpath_observe::record_remote_failure("https_interrupted");
                         return Err(ArtifactImportErrorV1::InterruptedResumable {
                             staging_id: session.staging_id(),
                         });
@@ -317,7 +317,7 @@ impl ModelArtifactStore {
                         QuarantineReasonV1::IdentityMismatch,
                         now_unix,
                     )?;
-                    crate::hotpath::record_remote_failure("immutable_range_mismatch");
+                    crate::hotpath_observe::record_remote_failure("immutable_range_mismatch");
                     return Err(ArtifactImportErrorV1::ImmutableRangeMismatch);
                 }
                 if let Err(error) = hotpath::measure_block!("semantic.https.decode", {

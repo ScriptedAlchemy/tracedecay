@@ -428,18 +428,18 @@ fn fetch_hf_hub_member(
     let cached = cache.repo(repository.clone()).get(upstream_path);
     let source = match cached {
         Some(path) => {
-            crate::hotpath::record_artifact_cache(true);
+            crate::hotpath_observe::record_artifact_cache(true);
             path
         }
         None if offline => {
-            crate::hotpath::record_artifact_cache(false);
-            crate::hotpath::record_remote_failure("offline_cache_miss");
+            crate::hotpath_observe::record_artifact_cache(false);
+            crate::hotpath_observe::record_remote_failure("offline_cache_miss");
             return Err(ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
                 "member '{upstream_path}' is absent from the private cache while offline mode is enabled"
             )));
         }
         None => {
-            crate::hotpath::record_artifact_cache(false);
+            crate::hotpath_observe::record_artifact_cache(false);
             let mut builder = ApiBuilder::from_cache(cache)
                 .with_token(None)
                 .with_progress(false)
@@ -451,7 +451,7 @@ fn fetch_hf_hub_member(
                 builder
                     .build()
                     .map_err(|error| {
-                        crate::hotpath::record_remote_failure("download_failed");
+                        crate::hotpath_observe::record_remote_failure("download_failed");
                         ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
                             "cannot initialize the Hugging Face client for '{}': {error}",
                             model.model_code
@@ -460,7 +460,7 @@ fn fetch_hf_hub_member(
                     .repo(repository)
                     .get(upstream_path)
                     .map_err(|error| {
-                        crate::hotpath::record_remote_failure("download_failed");
+                        crate::hotpath_observe::record_remote_failure("download_failed");
                         ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
                             "cannot acquire '{}@{}/{}': {error}",
                             model.model_code, model.source.revision, upstream_path
@@ -474,7 +474,7 @@ fn fetch_hf_hub_member(
     }
     hotpath::measure_block!("semantic.hf_hub.decode", {
         fs::copy(source, destination).map(|_| ()).map_err(|error| {
-            crate::hotpath::record_remote_failure("download_failed");
+            crate::hotpath_observe::record_remote_failure("download_failed");
             ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
                 "cannot copy cached member '{upstream_path}' into staging: {error}"
             ))
@@ -504,7 +504,7 @@ fn fetch_hf_hub_member(
         upstream_path,
         destination,
     );
-    crate::hotpath::record_remote_failure("rejected");
+    crate::hotpath_observe::record_remote_failure("rejected");
     Err(ModelLifecycleErrorV1::Rejected)
 }
 

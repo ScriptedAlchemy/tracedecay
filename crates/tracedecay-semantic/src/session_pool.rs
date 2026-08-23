@@ -44,7 +44,7 @@ fn duration_micros(duration: Duration) -> Option<u64> {
 }
 
 fn session_acquire_failed(error: SessionAcquireError) -> SessionAcquireError {
-    crate::hotpath::record_session_error(&error);
+    crate::hotpath_observe::record_session_error(&error);
     error
 }
 
@@ -382,7 +382,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             if reaped != 0 {
                 self.inner.wakeups.notify_all();
             }
-            crate::hotpath::record_session_acquire("warm");
+            crate::hotpath_observe::record_session_acquire("warm");
             return Ok(self.make_guard(identity, entry.session, entry.resident_bytes));
         }
         if state.live_sessions() >= self.inner.config.max_sessions {
@@ -503,7 +503,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             projected_resident.unwrap_or_else(|| panic!("resident total checked above"));
         state.sessions_opened += 1;
         state.last_cold_load_micros = duration_micros(load_elapsed);
-        crate::hotpath::record_session_acquire("cold");
+        crate::hotpath_observe::record_session_acquire("cold");
         Ok(self.make_guard(identity, session, resident_bytes))
     }
 
@@ -617,7 +617,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
 
             let remaining = budget.saturating_sub(waited);
             let timeout = remaining.min(WAITER_WAKEUP_INTERVAL);
-            crate::hotpath::record_session_acquire("wait");
+            crate::hotpath_observe::record_session_acquire("wait");
             let state = self.inner.lock_state();
             let (state, _) = hotpath::measure_block!("semantic.session_pool.wait", {
                 self.inner

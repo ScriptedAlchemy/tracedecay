@@ -24,9 +24,9 @@ fn run_acquisition(
         verified_ready,
     );
     match &result {
-        Ok(()) => crate::hotpath::record_model_state("installed"),
+        Ok(()) => crate::hotpath_observe::record_model_state("installed"),
         Err(error) => {
-            crate::hotpath::record_lifecycle_error(error);
+            crate::hotpath_observe::record_lifecycle_error(error);
         }
     }
     if let Err(error) = &result
@@ -90,7 +90,7 @@ fn run_acquisition_inner(
         });
         persist_durable(root, &guard.durable)
     })?;
-    crate::hotpath::record_model_state("downloading");
+    crate::hotpath_observe::record_model_state("downloading");
 
     let staging = root.join("staging").join(format!(
         "{}-{}",
@@ -152,7 +152,7 @@ fn run_acquisition_inner(
         cleanup_cancelled_path(root, &staging, epoch)?;
     }
     verifying?;
-    crate::hotpath::record_model_state("verifying");
+    crate::hotpath_observe::record_model_state("verifying");
 
     for member in model.members.values() {
         let path = staging.join(&member.path);

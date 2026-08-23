@@ -443,7 +443,6 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
     max_results: usize,
     is_cancelled: &C,
 ) -> bool {
-    let AstGrepFileIdentity { rel_str, key } = file;
     result.files_scanned += 1;
     let Ok(doc) = StrDoc::try_new(source, td_lang.clone()) else {
         return false;
@@ -461,7 +460,7 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
         result.lines_visited = result.lines_visited.saturating_add(1);
         let line_text = source_line_at_byte(source, range.start);
         result.matches.push(AstGrepSearchMatch {
-            file: rel_str.to_owned(),
+            file: file.rel_str.to_owned(),
             start_byte: range.start,
             end_byte: range.end,
             node_kind: node.kind().into_owned(),
@@ -469,7 +468,7 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
             column: (start.column(&node) as u32) + 1,
             matched_text: collapse_snippet(&node.text()),
             line_text,
-            lang: key.to_string(),
+            lang: file.key.to_string(),
         });
         if result.matches.len() > max_results {
             result.truncated = true;

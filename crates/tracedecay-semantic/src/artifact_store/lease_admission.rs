@@ -275,12 +275,12 @@ impl ModelArtifactStore {
             .map_err(|_| SemanticCapabilityDisabledV1::StorageFailure)?;
         let record = match inventory.records.get(&digest.to_string()) {
             Some(record) => {
-                crate::hotpath::record_artifact_cache(true);
+                crate::hotpath_observe::record_artifact_cache(true);
                 record
             }
             None => {
-                crate::hotpath::record_artifact_cache(false);
-                crate::hotpath::record_model_failure("missing_artifact");
+                crate::hotpath_observe::record_artifact_cache(false);
+                crate::hotpath_observe::record_model_failure("missing_artifact");
                 return Err(SemanticCapabilityDisabledV1::MissingArtifact);
             }
         };
@@ -297,7 +297,7 @@ impl ModelArtifactStore {
                 })
         {
             let error = SemanticCapabilityDisabledV1::LeaseUnavailable;
-            crate::hotpath::record_capability_error(&error);
+            crate::hotpath_observe::record_capability_error(&error);
             return Err(error);
         }
         match record.state {
@@ -305,16 +305,16 @@ impl ModelArtifactStore {
             }
             ArtifactInventoryStateV1::Revoked => {
                 let error = SemanticCapabilityDisabledV1::RevokedArtifact;
-                crate::hotpath::record_capability_error(&error);
+                crate::hotpath_observe::record_capability_error(&error);
                 return Err(error);
             }
             ArtifactInventoryStateV1::Quarantined => {
                 let error = SemanticCapabilityDisabledV1::QuarantinedArtifact;
-                crate::hotpath::record_capability_error(&error);
+                crate::hotpath_observe::record_capability_error(&error);
                 return Err(error);
             }
             ArtifactInventoryStateV1::Staged | ArtifactInventoryStateV1::Verified => {
-                crate::hotpath::record_model_failure("missing_artifact");
+                crate::hotpath_observe::record_model_failure("missing_artifact");
                 return Err(SemanticCapabilityDisabledV1::MissingArtifact);
             }
         }
@@ -324,26 +324,26 @@ impl ModelArtifactStore {
             || record.members != manifest.payload.members
         {
             let error = SemanticCapabilityDisabledV1::IdentityMismatch;
-            crate::hotpath::record_capability_error(&error);
+            crate::hotpath_observe::record_capability_error(&error);
             return Err(error);
         }
         self.verify_artifact_record(record).map_err(|_| {
             let error = SemanticCapabilityDisabledV1::CorruptArtifact;
-            crate::hotpath::record_capability_error(&error);
+            crate::hotpath_observe::record_capability_error(&error);
             error
         })?;
         check_compatibility(&manifest.payload.runtime, env).inspect_err(|error| {
-            crate::hotpath::record_capability_error(error);
+            crate::hotpath_observe::record_capability_error(error);
         })?;
         check_resource_ceiling(&manifest.payload.resource_ceiling, env).inspect_err(|error| {
-            crate::hotpath::record_capability_error(error);
+            crate::hotpath_observe::record_capability_error(error);
         })?;
         let directory = self
             .artifacts_dir
             .open_dir_nofollow(digest.as_str())
             .map_err(|_| {
                 let error = SemanticCapabilityDisabledV1::CorruptArtifact;
-                crate::hotpath::record_capability_error(&error);
+                crate::hotpath_observe::record_capability_error(&error);
                 error
             })?;
         Ok(AdmittedArtifactV1 {
@@ -372,8 +372,8 @@ impl ModelArtifactStore {
                 .get(&digest.to_string())
                 .and_then(|record| record.manifest.clone())
                 .ok_or_else(|| {
-                    crate::hotpath::record_artifact_cache(false);
-                    crate::hotpath::record_model_failure("missing_artifact");
+                    crate::hotpath_observe::record_artifact_cache(false);
+                    crate::hotpath_observe::record_model_failure("missing_artifact");
                     SemanticCapabilityDisabledV1::MissingArtifact
                 })?
         };
@@ -397,8 +397,8 @@ impl ModelArtifactStore {
                 .get(&digest.to_string())
                 .and_then(|record| record.manifest.clone())
                 .ok_or_else(|| {
-                    crate::hotpath::record_artifact_cache(false);
-                    crate::hotpath::record_model_failure("missing_artifact");
+                    crate::hotpath_observe::record_artifact_cache(false);
+                    crate::hotpath_observe::record_model_failure("missing_artifact");
                     SemanticCapabilityDisabledV1::MissingArtifact
                 })?
         };
