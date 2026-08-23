@@ -5,7 +5,7 @@ use crate::maintenance::ExclusiveMaintenancePermit;
 use super::driver::{CheckpointDriver, RusqliteCheckpointDriver};
 use super::types::{
     CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointError,
-    CheckpointInterruption, CheckpointMode, CheckpointResult, WalPressure,
+    CheckpointInterruption, CheckpointMode, CheckpointResult, WalPressure, WalSample,
 };
 
 /// Checkpoint policy state owned by the persistent writer.
@@ -13,6 +13,7 @@ pub(crate) struct WriterCheckpointController<D> {
     driver: D,
     config: CheckpointConfig,
     hard_drain_required: bool,
+    last_wal_bytes: Option<u64>,
 }
 
 impl<D: CheckpointDriver> WriterCheckpointController<D> {
@@ -30,11 +31,41 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
             driver,
             config,
             hard_drain_required: false,
+            last_wal_bytes: None,
         })
     }
 
     pub(crate) const fn hard_drain_required(&self) -> bool {
         self.hard_drain_required
+    }
+
+    /// Scheduled WAL sampling after a product write. Hard-drain recovery and
+    /// an unseen or near-soft estimate still sample; otherwise the write is
+    /// charged against the last sample so later writes cannot hide a crossing.
+    pub(crate) fn scheduled_sample_required(&self, additional_bytes: u64) -> bool {
+        self.hard_drain_required
+            || self
+                .estimated_wal_after_write(additional_bytes)
+                .is_none_or(|estimated| estimated >= self.config.soft_wal_bytes)
+    }
+
+    pub(crate) fn note_unsampled_write(&mut self, additional_bytes: u64) {
+        if let Some(estimated) = self.estimated_wal_after_write(additional_bytes) {
+            self.last_wal_bytes = Some(estimated);
+        }
+    }
+
+    fn estimated_wal_after_write(&self, additional_bytes: u64) -> Option<u64> {
+        Some(
+            self.last_wal_bytes?
+                .saturating_add(additional_bytes)
+                .saturating_add(self.growth_slack()),
+        )
+    }
+
+    fn growth_slack(&self) -> u64 {
+        // 1/32 of the soft limit (1 MiB at the default 32 MiB threshold).
+        self.config.soft_wal_bytes.saturating_div(32).max(1)
     }
 
     pub(crate) fn evaluate_scheduled(
@@ -52,7 +83,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         if !snapshot_blockers.is_clear() {
             return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
         }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
+        let sample = self.sample_wal()?;
         let decision = self.restart(sample.bytes, permit, snapshot_blockers)?;
         Ok(CheckpointResult::Decision { sample, decision })
     }
@@ -65,7 +96,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         if !snapshot_blockers.is_clear() {
             return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
         }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
+        let sample = self.sample_wal()?;
         let decision = self.truncate(sample.bytes, permit, snapshot_blockers)?;
         Ok(CheckpointResult::Decision { sample, decision })
     }
@@ -85,7 +116,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
                 snapshot_blockers,
             });
         }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
+        let sample = self.sample_wal()?;
         if let Some(reason) = interruption() {
             return Ok(CheckpointResult::Interrupted {
                 reason,
@@ -105,6 +136,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         wal_bytes: u64,
         snapshot_blockers: CheckpointBlockers,
     ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+        self.last_wal_bytes = Some(wal_bytes);
         let pressure = self.pressure(wal_bytes);
         if pressure == WalPressure::BelowSoft && !self.hard_drain_required {
             return Ok(CheckpointDecision::BelowSoftLimit { wal_bytes });
@@ -198,6 +230,12 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
             hard_drain_required: self.hard_drain_required,
             elapsed,
         })
+    }
+
+    fn sample_wal(&mut self) -> Result<WalSample, CheckpointError<D::Error>> {
+        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
+        self.last_wal_bytes = Some(sample.bytes);
+        Ok(sample)
     }
 
     fn pressure(&self, wal_bytes: u64) -> WalPressure {

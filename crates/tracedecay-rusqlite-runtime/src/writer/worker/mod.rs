@@ -448,9 +448,10 @@ impl Worker {
             let selected = queue.drain_fair();
             debug_assert!(!selected.is_empty());
             for batch in build_batches(selected, &self.config) {
+                let written_bytes = batch.bytes;
                 self.telemetry.released(
                     u32::try_from(batch.items.len()).unwrap_or(u32::MAX),
-                    batch.bytes,
+                    written_bytes,
                 );
                 process_execution_batch(
                     checkpoint.connection_mut(),
@@ -461,7 +462,11 @@ impl Worker {
                     &self.state,
                     &self.watermark_publisher,
                 );
-                self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
+                if checkpoint.scheduled_sample_required(written_bytes) {
+                    self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
+                } else {
+                    checkpoint.note_unsampled_write(written_bytes);
+                }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                     break;
                 }

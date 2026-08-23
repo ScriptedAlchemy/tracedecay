@@ -1,4 +1,12 @@
-use std::{collections::VecDeque, fmt::Debug, time::Duration};
+use std::{
+    collections::VecDeque,
+    fmt::Debug,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use tracedecay_store::{
     BrainId, ProjectId, RuntimePublicationIdV1, SnapshotLeaseIdV1, StoreAuthorityEpochV1,
@@ -32,6 +40,8 @@ struct FakeDriver {
     configure_error: bool,
     samples: VecDeque<Result<WalSample, FakeError>>,
     reports: VecDeque<Result<CheckpointReport, FakeError>>,
+    sample_calls: Arc<AtomicUsize>,
+    checkpoint_calls: Arc<AtomicUsize>,
 }
 
 impl FakeDriver {
@@ -64,10 +74,12 @@ impl CheckpointDriver for FakeDriver {
     }
 
     fn sample_wal(&mut self) -> Result<WalSample, Self::Error> {
+        self.sample_calls.fetch_add(1, Ordering::SeqCst);
         self.samples.pop_front().unwrap_or(Err(FakeError::Sample))
     }
 
     fn checkpoint(&mut self, _mode: CheckpointMode) -> Result<CheckpointReport, Self::Error> {
+        self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
         self.reports
             .pop_front()
             .unwrap_or(Err(FakeError::Checkpoint))
@@ -193,6 +205,72 @@ fn controller_reports_inventory_without_owning_snapshot_state() {
 }
 
 #[test]
+fn scheduled_sample_is_skipped_below_soft_and_forced_for_hard_drain() {
+    let sample_calls = Arc::new(AtomicUsize::new(0));
+    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    let config = CheckpointConfig::default();
+    let driver = FakeDriver {
+        samples: [Ok(WalSample {
+            frames: 3,
+            bytes: 4_096,
+        })]
+        .into(),
+        sample_calls: Arc::clone(&sample_calls),
+        checkpoint_calls: Arc::clone(&checkpoint_calls),
+        ..FakeDriver::default()
+    };
+    let mut scheduled =
+        WriterCheckpointController::new(driver, config).expect("fake driver configures");
+
+    assert!(matches!(
+        scheduled
+            .evaluate_scheduled(CheckpointBlockers::default())
+            .unwrap(),
+        CheckpointResult::Decision {
+            decision: CheckpointDecision::BelowSoftLimit { wal_bytes: 4_096 },
+            ..
+        }
+    ));
+    assert_eq!(sample_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !scheduled.scheduled_sample_required(128),
+        "a small product write far below soft must not take another NOOP sample"
+    );
+
+    scheduled.note_unsampled_write(128);
+    assert_eq!(sample_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 0);
+    let mut skipped_writes = 1_u32;
+    while !scheduled.scheduled_sample_required(128) {
+        scheduled.note_unsampled_write(128);
+        skipped_writes += 1;
+        assert!(
+            skipped_writes < 64,
+            "accrued WAL estimate must re-sample before the soft limit can be hidden"
+        );
+    }
+    assert!(skipped_writes > 1);
+    assert_eq!(sample_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 0);
+
+    let mut draining = controller([report(true, 1_000, 400)]);
+    assert!(matches!(
+        draining
+            .evaluate(config.hard_wal_bytes, CheckpointBlockers::default())
+            .unwrap(),
+        CheckpointDecision::Pending {
+            hard_drain_required: true,
+            ..
+        }
+    ));
+    assert!(
+        draining.scheduled_sample_required(0),
+        "hard-pressure recovery must sample even when no additional bytes were written"
+    );
+}
+
+#[test]
 fn scheduled_checkpoint_samples_frames_and_bytes_before_passive() {
     let config = CheckpointConfig::default();
     let sample = WalSample {
@@ -256,6 +334,10 @@ fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
         }
     ));
     assert!(controller.hard_drain_required());
+    assert!(
+        controller.scheduled_sample_required(0),
+        "hard-pressure recovery must keep sampling even when the last WAL size is unused"
+    );
     assert!(matches!(
         controller
             .evaluate(config.soft_wal_bytes - 1, CheckpointBlockers::default())
