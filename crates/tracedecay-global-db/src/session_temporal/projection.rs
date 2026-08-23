@@ -23,6 +23,7 @@ mod tests;
 use materialize::materialize_session_temporal_refresh_batch_in_transaction;
 
 pub(super) use materialize::canonical_parent_message_resolver;
+pub(in crate::session_temporal) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
     persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,

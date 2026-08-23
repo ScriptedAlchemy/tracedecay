@@ -12,7 +12,10 @@ use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::super::RegisteredGlobalDb;
 use super::super::observation_projection::derive_projection;
-use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
+use super::projection::{
+    canonical_parent_message_resolver, observation_envelope_from_payload,
+    validate_final_projection_receipt,
+};
 use super::query::{
     ACTIVATE_OPERATION, BEGIN_OPERATION, encode_watermarks, frontier_i64, generation_i64,
     now_micros, read_generation, require_active_generation, storage, storage_message,
@@ -427,10 +430,8 @@ pub(super) async fn validate_candidate_frontier(
             .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
         let observation: DurableObservationV1 =
             serde_json::from_str(&encoded).map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-        let envelope = serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(
-            observation.payload().clone(),
-        )
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+        let envelope = observation_envelope_from_payload(observation.payload())
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
         let projection =
             derive_projection(&observation).map_err(|error| storage(ACTIVATE_OPERATION, error))?;
         for output in projection

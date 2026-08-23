@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::RetrievalAnchorRecord;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
-use tracedecay_domain::{CanonicalObservationEnvelopeV1, RetrievalAnchorRecord};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{
@@ -189,9 +189,7 @@ pub(super) async fn validate_canonical_assertion_completeness(
                 .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
         )
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        let Ok(envelope) =
-            serde_json::from_value::<CanonicalObservationEnvelopeV1>(observation.payload().clone())
-        else {
+        let Ok(envelope) = observation_envelope_from_payload(observation.payload()) else {
             continue;
         };
         if envelope.relations().session_id() != session_id {
@@ -295,9 +293,7 @@ pub async fn record_canonical_observation_effect(
     observation: &tracedecay_domain::DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
-    let Ok(envelope) =
-        serde_json::from_value::<CanonicalObservationEnvelopeV1>(observation.payload().clone())
-    else {
+    let Ok(envelope) = observation_envelope_from_payload(observation.payload()) else {
         return Ok(());
     };
     let mut outputs = effect

@@ -33,6 +33,7 @@ mod semantic_filter_tests;
 #[cfg(test)]
 mod tests;
 
+use super::projection::observation_envelope_from_payload;
 use super::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
@@ -111,7 +112,7 @@ fn observation_matches_filter(
         return Ok(false);
     }
     let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
+        observation_envelope_from_payload(observation.payload())
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let is_goal = envelope.facts().iter().any(|fact| {
         matches!(

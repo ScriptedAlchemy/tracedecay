@@ -12,6 +12,7 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_store::SessionStoreResult;
 
 use super::operations::CanonicalPublicationManifest;
+use super::projection::observation_envelope_from_payload;
 use super::query::{generation_i64, storage, storage_message};
 use super::relations::{
     AgentHierarchyRelation, LogicalCopyRelation, SessionRelationError, SessionRelationProjection,
@@ -492,7 +493,7 @@ async fn reconstruct_occurrences(
         )
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let envelope: CanonicalObservationEnvelopeV1 =
-            serde_json::from_value(observation.payload().clone())
+            observation_envelope_from_payload(observation.payload())
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let anchor: RetrievalAnchorRecord = serde_json::from_str(
             &row.get::<String>(2)

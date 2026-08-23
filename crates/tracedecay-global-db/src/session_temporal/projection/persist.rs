@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1,
@@ -23,10 +24,16 @@ use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
 
+pub(in crate::session_temporal) fn observation_envelope_from_payload(
+    payload: &Value,
+) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
+    CanonicalObservationEnvelopeV1::deserialize(payload)
+}
+
 fn observation_envelope(
     observation: &tracedecay_domain::DurableObservationV1,
 ) -> SessionStoreResult<CanonicalObservationEnvelopeV1> {
-    serde_json::from_value(observation.payload().clone())
+    observation_envelope_from_payload(observation.payload())
         .map_err(|error| storage(PERSIST_OPERATION, error))
 }
 

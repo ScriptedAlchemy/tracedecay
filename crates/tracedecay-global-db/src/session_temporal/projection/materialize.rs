@@ -323,7 +323,7 @@ pub(super) async fn canonical_parent_copy_proof(
     };
     let (_, observation) = read_observation(conn, &observation_id).await?;
     let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
+        observation_envelope_from_payload(observation.payload())
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
     let stable = envelope.stable_record_id();
     if stable.as_str() == parent_message_id {
@@ -392,7 +392,7 @@ pub(super) async fn derive_retained_projection_relations(
     for occurrence in occurrences {
         let (_, observation) = read_observation(conn, &occurrence.source_observation_id).await?;
         let envelope: CanonicalObservationEnvelopeV1 =
-            serde_json::from_value(observation.payload().clone())
+            observation_envelope_from_payload(observation.payload())
                 .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
         // A parent-message relation is conversation threading, not evidence of a
         // copy: Claude's `parentUuid`, and every other producer of
