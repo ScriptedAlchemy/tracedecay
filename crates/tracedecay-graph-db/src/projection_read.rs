@@ -168,6 +168,10 @@ impl GraphDb {
             entities.push(stored.entity);
         }
         check_cancelled(cancellation.as_ref())?;
+        crate::hotpath_observe::record_counts(entities.len(), 0, 0, 0);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Live,
+        );
         Ok(GraphProjectionLabelPage {
             entities,
             total_entities,

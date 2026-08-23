@@ -414,6 +414,7 @@ impl GraphDb {
         Ok(result)
     }
 
+    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids", impl_type = "GraphDb")]
     pub fn outgoing_relation_ids(
         &self,
         namespace: &GraphNamespace,
@@ -425,7 +426,7 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
-        traversal::outgoing_relation_ids(
+        let batches = traversal::outgoing_relation_ids(
             database,
             namespace,
             starts,
@@ -433,12 +434,22 @@ impl GraphDb {
             max_relations,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
     }
 
     /// Bulk kind-filtered incoming fan-out: the counterpart of
     /// [`Self::outgoing_relation_ids`], with identical budget and
     /// cancellation semantics.
+    #[hotpath::measure(label = "graph_db.traversal.incoming_ids", impl_type = "GraphDb")]
     pub fn incoming_relation_ids(
         &self,
         namespace: &GraphNamespace,
@@ -450,7 +461,7 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
-        traversal::incoming_relation_ids(
+        let batches = traversal::incoming_relation_ids(
             database,
             namespace,
             starts,
@@ -458,7 +469,16 @@ impl GraphDb {
             max_relations,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
     }
 
     #[hotpath::measure(label = "graph_db.traversal.outgoing", impl_type = "GraphDb")]
@@ -494,6 +514,7 @@ impl GraphDb {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "graph_db.traversal.reachable", impl_type = "GraphDb")]
     pub fn reachable_entities(
         &self,
         namespace: &GraphNamespace,
@@ -508,7 +529,7 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(namespace, projection)?;
         self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
-        traversal::reachable_entities(
+        let results = traversal::reachable_entities(
             database,
             namespace,
             projection,
@@ -518,7 +539,16 @@ impl GraphDb {
             max_visits,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let entities: usize = results.iter().map(BTreeSet::len).sum();
+            crate::hotpath_observe::record_counts(entities, 0, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(results)
     }
 
     #[hotpath::measure(label = "graph_db.search.vector", impl_type = "GraphDb")]
