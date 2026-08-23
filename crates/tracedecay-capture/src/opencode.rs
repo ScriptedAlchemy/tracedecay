@@ -294,7 +294,7 @@ fn canonical_role(role: &str) -> CanonicalMessageRoleV1 {
 /// unsupported, so only the millis/seconds normalization is shared.
 fn timestamp_secs(value: Option<&Value>) -> Option<i64> {
     value
-        .filter(Value::is_i64)
+        .filter(|value| value.is_i64())
         .and_then(shared_timestamp_secs)
 }
 
