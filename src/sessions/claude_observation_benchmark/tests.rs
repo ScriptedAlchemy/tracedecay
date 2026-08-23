@@ -1,13 +1,14 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use serde_json::json;
 use tempfile::TempDir;
 
 use super::artifact::{
-    EvidenceIndex, git_snapshot, is_lower_hex, sha256_file, status_output_is_dirty,
+    EvidenceIndex, git_snapshot_from_repository, is_lower_hex, sha256_file, status_output_is_dirty,
     validate_evidence_directory, validate_git_snapshots, validate_release_profile,
-    verify_git_toplevel, workload_identity,
+    workload_identity,
 };
 use super::metrics::{
     PhaseAggregate, aggregate_samples, parse_clock_ticks_per_second, parse_cpu_identity,
@@ -532,11 +533,42 @@ fn git_snapshot_validation_rejects_dirty_or_changed_states() {
 }
 
 #[test]
-fn git_commands_are_scoped_to_the_manifest_repository() {
-    verify_git_toplevel();
-    let snapshot = git_snapshot();
-    assert!(!snapshot.commit.is_empty());
-    assert!(!snapshot.tree.is_empty());
+fn git_snapshot_is_scoped_to_the_supplied_repository() {
+    let temporary = TempDir::new().expect("temporary repository");
+    let init = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temporary.path())
+        .status()
+        .expect("initialize repository");
+    assert!(init.success());
+    fs::write(temporary.path().join("source.rs"), "fn main() {}\n")
+        .expect("write repository source");
+    let add = Command::new("git")
+        .args(["add", "source.rs"])
+        .current_dir(temporary.path())
+        .status()
+        .expect("stage repository source");
+    assert!(add.success());
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tracedecay-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test fixture",
+        ])
+        .current_dir(temporary.path())
+        .status()
+        .expect("commit repository source");
+    assert!(commit.success());
+
+    let snapshot = git_snapshot_from_repository(temporary.path());
+    assert!(is_lower_hex(&snapshot.commit, 40));
+    assert!(is_lower_hex(&snapshot.tree, 40));
+    assert!(!snapshot.dirty);
 }
 
 #[test]

@@ -875,11 +875,15 @@ pub(super) fn git_snapshot() -> GitSnapshot {
     if BUILD_SOURCE_MODE == Some("git_archive_read_only_v1") {
         return validate_source_archive().0;
     }
-    verify_git_toplevel();
+    git_snapshot_from_repository(repository_root())
+}
+
+pub(super) fn git_snapshot_from_repository(repository: &Path) -> GitSnapshot {
+    verify_git_toplevel(repository);
     GitSnapshot {
-        commit: git_output(&["rev-parse", "HEAD"]),
-        tree: git_output(&["rev-parse", "HEAD^{tree}"]),
-        dirty: worktree_is_dirty(),
+        commit: git_output(repository, &["rev-parse", "HEAD"]),
+        tree: git_output(repository, &["rev-parse", "HEAD^{tree}"]),
+        dirty: worktree_is_dirty(repository),
     }
 }
 
@@ -934,7 +938,7 @@ fn validate_source_archive() -> (GitSnapshot, usize) {
     )
 }
 
-fn worktree_is_dirty() -> bool {
+fn worktree_is_dirty(repository: &Path) -> bool {
     let output = Command::new("git")
         .args([
             "status",
@@ -942,7 +946,7 @@ fn worktree_is_dirty() -> bool {
             "--untracked-files=normal",
             "--ignore-submodules=none",
         ])
-        .current_dir(repository_root())
+        .current_dir(repository)
         .output()
         .expect("inspect benchmark worktree");
     assert!(output.status.success(), "git status failed");
@@ -957,10 +961,10 @@ pub(super) fn repository_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn git_output(args: &[&str]) -> String {
+fn git_output(repository: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
-        .current_dir(repository_root())
+        .current_dir(repository)
         .output()
         .unwrap_or_else(|error| panic!("run git {}: {error}", args.join(" ")));
     assert!(output.status.success(), "git {} failed", args.join(" "));
@@ -970,9 +974,9 @@ fn git_output(args: &[&str]) -> String {
         .to_string()
 }
 
-pub(super) fn verify_git_toplevel() {
-    let expected = fs::canonicalize(repository_root()).expect("canonicalize manifest directory");
-    let actual = fs::canonicalize(git_output(&["rev-parse", "--show-toplevel"]))
+fn verify_git_toplevel(repository: &Path) {
+    let expected = fs::canonicalize(repository).expect("canonicalize repository directory");
+    let actual = fs::canonicalize(git_output(repository, &["rev-parse", "--show-toplevel"]))
         .expect("canonicalize Git toplevel");
     assert_eq!(
         actual, expected,
