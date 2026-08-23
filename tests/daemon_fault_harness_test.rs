@@ -201,7 +201,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         let candidate = observation(stage);
 
         let initialized = open_lcm_db(&tmp).await;
-        initialized.close();
+        drop(initialized);
         set_statement_fault(&tmp, stage, table, true).await;
         let db = open_lcm_db(&tmp).await;
         let store = observation_store(&db);
@@ -213,7 +213,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             matches!(error, ObservationStoreError::Storage { .. }),
             "{stage} fault returned the wrong error: {error:?}"
         );
-        db.close();
+        drop((store, db));
 
         assert_eq!(observation_state_counts(&tmp).await, [0, 0, 0, 0]);
         let restarted = open_lcm_db(&tmp).await;
@@ -243,7 +243,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             "{stage} fault leaked replay state after restart"
         );
 
-        restarted.close();
+        drop((restarted_store, restarted));
         set_statement_fault(&tmp, stage, table, false).await;
         let retry = open_lcm_db(&tmp).await;
         let retry_store = observation_store(&retry);
@@ -256,7 +256,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             other => panic!("{stage} retry must commit once, got {other:?}"),
         };
         assert_eq!(committed.sequence(), 1);
-        retry.close();
+        drop((retry_store, retry));
 
         let replayed = open_lcm_db(&tmp).await;
         let replayed_store = observation_store(&replayed);
@@ -285,7 +285,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
                 .unwrap(),
             Some(cursor(stage, 100))
         );
-        replayed.close();
+        drop((replayed_store, replayed));
         assert_eq!(
             observation_state_counts(&tmp).await,
             [1, 1, 1, 1],
