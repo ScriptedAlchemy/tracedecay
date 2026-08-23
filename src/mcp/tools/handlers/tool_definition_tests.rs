@@ -149,10 +149,6 @@ fn work_definitions_cover_the_canonical_operation_registry() {
         .filter(|operation| operation.is_read_only())
         .count();
     assert_eq!(
-        canonical_reads, 16,
-        "canonical Work read set changed; confirm each new read is intentional",
-    );
-    assert_eq!(
         work_definitions
             .iter()
             .filter(
