@@ -16,16 +16,22 @@ use super::{
 };
 
 pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
-    append_durable(path, frame, DIRECTORY_POLICY)
-        .map(|_| ())
-        .map_err(|_| HookSpoolError::Io)
+    hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame.len());
+    hotpath::measure_block!("hooks.spool.fsync.frame", {
+        append_durable(path, frame, DIRECTORY_POLICY)
+            .map(|_| ())
+            .map_err(|_| HookSpoolError::Io)
+    })
 }
 
 pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpoolError> {
-    shared_truncate_file(&records_path(root), length, DIRECTORY_POLICY)
-        .map_err(|_| HookSpoolError::Io)
+    hotpath::measure_block!("hooks.spool.fsync.truncate", {
+        shared_truncate_file(&records_path(root), length, DIRECTORY_POLICY)
+            .map_err(|_| HookSpoolError::Io)
+    })
 }
 
+#[hotpath::measure]
 pub(super) fn scan_records(
     root: &Path,
     config: HookSpoolConfigV1,
@@ -93,6 +99,8 @@ pub(super) fn scan_records(
         offset = offset.saturating_add(u64::from(record.framed_len));
         records.push(record);
     }
+    hotpath::gauge!("hooks.spool.scan.frame_count").set(records.len());
+    hotpath::gauge!("hooks.spool.scan.bytes").set(physical_len);
     Ok(ScanResult {
         records,
         valid_end: offset,
@@ -134,6 +142,7 @@ pub(super) fn corrupt_scan(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn encode_frame(
     sequence: u64,
     queued_at: UtcMicros,
@@ -159,9 +168,11 @@ pub(super) fn encode_frame(
     frame.extend_from_slice(payload);
     let checksum = frame_checksum(&frame);
     frame.extend_from_slice(&checksum);
+    hotpath::gauge!("hooks.spool.encode.frame_bytes").set(frame.len());
     Ok(frame)
 }
 
+#[hotpath::measure]
 pub(super) fn decode_complete_frame(
     frame: &[u8],
     file_offset: u64,

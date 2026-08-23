@@ -36,6 +36,7 @@ impl HookSpoolV1 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn write_lease_file(
     file: &mut File,
     lease: HookSpoolWriterLeaseV1,
@@ -53,9 +54,12 @@ pub(super) fn write_lease_file(
     file.seek(SeekFrom::Start(0))
         .map_err(|_| HookSpoolError::Io)?;
     file.write_all(&bytes).map_err(|_| HookSpoolError::Io)?;
-    file.sync_all().map_err(|_| HookSpoolError::Io)
+    hotpath::measure_block!("hooks.spool.fsync.lease", {
+        file.sync_all().map_err(|_| HookSpoolError::Io)
+    })
 }
 
+#[hotpath::measure]
 pub(super) fn acquire_lease(
     root: &Path,
     lease_duration_micros: i64,
@@ -85,7 +89,9 @@ pub(super) fn acquire_lease(
     }
     file.try_lock().map_err(map_try_lock_error)?;
     write_lease_file(&mut file, candidate)?;
-    shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)?;
+    hotpath::measure_block!("hooks.spool.fsync.directory", {
+        shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
+    })?;
     Ok((candidate, file))
 }
 
