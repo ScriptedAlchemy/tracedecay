@@ -39,7 +39,9 @@ pub(crate) fn finish_remote<T>(
     result
 }
 
-#[cfg(any(feature = "hotpath", test))]
+// Gated to match `finish` above, its only caller. `problem_kind_name` keeps the
+// wider gate because the unit test below exercises it directly.
+#[cfg(feature = "hotpath")]
 pub(crate) fn record_client_error(error: &ClientError) {
     let class = match error {
         ClientError::InvalidConfiguration(_) => "invalid_configuration",
@@ -54,7 +56,8 @@ pub(crate) fn record_client_error(error: &ClientError) {
     hotpath::val!("sdk.http.error_class").set(&class);
 }
 
-#[cfg(any(feature = "hotpath", test))]
+// Gated to match `finish_remote` above, its only caller.
+#[cfg(feature = "hotpath")]
 pub(crate) fn record_remote_error(error: &RemoteClientError) {
     let class = match error {
         RemoteClientError::Configuration(_) => "configuration",
