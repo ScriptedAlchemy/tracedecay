@@ -1,11 +1,15 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter, types::Value};
+#[cfg(any(test, feature = "hotpath"))]
+use rusqlite::StatementStatus;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -22,6 +26,7 @@ use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactOccurrenceV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1, artifact_digest,
     decode_padded_receipt, encode_exact_field, encode_field, metadata_digest,
+    verify_required_artifact_indexes,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::{
@@ -43,16 +48,26 @@ use super::super::{
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, field_admitted,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, field_admitted,
 };
 
 #[derive(Clone)]
 pub struct CodeLexicalArtifactReaderV1 {
-    connection: Arc<Mutex<Connection>>,
+    connection: Arc<ArtifactConnectionMutex<Connection>>,
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
     retained_owned_bytes: usize,
 }
+
+#[cfg(feature = "hotpath")]
+type ArtifactConnectionMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ArtifactConnectionMutex<T> = StdMutex<T>;
+
+#[cfg(feature = "hotpath")]
+type ArtifactConnectionMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
+#[cfg(not(feature = "hotpath"))]
+type ArtifactConnectionMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 
 impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,7 +114,7 @@ impl CodeLexicalArtifactReaderV1 {
                 "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
             )));
         }
-        let digest = digest_artifact_file(&mut file, control)?;
+        let digest = digest_content_addressed_file(&mut file, control)?;
         if &digest != expected_file_digest {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "artifact file bytes do not match the durable head digest".to_owned(),
@@ -119,6 +134,7 @@ impl CodeLexicalArtifactReaderV1 {
             .pragma_update(None, "query_only", true)
             .map_err(sqlite_error)?;
         verify_artifact_state_revision(&connection, control)?;
+        verify_required_artifact_indexes(&connection)?;
         let receipt_bytes: Vec<u8> = connection
             .query_row(
                 "SELECT receipt FROM artifact_state WHERE singleton = 1",
@@ -193,6 +209,7 @@ impl CodeLexicalArtifactReaderV1 {
             .pragma_update(None, "query_only", true)
             .map_err(sqlite_error)?;
         verify_artifact_state_revision(&connection, control)?;
+        verify_required_artifact_indexes(&connection)?;
         // Read the BLOB length first so the page cache can be configured
         // before metadata is materialized. The retained metadata copy plus
         // SQLite's cache therefore cannot exceed the caller's reservation.
@@ -304,7 +321,14 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         let retained_owned_bytes = stored_metadata_bytes.len().saturating_add(page_cache_bytes);
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            // Every clone shares one rusqlite handle. The instrumented mutex
+            // exposes both shared-reader coordination wait and the full
+            // serialized SQL hold rather than attributing that time to the
+            // outer lane alone. This is one handle, not a connection pool.
+            connection: Arc::new(hotpath::mutex!(
+                StdMutex::new(connection),
+                label = "query.artifact.connection"
+            )),
             metadata,
             receipt: stored,
             retained_owned_bytes,
@@ -410,7 +434,7 @@ impl CodeLexicalArtifactReaderV1 {
 
     fn lock_connection(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
+    ) -> Result<ArtifactConnectionMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
         self.connection.lock().map_err(|_| {
             CodeLexicalArtifactErrorV1::Io("lexical artifact reader lock is poisoned".to_owned())
         })
@@ -500,6 +524,61 @@ struct ArtifactQueryV1<'a> {
     metadata: &'a super::super::CodeLexicalProjectionMetadataV1,
     receipt: &'a VerifiedCodeLexicalArtifactV1,
     document_count: usize,
+    metrics: ArtifactQueryMetricsV1,
+}
+
+#[derive(Default)]
+struct ArtifactQueryMetricsV1 {
+    #[cfg(test)]
+    probes: Cell<u64>,
+    #[cfg(test)]
+    fullscan_steps: Cell<u64>,
+}
+
+impl ArtifactQueryMetricsV1 {
+    #[inline(always)]
+    fn probe(&self) {
+        #[cfg(test)]
+        self.probes.set(self.probes.get().saturating_add(1));
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.sql.probes_total").inc(1u64);
+    }
+
+    #[inline(always)]
+    fn rows(&self, rows: u64) {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.sql.rows_total").inc(rows);
+        #[cfg(not(feature = "hotpath"))]
+        let _ = rows;
+    }
+
+    #[inline(always)]
+    fn observe_statement(
+        &self,
+        statement: &rusqlite::Statement<'_>,
+    ) -> Result<(), RetrievalPortError> {
+        #[cfg(any(test, feature = "hotpath"))]
+        let steps = u64::try_from(statement.get_status(StatementStatus::FullscanStep))
+            .map_err(contract_error)?;
+        #[cfg(test)]
+        self.fullscan_steps
+            .set(self.fullscan_steps.get().saturating_add(steps));
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.sql.observed_fullscan_steps_total").inc(steps);
+        #[cfg(not(any(test, feature = "hotpath")))]
+        let _ = statement;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn probes(&self) -> u64 {
+        self.probes.get()
+    }
+
+    #[cfg(test)]
+    fn observed_fullscan_steps(&self) -> u64 {
+        self.fullscan_steps.get()
+    }
 }
 
 /// A SQLite-owned candidate set. The query is evaluated row-by-row, so Rust
@@ -608,6 +687,8 @@ fn visit_document_ids(
         let Some(sql) = &query.sql else {
             return Ok(());
         };
+        ensure_sqlite_bind_capacity(0, query.parameters.len())?;
+        ensure_sqlite_bound_value_bytes(&query.parameters, std::iter::empty())?;
         let mut statement = connection.prepare(sql).map_err(map_query_sql_error)?;
         let mut rows = statement
             .query(params_from_iter(query.parameters.iter()))
@@ -618,12 +699,135 @@ fn visit_document_ids(
             visitor(u32::try_from(document).map_err(contract_error)?)?;
             visited += 1;
         }
-        hotpath::gauge!("query.stream.rows").set(visited);
+        hotpath::gauge!("query.stream.rows_total").inc(visited);
+        Ok(())
+    })
+}
+
+/// Stream each candidate row with all request-relevant term frequencies from
+/// one SQLite statement. The correlated posting lookup seeks the maintained
+/// document index; it never emits the row BLOB once per matching term.
+fn visit_lexical_rows(
+    connection: &Connection,
+    documents: &DocumentQueryV1,
+    terms: &BTreeSet<String>,
+    metrics: &ArtifactQueryMetricsV1,
+    mut visitor: impl FnMut(u32, Vec<u8>, LexicalTermFrequenciesV1) -> Result<(), RetrievalPortError>,
+) -> Result<(), RetrievalPortError> {
+    hotpath::measure_block!("query.stream.visit_lexical_rows", {
+        let Some(document_sql) = documents.sql.as_deref() else {
+            return Ok(());
+        };
+        ensure_sqlite_bind_capacity(documents.parameters.len(), terms.len())?;
+        ensure_sqlite_bound_value_bytes(&documents.parameters, terms.iter().map(String::as_str))?;
+        let mut parameters =
+            Vec::with_capacity(documents.parameters.len().saturating_add(terms.len()));
+        let frequencies = if terms.is_empty() {
+            "'[]'".to_owned()
+        } else {
+            let placeholders = std::iter::repeat_n("?", terms.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parameters.extend(terms.iter().cloned().map(Value::Text));
+            format!(
+                "COALESCE((SELECT json_group_array(json_array(posting.field, posting.term, posting.frequency)) \
+                 FROM term_postings AS posting INDEXED BY term_postings_by_document_term \
+                 WHERE posting.document_id = documents.document_id \
+                 AND posting.term IN ({placeholders})), '[]')"
+            )
+        };
+        // The frequency expression appears in the SELECT list before the
+        // document subquery appears in FROM, so its placeholders bind first.
+        // Keep the value vector in that exact textual order.
+        parameters.extend(documents.parameters.iter().cloned());
+        let sql = format!(
+            "SELECT documents.document_id, stored.row, {frequencies} \
+             FROM ({document_sql}) AS documents \
+             JOIN rows AS stored ON stored.document_id = documents.document_id \
+             ORDER BY documents.document_id"
+        );
+        metrics.probe();
+        let mut statement = connection.prepare(&sql).map_err(map_query_sql_error)?;
+        let mut rows = statement
+            .query(params_from_iter(parameters.iter()))
+            .map_err(map_query_sql_error)?;
+        let mut visited = 0u64;
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            let document = u32::try_from(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
+                .map_err(contract_error)?;
+            let bytes: Vec<u8> = row.get(1).map_err(map_query_sql_error)?;
+            let encoded_frequencies: String = row.get(2).map_err(map_query_sql_error)?;
+            let encoded: Vec<(String, String, i64)> =
+                serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
+            let mut term_frequencies = LexicalTermFrequenciesV1::new();
+            for (field, term, frequency) in encoded {
+                term_frequencies
+                    .entry(decode_field(&field)?)
+                    .or_default()
+                    .insert(term, usize::try_from(frequency).map_err(contract_error)?);
+            }
+            visitor(document, bytes, term_frequencies)?;
+            visited = visited.saturating_add(1);
+        }
+        drop(rows);
+        metrics.observe_statement(&statement)?;
+        metrics.rows(visited);
         Ok(())
     })
 }
 
 const ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1: usize = 16;
+
+/// SQLite distributions are required to support at least 999 variables. Keep
+/// generated statements within that portable ceiling instead of depending on
+/// the larger build-time limit of a particular linked SQLite library.
+const ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1: usize = 999;
+/// Caps request-projected text/blob input, and therefore the largest
+/// request-relevant frequency aggregate SQLite can return as one row. Live
+/// cancellation belongs above this read-port boundary, so the port keeps each
+/// individual SQLite call deterministically bounded instead.
+const ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1: usize =
+    ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1 * MAX_LEXICAL_QUERY_TERM_BYTES_V1;
+
+fn ensure_sqlite_bind_capacity(
+    fixed_parameters: usize,
+    dynamic_parameters: usize,
+) -> Result<(), RetrievalPortError> {
+    let parameters = fixed_parameters
+        .checked_add(dynamic_parameters)
+        .ok_or(RetrievalPortError::BudgetExceeded)?;
+    if parameters > ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1 {
+        return Err(RetrievalPortError::BudgetExceeded);
+    }
+    Ok(())
+}
+
+fn ensure_sqlite_bound_value_bytes<'a>(
+    fixed_parameters: &[Value],
+    dynamic_text: impl IntoIterator<Item = &'a str>,
+) -> Result<(), RetrievalPortError> {
+    let fixed_bytes = fixed_parameters.iter().try_fold(0usize, |bytes, value| {
+        let value_bytes = match value {
+            Value::Text(value) => value.len(),
+            Value::Blob(value) => value.len(),
+            Value::Null | Value::Integer(_) | Value::Real(_) => 0,
+        };
+        bytes
+            .checked_add(value_bytes)
+            .ok_or(RetrievalPortError::BudgetExceeded)
+    })?;
+    let total_bytes = dynamic_text
+        .into_iter()
+        .try_fold(fixed_bytes, |bytes, value| {
+            bytes
+                .checked_add(value.len())
+                .ok_or(RetrievalPortError::BudgetExceeded)
+        })?;
+    if total_bytes > ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1 {
+        return Err(RetrievalPortError::BudgetExceeded);
+    }
+    Ok(())
+}
 
 /// The first fixed number of distinct n-grams forms a selective, bounded
 /// prefilter. It may admit a superset for a very long phrase; the row-level
@@ -665,6 +869,7 @@ impl<'a> ArtifactQueryV1<'a> {
             metadata,
             receipt,
             document_count: usize::try_from(receipt.total_chunks()).map_err(contract_error)?,
+            metrics: ArtifactQueryMetricsV1::default(),
         })
     }
 
@@ -673,7 +878,8 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
-        let stats = self.lexical_stats(request, &fuzzy)?;
+        let terms = lexical_terms(request, &fuzzy);
+        let stats = self.lexical_stats(&terms)?;
         let phrase_queries = request
             .phrases
             .iter()
@@ -683,55 +889,77 @@ impl<'a> ArtifactQueryV1<'a> {
                 (normalized, query)
             })
             .collect::<BTreeMap<_, _>>();
-        let mut phrase_frequencies = BTreeMap::new();
-        for (phrase, query) in &phrase_queries {
-            let mut frequency = 0usize;
-            self.visit_documents(query, |document| {
-                let row = self.row(document)?;
-                if substring_count(&row.normalized_text, phrase) > 0 {
-                    frequency += 1;
+        let mut phrase_frequencies = phrase_queries
+            .keys()
+            .cloned()
+            .map(|phrase| (phrase, 0usize))
+            .collect::<BTreeMap<_, _>>();
+        let phrase_documents = union_document_queries(phrase_queries.values().cloned());
+        visit_lexical_rows(
+            self.connection,
+            &phrase_documents,
+            &BTreeSet::new(),
+            &self.metrics,
+            |_, bytes, _| {
+                let row = decode_row(&bytes).map_err(map_query_artifact_error)?;
+                for (phrase, frequency) in &mut phrase_frequencies {
+                    if substring_count(&row.normalized_text, phrase) > 0 {
+                        *frequency += 1;
+                    }
                 }
                 Ok(())
-            })?;
-            phrase_frequencies.insert(phrase.clone(), frequency);
-        }
+            },
+        )?;
         let documents = self.lexical_documents(request, &fuzzy, &phrase_queries)?;
-        // Selection precedes hydration: the scan holds one transient row at
-        // a time and a bounded worst-first heap of ranking keys, so retained
-        // materialization never exceeds the lane candidate cap.
+        // The scan holds one transient row and retains complete rows only for
+        // the cap-bounded winners. That avoids a second winner hydration pass
+        // while preserving the same strict materialization ceiling.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let mut excluded = self.document_count as u64;
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
-        self.visit_documents(&documents, |document| {
-            let row = self.row(document)?;
-            let score =
-                self.score_row(document, &row, request, &fuzzy, &phrase_frequencies, &stats)?;
-            let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
-                return Ok(());
-            };
-            eligible += 1;
-            excluded = excluded.saturating_sub(1);
-            retain_bounded(
-                &mut ranked,
-                cap,
-                RankedLexicalEntryV1 {
-                    key: (Reverse(ranking), row.id.as_str().to_owned(), document),
-                    score,
-                },
-            );
-            Ok(())
-        })?;
+        visit_lexical_rows(
+            self.connection,
+            &documents,
+            &terms,
+            &self.metrics,
+            |document, bytes, frequencies| {
+                let row = decode_row(&bytes).map_err(map_query_artifact_error)?;
+                let score = self.score_row(
+                    &row,
+                    request,
+                    &fuzzy,
+                    &phrase_frequencies,
+                    &stats,
+                    &frequencies,
+                )?;
+                let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
+                    return Ok(());
+                };
+                eligible += 1;
+                excluded = excluded.saturating_sub(1);
+                retain_bounded(
+                    &mut ranked,
+                    cap,
+                    RankedLexicalEntryV1 {
+                        key: (Reverse(ranking), row.id.as_str().to_owned(), document),
+                        score,
+                        row,
+                    },
+                );
+                Ok(())
+            },
+        )?;
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
         let mut candidates = Vec::with_capacity(selected.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, entry) in selected.into_iter().enumerate() {
             let RankedLexicalEntryV1 {
-                key: (_, _, document),
+                key: (_, _, _),
                 score,
+                row,
             } = entry;
-            let row = self.row(document)?;
             let mut candidate = candidate(
                 self.receipt,
                 &row,
@@ -857,6 +1085,7 @@ impl<'a> ArtifactQueryV1<'a> {
     }
 
     fn row(&self, document: u32) -> Result<ArtifactRowV1, RetrievalPortError> {
+        self.metrics.probe();
         let bytes: Vec<u8> = self
             .connection
             .query_row(
@@ -936,6 +1165,7 @@ impl<'a> ArtifactQueryV1<'a> {
         query: &DocumentQueryV1,
         visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
     ) -> Result<(), RetrievalPortError> {
+        self.metrics.probe();
         visit_document_ids(self.connection, query, visitor)
     }
 
@@ -1009,11 +1239,12 @@ impl<'a> ArtifactQueryV1<'a> {
                     .insert(term.clone());
             }
         }
-        hotpath::gauge!("query.lane.fuzzy.expansions").set(expansion_count);
+        hotpath::gauge!("query.lane.fuzzy.expansions_total").inc(expansion_count);
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
     fn load_vocabulary(&self) -> Result<Vec<String>, RetrievalPortError> {
+        self.metrics.probe();
         let mut statement = self
             .connection
             .prepare_cached("SELECT term FROM vocabulary ORDER BY term")
@@ -1023,6 +1254,10 @@ impl<'a> ArtifactQueryV1<'a> {
         while let Some(row) = rows.next().map_err(map_query_sql_error)? {
             vocabulary.push(row.get(0).map_err(map_query_sql_error)?);
         }
+        drop(rows);
+        self.metrics.observe_statement(&statement)?;
+        self.metrics
+            .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
         Ok(vocabulary)
     }
 
@@ -1034,10 +1269,12 @@ impl<'a> ArtifactQueryV1<'a> {
     /// repeat per term.
     fn lexical_stats(
         &self,
-        request: &LexicalLaneRequest<'_>,
-        fuzzy: &FuzzyExpansionsV1,
+        terms: &BTreeSet<String>,
     ) -> Result<LexicalStatsCacheV1, RetrievalPortError> {
+        ensure_sqlite_bind_capacity(0, terms.len())?;
+        ensure_sqlite_bound_value_bytes(&[], terms.iter().map(String::as_str))?;
         let mut field_totals = BTreeMap::new();
+        self.metrics.probe();
         let mut statement = self
             .connection
             .prepare_cached("SELECT field, total_length FROM field_stats")
@@ -1051,34 +1288,40 @@ impl<'a> ArtifactQueryV1<'a> {
                 usize::try_from(total).map_err(contract_error)?,
             );
         }
-        let mut terms = BTreeSet::new();
-        for term in &request.whole_terms {
-            terms.insert(normalize_lexical(term));
-        }
-        for expansions in fuzzy.by_query.values() {
-            terms.extend(expansions.iter().cloned());
-        }
-        for subtoken in &request.subtokens {
-            terms.insert(normalize_lexical(subtoken));
-        }
+        drop(rows);
+        self.metrics.observe_statement(&statement)?;
+        self.metrics
+            .rows(u64::try_from(field_totals.len()).map_err(contract_error)?);
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT field, document_frequency FROM term_stats WHERE term = ?1")
-            .map_err(map_query_sql_error)?;
-        for term in &terms {
-            let mut rows = statement.query([term]).map_err(map_query_sql_error)?;
+        if !terms.is_empty() {
+            let placeholders = std::iter::repeat_n("?", terms.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT field, term, document_frequency FROM term_stats INDEXED BY term_stats_by_term WHERE term IN ({placeholders})"
+            );
+            self.metrics.probe();
+            let mut statement = self
+                .connection
+                .prepare(&query)
+                .map_err(map_query_sql_error)?;
+            let mut rows = statement
+                .query(params_from_iter(terms.iter()))
+                .map_err(map_query_sql_error)?;
+            let mut observed_rows = 0u64;
             while let Some(row) = rows.next().map_err(map_query_sql_error)? {
                 let field: String = row.get(0).map_err(map_query_sql_error)?;
-                let frequency: i64 = row.get(1).map_err(map_query_sql_error)?;
+                let term: String = row.get(1).map_err(map_query_sql_error)?;
+                let frequency: i64 = row.get(2).map_err(map_query_sql_error)?;
                 document_frequencies
                     .entry(decode_field(&field)?)
                     .or_default()
-                    .insert(
-                        term.clone(),
-                        usize::try_from(frequency).map_err(contract_error)?,
-                    );
+                    .insert(term, usize::try_from(frequency).map_err(contract_error)?);
+                observed_rows = observed_rows.saturating_add(1);
             }
+            drop(rows);
+            self.metrics.observe_statement(&statement)?;
+            self.metrics.rows(observed_rows);
         }
         Ok(LexicalStatsCacheV1 {
             field_totals,
@@ -1088,26 +1331,26 @@ impl<'a> ArtifactQueryV1<'a> {
 
     fn score_row(
         &self,
-        document: u32,
         row: &ArtifactRowV1,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
+        frequencies: &LexicalTermFrequenciesV1,
     ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
-            self.score_row_inner(document, row, request, fuzzy, phrase_frequencies, stats)
+            self.score_row_inner(row, request, fuzzy, phrase_frequencies, stats, frequencies)
         })
     }
 
     fn score_row_inner(
         &self,
-        document: u32,
         row: &ArtifactRowV1,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
+        frequencies: &LexicalTermFrequenciesV1,
     ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
         let mut field_scores = BTreeMap::new();
         let mut matched_whole_terms = BTreeSet::new();
@@ -1119,7 +1362,7 @@ impl<'a> ArtifactQueryV1<'a> {
             if *field != LexicalFieldV1::Subtoken {
                 for query_term in &request.whole_terms {
                     let normalized = normalize_lexical(query_term);
-                    let exact_tf = self.term_frequency(*field, &normalized, document)?;
+                    let exact_tf = term_frequency(frequencies, *field, &normalized);
                     if exact_tf > 0 {
                         add_score(
                             &mut field_scores,
@@ -1131,7 +1374,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     }
                     if let Some(expansions) = fuzzy.by_query.get(query_term) {
                         for expansion in expansions {
-                            let tf = self.term_frequency(*field, expansion, document)?;
+                            let tf = term_frequency(frequencies, *field, expansion);
                             if tf == 0 {
                                 continue;
                             }
@@ -1149,7 +1392,7 @@ impl<'a> ArtifactQueryV1<'a> {
             } else {
                 for subtoken in &request.subtokens {
                     let normalized = normalize_lexical(subtoken);
-                    let tf = self.term_frequency(*field, &normalized, document)?;
+                    let tf = term_frequency(frequencies, *field, &normalized);
                     if tf > 0 {
                         add_score(
                             &mut field_scores,
@@ -1207,30 +1450,6 @@ impl<'a> ArtifactQueryV1<'a> {
         })
     }
 
-    fn term_frequency(
-        &self,
-        field: LexicalFieldV1,
-        term: &str,
-        document: u32,
-    ) -> Result<usize, RetrievalPortError> {
-        let field = encode_field(field).map_err(map_query_artifact_error)?;
-        let mut statement = self
-            .connection
-            .prepare_cached(
-                "SELECT frequency FROM term_postings WHERE field = ?1 AND term = ?2 AND document_id = ?3",
-            )
-            .map_err(map_query_sql_error)?;
-        statement
-            .query_row(params![field, term, i64::from(document)], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()
-            .map_err(map_query_sql_error)?
-            .unwrap_or_default()
-            .try_into()
-            .map_err(contract_error)
-    }
-
     fn term_score(
         &self,
         field: LexicalFieldV1,
@@ -1273,9 +1492,37 @@ impl<'a> ArtifactQueryV1<'a> {
 /// Request-local corpus statistics for BM25 scoring. Absent entries mean the
 /// artifact holds no posting for that key and score as zero, exactly like the
 /// SQL probes they replace.
+type LexicalTermFrequenciesV1 = BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>;
+
 struct LexicalStatsCacheV1 {
     field_totals: BTreeMap<LexicalFieldV1, usize>,
     document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
+}
+
+fn lexical_terms(request: &LexicalLaneRequest<'_>, fuzzy: &FuzzyExpansionsV1) -> BTreeSet<String> {
+    let mut terms = BTreeSet::new();
+    for term in &request.whole_terms {
+        terms.insert(normalize_lexical(term));
+    }
+    for expansions in fuzzy.by_query.values() {
+        terms.extend(expansions.iter().cloned());
+    }
+    for subtoken in &request.subtokens {
+        terms.insert(normalize_lexical(subtoken));
+    }
+    terms
+}
+
+fn term_frequency(
+    frequencies: &LexicalTermFrequenciesV1,
+    field: LexicalFieldV1,
+    term: &str,
+) -> usize {
+    frequencies
+        .get(&field)
+        .and_then(|terms| terms.get(term))
+        .copied()
+        .unwrap_or_default()
 }
 
 impl LexicalStatsCacheV1 {
@@ -1362,11 +1609,12 @@ struct RankedExactEntryV1 {
     matched_kinds: Vec<ExactTechnicalTermKindV1>,
 }
 
-/// One lexical winner retained during bounded selection. The score is
-/// carried so the post-heap hydrate does not re-run `score_row`.
+/// One lexical winner retained during bounded selection. Carrying its decoded
+/// row and score avoids both winner rehydration and score recomputation.
 struct RankedLexicalEntryV1 {
     key: (Reverse<u64>, String, u32),
     score: LexicalRowScoreV1,
+    row: ArtifactRowV1,
 }
 
 impl PartialEq for RankedLexicalEntryV1 {
@@ -1524,14 +1772,14 @@ fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArt
     Ok(())
 }
 
-#[hotpath::measure(label = "query.artifact.digest")]
-fn digest_artifact_file(
+#[inline]
+fn hash_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
+    mut record_bytes: impl FnMut(u64),
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
-    let mut bytes_read = 0u64;
     loop {
         checkpoint(control)?;
         let read = file
@@ -1540,12 +1788,38 @@ fn digest_artifact_file(
         if read == 0 {
             break;
         }
-        bytes_read += read as u64;
+        record_bytes(read as u64);
         hasher.update(&buffer[..read]);
     }
-    hotpath::gauge!("query.artifact.bytes").set(bytes_read);
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
+fn digest_content_addressed_file(
+    file: &mut File,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    hotpath::measure_block!("query.artifact.digest.content_address_preopen", {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.digest.content_address_preopen.passes_total").inc(1u64);
+        hash_artifact_file(file, control, |bytes| {
+            hotpath::gauge!("query.artifact.digest.content_address_preopen.bytes_total").inc(bytes);
+        })
+    })
+}
+
+fn digest_retained_artifact_file(
+    file: &mut File,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    hotpath::measure_block!("query.artifact.digest.retained_post_validation", {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.digest.retained_post_validation.passes_total").inc(1u64);
+        hash_artifact_file(file, control, |bytes| {
+            hotpath::gauge!("query.artifact.digest.retained_post_validation.bytes_total")
+                .inc(bytes);
+        })
+    })
 }
 
 /// The content-addressed head is the immutable authority for the bytes served
@@ -1559,7 +1833,7 @@ fn verify_retained_artifact_digest(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     file.seek(SeekFrom::Start(0))
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-    let actual = digest_artifact_file(file, control)?;
+    let actual = digest_retained_artifact_file(file, control)?;
     if &actual != expected {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "artifact bytes changed after SQLite opened the verified file".to_owned(),
@@ -1743,7 +2017,7 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
 #[cfg(test)]
 mod tests {
     use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
+    use std::collections::{BTreeSet, BinaryHeap};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1752,10 +2026,11 @@ mod tests {
     use tracedecay_private_fs::open_private_file;
 
     use super::{
-        ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, CodeLexicalArtifactErrorV1,
-        CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED, map_query_artifact_error,
-        ngram_document_query, query_ngrams, retain_bounded, union_document_queries,
-        visit_document_ids,
+        ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
+        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
+        CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
+        map_query_artifact_error, ngram_document_query, query_ngrams, retain_bounded,
+        union_document_queries, visit_document_ids, visit_lexical_rows,
     };
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -1894,7 +2169,7 @@ mod tests {
             .expect("make the artifact private");
 
         let mut retained = open_private_file(&artifact_path).expect("retain private artifact file");
-        let expected = super::digest_artifact_file(&mut retained, &AlwaysActiveControl)
+        let expected = super::digest_content_addressed_file(&mut retained, &AlwaysActiveControl)
             .expect("hash the original artifact bytes");
         let mutation = MutateSqliteHeaderAtObservation::new(artifact_path.clone(), 1);
         super::checkpoint(&mutation).expect("run the reader's post-hash checkpoint");
@@ -1936,7 +2211,7 @@ mod tests {
             .expect("make the artifact publicly readable");
 
         let mut file = std::fs::File::open(&artifact_path).expect("open artifact for digest");
-        let digest = super::digest_artifact_file(&mut file, &AlwaysActiveControl)
+        let digest = super::digest_content_addressed_file(&mut file, &AlwaysActiveControl)
             .expect("hash the publicly readable artifact");
         let size = file.metadata().expect("artifact metadata").len();
 
@@ -2089,6 +2364,156 @@ mod tests {
             streamed_documents(&connection, &query),
             (0..source_count).collect::<Vec<_>>(),
             "nested streamed enumeration preserves the exact candidate order beyond SQLite's flat UNION ceiling"
+        );
+    }
+
+    #[test]
+    fn lexical_row_stream_batches_term_frequencies_in_one_indexed_probe_at_scale() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        connection
+            .execute_batch(
+                "CREATE TABLE rows (
+                    document_id INTEGER PRIMARY KEY,
+                    row BLOB NOT NULL
+                );
+                CREATE TABLE term_postings (
+                    field TEXT NOT NULL,
+                    term TEXT NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    frequency INTEGER NOT NULL,
+                    PRIMARY KEY(field, term, document_id)
+                ) WITHOUT ROWID;
+                CREATE INDEX term_postings_by_document_term
+                    ON term_postings(document_id, term, field, frequency);",
+            )
+            .expect("lexical row fixture schema");
+        let field =
+            super::encode_field(super::LexicalFieldV1::BodyText).expect("encoded lexical field");
+        for document in 0..2_048i64 {
+            connection
+                .execute(
+                    "INSERT INTO rows(document_id, row) VALUES (?1, ?2)",
+                    params![document, (document as u32).to_le_bytes().as_slice()],
+                )
+                .expect("artifact row");
+            connection
+                .execute(
+                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, 'alpha', ?2, ?3)",
+                    params![field, document, document % 3 + 1],
+                )
+                .expect("matching posting");
+            connection
+                .execute(
+                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, 'irrelevant', ?2, 99)",
+                    params![field, document],
+                )
+                .expect("irrelevant posting");
+        }
+        let documents = DocumentQueryV1::term(field.clone(), "alpha".to_owned());
+        let mut terms = (0..250)
+            .map(|term| format!("absent-{term}"))
+            .collect::<BTreeSet<_>>();
+        terms.insert("alpha".to_owned());
+        terms.insert("beta".to_owned());
+        let metrics = ArtifactQueryMetricsV1::default();
+        let mut visited = 0usize;
+
+        visit_lexical_rows(
+            &connection,
+            &documents,
+            &terms,
+            &metrics,
+            |document, row, frequencies| {
+                assert_eq!(row, document.to_le_bytes());
+                assert_eq!(
+                    frequencies
+                        .get(&super::LexicalFieldV1::BodyText)
+                        .and_then(|terms| terms.get("alpha")),
+                    Some(&(usize::try_from(document).unwrap() % 3 + 1))
+                );
+                assert_eq!(
+                    frequencies
+                        .get(&super::LexicalFieldV1::BodyText)
+                        .and_then(|terms| terms.get("beta")),
+                    None,
+                    "absent postings stay exact zeroes"
+                );
+                assert!(
+                    !frequencies
+                        .get(&super::LexicalFieldV1::BodyText)
+                        .is_some_and(|terms| terms.contains_key("irrelevant")),
+                    "the batched probe must not hydrate unrelated terms"
+                );
+                visited += 1;
+                Ok(())
+            },
+        )
+        .expect("batched lexical row stream");
+
+        assert_eq!(visited, 2_048);
+        assert_eq!(
+            metrics.probes(),
+            1,
+            "statement count must stay constant as documents and terms grow"
+        );
+        assert_eq!(
+            metrics.observed_fullscan_steps(),
+            0,
+            "candidate and frequency lookups must stay on maintained indexes at scale"
+        );
+    }
+
+    #[test]
+    fn lexical_row_stream_refuses_more_than_the_portable_sqlite_bind_budget() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        let documents = DocumentQueryV1 {
+            sql: Some("SELECT ? AS document_id".to_owned()),
+            parameters: vec![rusqlite::types::Value::Integer(1)],
+        };
+        let terms = (0..ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1)
+            .map(|term| format!("term-{term}"))
+            .collect::<BTreeSet<_>>();
+
+        let error = visit_lexical_rows(
+            &connection,
+            &documents,
+            &terms,
+            &ArtifactQueryMetricsV1::default(),
+            |_, _, _| Ok(()),
+        )
+        .expect_err("combined document and term binds must be request-bounded");
+
+        assert_eq!(
+            error,
+            crate::retrieval::ports::RetrievalPortError::BudgetExceeded
+        );
+    }
+
+    #[test]
+    fn lexical_row_stream_refuses_aggregate_bound_text_over_budget() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        let documents = DocumentQueryV1 {
+            sql: Some("SELECT 1 AS document_id".to_owned()),
+            parameters: Vec::new(),
+        };
+        let per_term_bytes =
+            ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1 / ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1 + 1;
+        let terms = (0..ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1)
+            .map(|term| format!("{term:04}-{}", "x".repeat(per_term_bytes)))
+            .collect::<BTreeSet<_>>();
+
+        let error = visit_lexical_rows(
+            &connection,
+            &documents,
+            &terms,
+            &ArtifactQueryMetricsV1::default(),
+            |_, _, _| Ok(()),
+        )
+        .expect_err("aggregate bound text must stay within a deterministic byte budget");
+
+        assert_eq!(
+            error,
+            crate::retrieval::ports::RetrievalPortError::BudgetExceeded
         );
     }
 

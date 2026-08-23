@@ -1036,7 +1036,7 @@ fn content_addressed_reader_rejects_atomic_same_size_replacement() {
 }
 
 #[test]
-fn reader_rejects_incompatible_artifact_state_before_receipt_decode() {
+fn reader_rejects_revision_four_artifact_before_indexed_queries() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("incompatible-state.sqlite");
@@ -1050,10 +1050,41 @@ fn reader_rejects_incompatible_artifact_state_before_receipt_decode() {
     let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
     connection
         .execute(
-            "UPDATE artifact_state SET format_revision = format_revision + 1 WHERE singleton = 1",
+            "UPDATE artifact_state SET format_revision = 4 WHERE singleton = 1",
             [],
         )
-        .expect("write incompatible artifact state revision");
+        .expect("write revision-four artifact state");
+    drop(connection);
+
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+    ));
+}
+
+#[test]
+fn reader_rejects_current_artifact_missing_required_term_statistics_index() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory
+        .path()
+        .join("missing-term-statistics-index.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    connection
+        .execute_batch("DROP INDEX term_stats_by_term;")
+        .expect("remove required term-statistics index");
     drop(connection);
 
     assert!(matches!(
@@ -1203,7 +1234,7 @@ fn disk_artifact_controlled_reopen_cancels_receipt_scan_and_resumes() {
 }
 
 #[test]
-fn disk_artifact_base_schema_is_incompatible_before_resume_queries() {
+fn disk_artifact_revision_four_is_incompatible_before_new_index_queries() {
     let (fixture, pages, _) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -1216,19 +1247,53 @@ fn disk_artifact_base_schema_is_incompatible_before_resume_queries() {
         .expect("stage current-format source page");
     drop(builder);
 
-    // Model the prior branch-local staging schema: it has neither the durable
-    // finalization state nor the mutation epoch. A future builder must reject
-    // its declared revision before probing either newly required table.
+    // Revision four predates the term-leading statistics index. The declared
+    // revision must reject it before resume or query code can require that
+    // index by name.
     let connection = rusqlite::Connection::open(&artifact_path).expect("open legacy mutation");
     connection
         .execute(
-            "UPDATE artifact_state SET format_revision = 1 WHERE singleton = 1",
+            "UPDATE artifact_state SET format_revision = 4 WHERE singleton = 1",
             [],
         )
-        .expect("write legacy artifact revision");
+        .expect("write revision-four artifact state");
     connection
-        .execute_batch("DROP TABLE finalization_state; DROP TABLE content_epoch;")
-        .expect("remove future-only staging tables");
+        .execute_batch("DROP INDEX term_stats_by_term;")
+        .expect("remove revision-five index");
+    drop(connection);
+
+    assert!(matches!(
+        CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+            &artifact_path,
+            metadata,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+    ));
+}
+
+#[test]
+fn disk_artifact_resume_rejects_current_revision_with_wrong_term_index_shape() {
+    let (fixture, pages, _) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("wrong-term-index-shape.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
+    builder
+        .append_page(&pages[0], &control)
+        .expect("stage current-format source page");
+    drop(builder);
+
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open index mutation");
+    connection
+        .execute_batch(
+            "DROP INDEX term_stats_by_term;
+             CREATE INDEX term_stats_by_term ON term_stats(field, term);",
+        )
+        .expect("replace term-statistics index with wrong column order");
     drop(connection);
 
     assert!(matches!(
