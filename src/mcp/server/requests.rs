@@ -444,6 +444,7 @@ impl McpServer {
         result
     }
 
+    #[hotpath::measure(label = "mcp.hook_event")]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
@@ -659,10 +660,12 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.resources_list")]
     pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
         JsonRpcResponse::success(id, resources_list_result())
     }
 
+    #[hotpath::measure(label = "mcp.resources_read")]
     pub(crate) async fn handle_resources_read(
         &self,
         id: Value,
@@ -1112,6 +1115,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.tools_call.complete")]
     async fn complete_tool_call(
         &self,
         id: Value,
@@ -1297,6 +1301,7 @@ impl McpServer {
         ))
     }
 
+    #[hotpath::measure(label = "mcp.tools_call")]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,
