@@ -956,7 +956,7 @@ where
         admit_http_application_request(operation, request_id, controls, page, body)
     }) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let owner_kind = request.operation.owner_kind();
     let invocation = match owner_kind {
@@ -981,35 +981,37 @@ fn admit_http_application_request(
     controls: HttpApplicationControls,
     page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
-) -> Result<HttpApplicationRequest, Response> {
+// The rejection `Response` dwarfs the admitted request, so it is boxed:
+// the allocation lands only on the rejection path, which is the rare one.
+) -> Result<HttpApplicationRequest, Box<Response>> {
     let Query(page) = match page {
         Ok(page) => page,
         Err(_) => {
-            return Err(invalid_request_response(
+            return Err(Box::new(invalid_request_response(
                 request_id,
                 "http.invalid_query",
                 "The HTTP query is invalid",
-            ));
+            )));
         }
     };
     let page = match PageRequest::new(page.page_size, page.cursor) {
         Ok(page) => page,
         Err(_) => {
-            return Err(invalid_request_response(
+            return Err(Box::new(invalid_request_response(
                 request_id,
                 "http.invalid_page",
                 "The requested HTTP page is invalid",
-            ));
+            )));
         }
     };
     let Json(body) = match body {
         Ok(body) => body,
         Err(_) => {
-            return Err(invalid_request_response(
+            return Err(Box::new(invalid_request_response(
                 request_id,
                 "http.invalid_body",
                 "The HTTP request body is invalid or exceeds the configured limit",
-            ));
+            )));
         }
     };
     Ok(HttpApplicationRequest {
