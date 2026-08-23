@@ -622,11 +622,7 @@ impl Default for TraceDecayConfig {
 
 /// Typed project route for the configuration daemon boundary. The path is
 /// display/routing context only; [`ProjectId`] remains the authority key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeConfigurationTarget {
-    pub project_id: ProjectId,
-    pub project_root: PathBuf,
-}
+pub use tracedecay_usecases::config::RuntimeConfigurationTarget;
 
 /// A complete resolved configuration pinned to one revision before a runtime
 /// component starts. No caller may re-read mutable legacy input after holding
@@ -750,10 +746,7 @@ impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
     ) -> Result<tracedecay_dashboard_api::config::PinnedRuntimeConfiguration> {
         let configuration = self.for_root(project_root)?;
         tracedecay_dashboard_api::config::PinnedRuntimeConfiguration::new(
-            tracedecay_dashboard_api::config::RuntimeConfigurationTarget {
-                project_id: configuration.target.project_id,
-                project_root: configuration.target.project_root,
-            },
+            configuration.target,
             configuration.revision_id,
             configuration.snapshot,
         )
@@ -883,10 +876,7 @@ fn usecase_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,
 ) -> Result<tracedecay_usecases::config::PinnedRuntimeConfiguration> {
     tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
-        tracedecay_usecases::config::RuntimeConfigurationTarget {
-            project_id: configuration.target.project_id,
-            project_root: configuration.target.project_root,
-        },
+        configuration.target,
         configuration.revision_id,
         configuration.snapshot,
     )
@@ -907,10 +897,7 @@ pub(crate) fn root_runtime_configuration(
     configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
 ) -> Result<PinnedRuntimeConfiguration> {
     PinnedRuntimeConfiguration::new(
-        RuntimeConfigurationTarget {
-            project_id: configuration.target.project_id.clone(),
-            project_root: configuration.target.project_root.clone(),
-        },
+        configuration.target.clone(),
         configuration.revision_id.clone(),
         configuration.snapshot.clone(),
     )
