@@ -449,10 +449,10 @@ impl ElixirExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "arguments" {
-                    if let Some(arg) = child.named_child(0) {
-                        return Some(state.node_text(arg));
-                    }
+                if child.kind() == "arguments"
+                    && let Some(arg) = child.named_child(0)
+                {
+                    return Some(state.node_text(arg));
                 }
                 // For `def name(args)` the function name might be directly a `call`
                 // child (a call of name/args).

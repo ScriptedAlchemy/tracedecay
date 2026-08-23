@@ -1271,6 +1271,7 @@ fn apply_hint_efficacy_event(
     }
 }
 
+#[cfg(test)]
 fn decode_analytics_contract<T: serde::de::DeserializeOwned>(
     value: Value,
     label: &str,

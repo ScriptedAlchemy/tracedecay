@@ -2,7 +2,7 @@
 
 use super::*;
 use tracedecay_usecases::primitives::{
-    AffectedTestTraversal, RankedAffectedTest, affected_test_proximity, rank_affected_tests,
+    AffectedTestTraversal, affected_test_proximity, rank_affected_tests,
 };
 
 type FileDependentsByFile = HashMap<String, Vec<String>>;
@@ -175,6 +175,7 @@ pub(crate) async fn handle_affected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_usecases::primitives::RankedAffectedTest;
 
     struct FakeAffectedTestDependents {
         dependents: HashMap<String, Vec<String>>,

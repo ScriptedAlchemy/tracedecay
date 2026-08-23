@@ -124,18 +124,18 @@ pub(crate) fn extract_call_expression_sites(
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
-            if child.kind() == "call_expression" {
-                if let Some(callee) = child.named_child(0) {
-                    let callee_name = node_text(source, callee);
-                    unresolved_refs.push(UnresolvedRef {
-                        from_node_id: fn_node_id.to_string(),
-                        reference_name: callee_name,
-                        reference_kind: EdgeKind::Calls,
-                        line: child.start_position().row as u32,
-                        column: child.start_position().column as u32,
-                        file_path: file_path.to_string(),
-                    });
-                }
+            if child.kind() == "call_expression"
+                && let Some(callee) = child.named_child(0)
+            {
+                let callee_name = node_text(source, callee);
+                unresolved_refs.push(UnresolvedRef {
+                    from_node_id: fn_node_id.to_string(),
+                    reference_name: callee_name,
+                    reference_kind: EdgeKind::Calls,
+                    line: child.start_position().row as u32,
+                    column: child.start_position().column as u32,
+                    file_path: file_path.to_string(),
+                });
             }
             extract_call_expression_sites(source, file_path, unresolved_refs, child, fn_node_id);
             if !cursor.goto_next_sibling() {
