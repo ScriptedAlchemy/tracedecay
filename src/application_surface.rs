@@ -1424,7 +1424,7 @@ async fn application_http_context(
         deadline,
         cancellation: cancellation.clone(),
     });
-    let response = hotpath::measure_block!("http.request", next.run(request).await);
+    let response = hotpath::future!(next.run(request), label = "http.application_dispatch").await;
     active.finish();
     response
 }
