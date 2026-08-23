@@ -54,6 +54,17 @@ impl ProjectExecutor {
         Ok(())
     }
 
+    pub fn execute_observation_batch(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        writes: &[AnchoredObservationWrite],
+    ) -> rusqlite::Result<()> {
+        for write in writes {
+            self.execute_observation_write(savepoint, write)?;
+        }
+        Ok(())
+    }
+
     pub fn execute_remote_observation_replay(
         &mut self,
         savepoint: &Savepoint<'_>,

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures_util::future::join_all;
 use tracedecay_application::clock::now_micros;
 use tracing::Instrument;
 
@@ -929,79 +928,64 @@ async fn submit_observation_writes(
     writes: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationPersistOutcome)>> {
     let admitted_at = now_micros();
-    let mut prepared = Vec::with_capacity(writes.len());
-    for (slot, write) in writes {
-        let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(
-            &runtime_observation_command(&write),
-        )
-        .map_err(|error| {
+    let command = serde_json::json!({
+        "kind": "observation_batch",
+        "writes": writes
+            .iter()
+            .map(|(_, write)| runtime_observation_command(write))
+            .collect::<Vec<_>>(),
+    });
+    let (command_bytes, command_digest) =
+        canonical_json_bytes_and_sha256(&command).map_err(|error| {
             runtime_storage_error("derive observation runtime identity", error.to_string())
         })?;
-        let digest_suffix = runtime_digest_suffix(&command_digest)?;
-        let metadata = observation_submit_metadata(
-            runtime,
-            digest_suffix,
-            command_digest.as_str(),
-            command_bytes.len(),
-            format!("observation.{digest_suffix}"),
-            admitted_at,
-            "submit anchored observation",
-        )?;
-        prepared.push((slot, write, metadata, command_digest));
-    }
-    let compatibility = RuntimeBatchCompatibilityV1::for_batch(prepared.iter().map(|item| &item.2))
-        .map_err(|error| runtime_storage_error("submit anchored observation", error.to_string()))?;
-    let transaction_id = if let [(.., metadata, _)] = prepared.as_slice() {
-        RuntimeTransactionIdV1::new(format!("transaction.{}", metadata.operation_id.as_str()))
-            .map_err(|error| {
-                runtime_storage_error("submit anchored observation", error.to_string())
-            })?
-    } else {
-        let suffixes = prepared
-            .iter()
-            .map(|(_, _, _, digest)| runtime_digest_suffix(digest).map(str::to_owned))
-            .collect::<ObservationStoreResult<Vec<_>>>()?;
-        let digest = canonical_sha256(&serde_json::json!({
-            "kind": "observation.admission.batch",
-            "writes": suffixes,
-        }))
-        .map_err(|error| runtime_storage_error("submit anchored observation", error.to_string()))?;
-        RuntimeTransactionIdV1::new(format!(
-            "transaction.observation.admission.batch.{}",
-            runtime_digest_suffix(&digest)?
-        ))
-        .map_err(|error| runtime_storage_error("submit anchored observation", error.to_string()))?
-    };
+    let digest_suffix = runtime_digest_suffix(&command_digest)?;
+    let metadata = observation_submit_metadata(
+        runtime,
+        digest_suffix,
+        command_digest.as_str(),
+        command_bytes.len(),
+        format!("observation.batch.{digest_suffix}"),
+        admitted_at,
+        "submit observation batch",
+    )?;
+    let compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
+        .map_err(|error| runtime_storage_error("submit observation batch", error.to_string()))?;
+    let transaction_id = RuntimeTransactionIdV1::new(format!(
+        "transaction.observation.admission.batch.{digest_suffix}"
+    ))
+    .map_err(|error| runtime_storage_error("submit observation batch", error.to_string()))?;
     let transaction_scope = RuntimeTransactionScopeV1 {
         transaction_id,
         compatibility,
         opened_at: admitted_at,
     };
-    let submits = prepared.into_iter().map(|(slot, write, metadata, _)| {
-        let transaction_scope = transaction_scope.clone();
-        async move {
-            let observation_id = write.observation().observation_id().clone();
-            let candidate = write.observation().clone();
-            let candidate_cursor = write.next_cursor().clone();
-            let outcome = dispatch_runtime_submit(
-                runtime,
-                RepositoryWritePayloadV1::Observation(Box::new(write)),
-                metadata,
-                transaction_scope,
-                "submit anchored observation",
-            )
-            .await?;
+    let submitted_writes = writes
+        .iter()
+        .map(|(_, write)| write.clone())
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let outcome = dispatch_runtime_submit(
+        runtime,
+        RepositoryWritePayloadV1::ObservationBatch(submitted_writes),
+        metadata,
+        transaction_scope,
+        "submit observation batch",
+    )
+    .await?;
+    writes
+        .into_iter()
+        .map(|(slot, write)| {
             persist_outcome_from_submit(
                 runtime,
-                &observation_id,
-                &candidate,
-                candidate_cursor,
-                outcome,
+                write.observation().observation_id(),
+                write.observation(),
+                write.next_cursor().clone(),
+                outcome.clone(),
             )
             .map(|outcome| (slot, outcome))
-        }
-    });
-    join_all(submits).await.into_iter().collect()
+        })
+        .collect()
 }
 
 fn persist_outcome_from_submit(
@@ -1177,6 +1161,13 @@ fn runtime_command_value(
 ) -> ObservationStoreResult<serde_json::Value> {
     match payload {
         RepositoryWritePayloadV1::Observation(write) => Ok(runtime_observation_command(write)),
+        RepositoryWritePayloadV1::ObservationBatch(writes) => Ok(serde_json::json!({
+            "kind": "observation_batch",
+            "writes": writes
+                .iter()
+                .map(runtime_observation_command)
+                .collect::<Vec<_>>(),
+        })),
         RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => Ok(serde_json::json!({
             "kind": "observation_cursor_advance",
             "expected_cursor": advance.expected_cursor(),

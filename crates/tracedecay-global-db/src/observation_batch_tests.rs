@@ -16,14 +16,15 @@ use tracedecay_domain::{
     SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationPersistOutcome, ObservationStore, ObservationStoreError,
-    ObservationWrite,
+    AnchoredObservationWrite, FOREGROUND_BATCH_MAX_OPERATIONS, ObservationPersistOutcome,
+    ObservationStore, ObservationStoreError, ObservationWrite,
 };
 
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
 const BATCH_PROVIDER: &str = "observation-batch-test";
 const BATCH_SIZE: usize = 8;
+const ABOVE_WRITER_COALESCING_LIMIT: usize = FOREGROUND_BATCH_MAX_OPERATIONS as usize + 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WriterTxnCensus {
@@ -253,17 +254,21 @@ async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.observation-batch.one-txn").unwrap();
-    let writes = sequential_writes(&session_id, BATCH_SIZE);
+    let writes = sequential_writes(&session_id, ABOVE_WRITER_COALESCING_LIMIT);
     let before = writer_txn_census(&runtime).await;
     let outcomes = store.persist_observations(writes).await.unwrap();
-    assert_eq!(outcomes.len(), BATCH_SIZE);
+    assert_eq!(outcomes.len(), ABOVE_WRITER_COALESCING_LIMIT);
     assert!(
         outcomes
             .iter()
             .all(|outcome| matches!(outcome, ObservationPersistOutcome::Committed(_)))
     );
     let after = writer_txn_census(&runtime).await;
-    assert_eq!(after.operations - before.operations, BATCH_SIZE as i64);
+    assert_eq!(
+        after.operations - before.operations,
+        1,
+        "the bounded batch must be one admitted writer operation"
+    );
     assert_eq!(
         after.scopes - before.scopes,
         1,

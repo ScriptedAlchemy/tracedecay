@@ -767,6 +767,7 @@ pub enum RepositoryWritePayloadV1 {
     Configuration(Box<ConfigurationCommitV1>),
     Fact(Box<FactWriteBatch>),
     Observation(Box<AnchoredObservationWrite>),
+    ObservationBatch(Box<[AnchoredObservationWrite]>),
     ObservationCursorAdvance(Box<ObservationCursorAdvance>),
     RemoteObservationReplay(Box<RemoteObservationReplayWriteV1>),
     RemoteWriterFenceInstall(Box<RemoteWriterFenceInstallV1>),
@@ -790,6 +791,7 @@ impl RepositoryWritePayloadV1 {
             Self::Configuration(_) => "commit configuration",
             Self::Fact(_) => "commit fact lineage",
             Self::Observation(_) => "commit observation",
+            Self::ObservationBatch(_) => "commit observation batch",
             Self::ObservationCursorAdvance(_) => "advance observation source cursor",
             Self::RemoteObservationReplay(_) => "replay remote observation",
             Self::RemoteWriterFenceInstall(_) => "install remote writer fence",
@@ -816,6 +818,7 @@ impl RepositoryWritePayloadV1 {
         match self {
             Self::Configuration(_) => "profile",
             Self::Observation(_)
+            | Self::ObservationBatch(_)
             | Self::ObservationCursorAdvance(_)
             | Self::RemoteObservationReplay(_)
             | Self::RemoteWriterFenceInstall(_) => "observation",
@@ -839,6 +842,9 @@ impl RepositoryWritePayloadV1 {
             Self::Observation(write) => {
                 observation_scope_matches(write.observation().scope(), scope)
             }
+            Self::ObservationBatch(writes) => writes
+                .iter()
+                .all(|write| observation_scope_matches(write.observation().scope(), scope)),
             Self::ObservationCursorAdvance(advance) => {
                 observation_scope_matches(advance.next_cursor().scope(), scope)
             }
@@ -966,8 +972,14 @@ impl RepositoryWritePayloadV1 {
             }),
             Self::RemoteObservationReplay(write) => write.validate(),
             Self::RemoteWriterFenceInstall(install) => install.validate(),
+            Self::ObservationBatch(writes) if writes.is_empty() => {
+                Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                })
+            }
             Self::Fact(_)
             | Self::Observation(_)
+            | Self::ObservationBatch(_)
             | Self::ObservationCursorAdvance(_)
             | Self::Diagnostics(_) => Ok(()),
         }

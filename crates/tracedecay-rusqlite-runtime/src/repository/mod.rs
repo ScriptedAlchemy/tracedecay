@@ -107,6 +107,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::Observation(write) => {
                 self.project.execute_observation_write(savepoint, write)
             }
+            RepositoryWritePayloadV1::ObservationBatch(writes) => {
+                self.project.execute_observation_batch(savepoint, writes)
+            }
             RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => self
                 .project
                 .execute_observation_cursor_advance(savepoint, advance),
