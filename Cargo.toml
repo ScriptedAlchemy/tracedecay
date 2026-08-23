@@ -154,6 +154,14 @@ default = ["production"]
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
+    # `futures` gates the `future!` macro and the futures report; without it
+    # that report is empty however many async tasks the daemon runs.
+    "hotpath/futures",
+    # The daemon serves its HTTP application surface with axum 0.8 and reaches
+    # GitHub through ureq 3, and hotpath instruments both natively. Matching the
+    # versions we already depend on, so no second HTTP stack is introduced.
+    "hotpath/axum-0-8",
+    "hotpath/ureq-3",
     "tracedecay-agent-hosts/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",

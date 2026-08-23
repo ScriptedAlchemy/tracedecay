@@ -2993,6 +2993,7 @@ dependencies = [
  "cfg-if",
  "crossbeam-channel",
  "flate2",
+ "futures-channel",
  "futures-util",
  "hdrhistogram",
  "hotpath-macros",
@@ -3011,6 +3012,9 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tokio-util",
+ "tower-layer",
+ "tower-service",
+ "ureq",
 ]
 
 [[package]]
