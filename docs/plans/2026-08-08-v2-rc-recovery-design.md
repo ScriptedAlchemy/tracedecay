@@ -1,5 +1,12 @@
 # TraceDecay V2 RC Recovery Design
 
+> **RECONCILED INTO NEXT.md (2026-08-13).** Its live remainder is carried
+> by `docs/plans/tracedecay-v2/NEXT.md`, which is the delivery authority.
+> This document is retained as the design record for the recovery, not as
+> implementation authority. Its implementation-plan sibling,
+> `docs/superpowers/plans/2026-08-08-v2-rc-recovery.md`, was stamped at the
+> same time; this one was missed.
+
 **Status:** Approved on 2026-08-08
 
 ## Purpose

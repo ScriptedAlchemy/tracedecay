@@ -931,7 +931,10 @@ Unmeasured speculative optimizations and placeholder benchmarks do not ship.
   [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
   size-telemetry budgets, plus
   [Plan 39](39-embedded-grafeo-graph-database.md)'s embedded graph/vector
-  storage cutover.
+  storage cutover and
+  [Plan 40](40-partitioned-generation-storage-and-zero-copy-replay.md)'s
+  partitioned generation storage, which supersedes the monolithic sealed
+  generation envelope as the long-term storage design.
 
 Embedded graph and vector storage
 ([Plan 39](39-embedded-grafeo-graph-database.md)) threads through the active
