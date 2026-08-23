@@ -149,7 +149,7 @@ pub fn bound_path_list(
         .unwrap_or(u64::MAX)
         .saturating_add(skipped_oversized_entries);
     #[cfg(feature = "hotpath")]
-    crate::runtime::hotpath::record_discovery_files(
+    crate::runtime::pipeline_metrics::record_discovery_files(
         files_considered,
         u64::try_from(out.len()).unwrap_or(u64::MAX),
         bytes_charged,
@@ -184,12 +184,12 @@ pub fn collect_files_with_ext_bounded(
     };
     state.walk(dir, 0);
     #[cfg(feature = "hotpath")]
-    crate::runtime::hotpath::record_discovery_files(
+    crate::runtime::pipeline_metrics::record_discovery_files(
         state.files_considered,
         u64::try_from(state.paths.len()).unwrap_or(u64::MAX),
         state.bytes_charged,
     );
-    crate::runtime::hotpath::record_sweep_outcome(state.truncated.is_none());
+    crate::runtime::pipeline_metrics::record_sweep_outcome(state.truncated.is_none());
     FileDiscoveryReport {
         paths: state.paths,
         truncated: state.truncated,
@@ -218,7 +218,7 @@ impl WalkState<'_> {
         if depth > self.max_depth {
             return;
         }
-        crate::runtime::hotpath::record_dir_enumerated();
+        crate::runtime::pipeline_metrics::record_dir_enumerated();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };

@@ -394,7 +394,7 @@ impl ActiveAdmission<'_> {
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> TranscriptIngestResult<DurableFrameDisposition> {
         let checkpoint = frame.checkpoint;
-        crate::runtime::hotpath::record_capture_single();
+        crate::runtime::pipeline_metrics::record_capture_single();
         let request = self.capture_request(expected_cursor.clone(), frame, retention_class)?;
         let result = self.admission.capture_observation(request).await;
         self.apply_capture_result(expected_cursor, checkpoint, result, persisted_cursor_update)
@@ -412,7 +412,7 @@ impl ActiveAdmission<'_> {
         if frames.is_empty() {
             return Ok(());
         }
-        crate::runtime::hotpath::record_capture_window(frames.len());
+        crate::runtime::pipeline_metrics::record_capture_window(frames.len());
         let mut batch_expected = expected_cursor.clone();
         let mut requests = Vec::with_capacity(frames.len());
         let mut checkpoints = Vec::with_capacity(frames.len());
@@ -650,7 +650,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                             active
                                 .advance_coverage(expected_cursor, checkpoint, reason, None)
                                 .await?;
-                            crate::runtime::hotpath::record_frame_skipped(reason);
+                            crate::runtime::pipeline_metrics::record_frame_skipped(reason);
                             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                         }
                     }
@@ -712,7 +712,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
-            crate::runtime::hotpath::record_frame_skipped(skipped_reason(skipped.reason));
+            crate::runtime::pipeline_metrics::record_frame_skipped(skipped_reason(skipped.reason));
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
         if active.cancellation.is_cancelled() {
@@ -746,7 +746,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                     active
                         .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                         .await?;
-                    crate::runtime::hotpath::record_frame_skipped(reason);
+                    crate::runtime::pipeline_metrics::record_frame_skipped(reason);
                     progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                     continue;
                 }
@@ -803,7 +803,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
-            crate::runtime::hotpath::record_frame_skipped(skipped_reason(skipped.reason));
+            crate::runtime::pipeline_metrics::record_frame_skipped(skipped_reason(skipped.reason));
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
     } else {
@@ -820,7 +820,7 @@ pub(super) async fn admit_jsonl_observations<State>(
         source_deferred = progress.source_deferred,
         "transcript admission batch finished"
     );
-    crate::runtime::hotpath::record_admission_progress(
+    crate::runtime::pipeline_metrics::record_admission_progress(
         progress.frames_decoded,
         progress.frames_accepted,
         progress.frames_skipped,

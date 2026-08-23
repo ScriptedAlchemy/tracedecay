@@ -202,7 +202,7 @@ pub async fn expand_query(
     let synthesis_prompt =
         expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
 
-    crate::runtime::hotpath::record_lcm_retrieval(matches.len());
+    crate::runtime::pipeline_metrics::record_lcm_retrieval(matches.len());
     Ok(LcmExpandQueryResponse {
         prompt: request.prompt,
         query: request.query,

@@ -34,7 +34,7 @@ pub struct NewJsonl {
     pub replacement_generation: bool,
 }
 
-pub use crate::runtime::hotpath::{JsonlChangeKind, JsonlIoAccounting};
+pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 
 /// Why strict JSONL framing stopped before consuming the next record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -806,7 +806,7 @@ impl PreparedJsonlScan {
         let mtime = file_mtime_secs(&metadata);
         let (file_identity, identity_window_bytes) = stable_jsonl_file_id(&mut file, &metadata)
             .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
-        crate::runtime::hotpath::record_file_opened();
+        crate::runtime::pipeline_metrics::record_file_opened();
         let mut io = JsonlIoAccounting {
             identity_window_bytes,
             ..JsonlIoAccounting::default()
@@ -1361,7 +1361,7 @@ impl RawJsonlBatchScanner {
             || changed_consumed_prefix
             || final_metadata.len() < self.read_through
         {
-            crate::runtime::hotpath::record_scan_generation_changed();
+            crate::runtime::pipeline_metrics::record_scan_generation_changed();
             return Err(TranscriptIngestError::ScanGenerationChanged {
                 path: path.to_path_buf(),
             });
@@ -1407,7 +1407,7 @@ fn try_stream_new_jsonl_raw_from_file(
             .scan(path, oversized_policy)?
             .revalidate(path)?
     };
-    crate::runtime::hotpath::record_jsonl_io(&raw.io);
+    crate::runtime::pipeline_metrics::record_jsonl_io(&raw.io);
     Ok(raw)
 }
 

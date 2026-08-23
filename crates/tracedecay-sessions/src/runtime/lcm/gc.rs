@@ -458,7 +458,7 @@ pub async fn run_payload_gc(
     .await?;
     preview_dangling_placeholders(dir.as_deref(), &all_metadata_refs, &referenced, &mut report);
     report.ended_at = now;
-    crate::runtime::hotpath::record_lcm_gc(report.totals.bytes, report.totals.files);
+    crate::runtime::pipeline_metrics::record_lcm_gc(report.totals.bytes, report.totals.files);
     Ok(report)
 }
 
@@ -655,7 +655,7 @@ pub async fn run_payload_gc_in_transaction(
             schema::set_gc_meta(conn, "last_error", "partial").await?;
         }
     }
-    crate::runtime::hotpath::record_lcm_gc(report.totals.bytes, report.totals.files);
+    crate::runtime::pipeline_metrics::record_lcm_gc(report.totals.bytes, report.totals.files);
     Ok(report)
 }
 

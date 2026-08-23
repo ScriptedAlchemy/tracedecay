@@ -1,4 +1,4 @@
-//! Bounded Hotpath gauges for session discovery, JSONL, LCM, and git backfill.
+//! Bounded session-pipeline metrics backed by Hotpath.
 //!
 //! Labels are static enumerated names only. Gauges compile to no-ops when the
 //! `hotpath` feature is off. Counts stay exact; do not put paths, session IDs,

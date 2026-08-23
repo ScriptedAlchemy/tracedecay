@@ -503,8 +503,8 @@ async fn run_user_job_with_backend_publication(
     ledger_publication: AutomationRunLedgerPublication,
     settlement_guard: Option<&AutomationRunSettlementGuard>,
 ) -> super::AutomationRunResult<UserJobAutomationRun> {
-    let _run = super::hotpath::RunningGuard::enter();
-    let _duration = super::hotpath::DurationGuard::run();
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     validate_job(job)?;
     let UserJobRunOptions {
         trigger,

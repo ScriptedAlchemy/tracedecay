@@ -216,7 +216,9 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                         "user Codex coverage persistence failed",
                     ));
                 }
-                crate::runtime::hotpath::record_historical_ingest(!outcome.deferred_by_byte_cap);
+                crate::runtime::pipeline_metrics::record_historical_ingest(
+                    !outcome.deferred_by_byte_cap,
+                );
                 run
             }
             Err(error) => {

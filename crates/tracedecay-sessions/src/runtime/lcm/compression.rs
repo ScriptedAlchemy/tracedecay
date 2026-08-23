@@ -425,7 +425,7 @@ pub async fn compress(
 }
 
 fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
-    crate::runtime::hotpath::record_lcm_compression(
+    crate::runtime::pipeline_metrics::record_lcm_compression(
         response.summary_nodes_created,
         response.compression_attempts,
     );

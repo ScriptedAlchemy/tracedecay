@@ -299,9 +299,12 @@ impl CodexSource {
             let history_selected = u64::try_from(report.paths.len())
                 .unwrap_or(u64::MAX)
                 .saturating_sub(recent_selected);
-            crate::runtime::hotpath::record_discovery_slice(recent_selected, history_selected);
+            crate::runtime::pipeline_metrics::record_discovery_slice(
+                recent_selected,
+                history_selected,
+            );
         }
-        crate::runtime::hotpath::record_sweep_outcome(!report.is_truncated());
+        crate::runtime::pipeline_metrics::record_sweep_outcome(!report.is_truncated());
         CodexDiscoveryPass {
             report,
             next_history_rotation,
@@ -398,7 +401,7 @@ pub struct CodexDiscoveryPass {
 }
 
 fn count_jsonl_in_dir(dir: &Path) -> u64 {
-    crate::runtime::hotpath::record_dir_enumerated();
+    crate::runtime::pipeline_metrics::record_dir_enumerated();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -487,7 +490,7 @@ fn collect_bucket_dirs(root: &Path, max_depth: u8, max_dirs: usize) -> Vec<PathB
         if depth >= max_depth {
             continue;
         }
-        crate::runtime::hotpath::record_dir_enumerated();
+        crate::runtime::pipeline_metrics::record_dir_enumerated();
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

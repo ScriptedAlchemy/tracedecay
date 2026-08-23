@@ -379,7 +379,10 @@ where
         &mut stats,
     )
     .await?;
-    crate::runtime::hotpath::record_git_backfill(stats.sessions_scanned, stats.spans_written);
+    crate::runtime::pipeline_metrics::record_git_backfill(
+        stats.sessions_scanned,
+        stats.spans_written,
+    );
     Ok(stats)
 }
 
@@ -478,7 +481,10 @@ where
             scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
         })
         .await?;
-    crate::runtime::hotpath::record_git_backfill(stats.sessions_scanned, stats.spans_written);
+    crate::runtime::pipeline_metrics::record_git_backfill(
+        stats.sessions_scanned,
+        stats.spans_written,
+    );
     Ok(stats)
 }
 

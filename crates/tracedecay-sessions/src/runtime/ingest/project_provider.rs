@@ -274,7 +274,7 @@ impl<'a> ProjectProviderRun<'a> {
                 "project Codex coverage persistence failed",
             ));
         }
-        crate::runtime::hotpath::record_historical_ingest(!deferred);
+        crate::runtime::pipeline_metrics::record_historical_ingest(!deferred);
         outcome
     }
 

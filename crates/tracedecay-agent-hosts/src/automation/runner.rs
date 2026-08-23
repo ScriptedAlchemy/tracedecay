@@ -192,8 +192,8 @@ pub async fn run_user_session_automation_with_backend(
     options: UserSessionAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> AutomationRunResult<UserSessionAutomationRun> {
-    let _run = super::hotpath::RunningGuard::enter();
-    let _duration = super::hotpath::DurationGuard::run();
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_automation_with_backend_and_retrieval(
         profile_root,
@@ -566,8 +566,8 @@ async fn run_combined_review_for_retrieval(
     run_control: &AutomationRunControl,
     publication: CombinedReviewPublication<'_>,
 ) -> Result<CombinedReviewDispatch> {
-    let _run = super::hotpath::RunningGuard::enter();
-    let _duration = super::hotpath::DurationGuard::run();
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     let AutomationTaskIo { backend, retrieval } = io;
     let CombinedReviewPublication {
         ledger: ledger_publication,

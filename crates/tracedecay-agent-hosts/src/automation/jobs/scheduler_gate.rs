@@ -59,7 +59,7 @@ pub async fn evaluate_and_record_scheduler_skip(
     let lock_time = current_timestamp();
     let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, lock_time).await?
     else {
-        crate::automation::hotpath::observe_skip_reason("scheduler_lock_active");
+        crate::automation::scheduler_metrics::observe_skip_reason("scheduler_lock_active");
         return record_scheduler_lock_skip(
             dashboard_root,
             config,
@@ -75,10 +75,10 @@ pub async fn evaluate_and_record_scheduler_skip(
     let summary = load_scheduler_summary(dashboard_root, job).await?;
     let decision_time = current_timestamp();
     let Some(reason) = job_schedule_decision(job, summary.records(), decision_time) else {
-        crate::automation::hotpath::observe_due();
+        crate::automation::scheduler_metrics::observe_due();
         return Ok(None);
     };
-    crate::automation::hotpath::observe_skip_reason(reason);
+    crate::automation::scheduler_metrics::observe_skip_reason(reason);
     record_scheduler_diagnostic(
         dashboard_root,
         config,

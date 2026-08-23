@@ -744,7 +744,7 @@ pub use discovery::{
     bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
 };
 
-pub use crate::runtime::hotpath::{JsonlChangeKind, JsonlIoAccounting};
+pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 pub use jsonl::try_stream_new_jsonl_raw_strict;
 pub use jsonl::{

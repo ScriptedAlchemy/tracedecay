@@ -544,7 +544,7 @@ async fn run_session_retention_inner(
         scoped_row_count(&read, "session_messages", provider, session_id).await;
     report.freelist_after = pragma_u64(&read, "freelist_count").await;
     report.page_count_after = pragma_u64(&read, "page_count").await;
-    crate::runtime::hotpath::record_lcm_retention(report.bytes_reclaimed());
+    crate::runtime::pipeline_metrics::record_lcm_retention(report.bytes_reclaimed());
     Ok(report)
 }
 

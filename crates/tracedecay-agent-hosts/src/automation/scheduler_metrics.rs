@@ -1,4 +1,4 @@
-//! Bounded Hotpath gauges for the agent-host automation scheduler.
+//! Bounded scheduler and automation-run metrics backed by Hotpath.
 //!
 //! These gauges live at this crate's orchestration boundary so
 //! `tracedecay-automation` does not duplicate scheduler or run-queue metrics.
