@@ -54,10 +54,10 @@ die()  { printf '[hermetic] ERROR: %s\n' "$*" >&2; exit 1; }
 # Build the dev binary from THIS worktree. Echoes the built artifact path.
 build_binary() {
   local profile_dir="release"
-  local -a cargo_args=(build --release --bin tracedecay)
+  local -a cargo_args=(build --release --package tracedecay-cli --bin tracedecay)
   if [[ "${BUILD_DEBUG:-0}" == "1" ]]; then
     profile_dir="debug"
-    cargo_args=(build --bin tracedecay)
+    cargo_args=(build --package tracedecay-cli --bin tracedecay)
   fi
 
   # Isolate build artifacts from the user's normal target dir so a concurrent

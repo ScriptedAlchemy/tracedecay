@@ -423,7 +423,11 @@ cargo build \
   --features production \
   --bin tracedecay \
   --config "$patch_config"
-packaged_cli_bin="$cli_package/target/release/tracedecay"
+executable_suffix=""
+if [[ ${OS:-} == "Windows_NT" ]]; then
+  executable_suffix=".exe"
+fi
+packaged_cli_bin="$target_directory/release/tracedecay${executable_suffix}"
 [[ -x $packaged_cli_bin ]] ||
   die "packaged tracedecay CLI build did not produce $packaged_cli_bin"
 

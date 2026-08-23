@@ -32,6 +32,9 @@ fn reported_version() -> String {
 
 fn checkout() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("the CLI crate should live under the workspace crates directory")
 }
 
 /// Which branch runs depends on where the binary was built from: a developer
