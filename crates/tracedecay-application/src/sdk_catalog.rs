@@ -629,7 +629,35 @@ mod tests {
                     && !surface.is_alias()
             })
             .collect::<Vec<_>>();
-        assert_eq!(mcp_bindings.len(), 11, "all shipped Scout operations");
+        const EXPECTED_SCOUT_OPERATIONS: [&str; 11] = [
+            "context_scout_status",
+            "context_scout_recent",
+            "context_scout_explain",
+            "context_scout_capability",
+            "context_scout_budget",
+            "context_scout_pause",
+            "context_scout_resume",
+            "context_scout_cancel",
+            "context_scout_claim",
+            "context_scout_delivery",
+            "context_scout_feedback",
+        ];
+        assert!(
+            !mcp_bindings.is_empty(),
+            "Context Scout must ship at least one current MCP-bound operation"
+        );
+        let mut actual_operations: Vec<&str> = mcp_bindings
+            .iter()
+            .map(|surface| surface.operation().as_str())
+            .collect();
+        actual_operations.sort_unstable();
+        let mut expected_operations = EXPECTED_SCOUT_OPERATIONS.to_vec();
+        expected_operations.sort_unstable();
+        assert_eq!(
+            actual_operations, expected_operations,
+            "every named Scout operation must have exactly one current, non-alias MCP binding \
+             (adding an operation should extend EXPECTED_SCOUT_OPERATIONS, not just the count)"
+        );
 
         for surface in mcp_bindings {
             let operation = surface.operation().as_str();

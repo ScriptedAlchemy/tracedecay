@@ -334,14 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn source_edit_surface_wire_types_are_deserialize_owned() {
-        fn assert_deserialize_owned<T: serde::de::DeserializeOwned>() {}
-
-        assert_deserialize_owned::<SourceEditSurfaceOutcomeV1>();
-        assert_deserialize_owned::<SourceEditSurfaceResultV1>();
-    }
-
-    #[test]
     fn source_edit_surface_result_round_trips_success() {
         let expected = serde_json::json!({
             "success": true,

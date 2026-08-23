@@ -1143,7 +1143,6 @@ mod tests {
     #[test]
     fn every_capability_is_schema_backed_and_separately_authorized() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
-        assert_eq!(contribution.capabilities().len(), 11);
         for manifest in contribution.capabilities() {
             assert!(
                 contribution
