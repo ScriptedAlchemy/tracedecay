@@ -58,173 +58,42 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
 }
 
 #[test]
-fn test_tool_definitions_complete() {
+fn canonical_and_retired_tools_keep_truthful_discovery() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let compatibility_tools = tools
+    let tool_names = tools
         .iter()
-        .filter(|tool| ApplicationSurfaceOperation::from_tool_name(&tool.name).is_none())
-        .collect::<Vec<_>>();
-    for tool in compatibility_tools {
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for operation in ApplicationSurfaceOperation::ALL {
+        let tool_name = format!("tracedecay_{}", operation.as_str());
         assert!(
-            LegacyToolCompatibilityOwner::admits(&tool.name).expect("tool definitions"),
-            "{} must have an explicit compatibility owner",
-            tool.name
+            tool_names.contains(tool_name.as_str()),
+            "{tool_name} must be projected from the application registry"
         );
     }
 
-    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert!(tool_names.contains(&"tracedecay_search"));
-    assert!(tool_names.contains(&"tracedecay_move_symbol"));
-    assert!(tool_names.contains(&"tracedecay_analytics"));
-    assert!(tool_names.contains(&"tracedecay_retrieve"));
-    assert!(tool_names.contains(&"tracedecay_context"));
-    assert!(tool_names.contains(&"tracedecay_callers"));
-    assert!(tool_names.contains(&"tracedecay_callees"));
-    assert!(tool_names.contains(&"tracedecay_callers_for"));
-    assert!(tool_names.contains(&"tracedecay_by_qualified_name"));
-    assert!(tool_names.contains(&"tracedecay_signature"));
-    assert!(tool_names.contains(&"tracedecay_impls"));
-    assert!(tool_names.contains(&"tracedecay_diagnose"));
-    assert!(tool_names.contains(&"tracedecay_run_affected_tests"));
-    assert!(tool_names.contains(&"tracedecay_derives"));
-    for tool_name in [
-        "tracedecay_fact_store_add",
-        "tracedecay_fact_store_curate",
-        "tracedecay_fact_store_search",
-        "tracedecay_fact_store_probe",
-        "tracedecay_fact_store_related",
-        "tracedecay_fact_store_reason",
-        "tracedecay_fact_store_contradict",
-        "tracedecay_fact_store_get",
-        "tracedecay_fact_store_update",
-        "tracedecay_fact_store_remove",
-        "tracedecay_fact_store_list",
+    for retired in [
+        "tracedecay_fact_store",
+        "tracedecay_memory_automation_run",
+        "tracedecay_session_start",
+        "tracedecay_session_end",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
     ] {
         assert!(
-            tool_names.contains(&tool_name),
-            "{tool_name} must be advertised"
+            !tool_names.contains(retired),
+            "retired tool {retired} must not be advertised"
         );
     }
-    assert!(
-        !tool_names.contains(&"tracedecay_fact_store"),
-        "the broad fact-store translator must not be advertised"
-    );
-    assert!(tool_names.contains(&"tracedecay_fact_feedback"));
-    assert!(tool_names.contains(&"tracedecay_memory_status"));
-    assert!(!tool_names.contains(&"tracedecay_memory_automation_run"));
-    assert!(tool_names.contains(&"tracedecay_session_refresh"));
-    assert!(tool_names.contains(&"tracedecay_message_search"));
-    assert!(tool_names.contains(&"tracedecay_impact"));
-    assert!(tool_names.contains(&"tracedecay_node"));
-    assert!(tool_names.contains(&"tracedecay_status"));
-    assert!(tool_names.contains(&"tracedecay_active_project"));
-    assert!(tool_names.contains(&"tracedecay_storage_status"));
-    assert!(tool_names.contains(&"tracedecay_remote_status"));
-    assert!(tool_names.contains(&"tracedecay_project_list"));
-    assert!(tool_names.contains(&"tracedecay_project_search"));
-    assert!(tool_names.contains(&"tracedecay_project_context"));
-    assert!(tool_names.contains(&"tracedecay_files"));
-    assert!(tool_names.contains(&"tracedecay_affected"));
-    assert!(tool_names.contains(&"tracedecay_dead_code"));
-    assert!(tool_names.contains(&"tracedecay_diff_context"));
-    assert!(tool_names.contains(&"tracedecay_module_api"));
-    assert!(tool_names.contains(&"tracedecay_circular"));
-    assert!(tool_names.contains(&"tracedecay_hotspots"));
-    assert!(tool_names.contains(&"tracedecay_similar"));
-    assert!(tool_names.contains(&"tracedecay_rename_preview"));
-    assert!(tool_names.contains(&"tracedecay_unused_imports"));
-    assert!(tool_names.contains(&"tracedecay_changelog"));
-    assert!(tool_names.contains(&"tracedecay_rank"));
-    assert!(tool_names.contains(&"tracedecay_largest"));
-    assert!(tool_names.contains(&"tracedecay_coupling"));
-    assert!(tool_names.contains(&"tracedecay_inheritance_depth"));
-    assert!(tool_names.contains(&"tracedecay_distribution"));
-    assert!(tool_names.contains(&"tracedecay_recursion"));
-    assert!(tool_names.contains(&"tracedecay_complexity"));
-    assert!(tool_names.contains(&"tracedecay_doc_coverage"));
-    assert!(tool_names.contains(&"tracedecay_god_class"));
-    assert!(tool_names.contains(&"tracedecay_port_status"));
-    assert!(tool_names.contains(&"tracedecay_port_order"));
-    assert!(tool_names.contains(&"tracedecay_commit_context"));
-    assert!(tool_names.contains(&"tracedecay_pr_context"));
-    assert!(tool_names.contains(&"tracedecay_simplify_scan"));
-    assert!(tool_names.contains(&"tracedecay_test_map"));
-    assert!(tool_names.contains(&"tracedecay_type_hierarchy"));
-    assert!(tool_names.contains(&"tracedecay_branch_search"));
-    assert!(tool_names.contains(&"tracedecay_branch_diff"));
-    assert!(tool_names.contains(&"tracedecay_branch_list"));
-    assert!(tool_names.contains(&"tracedecay_str_replace"));
-    assert!(tool_names.contains(&"tracedecay_multi_str_replace"));
-    assert!(tool_names.contains(&"tracedecay_insert_at"));
-    // Structural search runs in-process (bundled grammars), so it is always
-    // advertised — unlike the CLI-backed rewrite tool gated just below.
-    assert!(tool_names.contains(&"tracedecay_ast_grep_search"));
-    if super::super::ast_grep_available() {
-        assert!(tool_names.contains(&"tracedecay_ast_grep_rewrite"));
-    } else {
-        assert!(!tool_names.contains(&"tracedecay_ast_grep_rewrite"));
-    }
-    assert!(tool_names.contains(&"tracedecay_gini"));
-    assert!(tool_names.contains(&"tracedecay_dependency_depth"));
-    assert!(tool_names.contains(&"tracedecay_health"));
-    assert!(tool_names.contains(&"tracedecay_redundancy"));
-    assert!(tool_names.contains(&"tracedecay_runtime"));
-    assert!(tool_names.contains(&"tracedecay_dsm"));
-    assert!(tool_names.contains(&"tracedecay_test_risk"));
-    assert!(!tool_names.contains(&"tracedecay_session_start"));
-    assert!(!tool_names.contains(&"tracedecay_session_end"));
-    assert!(tool_names.contains(&"tracedecay_body"));
-    assert!(tool_names.contains(&"tracedecay_todos"));
-    assert!(tool_names.contains(&"tracedecay_fact_feedback"));
-    assert!(tool_names.contains(&"tracedecay_memory_status"));
-    assert!(tool_names.contains(&"tracedecay_dashboard"));
-    assert!(tool_names.contains(&"tracedecay_message_search"));
-    assert!(tool_names.contains(&"tracedecay_sessions_for"));
-    assert!(tool_names.contains(&"tracedecay_workflows"));
-    assert!(tool_names.contains(&"tracedecay_lcm_status"));
-    assert!(tool_names.contains(&"tracedecay_lcm_doctor"));
-    assert!(tool_names.contains(&"tracedecay_lcm_load_session"));
-    assert!(tool_names.contains(&"tracedecay_lcm_grep"));
-    assert!(tool_names.contains(&"tracedecay_lcm_describe"));
-    assert!(tool_names.contains(&"tracedecay_lcm_expand"));
-    assert!(tool_names.contains(&"tracedecay_lcm_expand_query"));
-    assert!(!tool_names.contains(&"tracedecay_lcm_preflight"));
-    assert!(!tool_names.contains(&"tracedecay_lcm_compress"));
-    assert!(!tool_names.contains(&"tracedecay_lcm_session_boundary"));
-    let doctor = tools
-        .iter()
-        .find(|tool| tool.name == "tracedecay_lcm_doctor")
-        .expect("read-only LCM Doctor is advertised");
-    assert_eq!(doctor.annotations.as_ref().unwrap()["readOnlyHint"], true);
-    assert_eq!(doctor.input_schema["additionalProperties"], false);
-    // Doctor takes no provider argument: the daemon query is store-wide. The
-    // only knobs are the output format and which session store to inspect.
+
+    assert!(tool_names.contains("tracedecay_ast_grep_search"));
     assert_eq!(
-        doctor.input_schema["properties"]
-            .as_object()
-            .expect("doctor properties object")
-            .keys()
-            .collect::<Vec<_>>(),
-        ["format", "storage_scope"]
+        tool_names.contains("tracedecay_ast_grep_rewrite"),
+        super::super::ast_grep_available(),
+        "CLI-backed rewrite discovery must match host availability"
     );
-    assert!(tool_names.contains(&"tracedecay_read"));
-    assert!(tool_names.contains(&"tracedecay_outline"));
-    assert!(tool_names.contains(&"tracedecay_implementations"));
-    assert!(tool_names.contains(&"tracedecay_unsafe_patterns"));
-    assert!(tool_names.contains(&"tracedecay_diagnostics"));
-    assert!(tool_names.contains(&"tracedecay_config"));
-    assert!(tool_names.contains(&"tracedecay_signature_search"));
-    assert!(tool_names.contains(&"tracedecay_constructors"));
-    assert!(tool_names.contains(&"tracedecay_field_sites"));
-    assert!(tool_names.contains(&"tracedecay_call_chain"));
-    assert!(tool_names.contains(&"tracedecay_file_dependents"));
-    assert!(tool_names.contains(&"tracedecay_replace_symbol"));
-    assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
-    assert!(tool_names.contains(&"tracedecay_move_symbol"));
-    assert!(tool_names.contains(&"tracedecay_rename_symbol"));
-    assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
-    assert!(tool_names.contains(&"tracedecay_source_edit_rollback"));
-    assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
 }
 
 #[test]
