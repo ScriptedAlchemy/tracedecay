@@ -336,6 +336,7 @@ pub struct SharedPhysicalCodeArtifactPoolV1 {
 }
 
 impl SharedPhysicalCodeArtifactPoolV1 {
+    #[hotpath::measure]
     fn reuse(
         &self,
         key: &ManifestDigest,
@@ -354,6 +355,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     /// Record one artifact under its physical reuse key. The artifact is
     /// cloned only when the key is actually admitted, so re-recording an
     /// already-pooled key (every warm rebuild) costs a lock, not a deep copy.
+    #[hotpath::measure]
     fn insert(&self, key: ManifestDigest, artifact: &FileGenerationArtifactsV1) {
         let mut state = self
             .state
@@ -1584,6 +1586,7 @@ where
         Ok((physical_reuse_key, artifact))
     }
 
+    #[hotpath::measure]
     fn physical_reuse_key(
         config: &CodeIndexProductionConfigV1,
         file: &SanitizedCodeFileV1,

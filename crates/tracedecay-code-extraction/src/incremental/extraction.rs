@@ -191,6 +191,7 @@ fn parse_reset_reason(reason: ParseResetReason) -> ParsedExtractionResetReason {
     }
 }
 
+#[hotpath::measure]
 fn merge_changed_artifact(
     previous: &ExtractionArtifactV1,
     delta: ExtractionArtifactV1,

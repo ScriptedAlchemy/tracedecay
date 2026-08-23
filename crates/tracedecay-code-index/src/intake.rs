@@ -264,6 +264,7 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
             .map(SanitizedSnapshotCapabilityV1::new)
     }
 
+    #[hotpath::measure]
     fn bind_file(
         &self,
         capability: &SanitizedSnapshotCapabilityV1,
