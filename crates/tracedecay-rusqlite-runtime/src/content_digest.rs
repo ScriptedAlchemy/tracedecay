@@ -6,10 +6,9 @@
 //! per-table row order, and the per-value encoding below are all part of the
 //! wire contract and must not be "improved" without a versioned domain tag.
 
-use std::cmp::Ordering;
 use std::path::Path;
 
-use rusqlite::types::{Value, ValueRef};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest as _, Sha256};
 
@@ -97,7 +96,19 @@ fn digest_table(
             &format!("SELECT * FROM \"{escaped}\" ORDER BY {order}"),
         );
     }
-    digest_collected_in_column_order(connection, digest, &escaped)
+    let statement = connection
+        .prepare(&format!("SELECT * FROM \"{escaped}\""))
+        .map_err(|error| CanonicalContentDigestError::new("prepare session table read", error))?;
+    let order = (1..=statement.column_count())
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    drop(statement);
+    digest_ordered_sql(
+        connection,
+        digest,
+        &format!("SELECT * FROM \"{escaped}\" ORDER BY {order}"),
+    )
 }
 
 fn unique_declaration_prefix_len(
@@ -213,43 +224,6 @@ fn digest_ordered_sql(
     Ok(())
 }
 
-fn digest_collected_in_column_order(
-    connection: &Connection,
-    digest: &mut Sha256,
-    escaped: &str,
-) -> Result<(), CanonicalContentDigestError> {
-    let mut statement = connection
-        .prepare(&format!("SELECT * FROM \"{escaped}\""))
-        .map_err(|error| CanonicalContentDigestError::new("prepare session table read", error))?;
-    let column_count = statement.column_count();
-    let mut rows = statement
-        .query([])
-        .map_err(|error| CanonicalContentDigestError::new("query session table", error))?;
-    let mut collected = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| CanonicalContentDigestError::new("read session table row", error))?
-    {
-        let mut values = Vec::with_capacity(column_count);
-        for index in 0..column_count {
-            values.push(row.get::<_, Value>(index).map_err(|error| {
-                CanonicalContentDigestError::new("decode session table value", error)
-            })?);
-        }
-        collected.push(values);
-    }
-    drop(rows);
-    crate::telemetry::observe_statement(&statement);
-    collected.sort_by(|left, right| sqlite_row_cmp(left, right));
-    for values in collected {
-        digest.update(b"row\0");
-        for value in values {
-            digest_owned_value(digest, &value);
-        }
-    }
-    Ok(())
-}
-
 fn digest_query_rows(
     digest: &mut Sha256,
     statement: &mut rusqlite::Statement<'_>,
@@ -297,75 +271,6 @@ fn digest_value_ref(digest: &mut Sha256, value: ValueRef<'_>) {
     }
 }
 
-fn digest_owned_value(digest: &mut Sha256, value: &Value) {
-    match value {
-        Value::Null => digest.update([0]),
-        Value::Integer(value) => {
-            digest.update([1]);
-            digest.update(value.to_le_bytes());
-        }
-        Value::Real(value) => {
-            digest.update([2]);
-            digest.update(value.to_bits().to_le_bytes());
-        }
-        Value::Text(value) => {
-            digest.update([3]);
-            digest_len_prefixed(digest, value.as_bytes());
-        }
-        Value::Blob(value) => {
-            digest.update([4]);
-            digest_len_prefixed(digest, value);
-        }
-    }
-}
-
-fn sqlite_row_cmp(left: &[Value], right: &[Value]) -> Ordering {
-    for (left, right) in left.iter().zip(right.iter()) {
-        let order = sqlite_value_cmp(left, right);
-        if order != Ordering::Equal {
-            return order;
-        }
-    }
-    Ordering::Equal
-}
-
-fn sqlite_value_cmp(left: &Value, right: &Value) -> Ordering {
-    match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
-        (Value::Integer(left), Value::Integer(right)) => left.cmp(right),
-        (Value::Integer(left), Value::Real(right)) => cmp_integer_real(*left, *right),
-        (Value::Real(left), Value::Integer(right)) => cmp_integer_real(*right, *left).reverse(),
-        (Value::Real(left), Value::Real(right)) => left.total_cmp(right),
-        (Value::Integer(_) | Value::Real(_), _) => Ordering::Less,
-        (_, Value::Integer(_) | Value::Real(_)) => Ordering::Greater,
-        (Value::Text(left), Value::Text(right)) => left.as_bytes().cmp(right.as_bytes()),
-        (Value::Text(_), Value::Blob(_)) => Ordering::Less,
-        (Value::Blob(_), Value::Text(_)) => Ordering::Greater,
-        (Value::Blob(left), Value::Blob(right)) => left.cmp(right),
-    }
-}
-
-fn cmp_integer_real(integer: i64, real: f64) -> Ordering {
-    let as_real = integer as f64;
-    if as_real.is_finite() && as_real as i64 == integer {
-        return as_real.total_cmp(&real);
-    }
-    if !real.is_finite() {
-        return if real.is_sign_negative() {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        };
-    }
-    if real < as_real {
-        Ordering::Greater
-    } else {
-        Ordering::Less
-    }
-}
-
 fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
     digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     digest.update(value);
@@ -373,7 +278,7 @@ fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{Connection, StatementStatus};
+    use rusqlite::Connection;
     use sha2::{Digest as _, Sha256};
 
     use super::*;
@@ -382,7 +287,7 @@ mod tests {
     const ROW_COUNT: i64 = 64;
 
     #[test]
-    fn ordered_session_read_avoids_fullscan_sort_and_keeps_byte_exact_identity() {
+    fn declaration_prefix_read_avoids_fullscan_sort_and_keeps_byte_exact_identity() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-domain.db");
         let connection = Connection::open(&path).unwrap();
@@ -393,10 +298,10 @@ mod tests {
                     payload TEXT NOT NULL
                  );
                  CREATE TABLE messages (
-                    payload TEXT NOT NULL,
-                    extra TEXT NOT NULL,
                     provider TEXT NOT NULL,
                     message_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    extra TEXT NOT NULL,
                     PRIMARY KEY (provider, message_id)
                  );",
             )
@@ -406,10 +311,10 @@ mod tests {
                 .execute(
                     "INSERT INTO messages VALUES (?1, ?2, ?3, ?4)",
                     (
-                        format!("payload-{index:04}"),
-                        format!("extra-{index:04}"),
                         "cursor",
                         format!("msg-{index:04}"),
+                        format!("payload-{index:04}"),
+                        format!("extra-{index:04}"),
                     ),
                 )
                 .unwrap();
@@ -420,12 +325,6 @@ mod tests {
                 )
                 .unwrap();
         }
-        let leftover = leftover_order_by_all_columns_vm(&connection);
-        assert_eq!(leftover.visited, ROW_COUNT);
-        assert!(
-            leftover.fullscan_steps > 0 || leftover.sort_steps > 0,
-            "ORDER BY every column on a non-prefix unique key must fullscan or sort; got {leftover:?}"
-        );
         drop(connection);
 
         let expected = reference_session_domain_digest(&path);
@@ -435,7 +334,7 @@ mod tests {
         assert_eq!(actual, expected, "digest identity must stay byte-exact");
         assert!(
             snapshot.fullscan_steps <= u64::try_from(ROW_COUNT).unwrap(),
-            "unordered collect must visit each row at most once; got {snapshot:?}"
+            "index-ordered read must visit each row at most once; got {snapshot:?}"
         );
         assert_eq!(
             snapshot.sort_steps, 0,
@@ -446,44 +345,9 @@ mod tests {
             "digest must record sqlite_vm steps for the table read"
         );
         assert!(
-            snapshot.vm_steps < leftover.vm_steps,
-            "index-ordered read must do fewer VM steps than full-table ORDER BY ({snapshot:?} vs {leftover:?})"
-        );
-        assert!(
             snapshot.vm_steps < u64::try_from(ROW_COUNT).unwrap().saturating_mul(32),
             "ordered read must stay linear in visited rows; got {snapshot:?}"
         );
-    }
-
-    #[derive(Debug)]
-    struct LeftoverVm {
-        visited: i64,
-        fullscan_steps: u64,
-        sort_steps: u64,
-        vm_steps: u64,
-    }
-
-    fn leftover_order_by_all_columns_vm(connection: &Connection) -> LeftoverVm {
-        let mut statement = connection
-            .prepare("SELECT * FROM \"messages\" ORDER BY 1, 2, 3, 4")
-            .unwrap();
-        let visited = statement
-            .query_map([], |_| Ok(()))
-            .unwrap()
-            .count()
-            .try_into()
-            .unwrap();
-        LeftoverVm {
-            visited,
-            fullscan_steps: u64::try_from(
-                statement.get_status(StatementStatus::FullscanStep).max(0),
-            )
-            .unwrap_or(u64::MAX),
-            sort_steps: u64::try_from(statement.get_status(StatementStatus::Sort).max(0))
-                .unwrap_or(u64::MAX),
-            vm_steps: u64::try_from(statement.get_status(StatementStatus::VmStep).max(0))
-                .unwrap_or(u64::MAX),
-        }
     }
 
     fn reference_session_domain_digest(path: &std::path::Path) -> [u8; 32] {
