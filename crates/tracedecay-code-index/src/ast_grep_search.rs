@@ -403,11 +403,7 @@ where
             let line0 = start.line();
             result.lines_examined = result.lines_examined.saturating_add(1);
             result.lines_visited = result.lines_visited.saturating_add(1);
-            let line_text = source
-                .lines()
-                .nth(line0)
-                .map(str::to_owned)
-                .unwrap_or_default();
+            let line_text = source_line_at_byte(&source, range.start);
             result.matches.push(AstGrepSearchMatch {
                 file: rel_str.clone(),
                 start_byte: range.start,
@@ -428,6 +424,22 @@ where
     }
 
     Ok(result)
+}
+
+fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
+    let Some(prefix) = source.get(..byte_offset) else {
+        return String::new();
+    };
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let suffix = source.get(byte_offset..).unwrap_or_default();
+    let line_end = suffix
+        .find('\n')
+        .map_or(source.len(), |index| byte_offset + index);
+    source
+        .get(line_start..line_end)
+        .unwrap_or_default()
+        .trim_end_matches('\r')
+        .to_owned()
 }
 
 /// Collapses a (possibly multi-line) matched snippet to a single display line,
@@ -706,5 +718,14 @@ mod tests {
             result.lines_examined
         );
         assert!(result.lines_visited < TOTAL_LINES);
+    }
+
+    #[test]
+    fn source_line_lookup_uses_the_match_byte_offset() {
+        let source = "first\r\nsecond é\r\nthird\n";
+        let offset = source.find('é').unwrap();
+
+        assert_eq!(source_line_at_byte(source, offset), "second é");
+        assert!(source_line_at_byte(source, source.len() + 1).is_empty());
     }
 }
