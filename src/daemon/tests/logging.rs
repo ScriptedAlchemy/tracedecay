@@ -128,6 +128,7 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
         task_key: Some("memory_curator".to_string()),
         backend: "codex_app_server".to_string(),
+        backend_identity: None,
         host_mode: Some("standalone".to_string()),
         prompt_version: Some("memory_curator:v1".to_string()),
         response_schema: None,

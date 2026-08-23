@@ -43,6 +43,7 @@ mod tests {
             task: AgentTaskKind::MemoryCurator,
             task_key: Some("memory_curator".to_owned()),
             backend: "codex_app_server".to_owned(),
+            backend_identity: None,
             host_mode: Some("app_server".to_owned()),
             prompt_version: Some("memory_curator.v1".to_owned()),
             response_schema: Some(json!({"type": "object"})),

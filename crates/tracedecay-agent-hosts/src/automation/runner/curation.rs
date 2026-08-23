@@ -132,6 +132,7 @@ pub(super) fn unpersisted_rejected_parts(
         task,
         task_key: Some(task_key(task).to_string()),
         backend: config.backend.as_str().to_string(),
+        backend_identity: crate::automation::backend_identity::backend_identity(config).ok(),
         host_mode: Some(config.host_mode.as_str().to_string()),
         prompt_version: Some(prompt_version(task).to_string()),
         response_schema: Some(contract.response_schema),

@@ -1227,6 +1227,7 @@ pub(crate) fn scheduler_record_for(
         task,
         task_key: Some(test_task_key(task).to_string()),
         backend: "codex_app_server".to_string(),
+        backend_identity: None,
         host_mode: Some("standalone".to_string()),
         prompt_version: Some(test_prompt_version(task).to_string()),
         response_schema: None,

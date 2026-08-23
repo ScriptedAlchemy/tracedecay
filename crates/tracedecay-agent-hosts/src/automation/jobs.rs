@@ -780,6 +780,7 @@ impl JobRunContext<'_> {
             task: AgentTaskKind::UserJob,
             task_key: Some(job_task_key(&self.job.id)),
             backend: self.config.backend.as_str().to_string(),
+            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(
                 super::backend::prompt_version(AgentTaskKind::UserJob).to_string(),

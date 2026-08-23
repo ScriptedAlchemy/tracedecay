@@ -16,6 +16,7 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         task: AgentTaskKind::MemoryCurator,
         task_key: Some("memory_curator".to_string()),
         backend: "fake".to_string(),
+        backend_identity: None,
         host_mode: Some("standalone".to_string()),
         prompt_version: Some("memory_curator:v1".to_string()),
         response_schema: None,

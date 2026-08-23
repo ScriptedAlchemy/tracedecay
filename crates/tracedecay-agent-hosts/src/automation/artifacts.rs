@@ -206,6 +206,7 @@ mod tests {
             task: AgentTaskKind::SkillWriter,
             task_key: Some("skill_writer".to_string()),
             backend: "test".to_string(),
+            backend_identity: None,
             host_mode: None,
             prompt_version: None,
             response_schema: None,

@@ -143,6 +143,16 @@ pub struct AutomationRunLedgerRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_key: Option<String>,
     pub backend: String,
+    /// The durable backend/configuration identity this run executed under.
+    ///
+    /// A settled deterministic failure stays suppressed only while this
+    /// matches the identity now configured, so the scheduler can re-admit the
+    /// task the moment the backend or configuration changes. Records written
+    /// before this field existed carry `None` and never suppress: an
+    /// unidentified failure cannot be shown to have failed under the current
+    /// identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

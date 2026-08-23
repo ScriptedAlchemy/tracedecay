@@ -1152,6 +1152,12 @@ impl<'a> AgentRunFinalizer<'a> {
             task: self.task,
             task_key: Some(task_key(self.task).to_string()),
             backend: self.config.backend.as_str().to_string(),
+            // Stamped on every terminal record so a settled deterministic
+            // failure can be re-admitted the moment the backend or
+            // configuration it failed under changes. A digest that cannot be
+            // computed is left absent rather than guessed: an unidentified
+            // failure must not suppress anything.
+            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(prompt_version(self.task).to_string()),
             response_schema: Some(contract.response_schema),
