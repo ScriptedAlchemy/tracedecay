@@ -58,17 +58,17 @@ mod root_relation_fixture;
 
 const SCHEMA_VERSION: u64 = 2;
 const WORKLOAD_ID: &str = "session-temporal-v1";
-const WORKLOAD_PATH: &str = "benchmarks/session-temporal/workload-v1.json";
-const EVIDENCE_INDEX_PATH: &str = "benchmarks/session-temporal/evidence-index.json";
-const RESULT_PATH: &str = "benchmarks/session-temporal/result-current.json";
+const WORKLOAD_PATH: &str = "benchmark_data/session-temporal/workload-v1.json";
+const EVIDENCE_INDEX_PATH: &str = "benchmark_data/session-temporal/evidence-index.json";
+const RESULT_PATH: &str = "benchmark_data/session-temporal/result-current.json";
 const RESULT_FILE_NAME: &str = "result-current.json";
-const HISTORICAL_RESULT_PATH: &str = "benchmarks/session-temporal/result-provisional.json";
+const HISTORICAL_RESULT_PATH: &str = "benchmark_data/session-temporal/result-provisional.json";
 const HISTORICAL_RESULT_FILE_NAME: &str = "result-provisional.json";
 const HISTORICAL_HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
 const HARNESS_PATH: &str = "src/session_temporal_benchmark.rs";
 const SANITIZATION_RECEIPT_PATH: &str =
-    "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json";
+    "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json";
 const P95_LABEL: &str = "descriptive nearest-rank sample p95";
 const P99_LABEL: &str = "descriptive nearest-rank sample p99 (sample maximum when n=30)";
 const WARMUP_REPETITIONS: usize = 3;

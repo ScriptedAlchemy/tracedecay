@@ -15,7 +15,7 @@ SPEC = importlib.util.spec_from_file_location("run_real_model", MODULE_PATH)
 run_real_model = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_real_model)
 
-BENCHMARK_PATH = MODULE_PATH.parent.parent / "benchmarks" / "run_benchmarks.py"
+BENCHMARK_PATH = MODULE_PATH.parent.parent / "benchmark_data" / "run_benchmarks.py"
 BENCHMARK_SPEC = importlib.util.spec_from_file_location("run_benchmarks", BENCHMARK_PATH)
 run_benchmarks = importlib.util.module_from_spec(BENCHMARK_SPEC)
 BENCHMARK_SPEC.loader.exec_module(run_benchmarks)

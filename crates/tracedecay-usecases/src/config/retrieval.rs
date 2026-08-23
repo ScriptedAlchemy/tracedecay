@@ -971,7 +971,7 @@ mod tests {
     #[test]
     fn aggregate_only_report_cannot_become_activation_evidence() {
         let aggregate_only =
-            include_str!("../../../../benchmarks/search-quality/query-fallback-report-v1.json");
+            include_str!("../../../../benchmark_data/search-quality/query-fallback-report-v1.json");
 
         assert!(serde_json::from_str::<DirectEvaluationReportV1>(aggregate_only).is_err());
     }

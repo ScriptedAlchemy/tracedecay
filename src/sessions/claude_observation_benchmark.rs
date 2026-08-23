@@ -31,13 +31,13 @@ const CONCURRENCY: usize = 1;
 const BENCHMARK_COMMAND: &str = "cargo test --quiet --release --lib claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
 const EVIDENCE_RUNNER: &str = "scripts/run-claude-observation-benchmark.sh";
 const WORKLOAD_IMPLEMENTATION: &str = "src/sessions/claude_observation_benchmark.rs";
-const WORKLOAD_MANIFEST_PATH: &str = "benchmarks/claude-observation/workload-v1.json";
+const WORKLOAD_MANIFEST_PATH: &str = "benchmark_data/claude-observation/workload-v1.json";
 const BENCHMARK_SECRET_PREFIX: &str = "sk-test-";
 const REDACTION_MARKER: &str = "[TraceDecay redacted:";
 const PROVIDER_PIPELINE_SCOPE: &str =
     "production_parse_normalize_sanitize_commit_project_and_replay";
 const WORKLOAD_MANIFEST: &str =
-    include_str!("../../benchmarks/claude-observation/workload-v1.json");
+    include_str!("../../benchmark_data/claude-observation/workload-v1.json");
 const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",

@@ -18,8 +18,8 @@ commit=$(git rev-parse HEAD)
 tree=$(git rev-parse 'HEAD^{tree}')
 short_commit=${commit:0:8}
 result_name="result-$(date -u +%F)-${short_commit}.json"
-result_path="benchmarks/claude-observation/$result_name"
-index_path="benchmarks/claude-observation/evidence-index.json"
+result_path="benchmark_data/claude-observation/$result_name"
+index_path="benchmark_data/claude-observation/evidence-index.json"
 if [[ -e $result_path ]]; then
   echo "refusing to overwrite $result_path" >&2
   exit 1
@@ -156,7 +156,7 @@ sed "s/\"current_acceptance\": null/\"current_acceptance\": \"$result_name\"/" \
 (
   cd "$build_root"
   TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE=1 \
-  TRACEDECAY_BENCHMARK_EVIDENCE_DIR="$repo_root/benchmarks/claude-observation" \
+  TRACEDECAY_BENCHMARK_EVIDENCE_DIR="$repo_root/benchmark_data/claude-observation" \
   TRACEDECAY_SKIP_DASHBOARD_BUILD=1 \
     cargo test --quiet --release --lib \
       claude_observation_benchmark::evidence_directory_matches_index_contract -- \

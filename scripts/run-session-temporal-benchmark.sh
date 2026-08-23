@@ -40,7 +40,7 @@ import sys
 import tomllib
 
 root = pathlib.Path(sys.argv[1])
-benchmark_root = root / "benchmarks/session-temporal"
+benchmark_root = root / "benchmark_data/session-temporal"
 phases = [
     "rebuild_activate",
     "exact_replay",
@@ -49,7 +49,7 @@ phases = [
 ]
 p95_label = "descriptive nearest-rank sample p95"
 p99_label = "descriptive nearest-rank sample p99 (sample maximum when n=30)"
-receipt_path = "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json"
+receipt_path = "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json"
 
 def load(path):
     with path.open(encoding="utf-8") as handle:

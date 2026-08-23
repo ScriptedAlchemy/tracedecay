@@ -146,9 +146,9 @@ assert_required_assets() {
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
-    "benchmarks/claude-observation/workload-v1.json"
+    "benchmark_data/claude-observation/workload-v1.json"
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
-    "benchmarks/search-quality/query-fallback-report-v1.json"
+    "benchmark_data/search-quality/query-fallback-report-v1.json"
   )
 
   for required in "${root_assets[@]}"; do

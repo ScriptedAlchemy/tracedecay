@@ -388,7 +388,7 @@ Install the verified binary to `~/.local/bin/tracedecay`, restart the daemon onc
 
 **Files:**
 - Add or modify only after profiling identifies the production owners
-- Prefer an existing benchmark location under `benchmarks/runtime/` for reproducible receipts
+- Prefer an existing benchmark location under `benchmark_data/runtime/` for reproducible receipts
 
 **Interfaces:**
 - Consumes: installed post-merge beta and real Cursor/Codex session corpus
@@ -412,7 +412,7 @@ For each store shard, record admitted operations, committed batches, WAL bytes, 
 
 **Files:**
 - Likely modify: session provider discovery/cursor owners, runtime writer batching, and scheduler admission paths identified by Task 7
-- Test/benchmark: focused production journeys and `benchmarks/runtime/`
+- Test/benchmark: focused production journeys and `benchmark_data/runtime/`
 
 **Interfaces:**
 - Consumes: Task 7 profile and existing per-source cursor/CAS authorities

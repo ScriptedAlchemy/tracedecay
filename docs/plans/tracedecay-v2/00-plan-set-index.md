@@ -142,7 +142,7 @@ failure/recovery tests, and normal CI are the evidence.
 PR-specific acceptance snapshots, owner receipts, gate manifests,
 clean/content-addressed checkout snapshots, signatures, attestations,
 reveal/trust-root evidence, or giant gate scaffolds. Acceptance is direct
-product tests plus simple Linux-only developer benchmarks/evals and truthful
+product tests plus simple Linux-only developer benchmark_data/evals and truthful
 pass/fail/pending summaries; normal Linux/macOS/Windows CI continues to support
 the product's default features. This rule does not remove product-runtime
 receipts for atomic effects, Git transactions, daemon operations,
@@ -194,7 +194,7 @@ records the rejected mechanism, the reason, and the retained replacement:
    signatures, attestations, reveal/trust-root evidence, and giant gate
    scaffolds were planning bureaucracy rather than product evidence. The
    authoritative acceptance rule above replaces them with direct product
-   tests, simple Linux developer benchmarks/evals, truthful
+   tests, simple Linux developer benchmark_data/evals, truthful
    pass/fail/pending summaries, and normal cross-platform CI. Product-runtime
    receipts, authorized repository/worktree/state snapshots, immutable
    generations, and real content/source digests remain required.

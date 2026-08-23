@@ -165,7 +165,7 @@ impl CodeIndexEventToReadyReceiptV1 {
 /// Minimum matching samples before a percentile may be reported.
 ///
 /// These mirror the frozen runtime measurement policy in
-/// `benchmarks/runtime/policies/journey-margins-v1.json` so a percentile this
+/// `benchmark_data/runtime/policies/journey-margins-v1.json` so a percentile this
 /// read model publishes is admissible under the same rule the harness applies.
 pub(crate) const P50_MINIMUM_SAMPLES: usize = 2;
 pub(crate) const P95_MINIMUM_SAMPLES: usize = 40;
