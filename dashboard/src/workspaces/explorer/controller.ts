@@ -98,16 +98,27 @@ const RETRYABLE_TRANSPORT_STATES: ReadonlySet<DashboardDomainStateV1> = new Set<
 >(['offline', 'error', 'loading']);
 
 /**
- * Consecutive retryable failures a pending run tolerates before the poll gives
- * up. Bounded on purpose: an admitted run is the only thing this query is
- * waiting on, and a daemon that has been unreachable for this many slow ticks
- * is a condition the reader must see rather than one to keep re-asking.
+ * How long a retried status read waits, by how many consecutive transport
+ * failures precede it: 1 s, 2 s, 5 s, 10 s, and then the ceiling below for as
+ * long as the failure lasts.
+ *
+ * A ladder rather than an attempt budget. An admitted run does not stop
+ * existing because the daemon blinked, and this poll is the only thing that
+ * can ever resolve it, so a budget strands every run that outlives it — the
+ * daemon comes back, the run completes, and the surface never finds out.
+ * Backing off instead keeps the run reachable while making a dead daemon cost
+ * two reads a minute, and the failing reads stay on screen the whole time
+ * because `fetchEnvelope` reports them as data the lanes render.
  */
-const TRANSPORT_RETRY_LIMIT = 4;
+const TRANSPORT_BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10_000];
 
-/** The slow tick a retried read uses — long enough for a daemon restart to
- * finish, slow enough that an offline daemon is not hammered. */
-const TRANSPORT_RETRY_MS = 2000;
+/** The slowest the poll ever ticks, held until the run terminates or the
+ * surface goes away. */
+const TRANSPORT_BACKOFF_CEILING_MS = 30_000;
+
+function transportBackoffMs(consecutiveFailures: number): number {
+  return TRANSPORT_BACKOFF_MS[consecutiveFailures - 1] ?? TRANSPORT_BACKOFF_CEILING_MS;
+}
 
 /* -------------------------------------------------------------- controller */
 
@@ -170,8 +181,9 @@ export function useExplorerController(): ExplorerController {
   });
   const activeRunIdForQuery = activeRunId ?? '';
   // `fetchEnvelope` reports a transport failure as data rather than throwing,
-  // so react-query's own failure count never moves and cannot bound the retry
-  // below. This is that count, reset by the first read that lands an envelope.
+  // so react-query's own failure count never moves and cannot pace the retry
+  // below. This is that count — how far down the backoff ladder the poll has
+  // walked — reset by the first read that lands an envelope.
   const transportFailures = useRef(0);
   const runStatus = useQuery({
     queryKey: ['explorer', 'query-run', activeRunIdForQuery],
@@ -188,13 +200,14 @@ export function useExplorerController(): ExplorerController {
       if (result.outcome === 'transport') {
         // This poll is the only thing that resolves an admitted run — run
         // completion publishes no targeted invalidation — so a transport
-        // failure that a repeat read could clear must not end it, or a run
-        // that is still progressing never surfaces. The retry is slow and
-        // bounded; past the bound, and for any standing refusal, the poll
-        // stops and the failure is left on screen rather than hidden behind
-        // an indefinite spinner.
+        // failure a repeat read could clear must not end it, at any count: a
+        // run whose daemon blinks more times than some budget allows is still
+        // a live run, and abandoning it is the stuck surface this poll exists
+        // to prevent. What is bounded is the rate, not the attempts. A
+        // standing refusal still stops immediately, because re-asking it only
+        // ever gets the same answer.
         if (!RETRYABLE_TRANSPORT_STATES.has(result.state)) return false;
-        return transportFailures.current >= TRANSPORT_RETRY_LIMIT ? false : TRANSPORT_RETRY_MS;
+        return transportBackoffMs(transportFailures.current);
       }
       if (runIsTerminal(result.envelope.payload.state)) return false;
       // A long-pending run escalates off the fast tick rather than holding
@@ -326,8 +339,8 @@ export function useExplorerController(): ExplorerController {
       if (nextQuery === '') return;
       setSubmitted(nextQuery);
       setActiveRunId(null);
-      // A fresh run gets the whole retry budget: the previous run's failures
-      // are not this one's.
+      // A fresh run starts at the top of the backoff ladder: the previous
+      // run's failures are not this one's, and must not slow its first reads.
       transportFailures.current = 0;
       planner.reset();
       planner.mutate(nextQuery);
