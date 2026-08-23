@@ -770,7 +770,7 @@ impl DaemonInvocationState {
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
-                        (**request).clone(),
+                        request.as_ref().clone(),
                         observed_at,
                         deadline.clone(),
                         cancellation,
