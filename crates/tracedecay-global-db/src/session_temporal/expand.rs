@@ -571,11 +571,11 @@ async fn retrieve_summary_page(
                 "summary page exceeds the transitional store cursor capacity",
             ));
         }
-        let summary_id = decode_text::<SessionSummaryIdV1>(row_get(row, 0)?)?;
-        let summary_anchor_id = decode_text::<RetrievalAnchorId>(row_get(row, 1)?)?;
-        let source_horizon = decode_json_str::<SummarySourceHorizonV1>(row_get(row, 2)?)?;
-        let created_at = UtcMicros(row_get(row, 3)?);
-        let publication = row_get::<Option<String>>(row, 4)?;
+        let summary_id = decode_text::<SessionSummaryIdV1>(row_get(&row, 0)?)?;
+        let summary_anchor_id = decode_text::<RetrievalAnchorId>(row_get(&row, 1)?)?;
+        let source_horizon = decode_json_str::<SummarySourceHorizonV1>(row_get(&row, 2)?)?;
+        let created_at = UtcMicros(row_get(&row, 3)?);
+        let publication = row_get::<Option<String>>(&row, 4)?;
         summary_seeds.push(SummarySeed {
             summary_id,
             summary_anchor_id,
