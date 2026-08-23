@@ -394,8 +394,10 @@ where
                     &source,
                     td_lang,
                     compiled,
-                    &rel_str,
-                    key,
+                    AstGrepFileIdentity {
+                        rel_str: &rel_str,
+                        key,
+                    },
                     &mut result,
                     max_results,
                     &is_cancelled,
@@ -406,8 +408,10 @@ where
                 &source,
                 td_lang,
                 compiled,
-                &rel_str,
-                key,
+                AstGrepFileIdentity {
+                    rel_str: &rel_str,
+                    key,
+                },
                 &mut result,
                 max_results,
                 &is_cancelled,
@@ -421,16 +425,25 @@ where
     Ok(result)
 }
 
+/// Which file a match is attributed to: its project-relative path and the
+/// language key. Both are only ever copied into the emitted match, and they
+/// always describe the same file, so they travel as one value.
+#[derive(Clone, Copy)]
+struct AstGrepFileIdentity<'file> {
+    rel_str: &'file str,
+    key: &'file str,
+}
+
 fn examine_ast_grep_file<C: Fn() -> bool>(
     source: &str,
     td_lang: &TdLang,
     compiled: &Pattern,
-    rel_str: &str,
-    key: &str,
+    file: AstGrepFileIdentity<'_>,
     result: &mut AstGrepSearchResult,
     max_results: usize,
     is_cancelled: &C,
 ) -> bool {
+    let AstGrepFileIdentity { rel_str, key } = file;
     result.files_scanned += 1;
     let Ok(doc) = StrDoc::try_new(source, td_lang.clone()) else {
         return false;

@@ -309,7 +309,7 @@ impl GlobalDbObservationStore {
                     && cursor.position() >= identity.position().end()
             });
             if revision_covered {
-                return Ok(PreparedObservationPersist::Ready(
+                return Ok(PreparedObservationPersist::Ready(Box::new(
                     ObservationPersistOutcome::CoveredDuplicate(
                         ObservationCommitReceipt::new(
                             existing.sequence(),
@@ -322,7 +322,7 @@ impl GlobalDbObservationStore {
                             existing.repository_provenance_attachment().clone(),
                         )?,
                     ),
-                ));
+                )));
             }
             let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
                 identity.source().clone(),
@@ -350,7 +350,7 @@ impl GlobalDbObservationStore {
                 }
             }
             self.advance_source_cursor(advance).await?;
-            return Ok(PreparedObservationPersist::Ready(
+            return Ok(PreparedObservationPersist::Ready(Box::new(
                 ObservationPersistOutcome::CoveredDuplicate(
                     ObservationCommitReceipt::new(
                         existing.sequence(),
@@ -363,7 +363,7 @@ impl GlobalDbObservationStore {
                         existing.repository_provenance_attachment().clone(),
                     )?,
                 ),
-            ));
+            )));
         }
         let same_identity = existing
             .as_ref()
@@ -418,18 +418,19 @@ impl GlobalDbObservationStore {
                     )),
                 });
             };
-            return Ok(PreparedObservationPersist::Ready(
+            return Ok(PreparedObservationPersist::Ready(Box::new(
                 ObservationPersistOutcome::ExactDuplicate(existing.commit_receipt().clone()),
-            ));
+            )));
         }
         Ok(PreparedObservationPersist::Submit(Box::new(write)))
     }
 }
 
 enum PreparedObservationPersist {
-    Ready(ObservationPersistOutcome),
-    // Boxed: the write dwarfs the ready outcome, so an unboxed variant made
-    // every `Ready` value carry the larger payload's footprint.
+    // Both payloads are large and only one is ever live, so both are boxed:
+    // leaving either inline makes every value of this enum carry that variant's
+    // footprint.
+    Ready(Box<ObservationPersistOutcome>),
     Submit(Box<AnchoredObservationWrite>),
 }
 
@@ -487,7 +488,7 @@ impl ObservationStore for GlobalDbObservationStore {
             let mut submits = Vec::new();
             for item in prepared {
                 match item {
-                    PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(outcome)),
+                    PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(*outcome)),
                     PreparedObservationPersist::Submit(write) => {
                         submits.push((outcomes.len(), *write));
                         outcomes.push(None);
@@ -949,9 +950,11 @@ async fn submit_observation_writes(
     let digest_suffix = runtime_digest_suffix(&command_digest)?;
     let metadata = observation_submit_metadata(
         runtime,
-        digest_suffix,
-        command_digest.as_str(),
-        command_bytes.len(),
+        SubmitCommandIdentity {
+            digest_suffix,
+            command_digest: command_digest.as_str(),
+            command_bytes: command_bytes.len(),
+        },
         format!("observation.batch.{digest_suffix}"),
         admitted_at,
         priority,
@@ -1047,16 +1050,29 @@ fn persist_outcome_from_submit(
     }
 }
 
+/// One canonical command's identity: the digest, the short suffix derived from
+/// it, and its encoded size. All three come from a single
+/// `canonical_json_bytes_and_sha256` and are always consumed together.
+#[derive(Clone, Copy)]
+struct SubmitCommandIdentity<'command> {
+    digest_suffix: &'command str,
+    command_digest: &'command str,
+    command_bytes: usize,
+}
+
 fn observation_submit_metadata(
     runtime: &DatabaseRuntimeClientV1,
-    digest_suffix: &str,
-    command_digest: &str,
-    command_bytes: usize,
+    command: SubmitCommandIdentity<'_>,
     idempotency_key: String,
     admitted_at: tracedecay_domain::UtcMicros,
     priority: OperationPriorityV1,
     operation: &'static str,
 ) -> ObservationStoreResult<StoreOperationMetadataV1> {
+    let SubmitCommandIdentity {
+        digest_suffix,
+        command_digest,
+        command_bytes,
+    } = command;
     let binding = runtime.binding();
     Ok(StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!(
@@ -1093,9 +1109,11 @@ async fn submit_runtime_write(
     let admitted_at = now_micros();
     let metadata = observation_submit_metadata(
         runtime,
-        digest_suffix,
-        command_digest.as_str(),
-        command_bytes,
+        SubmitCommandIdentity {
+            digest_suffix,
+            command_digest: command_digest.as_str(),
+            command_bytes,
+        },
         idempotency_key,
         admitted_at,
         OperationPriorityV1::Foreground,

@@ -2594,6 +2594,11 @@ impl ProductionJsonlAdmission {
                     "privacy_boundary_failed",
                 )
             }
+            ObservationApplicationError::BatchContainsNonDurable => {
+                tracedecay_sessions::admission::HostAdmissionOutcome::degraded(
+                    "observation_batch_non_durable",
+                )
+            }
             ObservationApplicationError::Store(_) => {
                 tracedecay_sessions::admission::HostAdmissionOutcome::degraded(
                     "observation_store_failed",

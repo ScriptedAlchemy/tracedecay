@@ -525,6 +525,12 @@ pub fn classify_claude_observation_failure(
             crate::observation::ObservationApplicationError::Privacy(_) => {
                 permanent("observation_privacy_rejected")
             }
+            // A batch reached the durable persist path carrying a rejected or
+            // quarantined outcome. That is an admission invariant break, not a
+            // transient source or authority fault, so re-running cannot fix it.
+            crate::observation::ObservationApplicationError::BatchContainsNonDurable => {
+                permanent("observation_batch_non_durable")
+            }
         },
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
         Ingest::InvalidFrameState => permanent("observation_frame_state_invalid"),

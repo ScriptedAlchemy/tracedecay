@@ -775,6 +775,7 @@ pub enum RepositoryWritePayloadV1 {
     DiagnosticSupersession(Box<DiagnosticGenerationSupersessionV1>),
     EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
     ExternalSource(Box<SourceCommitV1>),
+    ExternalSourceBatch(Box<[SourceCommitV1]>),
     ExternalSourceProjection(Box<SourceProjectionCommitV1>),
     ExternalSourceAcquisition(Box<SourceAcquisitionQueueCasV1>),
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
@@ -799,6 +800,7 @@ impl RepositoryWritePayloadV1 {
             Self::DiagnosticSupersession(_) => "supersede diagnostic generation",
             Self::EvidenceAssembly(_) => "publish evidence assembly",
             Self::ExternalSource(_) => "commit external source",
+            Self::ExternalSourceBatch(_) => "commit external source batch",
             Self::ExternalSourceProjection(_) => "project external source",
             Self::ExternalSourceAcquisition(_) => "schedule external source acquisition",
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
@@ -829,6 +831,7 @@ impl RepositoryWritePayloadV1 {
             | Self::RetrievalAnchorDisposition(_)
             | Self::RetrievalAnchorDerivative(_) => "project",
             Self::ExternalSource(_)
+            | Self::ExternalSourceBatch(_)
             | Self::ExternalSourceProjection(_)
             | Self::ExternalSourceAcquisition(_) => "external_source",
             Self::GitIndexTransaction(_) => "code",
@@ -881,6 +884,19 @@ impl RepositoryWritePayloadV1 {
                     StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
                 )
             ),
+            Self::ExternalSourceBatch(commits) => commits.iter().all(|commit| {
+                matches!(
+                    (&commit.binding().owner, scope),
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Project(_),
+                        StoreShardScopeV1::Project { .. }
+                            | StoreShardScopeV1::ProjectSessions { .. },
+                    ) | (
+                        tracedecay_domain::SourceBindingOwnerV1::Profile(_),
+                        StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                    )
+                )
+            }),
             Self::ExternalSourceProjection(projection) => matches!(
                 (&projection.source_frontier().binding().owner, scope),
                 (
@@ -955,6 +971,15 @@ impl RepositoryWritePayloadV1 {
                     payload: self.name(),
                 }
             }),
+            Self::ExternalSourceBatch(commits) => {
+                if commits.is_empty() || commits.iter().any(|commit| commit.validate().is_err()) {
+                    Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             Self::ExternalSourceProjection(projection) => projection.validate().map_err(|_| {
                 StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                     payload: self.name(),
@@ -1069,6 +1094,32 @@ impl RepositoryOperationEnvelopeV1 {
                 ) => profile_id == &self.metadata.shard_id.profile_id,
                 _ => false,
             };
+            if !exact_owner {
+                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                    operation: self.payload.family_name(),
+                    shard_family: "external_source",
+                });
+            }
+        }
+        if let RepositoryWritePayloadV1::ExternalSourceBatch(commits) = &self.payload {
+            let exact_owner = commits.iter().all(|commit| {
+                match (&commit.binding().owner, &self.metadata.shard_id.scope) {
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
+                        StoreShardScopeV1::Project {
+                            project_id: shard_project,
+                        }
+                        | StoreShardScopeV1::ProjectSessions {
+                            project_id: shard_project,
+                        },
+                    ) => project_id == shard_project,
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
+                        StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                    ) => profile_id == &self.metadata.shard_id.profile_id,
+                    _ => false,
+                }
+            });
             if !exact_owner {
                 return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
                     operation: self.payload.family_name(),
