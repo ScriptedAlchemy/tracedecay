@@ -423,7 +423,9 @@ impl ExactSqlHandle {
     }
 
     pub fn begin_immediate(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
+        hotpath::measure_block!("rusqlite.begin_immediate", {
+            self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
+        })
     }
 
     pub fn begin_deferred(&self) -> Result<ExactSqlTransaction, ExactSqlError> {

@@ -184,7 +184,7 @@ pub(super) fn process_batch(
         return;
     }
 
-    let commit_failure = match transaction.commit() {
+    let commit_failure = match hotpath::measure_block!("rusqlite.commit", transaction.commit()) {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,

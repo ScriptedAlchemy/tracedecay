@@ -179,9 +179,11 @@ impl OpenedDatabaseFile {
     /// [`Self::create_new`] or [`Self::create_new_or_conflict`] rather than
     /// [`Self::pin`], whose handle is read-only.
     pub(crate) fn sync_all(&self) -> Result<(), OpenedDatabaseFileError> {
-        self.file
-            .sync_all()
-            .map_err(|_| OpenedDatabaseFileError::Inspect)
+        hotpath::measure_block!("rusqlite.sync_all", {
+            self.file
+                .sync_all()
+                .map_err(|_| OpenedDatabaseFileError::Inspect)
+        })
     }
 
     pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {

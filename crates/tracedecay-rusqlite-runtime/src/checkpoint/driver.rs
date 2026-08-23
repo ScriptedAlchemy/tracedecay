@@ -92,16 +92,18 @@ impl CheckpointDriver for RusqliteCheckpointDriver {
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointReport, Self::Error> {
-        let sql = match mode {
-            CheckpointMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
-            CheckpointMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
-            CheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
-        };
-        let row = self.checkpoint_row(sql)?;
-        Ok(CheckpointReport {
-            busy: row.0 != 0,
-            log_frames: row.1,
-            checkpointed_frames: row.2,
+        hotpath::measure_block!("rusqlite.wal_checkpoint", {
+            let sql = match mode {
+                CheckpointMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
+                CheckpointMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
+                CheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+            };
+            let row = self.checkpoint_row(sql)?;
+            Ok(CheckpointReport {
+                busy: row.0 != 0,
+                log_frames: row.1,
+                checkpointed_frames: row.2,
+            })
         })
     }
 }

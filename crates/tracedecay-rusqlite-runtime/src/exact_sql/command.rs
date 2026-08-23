@@ -62,10 +62,12 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
-    retry_busy_begin(
-        || Transaction::new_unchecked(connection, behavior),
-        shutdown_requested,
-    )
+    hotpath::measure_block!("rusqlite.begin_immediate", {
+        retry_busy_begin(
+            || Transaction::new_unchecked(connection, behavior),
+            shutdown_requested,
+        )
+    })
 }
 
 pub(super) fn retry_busy_begin<T>(
@@ -243,20 +245,22 @@ pub(crate) fn run_writer_command(
                     return;
                 }
             };
-            let result = with_exact_sql_guard(
-                connection,
-                false,
-                false,
-                Some(Arc::clone(shutdown_requested)),
-                None,
-                true,
-                None,
-                crate::connection::authorize_writer,
-                false,
-                None,
-                None,
-                || execute_query_unchecked(connection, statement),
-            );
+            let result = hotpath::measure_block!("rusqlite.wal_checkpoint", {
+                with_exact_sql_guard(
+                    connection,
+                    false,
+                    false,
+                    Some(Arc::clone(shutdown_requested)),
+                    None,
+                    true,
+                    None,
+                    crate::connection::authorize_writer,
+                    false,
+                    None,
+                    None,
+                    || execute_query_unchecked(connection, statement),
+                )
+            });
             let _ = reply.send(result);
         }
         WriterCommand::Vacuum { reply, authority } => {
@@ -583,10 +587,12 @@ fn run_transaction(
                     );
                 }
                 let changed_rows = transaction.total_changes().saturating_sub(before);
-                let result = transaction
-                    .commit()
-                    .map(|()| ExactSqlCommitReceipt { changed_rows })
-                    .map_err(|error| sqlite_error("commit immediate transaction", error));
+                let result = hotpath::measure_block!("rusqlite.commit", {
+                    transaction
+                        .commit()
+                        .map(|()| ExactSqlCommitReceipt { changed_rows })
+                        .map_err(|error| sqlite_error("commit immediate transaction", error))
+                });
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,

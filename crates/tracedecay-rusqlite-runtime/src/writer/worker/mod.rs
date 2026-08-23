@@ -664,7 +664,9 @@ fn run_incremental_vacuum(
         }));
         return;
     }
-    let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+    let transaction = match hotpath::measure_block!("rusqlite.begin_immediate", {
+        connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    }) {
         Ok(transaction) => transaction,
         Err(error) => {
             command.settle(Err(WriterActorError::IncrementalVacuumFailed(
