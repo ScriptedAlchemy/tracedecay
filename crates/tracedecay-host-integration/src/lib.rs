@@ -86,7 +86,6 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
         HostKindV1::CursorCloud | HostKindV1::ClineFamily => {
             Unavailable(HostRegistrationUnsupported)
         }
-        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => Supported,
         _ => Supported,
     };
     let mut evidence = vec![HostRegistrationEvidenceV1 {
@@ -154,7 +153,7 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
             HostRegistrationEvidenceV1 {
                 route: Hook,
                 state: Supported,
-                evidence_ref: "plugin/hooks/hooks-codex.json",
+                evidence_ref: "crates/tracedecay-agent-hosts/src/agents/codex.rs",
                 starts_analyzer: false,
             },
             HostRegistrationEvidenceV1 {

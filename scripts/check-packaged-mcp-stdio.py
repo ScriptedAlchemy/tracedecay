@@ -14,9 +14,17 @@ import time
 from lib.process_control import terminate
 
 
-# Default MCP Inspector pin, shared with scripts/mcp-conformance-smoke.sh —
-# override both through the INSPECTOR_VERSION environment variable.
-INSPECTOR_VERSION = os.environ.get("INSPECTOR_VERSION", "0.22.0")
+# Default MCP Inspector pin, shared with scripts/mcp-conformance-smoke.sh
+# via scripts/lib/inspector_version — override both through INSPECTOR_VERSION.
+INSPECTOR_VERSION = os.environ.get(
+    "INSPECTOR_VERSION",
+    Path(__file__)
+    .resolve()
+    .with_name("lib")
+    .joinpath("inspector_version")
+    .read_text(encoding="utf-8")
+    .strip(),
+)
 REQUIRED_TOOLS = {
     "tracedecay_search",
     "tracedecay_diagnostics",

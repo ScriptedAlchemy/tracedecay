@@ -726,20 +726,7 @@ impl Drop for HomeEnvGuard {
     }
 }
 
-pub(crate) fn canonicalize_test_dir(path: &Path) -> PathBuf {
-    fs::create_dir_all(path).unwrap_or_else(|err| {
-        panic!(
-            "failed to create test directory '{}': {err}",
-            path.display()
-        )
-    });
-    path.canonicalize().unwrap_or_else(|err| {
-        panic!(
-            "failed to canonicalize test directory '{}': {err}",
-            path.display()
-        )
-    })
-}
+pub(crate) use crate::common::canonicalize_test_dir;
 
 pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path

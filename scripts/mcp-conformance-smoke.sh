@@ -24,9 +24,9 @@
 
 set -euo pipefail
 
-INSPECTOR_VERSION="${INSPECTOR_VERSION:-0.22.0}"
-CALL_TIMEOUT_SECS="${CALL_TIMEOUT_SECS:-60}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSPECTOR_VERSION="${INSPECTOR_VERSION:-$(tr -d '[:space:]' < "$REPO_ROOT/scripts/lib/inspector_version")}"
+CALL_TIMEOUT_SECS="${CALL_TIMEOUT_SECS:-60}"
 SCRIPT_PATH="$REPO_ROOT/scripts/mcp-conformance-smoke.sh"
 DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
 WORK_DIR=""

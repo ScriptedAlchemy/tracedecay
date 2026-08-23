@@ -316,7 +316,7 @@ impl AgentEnvLock {
     }
 }
 
-fn canonicalize_test_dir(path: &Path) -> PathBuf {
+pub fn canonicalize_test_dir(path: &Path) -> PathBuf {
     fs::create_dir_all(path).unwrap_or_else(|err| {
         panic!(
             "failed to create test directory '{}': {err}",
