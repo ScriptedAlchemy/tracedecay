@@ -38,6 +38,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     state.mark_running();
     loop {
         if state.cancelled.load(Ordering::Acquire) {
+            stop_worker(&state, &mut history_retry_pending);
             return;
         }
         loop {
@@ -63,6 +64,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 Some(SessionHistoricalIngestOutcome::Cancelled)
             ) || state.cancelled.load(Ordering::Acquire)
             {
+                stop_worker(&state, &mut history_retry_pending);
                 return;
             }
             match history_outcome {
@@ -101,13 +103,17 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     tokio::pin!(pass);
                     tokio::select! {
                         biased;
-                        () = state.wait_for_cancellation() => return,
+                        () = state.wait_for_cancellation() => {
+                            stop_worker(&state, &mut history_retry_pending);
+                            return;
+                        },
                         report = &mut pass => report,
                     }
                 } else {
                     SessionTemporalRefreshPassReport::default()
                 };
             if state.cancelled.load(Ordering::Acquire) {
+                stop_worker(&state, &mut history_retry_pending);
                 return;
             }
             let made_progress = report.begun > 0
@@ -129,7 +135,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 state.mark_recovering(class.into(), class);
                 state.requeue_projection();
                 tokio::select! {
-                    () = state.wait_for_cancellation() => return,
+                    () = state.wait_for_cancellation() => {
+                        stop_worker(&state, &mut history_retry_pending);
+                        return;
+                    },
                     () = state.wake.notified() => {}
                     () = tokio::time::sleep(session_refresh_retry_delay(class, retry_attempt)) => {}
                 }
@@ -149,12 +158,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 }
                 state.mark_running();
                 retry_attempt = 0;
-                history_retry_pending = true;
-                hotpath::gauge!("history_retry_state").set(1.0);
+                update_history_retry_state(&mut history_retry_pending, true);
             } else {
                 if history_outcome.is_some() {
-                    history_retry_pending = false;
-                    hotpath::gauge!("history_retry_state").set(0.0);
+                    update_history_retry_state(&mut history_retry_pending, false);
                 }
                 state.mark_running();
                 retry_attempt = 0;
@@ -176,21 +183,39 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         }
         if history_retry_pending {
             tokio::select! {
-                () = state.wait_for_cancellation() => return,
+                () = state.wait_for_cancellation() => {
+                    stop_worker(&state, &mut history_retry_pending);
+                    return;
+                },
                 () = wake => {}
                 () = tokio::time::sleep(Duration::from_millis(250)) => {
-                    history_retry_pending = false;
-                    hotpath::gauge!("history_retry_state").set(0.0);
+                    update_history_retry_state(&mut history_retry_pending, false);
                     state.wake_history();
                 },
             }
         } else {
             tokio::select! {
-                () = state.wait_for_cancellation() => return,
+                () = state.wait_for_cancellation() => {
+                    stop_worker(&state, &mut history_retry_pending);
+                    return;
+                },
                 () = wake => {}
             }
         }
     }
+}
+
+fn update_history_retry_state(current: &mut bool, pending: bool) {
+    if *current == pending {
+        return;
+    }
+    hotpath::gauge!("history_retry_state").inc(if pending { 1.0 } else { -1.0 });
+    *current = pending;
+}
+
+fn stop_worker(state: &SessionTemporalRefreshWakeState, history_retry_pending: &mut bool) {
+    state.mark_worker_idle();
+    update_history_retry_state(history_retry_pending, false);
 }
 
 #[hotpath::measure]
