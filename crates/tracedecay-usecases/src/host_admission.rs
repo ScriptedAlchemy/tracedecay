@@ -7,8 +7,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationProjectionStore, ObservationStore, ObservationStoreError, ParseOffset,
-    ProjectionStoreError, StoreShardScopeV1, build_scope_resolution_authorization_v1,
+    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
+    ParseOffset, ProjectionStoreError, StoreShardScopeV1, build_scope_resolution_authorization_v1,
 };
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
