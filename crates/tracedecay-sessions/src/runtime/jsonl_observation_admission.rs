@@ -394,6 +394,7 @@ impl ActiveAdmission<'_> {
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> TranscriptIngestResult<DurableFrameDisposition> {
         let checkpoint = frame.checkpoint;
+        crate::runtime::hotpath::record_capture_single();
         let request = self.capture_request(expected_cursor.clone(), frame, retention_class)?;
         let result = self.admission.capture_observation(request).await;
         self.apply_capture_result(expected_cursor, checkpoint, result, persisted_cursor_update)
@@ -411,6 +412,7 @@ impl ActiveAdmission<'_> {
         if frames.is_empty() {
             return Ok(());
         }
+        crate::runtime::hotpath::record_capture_window(frames.len());
         let mut batch_expected = expected_cursor.clone();
         let mut requests = Vec::with_capacity(frames.len());
         let mut checkpoints = Vec::with_capacity(frames.len());

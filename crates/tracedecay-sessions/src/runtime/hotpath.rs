@@ -130,6 +130,26 @@ pub(crate) fn record_scan_generation_changed() {
     add("sessions.jsonl.scan.generation_changed", 1);
 }
 
+/// One durable capture window: how many frames it carried.
+///
+/// Frames-per-window is the batching ratio the writer amplification question
+/// turns on, and it cannot be read off the writer's own counters — those mix
+/// observation writes with code-index writes, so a cold run makes batching look
+/// far worse than it is. Counting windows and frames at the point they are
+/// submitted keeps the ratio attributable to session ingestion alone.
+pub(crate) fn record_capture_window(frames: usize) {
+    add("sessions.jsonl.capture.windows", 1);
+    add_usize("sessions.jsonl.capture.framed", frames);
+}
+
+/// One frame captured on its own rather than through a window.
+///
+/// A ratio that looks good only because most frames never reach a window is
+/// not batching; this is what tells the two apart.
+pub(crate) fn record_capture_single() {
+    add("sessions.jsonl.capture.single", 1);
+}
+
 /// One frame decoded and then dropped, split by why.
 ///
 /// The aggregate says three quarters of decoded frames are thrown away but not

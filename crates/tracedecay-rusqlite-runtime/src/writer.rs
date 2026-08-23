@@ -739,6 +739,12 @@ impl PersistentWriter {
         }
 
         self.telemetry.offered();
+        // Every write funnels through here, so the timing frames cannot say
+        // whether a submission came from session ingestion or the code index.
+        // Priority is the discriminator the metadata already carries, so
+        // labelling by it separates the two without threading a new field
+        // through the operation contract.
+        crate::hotpath_observe::record_writer_submit(request.envelope().metadata.priority);
         let permit = match self.admission.reserve(&request.envelope().metadata) {
             Ok(permit) => permit,
             Err(scope) => {

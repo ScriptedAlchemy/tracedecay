@@ -14,6 +14,7 @@ pub mod handoff;
 mod ledger;
 pub mod maintenance;
 mod operation;
+mod hotpath_observe;
 mod persistence;
 mod profiled_lock;
 pub mod read_consistency;

@@ -174,6 +174,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
             .checkpoint(mode)
             .map_err(CheckpointError::Driver)?;
         let elapsed = started.elapsed();
+        crate::hotpath_observe::record_checkpoint(elapsed, report.complete());
 
         if report.complete() {
             self.hard_drain_required = false;
