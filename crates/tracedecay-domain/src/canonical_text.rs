@@ -73,19 +73,19 @@ pub fn encode_lowercase_hex(bytes: &[u8]) -> String {
 pub fn encode_tagged_lowercase_hex(tag: &str, bytes: &[u8]) -> String {
     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-    let mut encoded = Vec::with_capacity(tag.len() + bytes.len().saturating_mul(2));
-    encoded.extend_from_slice(tag.as_bytes());
+    let mut encoded = String::with_capacity(tag.len() + bytes.len().saturating_mul(2));
+    encoded.push_str(tag);
     for byte in bytes {
-        encoded.push(HEX_DIGITS[usize::from(byte >> 4)]);
-        encoded.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
-    match String::from_utf8(encoded) {
-        Ok(text) => text,
-        Err(error) => {
-            // `tag` is already UTF-8 and every nibble byte is ASCII.
-            String::from_utf8_lossy(error.as_bytes()).into_owned()
-        }
-    }
+    encoded
+}
+
+/// Serde `#[serde(default = "...")]` helper for fields that default to `true`.
+#[must_use]
+pub const fn default_true() -> bool {
+    true
 }
 
 /// Length-prefixed SHA-256 over a domain separator and an ordered list of
@@ -272,7 +272,7 @@ macro_rules! validated_string_newtype {
     )+};
 }
 
-pub(crate) use validated_string_newtype;
+pub use validated_string_newtype;
 
 #[cfg(test)]
 mod tests {

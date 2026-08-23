@@ -281,11 +281,15 @@ fn validate_topology(
         }
         dependents
             .get_mut(&edge.dependency)
-            .expect("validated dependency node")
+            .ok_or(DomainError::UnknownReference {
+                field: "branch stack edge node",
+            })?
             .insert(edge.dependent.clone());
         *indegree
             .get_mut(&edge.dependent)
-            .expect("validated dependent node") += 1;
+            .ok_or(DomainError::UnknownReference {
+                field: "branch stack edge node",
+            })? += 1;
     }
 
     let mut ready = indegree
@@ -298,7 +302,9 @@ fn validate_topology(
         for dependent in &dependents[&node_id] {
             let degree = indegree
                 .get_mut(dependent)
-                .expect("validated dependent node");
+                .ok_or(DomainError::UnknownReference {
+                    field: "branch stack edge node",
+                })?;
             *degree -= 1;
             if *degree == 0 {
                 ready.insert(dependent.clone());

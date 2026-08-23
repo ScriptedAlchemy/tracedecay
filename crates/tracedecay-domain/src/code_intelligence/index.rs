@@ -1,12 +1,8 @@
-//! Generation, intake, extraction, lineage, and test-attribution contracts
-//! (Plan 25: "Sanitized intake", "Generations and incremental reuse",
-//! "Identity and lineage", "Diagnostics and tests").
+//! Generation, intake, extraction, lineage, and test-attribution contracts.
 //!
 //! These are storage-neutral logical records. The index stores only typed
-//! references to Plan 35's `GenerationDiagnosticV1` contract (owned by
-//! `crates/tracedecay-domain/src/diagnostics.rs`, delivered by the query/12
-//! diagnostic-persistence authority packet) — never a duplicate diagnostic
-//! record.
+//! references to `GenerationDiagnosticV1` (`crate::diagnostics`) — never a
+//! duplicate diagnostic record.
 
 use std::collections::BTreeSet;
 
@@ -26,8 +22,8 @@ use super::identity::{
 };
 use super::language::EdgeAuthorityV1;
 
-/// One receipt-bound sanitized repository snapshot (Plan 25: the only legal
-/// intake). Carries repository, checkout, worktree, ref, source revision,
+/// One receipt-bound sanitized repository snapshot — the only legal intake.
+/// Carries repository, checkout, worktree, ref, source revision,
 /// sanitizer revision, and content identity. Missing, stale, mixed-snapshot,
 /// or unsanitized input is rejected before parsing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,7 +148,7 @@ pub fn validate_code_logical_path(logical_path: &str) -> Result<(), DomainError>
 }
 
 /// Explicit handling of deletions, renames, ignored, binary, generated, and
-/// unsupported-language files (Plan 25).
+/// unsupported-language files.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotFileDispositionV1 {
@@ -167,7 +163,7 @@ pub enum SnapshotFileDispositionV1 {
 
 /// A snapshot that passed intake validation: receipt-bound, single-snapshot,
 /// and sanitized. Constructed only by `CodeIndexIntake::validate` in
-/// `src/code_index/intake.rs` (Plan 25).
+/// `src/code_index/intake.rs`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ValidatedCodeSnapshotV1 {
@@ -187,7 +183,7 @@ pub struct ValidatedCodeFileV1 {
     pub sanitized_bytes: Vec<u8>,
 }
 
-/// Why intake rejected a snapshot (Plan 25: reject before parsing).
+/// Why intake rejected a snapshot. Reject before parsing.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(tag = "rejection", content = "detail", rename_all = "snake_case")]
 pub enum IntakeRejectionV1 {
@@ -198,9 +194,8 @@ pub enum IntakeRejectionV1 {
     IncompatibleSanitizerRevision,
 }
 
-/// The sealed manifest of one immutable logical generation (Plan 25:
-/// generations are planned, sealed, digested, and never mutated after
-/// publication).
+/// The sealed manifest of one immutable logical generation. Generations are
+/// planned, sealed, digested, and never mutated after publication.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationManifestV1 {
@@ -254,9 +249,10 @@ impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
             project_id: wire.project_id,
             generation_id: wire.generation_id,
             snapshot_digest: wire.snapshot_digest,
-            invalidation_digest: wire
-                .invalidation_digest
-                .unwrap_or_else(zero_manifest_digest),
+            invalidation_digest: match wire.invalidation_digest {
+                Some(digest) => digest,
+                None => ManifestDigest::zero().map_err(serde::de::Error::custom)?,
+            },
             registry_revision: wire.registry_revision,
             grammar_revisions: wire.grammar_revisions,
             extractor_revisions: wire.extractor_revisions,
@@ -282,13 +278,8 @@ impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
     }
 }
 
-fn zero_manifest_digest() -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-        .expect("zero sha256 digest is canonical")
-}
-
 /// The seal applied before rows and the expected digest are handed to the
-/// store publication port (Plan 25).
+/// store publication port.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationSealV1 {
@@ -300,10 +291,10 @@ pub struct GenerationSealV1 {
 /// Identity of the deterministic generation planner that produced a seal.
 pub type GenerationPlannerIdV1 = crate::research::id::ComponentVersion;
 
-/// The output of one language extractor for one validated file (Plan 25:
-/// stable canonical rows and digests for identical input, registry, and
-/// extractor revisions on every supported host; parse errors and unsupported
-/// constructs are preserved as evidence).
+/// The output of one language extractor for one validated file. Identical
+/// input, registry, and extractor revisions produce stable canonical rows
+/// and digests on every supported host; parse errors and unsupported
+/// constructs are preserved as evidence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractionBatchV1 {
@@ -326,8 +317,8 @@ pub struct ExtractionBatchV1 {
     pub rows_digest: ManifestDigest,
 }
 
-/// Parse outcome; bounded traversal or extraction caps propagate as partial
-/// (Plan 25). Extraction never invents successful structure.
+/// Parse outcome; bounded traversal or extraction caps propagate as partial.
+/// Extraction never invents successful structure.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(tag = "outcome", content = "detail", rename_all = "snake_case")]
 pub enum ParseOutcomeV1 {
@@ -338,8 +329,8 @@ pub enum ParseOutcomeV1 {
     Failed { reason: String },
 }
 
-/// Extraction coverage and ambiguity evidence (Plan 25: canonical raw
-/// quantifier inputs; no universal quality score is defined here).
+/// Extraction coverage and ambiguity evidence. These are canonical raw
+/// quantifier inputs; no universal quality score is defined here.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractionCoverageV1 {
@@ -363,9 +354,9 @@ pub enum ExtractionFailureV1 {
     IncompatibleDescriptor { detail: String },
 }
 
-/// One recorded relationship edge with its authority class (Plan 25: every
-/// graph path preserves its weakest edge authority; unresolved dispatch
-/// cannot become semantic fact).
+/// One recorded relationship edge with its authority class. Every graph path
+/// preserves its weakest edge authority; unresolved dispatch cannot become
+/// semantic fact.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalRelationEdgeV1 {
@@ -376,7 +367,6 @@ pub struct CanonicalRelationEdgeV1 {
     pub evidence_span: SourceSpan,
 }
 
-/// Canonical relation kinds.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationEdgeKindV1 {
@@ -391,10 +381,10 @@ pub enum RelationEdgeKindV1 {
     Receives,
 }
 
-/// One lineage candidate for a symbol across generations (Plan 25: record
-/// rename, move, split, merge, and structural-continuity candidates with
-/// method, evidence, confidence kind, alternatives, and abstention; ambiguous
-/// lineage stays explicit and never silently merges unrelated symbols).
+/// One lineage candidate for a symbol across generations. Record rename,
+/// move, split, merge, and structural-continuity candidates with method,
+/// evidence, confidence kind, alternatives, and abstention; ambiguous
+/// lineage stays explicit and never silently merges unrelated symbols.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolLineageCandidateV1 {
@@ -408,7 +398,6 @@ pub struct SymbolLineageCandidateV1 {
     pub abstention: Option<LineageAbstentionV1>,
 }
 
-/// The lineage relation kinds.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LineageKindV1 {
@@ -422,7 +411,7 @@ pub enum LineageKindV1 {
 
 /// How a lineage candidate was derived. Tree-sitter object reuse, path,
 /// line, qualified-name similarity, or embedding similarity never proves
-/// lineage (Plan 25).
+/// lineage.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LineageMethodV1 {
@@ -433,7 +422,6 @@ pub enum LineageMethodV1 {
     DeclaredAbstention,
 }
 
-/// Evidence supporting a lineage candidate.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LineageEvidenceV1 {
@@ -444,8 +432,8 @@ pub struct LineageEvidenceV1 {
     pub evidence_digest: ManifestDigest,
 }
 
-/// Confidence kind; kept as a kind, not a scalar score (Plan 25 preserves
-/// raw evidence and does not define a universal quality score).
+/// Confidence kind; kept as a kind, not a scalar score. This preserves raw
+/// evidence and does not define a universal quality score.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LineageConfidenceKindV1 {
@@ -455,7 +443,6 @@ pub enum LineageConfidenceKindV1 {
     Abstained,
 }
 
-/// An explicit lineage abstention with its reason.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LineageAbstentionV1 {
@@ -463,25 +450,24 @@ pub struct LineageAbstentionV1 {
     pub candidate_count: u32,
 }
 
-/// A typed reference to Plan 35's generation-bound diagnostic contract. The
-/// diagnostic record itself is owned by
-/// `crates/tracedecay-domain/src/diagnostics.rs` (query/12 authority packet);
-/// the index stores only anchor-bound references (Plan 25).
+/// A typed reference to the generation-bound diagnostic contract. The
+/// diagnostic record itself is owned by `crate::diagnostics`; the index
+/// stores only anchor-bound references.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationDiagnosticAttachmentV1 {
     pub generation_id: CodeGenerationId,
     pub file_occurrence_id: FileOccurrenceId,
     pub symbol_occurrence_id: Option<SymbolOccurrenceId>,
-    /// Plan 13 anchor addressing the Plan-35-owned diagnostic record.
+    /// Retrieval anchor addressing the diagnostic record.
     pub diagnostic_anchor: RetrievalAnchorId,
     pub content_digest: ContentDigest,
 }
 
-/// Test-attribution evidence for one generation (Plan 25: map test
-/// definitions and runs to the generation, source revision, and candidate
-/// production symbols they cover; no candidate mode proves execution,
-/// correctness, or universal safety).
+/// Test-attribution evidence for one generation. Map test definitions and
+/// runs to the generation, source revision, and candidate production symbols
+/// they cover; no candidate mode proves execution, correctness, or
+/// universal safety.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationTestAttributionV1 {
@@ -493,8 +479,8 @@ pub struct GenerationTestAttributionV1 {
     pub attribution_revision: crate::research::id::ComponentVersion,
 }
 
-/// The declared attribution evidence classes (Plan 05/Plan 25:
-/// `conservative_dependency_candidates`, `observed_coverage_candidates`,
+/// The declared attribution evidence classes
+/// (`conservative_dependency_candidates`, `observed_coverage_candidates`,
 /// `predictive_ranked_candidates`, stale evidence, or
 /// `unknown_unsupported`).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -507,8 +493,8 @@ pub enum TestAttributionEvidenceClassV1 {
     UnknownUnsupported,
 }
 
-/// A chunk-to-generation binding asserted by the index (Plan 25: every
-/// eligible chunk names exactly one code generation and file occurrence).
+/// A chunk-to-generation binding asserted by the index. Every eligible
+/// chunk names exactly one code generation and file occurrence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct ChunkGenerationBindingV1 {
@@ -543,8 +529,8 @@ impl CodeGenerationManifestV1 {
     }
 
     /// A manifest is single-generation: it names exactly one generation and
-    /// at most one parent (Plan 25: mixed-generation manifests are rejected
-    /// before publication).
+    /// at most one parent. Mixed-generation manifests are rejected before
+    /// publication.
     pub fn validate(&self) -> Result<(), DomainError> {
         self.project_id.validate()?;
         self.generation_id.validate()?;

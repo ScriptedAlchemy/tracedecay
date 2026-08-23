@@ -16,6 +16,13 @@ impl ManifestDigest {
     pub fn from_sha256_bytes(digest: &[u8]) -> Result<Self, DomainError> {
         Self::new(encode_tagged_lowercase_hex("sha256:", digest))
     }
+
+    /// All-zero SHA-256 digest (`sha256:` followed by 64 `0` digits).
+    ///
+    /// Used as the unsigned placeholder while sealing a digest-bearing record.
+    pub fn zero() -> Result<Self, DomainError> {
+        Self::from_sha256_bytes(&[0u8; 32])
+    }
 }
 
 pub(super) type CanonicalError = serde_json::Error;

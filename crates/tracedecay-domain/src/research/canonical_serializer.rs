@@ -406,7 +406,7 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
     fn new(sink: &'sink mut S, len: usize, open: &'static str, close: &'static str) -> Self {
         Self {
             sink,
-            values: String::new(),
+            values: String::with_capacity(len.saturating_mul(32)),
             entries: Vec::with_capacity(len),
             pending_key: None,
             open,

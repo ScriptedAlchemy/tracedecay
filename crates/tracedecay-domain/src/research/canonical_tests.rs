@@ -51,12 +51,10 @@ fn streaming_digest_matches_digest_of_canonical_bytes() {
         "nested": {"z": null, "a": [true, "line\nfeed", 42]},
     });
     let bytes = canonical_json_bytes(&value).unwrap();
-    let digest = Sha256::digest(&bytes);
-    let mut expected = String::from("sha256:");
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut expected, "{byte:02x}").unwrap();
-    }
+    let expected = crate::canonical_text::encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(&bytes),
+    );
 
     assert_eq!(canonical_sha256(&value).unwrap().as_str(), expected);
     let (combined_bytes, combined_digest) = canonical_json_bytes_and_sha256(&value).unwrap();
@@ -457,5 +455,13 @@ fn presorted_and_unsorted_objects_canonicalize_identically() {
     assert_eq!(
         canonical_json_value(&sorted).unwrap(),
         r#"{"a":1,"b":{"a":2,"z":3},"z":[{"a":4}]}"#,
+    );
+}
+
+#[test]
+fn zero_digest_matches_the_historical_placeholder_spelling() {
+    assert_eq!(
+        crate::ManifestDigest::zero().unwrap().as_str(),
+        format!("sha256:{}", "0".repeat(64))
     );
 }

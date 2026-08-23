@@ -209,7 +209,6 @@ fn is_default_observation_provider(provider: &ProviderId) -> bool {
     provider.as_str() == "claude"
 }
 
-/// Compatibility name for the first observation source adapter.
 pub type ClaudeSourceIdentityV1 = ObservationSourceIdentityV1;
 
 /// Authoritative ownership scope selected before persistence.
@@ -296,7 +295,6 @@ impl<'de> Deserialize<'de> for ObservationSourceGenerationV1 {
     }
 }
 
-/// Compatibility name for Claude JSONL file generations.
 pub type ClaudeFileGenerationV1 = ObservationSourceGenerationV1;
 
 /// Exact byte span of one complete Claude JSONL record.
@@ -340,7 +338,6 @@ impl<'de> Deserialize<'de> for ObservationSourceRangeV1 {
     }
 }
 
-/// Compatibility name for Claude JSONL byte ranges.
 pub type ClaudeByteRangeV1 = ObservationSourceRangeV1;
 
 /// Stable source evidence used to derive one observation identity.
@@ -627,7 +624,6 @@ impl ObservationSourceCursorV1 {
     }
 }
 
-/// Compatibility name for Claude JSONL source cursors.
 pub type ClaudeSourceCursorV1 = ObservationSourceCursorV1;
 
 pub const CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1: u16 = 1;
@@ -2474,7 +2470,6 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
     }
 }
 
-/// Compatibility name for durable Claude observations.
 pub type DurableClaudeObservationV1 = DurableObservationV1;
 
 /// Relationship between an existing record and a candidate retry.
@@ -2530,13 +2525,11 @@ pub fn is_canonical_payload_revision_replay(
         return false;
     }
 
-    let Ok(existing_envelope) =
-        serde_json::from_value::<CanonicalObservationEnvelopeV1>(existing.payload().clone())
+    let Ok(existing_envelope) = CanonicalObservationEnvelopeV1::deserialize(existing.payload())
     else {
         return false;
     };
-    let Ok(candidate_envelope) =
-        serde_json::from_value::<CanonicalObservationEnvelopeV1>(candidate.payload().clone())
+    let Ok(candidate_envelope) = CanonicalObservationEnvelopeV1::deserialize(candidate.payload())
     else {
         return false;
     };

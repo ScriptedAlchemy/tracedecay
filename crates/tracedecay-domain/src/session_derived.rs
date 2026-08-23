@@ -4,6 +4,7 @@
 //! message occurrences. They are not source authority, summaries, or carriers of
 //! external GitHub/CI/diagnostic/Git/receipt/task payloads.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -194,26 +195,21 @@ impl SessionDerivedEvidenceRecordV1 {
             return Err(SessionContractError::DerivedEvidenceMembersRequired);
         }
         source_horizon.validate()?;
-        let mut seen = BTreeSetLite::default();
+        let mut seen = BTreeSet::new();
         for (index, member) in members.iter().enumerate() {
             member.validate()?;
             if member.ordinal as usize != index {
                 return Err(SessionContractError::NoncontiguousDerivedEvidenceOrdinals);
             }
-            if !seen.insert(member.occurrence_id.as_str().to_owned()) {
+            if !seen.insert(member.occurrence_id.as_str()) {
                 return Err(SessionContractError::DuplicateDerivedEvidenceMember);
             }
         }
-        let first = members
-            .first()
-            .expect("non-empty members")
-            .occurrence_id
-            .clone();
-        let last = members
-            .last()
-            .expect("non-empty members")
-            .occurrence_id
-            .clone();
+        let [first_member, .., last_member] = members.as_slice() else {
+            return Err(SessionContractError::DerivedEvidenceMembersRequired);
+        };
+        let first = first_member.occurrence_id.clone();
+        let last = last_member.occurrence_id.clone();
         let member_digest = member_digest(
             evidence_kind,
             &algorithm_version,
@@ -279,9 +275,12 @@ impl SessionDerivedEvidenceRecordV1 {
                 field: "DerivedEvidenceIdV1",
             });
         }
-        let first = &self.members.first().expect("non-empty").occurrence_id;
-        let last = &self.members.last().expect("non-empty").occurrence_id;
-        if first != &self.first_occurrence_id || last != &self.last_occurrence_id {
+        let [first_member, .., last_member] = self.members.as_slice() else {
+            return Err(SessionContractError::DerivedEvidenceMembersRequired);
+        };
+        if first_member.occurrence_id != self.first_occurrence_id
+            || last_member.occurrence_id != self.last_occurrence_id
+        {
             return Err(SessionContractError::DerivedEvidenceEndpointMismatch);
         }
         for (index, member) in self.members.iter().enumerate() {
@@ -560,6 +559,11 @@ fn horizon_for_run(
     })
 }
 
+/// Frozen derived-identity layout: these three digests concatenate hasher
+/// updates with **no length framing**. That is weaker than
+/// [`crate::canonical_text::canonical_framed_sha256`], but the persisted ids
+/// are already written. Do not change these bytes; any new derived identity
+/// must use the framed helper.
 fn derive_evidence_id(
     kind: DerivedEvidenceKindV1,
     algorithm_version: &str,
@@ -632,21 +636,4 @@ fn encode_sha256(hasher: Sha256) -> String {
 
 fn is_sha256_identity(value: &str) -> bool {
     crate::canonical_text::is_tagged_lowercase_hex(value, "sha256:", 64)
-}
-
-#[derive(Default)]
-struct BTreeSetLite {
-    values: Vec<String>,
-}
-
-impl BTreeSetLite {
-    fn insert(&mut self, value: String) -> bool {
-        match self.values.binary_search(&value) {
-            Ok(_) => false,
-            Err(index) => {
-                self.values.insert(index, value);
-                true
-            }
-        }
-    }
 }

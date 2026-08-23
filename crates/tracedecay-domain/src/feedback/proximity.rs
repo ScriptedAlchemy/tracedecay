@@ -335,7 +335,11 @@ impl ProximityContributionV1 {
         }
 
         if !concealed {
-            let address = self.address.as_ref().expect("validated above");
+            let Some(address) = self.address.as_ref() else {
+                return Err(DomainError::NonCanonical {
+                    field: "proximity evidence",
+                });
+            };
             let has_relation = |kind| self.relation_paths.iter().any(|path| path.kind == kind);
             let exact_shape = match self.warning_class {
                 ProximityWarningClassV1::SameFile => true,

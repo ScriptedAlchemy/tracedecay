@@ -162,6 +162,7 @@ impl NativeWorktreeCleanupReceiptV1 {
     }
 }
 
-fn zero_digest() -> Result<ManifestDigest, DomainError> {
-    ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+/// All-zero SHA-256 digest used as the unsigned placeholder while sealing.
+pub fn zero_digest() -> Result<ManifestDigest, DomainError> {
+    ManifestDigest::zero()
 }
