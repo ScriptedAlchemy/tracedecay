@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 
 use tracedecay_agent_hosts::automation::AutomationRunControl;
@@ -9,13 +10,51 @@ use super::{
     DaemonEngine, DaemonHandshake, effective_automation_config_for_project, log_daemon_event,
 };
 
+const HOST_RECEIPT_REVIEW_BATCH_LIMIT: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostReceiptReviewProgress {
+    Completed,
+    Deferred,
+    Idle,
+}
+
 pub(super) async fn run_host_receipt_review(
+    project_path: &Path,
+    cg: &TraceDecay,
+    handshake: &DaemonHandshake,
+    engine: &DaemonEngine,
+    run_control: &AutomationRunControl,
+) -> Result<()> {
+    drain_ready_host_receipts(|| {
+        run_one_host_receipt_review(project_path, cg, handshake, engine, run_control)
+    })
+    .await
+    .map(|_| ())
+}
+
+async fn drain_ready_host_receipts<Review, ReviewFuture>(mut review: Review) -> Result<usize>
+where
+    Review: FnMut() -> ReviewFuture,
+    ReviewFuture: Future<Output = Result<HostReceiptReviewProgress>>,
+{
+    let mut completed = 0;
+    while completed < HOST_RECEIPT_REVIEW_BATCH_LIMIT {
+        match review().await? {
+            HostReceiptReviewProgress::Completed => completed += 1,
+            HostReceiptReviewProgress::Deferred | HostReceiptReviewProgress::Idle => break,
+        }
+    }
+    Ok(completed)
+}
+
+async fn run_one_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,
     _handshake: &DaemonHandshake,
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
-) -> Result<()> {
+) -> Result<HostReceiptReviewProgress> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
     use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
     use tracedecay_agent_hosts::automation::runner::{
@@ -27,14 +66,14 @@ pub(super) async fn run_host_receipt_review(
     let Some(ready) =
         tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root).await?
     else {
-        return Ok(());
+        return Ok(HostReceiptReviewProgress::Idle);
     };
     let pending = ready.pending;
     if tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(&dashboard_root)
         .await?
         .paused
     {
-        return Ok(());
+        return Ok(HostReceiptReviewProgress::Deferred);
     }
     let configuration = effective_automation_config_for_project(cg).await?;
     let config = &configuration.settings;
@@ -43,7 +82,7 @@ pub(super) async fn run_host_receipt_review(
         .as_ref()
         .and_then(|route| route.session_id.clone());
     let Some(authoritative_project_id) = cg.store_layout().identity.project_id.as_deref() else {
-        return Ok(());
+        return Ok(HostReceiptReviewProgress::Deferred);
     };
     let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
         .map_err(|error| TraceDecayError::Config {
@@ -84,7 +123,7 @@ pub(super) async fn run_host_receipt_review(
     if !watermark_durable {
         // Never review a terminal receipt until the exact completed-turn
         // watermark is durable in LCM.
-        return Ok(());
+        return Ok(HostReceiptReviewProgress::Deferred);
     }
     let profile_identity = engine.store_administration.profile_identity()?.clone();
     let retrieval =
@@ -144,6 +183,7 @@ pub(super) async fn run_host_receipt_review(
             pending.generation,
         )
         .await?;
+        Ok(HostReceiptReviewProgress::Completed)
     } else if !outcome.handled() {
         log_daemon_event(
             "host_receipt_review",
@@ -153,6 +193,63 @@ pub(super) async fn run_host_receipt_review(
                 ("reason", "not_combined".to_string()),
             ],
         );
+        Ok(HostReceiptReviewProgress::Deferred)
+    } else {
+        Ok(HostReceiptReviewProgress::Deferred)
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        HOST_RECEIPT_REVIEW_BATCH_LIMIT, HostReceiptReviewProgress, drain_ready_host_receipts,
+    };
+
+    #[tokio::test]
+    async fn one_review_pass_drains_multiple_ready_receipts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+
+        let completed = drain_ready_host_receipts(move || {
+            let call = observed.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(if call < 3 {
+                    HostReceiptReviewProgress::Completed
+                } else {
+                    HostReceiptReviewProgress::Idle
+                })
+            }
+        })
+        .await
+        .expect("drain ready receipts");
+
+        assert_eq!(completed, 3);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "the pass should fetch the next receipt without returning to fixed tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_review_drain_stops_at_its_batch_bound() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+
+        let completed = drain_ready_host_receipts(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            async { Ok(HostReceiptReviewProgress::Completed) }
+        })
+        .await
+        .expect("drain bounded receipt batch");
+
+        assert_eq!(completed, HOST_RECEIPT_REVIEW_BATCH_LIMIT);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            HOST_RECEIPT_REVIEW_BATCH_LIMIT
+        );
+    }
 }

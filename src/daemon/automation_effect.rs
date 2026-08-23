@@ -1320,12 +1320,14 @@ impl AutomationEffectAuthority {
         let index_path = journal_path.clone();
         let indexed = admission.clone();
         let reservation = tokio::task::spawn_blocking(move || {
-            reserve_or_replay_indexed_blocking(
-                &reserve_path,
-                requested,
-                || recovery_index::add_pending_blocking(&index_root, &index_path, &indexed),
-                || recovery_index::remove_pending_blocking(&index_root, &index_path),
-            )
+            hotpath::measure_block!("automation.effect.reserve", {
+                reserve_or_replay_indexed_blocking(
+                    &reserve_path,
+                    requested,
+                    || recovery_index::add_pending_blocking(&index_root, &index_path, &indexed),
+                    || recovery_index::remove_pending_blocking(&index_root, &index_path),
+                )
+            })
         })
         .await
         .map_err(|error| {
@@ -1992,6 +1994,7 @@ fn settle_bound_owner(
     settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
 }
 
+#[hotpath::measure(label = "automation.effect.settle")]
 fn settle_bound_owner_with_budget(
     mut state: RetainedBoundSettlement,
     budget: Duration,
@@ -2020,10 +2023,10 @@ fn settle_bound_owner_with_budget(
                         "automation finalization remains pending under its blocking owner"
                     ),
                     Err(classification_error) => tracing::warn!(
-                        run_id = %state.ledger.run_id,
-                        error = %error,
-                        classification_error = %classification_error,
-                        "automation finalization remains uncertain under its blocking owner"
+                            run_id = %state.ledger.run_id,
+                            error = %error,
+                            classification_error = %classification_error,
+                            "automation finalization remains uncertain under its blocking owner"
                     ),
                 }
                 error
@@ -2104,12 +2107,13 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
         .publication
         .as_ref()
         .ok_or_else(|| contract_error("prepared settlement lost its exact publication"))?;
-    let published =
+    let published = hotpath::measure_block!("automation.effect.publish", {
         tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact_blocking(
             &state.authority.dashboard_root,
             state.authority.admission.request.run_id.as_str(),
             publication,
-        )?;
+        )
+    })?;
     if published == ExactRunPublishOutcome::MissingPayload {
         return Err(contract_error(
             "prepared automation terminal has neither its spool nor exact ledger row",
