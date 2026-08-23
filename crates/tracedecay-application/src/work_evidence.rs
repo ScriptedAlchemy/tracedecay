@@ -20,10 +20,10 @@ use tracedecay_domain::{
 
 use crate::work::work_authority;
 use crate::{
-    OpaqueCursor, RequestAdmission, RequestContext, VerifiedWorkGraphVersionV1,
-    WorkAttemptEvidenceRecordV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
-    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductPortContextV1, WorkProductSelectionScopeV1,
+    AuthorizedWorkProductScopeV1, OpaqueCursor, RequestAdmission, RequestContext,
+    VerifiedWorkGraphVersionV1, WorkAttemptEvidenceRecordV1, WorkProductApplicationErrorV1,
+    WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
 pub const MAX_WORK_ROOTED_EVIDENCE_SOURCES_V1: u32 = 100;
@@ -407,7 +407,7 @@ pub trait WorkTaskSessionReauthorizationPortV1: Send + Sync {
     ) -> Result<(), WorkTaskSessionReauthorizationErrorV1>;
 }
 
-/// Plan 13/owning-store exact expansion adapter for non-session anchors.
+/// Owning-store exact expansion adapter for non-session anchors.
 pub trait WorkAnchorHydrationPortV1: Send + Sync {
     fn hydrate_anchor<'a>(
         &'a self,
@@ -508,7 +508,7 @@ where
         let authority = work_authority(context)
             .map_err(|_| WorkProductApplicationErrorV1::NotFoundOrNotAuthorized)?;
         let mut sources = Vec::new();
-        let mut omissions = selected.omissions;
+        let mut omissions = Vec::new();
         let mut continuations = Vec::new();
         let mut hydrated = 0_u32;
         let mut source_partial = false;
@@ -516,8 +516,9 @@ where
         let mut redacted = false;
 
         for source in selected.sources {
-            // Reauthorize the exact root before every owning-store read.
-            self.authorize_root(context, &request)?;
+            // Recheck admission and scope before every owning-store read.
+            // The exact root is already pinned; do not re-hydrate it.
+            self.recheck_access(context, &request)?;
             match source {
                 SelectedSource::Attempt(identity) => {
                     match self.attempts.attempt_receipt(&authority, &identity) {
@@ -531,7 +532,7 @@ where
                             });
                             hydrated = hydrated.saturating_add(1);
                             if let Some(source) = provider_session {
-                                self.authorize_root(context, &request)?;
+                                self.recheck_access(context, &request)?;
                                 let continuation = task_session_continuation(&request, &identity);
                                 let has_matched_task_session_continuation = continuation.is_some();
                                 let accepted_attempts =
@@ -644,8 +645,18 @@ where
         }
 
         let selected_count = selected.selected_count;
-        let omitted = u32::try_from(omissions.len())
+        let hydration_omitted = u32::try_from(omissions.len())
             .map_err(|_| WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable)?;
+        let omitted = selected
+            .omitted_by_limit
+            .checked_add(hydration_omitted)
+            .ok_or(WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable)?;
+        if selected.omitted_by_limit > 0 {
+            omissions.push(WorkEvidenceOmissionV1 {
+                relation: "task_evidence".to_owned(),
+                reason: WorkEvidenceOmissionReasonV1::LimitReached,
+            });
+        }
         for omission in &omissions {
             match omission.reason {
                 WorkEvidenceOmissionReasonV1::Stale => {
@@ -685,11 +696,11 @@ where
         })
     }
 
-    fn authorize_root(
+    fn recheck_access(
         &self,
         context: &RequestContext,
         request: &WorkEvidenceRetrieveRequestV1,
-    ) -> Result<VerifiedWorkEvidenceRootV1, WorkProductApplicationErrorV1> {
+    ) -> Result<AuthorizedWorkProductScopeV1, WorkProductApplicationErrorV1> {
         if !context.allows(self.binding.capability_id(), self.binding.use_case_id()) {
             return Err(WorkProductApplicationErrorV1::NotAuthorized);
         }
@@ -716,6 +727,15 @@ where
         if scope.selection() != &request.selection {
             return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
         }
+        Ok(scope)
+    }
+
+    fn authorize_root(
+        &self,
+        context: &RequestContext,
+        request: &WorkEvidenceRetrieveRequestV1,
+    ) -> Result<VerifiedWorkEvidenceRootV1, WorkProductApplicationErrorV1> {
+        let scope = self.recheck_access(context, request)?;
         let port_context =
             WorkProductPortContextV1::from_request(context, scope, request.observed_at);
         let root = self
@@ -810,16 +830,17 @@ enum SelectedSource {
 struct SelectedSources {
     sources: Vec<SelectedSource>,
     selected_count: u32,
-    omissions: Vec<WorkEvidenceOmissionV1>,
+    omitted_by_limit: u32,
 }
 
 fn select_sources(
     root: &VerifiedWorkEvidenceRootV1,
     request: &WorkEvidenceRetrieveRequestV1,
 ) -> Result<SelectedSources, WorkProductApplicationErrorV1> {
-    let mut all = Vec::new();
-    if let Some(expansion) = &request.expansion {
-        match expansion {
+    let limit = usize::try_from(request.page_size)
+        .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+    let (sources, selected_count) = if let Some(expansion) = &request.expansion {
+        let source = match expansion {
             WorkEvidenceExpansionSelectorV1::Anchor { link_id } => {
                 let link = root
                     .links
@@ -827,41 +848,40 @@ fn select_sources(
                     .find(|link| link.link_id() == link_id)
                     .cloned()
                     .ok_or(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized)?;
-                all.push(SelectedSource::Anchor(link));
+                SelectedSource::Anchor(link)
             }
             WorkEvidenceExpansionSelectorV1::TaskSession { attempt } => {
                 if !root.item.accepted_attempts().contains(attempt) {
                     return Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized);
                 }
-                all.push(SelectedSource::Attempt(attempt.clone()));
+                SelectedSource::Attempt(attempt.clone())
             }
-        }
+        };
+        (vec![source], 1)
     } else {
-        all.extend(
-            root.item
-                .accepted_attempts()
-                .iter()
-                .cloned()
-                .map(SelectedSource::Attempt),
-        );
-        all.extend(root.links.iter().cloned().map(SelectedSource::Anchor));
-    }
-    let selected_count = u32::try_from(all.len())
+        let attempts = root.item.accepted_attempts();
+        let links = &root.links;
+        let total = attempts
+            .len()
+            .checked_add(links.len())
+            .ok_or(WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable)?;
+        let selected_count = u32::try_from(total)
+            .map_err(|_| WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable)?;
+        let sources = attempts
+            .iter()
+            .cloned()
+            .map(SelectedSource::Attempt)
+            .chain(links.iter().cloned().map(SelectedSource::Anchor))
+            .take(limit)
+            .collect::<Vec<_>>();
+        (sources, selected_count)
+    };
+    let returned = u32::try_from(sources.len())
         .map_err(|_| WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable)?;
-    let limit = usize::try_from(request.page_size)
-        .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
-    let omitted_count = all.len().saturating_sub(limit);
-    all.truncate(limit);
-    let omissions = (0..omitted_count)
-        .map(|_| WorkEvidenceOmissionV1 {
-            relation: "task_evidence".to_owned(),
-            reason: WorkEvidenceOmissionReasonV1::LimitReached,
-        })
-        .collect();
     Ok(SelectedSources {
-        sources: all,
+        sources,
         selected_count,
-        omissions,
+        omitted_by_limit: selected_count.saturating_sub(returned),
     })
 }
 

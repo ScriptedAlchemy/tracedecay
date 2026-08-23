@@ -600,7 +600,7 @@ impl<'a> DoctorReportComposerV1<'a> {
                 entries.push(DoctorReportEntryV1::new(finding, None)?);
             }
         }
-        Ok((entries, strongest_consultation(consultations)))
+            Ok((entries, strongest_consultation(consultations)?))
     }
 
     async fn compose_host(
@@ -662,7 +662,7 @@ impl<'a> DoctorReportComposerV1<'a> {
             }
             consultations.push(consultation);
         }
-        Ok((entries, strongest_consultation(consultations)))
+            Ok((entries, strongest_consultation(consultations)?))
     }
 
     async fn compose_code_index(
@@ -850,16 +850,18 @@ const fn unavailable(reason: DoctorFamilyUnavailableReasonV1) -> DoctorFamilyCon
 
 fn strongest_consultation(
     consultations: Vec<DoctorFamilyConsultationV1>,
-) -> DoctorFamilyConsultationV1 {
+) -> Result<DoctorFamilyConsultationV1, ApplicationContractError> {
     consultations
         .iter()
         .copied()
         .find(|consultation| consultation.is_consulted())
-        .unwrap_or_else(|| {
+        .or_else(|| {
             consultations
                 .into_iter()
                 .max_by_key(|consultation| consultation.rank())
-                .expect("a composed family has at least one source")
+        })
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "doctor family consultation",
         })
 }
 
@@ -1005,6 +1007,6 @@ fn build_statement(families: &[DoctorFamilyCoverageV1], consulted: usize, total:
         statement.push_str(&unavailable_list);
     }
     // The family/reason vocabulary is closed and small, so the composed
-    // statement is well within the 512-byte budget; guard defensively anyway.
+    // statement stays within the 512-byte coverage-statement budget.
     truncate_at_char_boundary(&statement, 512)
 }

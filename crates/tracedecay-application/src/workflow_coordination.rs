@@ -609,20 +609,21 @@ where
         let from_by_id = from
             .steps()
             .iter()
-            .map(|step| (step.step_id.clone(), step))
+            .map(|step| (&step.step_id, step))
             .collect::<BTreeMap<_, _>>();
         let to_by_id = to
             .steps()
             .iter()
-            .map(|step| (step.step_id.clone(), step))
+            .map(|step| (&step.step_id, step))
             .collect::<BTreeMap<_, _>>();
         let changed_steps = from_by_id
             .keys()
-            .chain(to_by_id.keys())
-            .cloned()
+            .copied()
+            .chain(to_by_id.keys().copied())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .filter(|step_id| from_by_id.get(step_id) != to_by_id.get(step_id))
+            .cloned()
             .collect();
         Ok(WorkflowDefinitionDiff {
             definition_id: definition_id.clone(),

@@ -212,6 +212,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        let legal_actions = wire.legal_actions;
         let source = match (
             wire.kind,
             wire.diagnostic.clone(),
@@ -221,20 +222,20 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                 ApplicationProblem::InvalidRequest {
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::NotFoundOrNotAuthorized, None, None) => {
                 ApplicationProblem::NotFoundOrNotAuthorized {
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::Conflict, Some(diagnostic), None) => {
                 ApplicationProblem::Conflict {
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::PartialEffect, Some(diagnostic), Some(committed_receipt)) => {
@@ -242,19 +243,19 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     diagnostic,
                     committed_receipt: Box::new(committed_receipt),
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::Stale, Some(diagnostic), None) => ApplicationProblem::Stale {
                 diagnostic,
                 retry: wire.retry,
-                legal_actions: wire.legal_actions.clone(),
+                legal_actions: legal_actions.clone(),
             },
             (ApplicationProblemKind::Unsupported, Some(diagnostic), None) => {
                 ApplicationProblem::Unsupported {
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::Unavailable, Some(diagnostic), None) => {
@@ -266,7 +267,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     })?,
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::ExecutionFailed, Some(diagnostic), None) => {
@@ -278,21 +279,21 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     })?,
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::ResetRequired, Some(diagnostic), None) => {
                 ApplicationProblem::ResetRequired {
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::Saturated, Some(diagnostic), None) => {
                 ApplicationProblem::Saturated {
                     diagnostic,
                     retry: wire.retry,
-                    legal_actions: wire.legal_actions.clone(),
+                    legal_actions: legal_actions.clone(),
                 }
             }
             (ApplicationProblemKind::Cancelled, None, None) => ApplicationProblem::Cancelled {
@@ -300,14 +301,14 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     serde::de::Error::custom("cancelled problem is missing its cancellation stage")
                 })?,
                 retry: wire.retry,
-                legal_actions: wire.legal_actions.clone(),
+                legal_actions: legal_actions.clone(),
             },
             (ApplicationProblemKind::TimedOut, None, None) => ApplicationProblem::TimedOut {
                 stage: wire.cancellation_stage.0.ok_or_else(|| {
                     serde::de::Error::custom("timed-out problem is missing its cancellation stage")
                 })?,
                 retry: wire.retry,
-                legal_actions: wire.legal_actions.clone(),
+                legal_actions: legal_actions.clone(),
             },
             _ => {
                 return Err(serde::de::Error::custom(
@@ -334,7 +335,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             request_id: wire.request_id,
             trace_id: wire.trace_id,
             details: wire.details,
-            legal_actions: wire.legal_actions,
+            legal_actions,
             coverage: wire.coverage,
             source,
         };
