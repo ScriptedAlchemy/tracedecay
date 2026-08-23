@@ -31,6 +31,7 @@ async fn daemon_automation_action(
     crate::commands::daemon_tool_json(Some(project_path), "tracedecay_admin_project", args).await
 }
 
+#[hotpath::measure]
 pub(crate) async fn handle_automation_command(
     action: AutomationAction,
 ) -> tracedecay::errors::Result<()> {

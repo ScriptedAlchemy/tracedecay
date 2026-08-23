@@ -368,10 +368,12 @@ where
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
     run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
+#[hotpath::measure]
 pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
@@ -407,6 +409,7 @@ fn combine_operation_and_restore<T>(
     }
 }
 
+#[hotpath::measure]
 pub(crate) async fn run_post_update_command(
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,

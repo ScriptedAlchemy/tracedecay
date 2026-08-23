@@ -74,6 +74,7 @@ async fn registered_diagnostics_message_count(
 
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
 /// `analytics_events` table and print what happened.
+#[hotpath::measure]
 pub async fn run_analytics_sync() -> crate::errors::Result<()> {
     let project_root = cli_project_root();
     let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
@@ -86,6 +87,7 @@ pub async fn run_analytics_sync() -> crate::errors::Result<()> {
 
 /// `tracedecay analytics diagnostics`: the CLI wrapper around the dashboard
 /// diagnostics summary — durable `analytics_events` plus merged hook JSONL.
+#[hotpath::measure]
 pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,

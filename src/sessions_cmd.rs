@@ -60,6 +60,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     Value::Object(arguments)
 }
 
+#[hotpath::measure]
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
 ) -> tracedecay::errors::Result<()> {

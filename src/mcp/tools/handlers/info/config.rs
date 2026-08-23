@@ -3,6 +3,7 @@
 use super::*;
 
 /// Structured TOML / JSON queries by dotted key path.
+#[hotpath::measure]
 pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let key = args
         .get("key")

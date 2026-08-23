@@ -8,6 +8,7 @@ mod settlement;
 
 use settlement::{configuration_effect, reconcile_configuration_runtime};
 
+#[hotpath::measure]
 pub(super) async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,

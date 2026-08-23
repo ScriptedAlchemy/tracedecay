@@ -3039,6 +3039,7 @@ pub fn parse_application_surface_request(
     }
 }
 
+#[hotpath::measure]
 pub async fn execute_application_surface(
     operation: ApplicationSurfaceOperation,
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
