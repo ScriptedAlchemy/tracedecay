@@ -95,6 +95,7 @@ impl AgentIntegration for KiloIntegration {
         }
     }
 
+    #[hotpath::measure(label = "kilo_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],

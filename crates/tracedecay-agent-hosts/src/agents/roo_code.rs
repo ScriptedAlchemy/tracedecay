@@ -74,6 +74,7 @@ impl AgentIntegration for RooCodeIntegration {
         }
     }
 
+    #[hotpath::measure(label = "roo_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],

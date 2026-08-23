@@ -275,6 +275,7 @@ fn require_copilot_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
+#[hotpath::measure(label = "copilot_mcp_install")]
 fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
     args.extend(MCP_SERVER_ARGS.iter().copied());

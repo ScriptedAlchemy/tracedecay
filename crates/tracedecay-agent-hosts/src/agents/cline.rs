@@ -94,6 +94,7 @@ impl AgentIntegration for ClineIntegration {
         }
     }
 
+    #[hotpath::measure(label = "cline_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],

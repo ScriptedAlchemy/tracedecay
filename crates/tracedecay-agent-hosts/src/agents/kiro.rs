@@ -274,6 +274,7 @@ impl AgentIntegration for KiroIntegration {
     /// adopting it needs a project-aware host-CLI invocation first. Until then
     /// the file write is the only way to target the requested project. The
     /// global path above *is* CLI-driven.
+    #[hotpath::measure(label = "kiro_project_install")]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -548,6 +549,7 @@ fn require_kiro_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
+#[hotpath::measure(label = "kiro_mcp_install")]
 fn kiro_mcp_add_with(kiro_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     // Make the global scope explicit. Kiro's CLI also supports a workspace
     // registry, but this lifecycle owns only the profile-global entry; the
@@ -638,6 +640,7 @@ fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
 /// Returns true when tracedecay owns the resulting agent file. A pre-existing
 /// user-managed `tracedecay.json` is preserved and returns false so the default
 /// agent selector is not pointed at a file whose policy tracedecay does not own.
+#[hotpath::measure(label = "kiro_agent_install")]
 fn install_managed_agent(
     path: &Path,
     tracedecay_bin: &str,
