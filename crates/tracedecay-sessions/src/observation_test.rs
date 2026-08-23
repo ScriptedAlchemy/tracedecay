@@ -915,3 +915,26 @@ async fn capture_observations_sanitizes_then_persists_once() {
     assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 1);
     assert_eq!(application.store.observations.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn capture_observations_refuses_mixed_privacy_batch_before_persist() {
+    let application = application();
+    let durable = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "batch-durable" }
+    });
+    let rejected = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "x".repeat(1_048_577) }
+    });
+    let start_two = u64::try_from(serde_json::to_vec(&durable).unwrap().len()).unwrap();
+    let result = application
+        .capture_observations(vec![request(&durable), request_at(&rejected, start_two)])
+        .await;
+    assert!(matches!(
+        result,
+        Err(ObservationApplicationError::BatchContainsNonDurable)
+    ));
+    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 0);
+    assert!(application.store.observations.lock().unwrap().is_empty());
+}

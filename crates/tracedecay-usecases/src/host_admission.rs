@@ -1046,6 +1046,11 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             true,
             Some("admission_cancelled"),
         ),
+        ObservationApplicationError::BatchContainsNonDurable => admission_outcome(
+            HostAdmissionStatus::Degraded,
+            false,
+            Some("privacy_boundary_failed"),
+        ),
         ObservationApplicationError::Store(ObservationStoreError::CursorConflict { .. }) => {
             admission_outcome(
                 HostAdmissionStatus::Backpressured,

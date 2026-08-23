@@ -306,6 +306,8 @@ pub enum ObservationApplicationError {
     Store(#[from] ObservationStoreError),
     #[error("observation operation was cancelled")]
     Cancelled,
+    #[error("observation batch contains a non-durable privacy outcome")]
+    BatchContainsNonDurable,
 }
 
 enum PreparedObservationCapture {
@@ -634,8 +636,8 @@ where
     /// Sanitizes every request, then persists durable writes through one
     /// store-owned `persist_observations` call. Empty input returns empty
     /// without touching persist authority. A sanitizer reject or quarantine
-    /// in the batch falls back to per-request persist so cursor/CAS
-    /// transitions stay contiguous with coverage advances at the caller.
+    /// in the batch refuses before persistence so the stream owner can retry
+    /// one request at a time and advance typed coverage between records.
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -650,65 +652,11 @@ where
         let all_durable = prepared
             .iter()
             .all(|prepared| matches!(prepared, PreparedObservationCapture::Durable { .. }));
-        if all_durable {
-            let mut writes = Vec::with_capacity(prepared.len());
-            let mut durable = Vec::with_capacity(prepared.len());
-            for prepared in prepared {
-                match prepared {
-                    PreparedObservationCapture::Durable {
-                        write,
-                        sanitized_record,
-                        findings,
-                        cancellation,
-                    } => {
-                        writes.push(*write);
-                        durable.push((sanitized_record, findings, cancellation));
-                    }
-                    PreparedObservationCapture::Rejected { .. }
-                    | PreparedObservationCapture::Quarantined { .. } => {
-                        return Err(ObservationApplicationError::Store(
-                            ObservationStoreError::Storage {
-                                operation: "persist_observations",
-                                source: Box::new(std::io::Error::other(
-                                    "durable batch contained a non-durable frame",
-                                )),
-                            },
-                        ));
-                    }
-                }
-            }
-            if writes.is_empty() {
-                return Ok(Vec::new());
-            }
-            let persist_outcomes = self.store.persist_observations(writes).await?;
-            if persist_outcomes.len() != durable.len() {
-                return Err(ObservationApplicationError::Store(
-                    ObservationStoreError::Storage {
-                        operation: "persist_observations",
-                        source: Box::new(std::io::Error::other(
-                            "persist_observations returned a different outcome count",
-                        )),
-                    },
-                ));
-            }
-            let mut outcomes = Vec::with_capacity(durable.len());
-            for ((sanitized_record, findings, cancellation), persist_outcome) in
-                durable.into_iter().zip(persist_outcomes)
-            {
-                outcomes.push(
-                    self.persisted_outcome(
-                        persist_outcome,
-                        sanitized_record,
-                        findings,
-                        &cancellation,
-                    )
-                    .await?,
-                );
-            }
-            return Ok(outcomes);
+        if !all_durable {
+            return Err(ObservationApplicationError::BatchContainsNonDurable);
         }
-
-        let mut outcomes = Vec::with_capacity(prepared.len());
+        let mut writes = Vec::with_capacity(prepared.len());
+        let mut durable = Vec::with_capacity(prepared.len());
         for prepared in prepared {
             match prepared {
                 PreparedObservationCapture::Durable {
@@ -717,24 +665,34 @@ where
                     findings,
                     cancellation,
                 } => {
-                    let persist_outcome = self.store.persist_observation(*write).await?;
-                    outcomes.push(
-                        self.persisted_outcome(
-                            persist_outcome,
-                            sanitized_record,
-                            findings,
-                            &cancellation,
-                        )
-                        .await?,
-                    );
+                    writes.push(*write);
+                    durable.push((sanitized_record, findings, cancellation));
                 }
-                PreparedObservationCapture::Rejected { receipt, findings } => {
-                    outcomes.push(CaptureObservationOutcome::Rejected { receipt, findings });
-                }
-                PreparedObservationCapture::Quarantined { receipt, findings } => {
-                    outcomes.push(CaptureObservationOutcome::Quarantined { receipt, findings });
+                PreparedObservationCapture::Rejected { .. }
+                | PreparedObservationCapture::Quarantined { .. } => {
+                    return Err(ObservationApplicationError::BatchContainsNonDurable);
                 }
             }
+        }
+        let persist_outcomes = self.store.persist_observations(writes).await?;
+        if persist_outcomes.len() != durable.len() {
+            return Err(ObservationApplicationError::Store(
+                ObservationStoreError::Storage {
+                    operation: "persist_observations",
+                    source: Box::new(std::io::Error::other(
+                        "persist_observations returned a different outcome count",
+                    )),
+                },
+            ));
+        }
+        let mut outcomes = Vec::with_capacity(durable.len());
+        for ((sanitized_record, findings, cancellation), persist_outcome) in
+            durable.into_iter().zip(persist_outcomes)
+        {
+            outcomes.push(
+                self.persisted_outcome(persist_outcome, sanitized_record, findings, &cancellation)
+                    .await?,
+            );
         }
         Ok(outcomes)
     }

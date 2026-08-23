@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
 
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -163,7 +164,7 @@ struct DurableJsonlFrame {
     range: tracedecay_domain::ObservationSourceRangeV1,
     parsed_record: ParsedObservationRecordV1,
     native_record_id: ObservationId,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -589,10 +590,10 @@ pub(super) async fn admit_jsonl_observations<State>(
         if frames.is_empty() {
             return Ok(());
         }
-        let mut backups = Vec::with_capacity(frames.len());
-        for frame in &frames {
-            backups.push((frame.checkpoint, frame.range, frame.bytes.clone()));
-        }
+        let backups = frames
+            .iter()
+            .map(|frame| (frame.checkpoint, frame.range, Arc::clone(&frame.bytes)))
+            .collect::<Vec<_>>();
         match active
             .capture_window(
                 expected_cursor,
@@ -611,7 +612,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                             provider: active.provider,
                         });
                     }
-                    match normalize(state, &bytes, range, checkpoint.offset)? {
+                    match normalize(state, bytes.as_ref(), range, checkpoint.offset)? {
                         JsonlFrameAdmission::Durable {
                             parsed_record,
                             native_record_id,
@@ -750,7 +751,7 @@ pub(super) async fn admit_jsonl_observations<State>(
             range,
             parsed_record,
             native_record_id,
-            bytes: frame.bytes,
+            bytes: frame.bytes.into(),
         });
         if pending.len() >= MAX_CAPTURE_WINDOW {
             flush_pending(

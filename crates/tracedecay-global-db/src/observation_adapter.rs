@@ -422,13 +422,15 @@ impl GlobalDbObservationStore {
                 ObservationPersistOutcome::ExactDuplicate(existing.commit_receipt().clone()),
             ));
         }
-        Ok(PreparedObservationPersist::Submit(write))
+        Ok(PreparedObservationPersist::Submit(Box::new(write)))
     }
 }
 
 enum PreparedObservationPersist {
     Ready(ObservationPersistOutcome),
-    Submit(AnchoredObservationWrite),
+    // Boxed: the write dwarfs the ready outcome, so an unboxed variant made
+    // every `Ready` value carry the larger payload's footprint.
+    Submit(Box<AnchoredObservationWrite>),
 }
 
 impl ObservationStore for GlobalDbObservationStore {
@@ -487,7 +489,7 @@ impl ObservationStore for GlobalDbObservationStore {
                 match item {
                     PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(outcome)),
                     PreparedObservationPersist::Submit(write) => {
-                        submits.push((outcomes.len(), write));
+                        submits.push((outcomes.len(), *write));
                         outcomes.push(None);
                     }
                 }
@@ -928,6 +930,11 @@ async fn submit_observation_writes(
     writes: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationPersistOutcome)>> {
     let admitted_at = now_micros();
+    let priority = if writes.len() == 1 {
+        OperationPriorityV1::Foreground
+    } else {
+        OperationPriorityV1::Background
+    };
     let command = serde_json::json!({
         "kind": "observation_batch",
         "writes": writes
@@ -947,6 +954,7 @@ async fn submit_observation_writes(
         command_bytes.len(),
         format!("observation.batch.{digest_suffix}"),
         admitted_at,
+        priority,
         "submit observation batch",
     )?;
     let compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
@@ -1046,6 +1054,7 @@ fn observation_submit_metadata(
     command_bytes: usize,
     idempotency_key: String,
     admitted_at: tracedecay_domain::UtcMicros,
+    priority: OperationPriorityV1,
     operation: &'static str,
 ) -> ObservationStoreResult<StoreOperationMetadataV1> {
     let binding = runtime.binding();
@@ -1066,7 +1075,7 @@ fn observation_submit_metadata(
                 .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
         },
         durability: DurabilityClassV1::Full,
-        priority: OperationPriorityV1::Foreground,
+        priority,
         admission_bytes: u64::try_from(command_bytes).unwrap_or(u64::MAX).max(1),
         admitted_at,
     })
@@ -1089,6 +1098,7 @@ async fn submit_runtime_write(
         command_bytes,
         idempotency_key,
         admitted_at,
+        OperationPriorityV1::Foreground,
         operation,
     )?;
     let compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
