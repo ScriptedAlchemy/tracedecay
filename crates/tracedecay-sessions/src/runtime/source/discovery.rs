@@ -14,7 +14,6 @@ use crate::admission::{DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MA
 /// upper bound for the `Metadata` / `FileType` values touched per entry.
 const ENTRY_METADATA_CHARGE_BYTES: u64 = std::mem::size_of::<std::fs::Metadata>() as u64;
 
-/// Allocation bounds for one transcript discovery walk or path-list filter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TranscriptDiscoveryBounds {
     /// Maximum retained file paths (units).
@@ -55,7 +54,6 @@ impl TranscriptDiscoveryBounds {
     }
 }
 
-/// Which discovery budget stopped retention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileDiscoveryLimit {
     FileCount,
@@ -107,8 +105,6 @@ pub fn os_str_byte_len(value: &std::ffi::OsStr) -> usize {
     }
 }
 
-/// Apply discovery bounds to an already-materialized path list.
-///
 /// Prefer [`collect_files_with_ext_bounded`] for filesystem walks so bounds are
 /// enforced before collection. This helper exists for trait defaults and tests.
 pub fn bound_path_list(

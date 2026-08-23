@@ -99,7 +99,6 @@ const HISTORY_CATCH_UP_UNITS: usize = 512;
 /// directories is ~3700; this cap only guards against pathological trees).
 const MAX_BUCKET_DIRS: usize = 8192;
 
-/// Codex CLI transcript locator + parser.
 pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,

@@ -1,6 +1,6 @@
 //! Daemon git-metadata watcher (design D3) and scheduler backstop (D5).
 //!
-//! # Why this is safe (unlike the removed #80 working-tree watcher)
+//! # Why this is safe (unlike a working-tree watcher)
 //!
 //! The v6.x `notify-debouncer-full` watcher recursively watched the **working
 //! tree** and drowned on monorepo `node_modules`/`target` churn. This watcher

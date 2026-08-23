@@ -265,8 +265,6 @@ impl AutomationRunControl {
         &self.read_control
     }
 
-    /// Returns admission controls for one independent fact mutation.
-    ///
     /// The caller's live interruption predicate is checked before the local
     /// one-shot gate. Once that gate wins, it remains consumed even if the run
     /// is interrupted later.

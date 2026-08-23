@@ -61,7 +61,6 @@ impl CompletionDisposition {
     }
 }
 
-/// Standard LSP request failure codes used by the protocol adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LspRequestFailure {
     RequestCancelled,

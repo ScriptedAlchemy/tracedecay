@@ -508,9 +508,8 @@ async fn test_move_symbol_qualified_caller_hint() {
     );
 }
 
-/// Contract (#353 `attrs_start_line` edge case): when the symbol's doc block is
-/// the very first lines of the file, the doc travels with the move and the
-/// source is left with no doc residue.
+/// When the symbol's doc block is the very first lines of the file, the doc
+/// travels with the move and the source is left with no doc residue.
 #[tokio::test]
 async fn test_move_symbol_first_in_file_docs_travel() {
     let dir = test_temp_dir();
@@ -874,10 +873,6 @@ pub(crate) async fn move_pricing_fixture(project: &Path) {
     )
     .unwrap();
 }
-
-// --------------------------------------------------------------------------- //
-// tracedecay_move_symbol — fixture-crate integration through the MCP path.
-// --------------------------------------------------------------------------- //
 
 /// Parses the JSON payload text from a move_symbol ToolResult.
 pub(crate) fn move_payload(result: &ToolResult) -> Value {

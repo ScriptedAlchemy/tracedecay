@@ -1,4 +1,4 @@
-//! Canonical Plan 24 product graph contracts.
+//! Canonical Work product graph contracts.
 //!
 //! These values contain no persistence or provider behavior. The owning daemon
 //! stores them through its injected shared graph handle. Runtime execution
@@ -158,9 +158,9 @@ impl<'de> Deserialize<'de> for WorkGraphVersionV1 {
 
 /// The exact owner-relative relation set selected for a canonical Work graph.
 ///
-/// This identity lives in the domain because Plan 32 attempt admission must
-/// retain it byte-for-byte through provider settlement. Reconstructing it
-/// from a project context would conflate explicit no-Git work with a scoped
+/// This identity lives in the domain because attempt admission must retain
+/// it byte-for-byte through provider settlement. Reconstructing it from a
+/// project context would conflate explicit no-Git work with a scoped
 /// repository relation.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "selection", rename_all = "snake_case")]

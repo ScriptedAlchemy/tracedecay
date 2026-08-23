@@ -38,7 +38,6 @@ async fn search_call_writes_savings_ledger_row() {
     )
     .await;
 
-    // Verify the request completed successfully.
     let resp_str = responses
         .iter()
         .find(|r| parse_response(r)["id"] == 9001)

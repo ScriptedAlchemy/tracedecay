@@ -217,7 +217,7 @@ impl HistoricalGitReadUnavailableReasonV1 {
     }
 }
 
-/// Code-index join over one already-mounted Plan 36 Git authority.
+/// Code-index join over one already-mounted Git authority.
 pub struct HistoricalGitQueryAdapter<'a, P: GitHistoricalBlobReadPort> {
     port: &'a P,
     scope: ResolvedScope,

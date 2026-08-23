@@ -34,13 +34,10 @@ const MIGRATION_NAME: &str = "workflow_indexing";
 /// git-correlation ceiling so the two surfaces page alike.
 pub const MAX_WORKFLOW_LIMIT: usize = MAX_SESSIONS_FOR_LIMIT;
 
-/// Errors from the workflow-index store.
-///
 /// Shaped like [`crate::runtime::git_correlation::GitCorrelationError`] so
 /// callers and `?`-conversions read the same across both stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowIndexError {
-    /// Underlying database failure.
     Db(String),
     /// Caller-supplied argument was invalid (empty run id, …).
     InvalidArgument(String),

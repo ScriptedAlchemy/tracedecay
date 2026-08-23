@@ -52,7 +52,6 @@ fn test_fortran_subroutines() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // Subroutines: log_message, connect_endpoint, disconnect_endpoint
     assert!(
         fns.iter().any(|n| n.name == "log_message"),
         "log_message subroutine not found"
@@ -75,7 +74,6 @@ fn test_fortran_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // Functions: create_endpoint, is_connected
     assert!(
         fns.iter().any(|n| n.name == "create_endpoint"),
         "create_endpoint function not found"
@@ -107,7 +105,6 @@ fn test_fortran_derived_types() {
 #[test]
 fn test_fortran_type_extension() {
     let result = extract_fixture();
-    // PooledEndpoint extends Endpoint
     let extends_refs: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -182,7 +179,6 @@ fn test_fortran_fields() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
-    // Endpoint has: host, port, connected
     assert!(
         fields.iter().any(|n| n.name == "host"),
         "host field not found"
@@ -195,7 +191,6 @@ fn test_fortran_fields() {
         fields.iter().any(|n| n.name == "connected"),
         "connected field not found"
     );
-    // PooledEndpoint has: pool_size
     assert!(
         fields.iter().any(|n| n.name == "pool_size"),
         "pool_size field not found"
@@ -211,13 +206,11 @@ fn test_fortran_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!calls.is_empty(), "expected call site refs");
-    // connect_endpoint calls log_message
     assert!(
         calls.iter().any(|r| r.reference_name == "log_message"),
         "expected call to log_message, got: {:?}",
         calls.iter().map(|r| &r.reference_name).collect::<Vec<_>>()
     );
-    // program calls create_endpoint, connect_endpoint, disconnect_endpoint
     assert!(
         calls.iter().any(|r| r.reference_name == "create_endpoint"),
         "expected call to create_endpoint"
@@ -237,7 +230,6 @@ fn test_fortran_call_sites() {
 #[test]
 fn test_fortran_docstrings() {
     let result = extract_fixture();
-    // Check subroutines which have comments inside the module.
     let log_msg = result
         .nodes
         .iter()
@@ -258,7 +250,6 @@ fn test_fortran_docstrings() {
         "create_endpoint should have docstring"
     );
 
-    // Endpoint type should have docstring.
     let ep = result
         .nodes
         .iter()
@@ -279,7 +270,6 @@ fn test_fortran_contains_edges() {
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
     assert!(!contains.is_empty(), "expected Contains edges");
-    // Module should contain subroutines, functions, types, constants, interface
     assert!(
         contains.len() >= 5,
         "expected >= 5 Contains edges, got {}",

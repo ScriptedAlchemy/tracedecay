@@ -18,7 +18,6 @@ struct PortOrderSymbol<'a> {
     start_line: u32,
 }
 
-/// Handles `tracedecay_port_order` tool calls.
 pub(crate) async fn handle_port_order(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

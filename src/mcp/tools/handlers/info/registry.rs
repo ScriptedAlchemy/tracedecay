@@ -60,7 +60,6 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     )
 }
 
-/// Handles `tracedecay_project_list` tool calls.
 pub(crate) async fn handle_project_list(
     cg: &TraceDecay,
     args: Value,
@@ -85,7 +84,6 @@ pub(crate) async fn handle_project_list(
     ))
 }
 
-/// Handles `tracedecay_project_search` tool calls.
 pub(crate) async fn handle_project_search(
     cg: &TraceDecay,
     args: Value,
@@ -185,7 +183,6 @@ fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySel
     }
 }
 
-/// Handles `tracedecay_project_context` tool calls.
 pub(crate) async fn handle_project_context(
     cg: &TraceDecay,
     args: Value,

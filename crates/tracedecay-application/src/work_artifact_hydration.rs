@@ -119,7 +119,6 @@ pub enum WorkArtifactHydrationV1 {
     },
 }
 
-/// The artifact and evidence hydration read authority.
 pub struct WorkArtifactHydrationService<S> {
     attempts: S,
 }

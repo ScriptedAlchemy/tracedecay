@@ -190,7 +190,6 @@ impl StoreWriterGates {
     }
 
     /// Acquires admission only if every level is free right now.
-    ///
     pub(super) fn try_acquire(&self, scope: &WriterScope) -> Option<WriterAdmissionGuard> {
         match scope {
             WriterScope::Daemon => Some(WriterAdmissionGuard {

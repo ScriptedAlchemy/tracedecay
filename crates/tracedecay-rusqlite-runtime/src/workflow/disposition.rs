@@ -1,11 +1,11 @@
 //! Transactional workflow-definition lifecycle dispositions.
 //!
-//! Plan 32 ("Typed workflow definitions") keeps `candidate`, `validate`,
-//! `activate`, `retire`, and `reject` as retained lifecycle operations over
-//! immutable definition versions. The definition payload never changes —
-//! "Editing creates a new version; admitted runs remain pinned" — so the
-//! disposition is a separate compare-and-swap aggregate, and every state a
-//! transition passes through is appended to an immutable journal.
+//! `candidate`, `validate`, `activate`, `retire`, and `reject` are retained
+//! lifecycle operations over immutable definition versions. The definition
+//! payload never changes — editing creates a new version and admitted runs
+//! remain pinned — so the disposition is a separate compare-and-swap
+//! aggregate, and every state a transition passes through is appended to an
+//! immutable journal.
 
 use tracedecay_application::{
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,

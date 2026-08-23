@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_read` — mode-aware file read with cross-session cache.
 pub(crate) async fn handle_read(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

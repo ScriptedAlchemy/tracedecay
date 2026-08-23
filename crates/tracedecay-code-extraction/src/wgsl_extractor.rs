@@ -161,10 +161,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // function_decl
-    // -------------------------------------------------------
-
     fn visit_function_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         let Some(header) = find_direct_child_by_kind(node, "function_header") else {
             return;
@@ -262,10 +258,6 @@ impl WgslExtractor {
         }
         attrs
     }
-
-    // -------------------------------------------------------
-    // struct_decl
-    // -------------------------------------------------------
 
     fn visit_struct_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "ident")
@@ -387,10 +379,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Global variables and constants
-    // -------------------------------------------------------
-
     fn visit_global_variable(state: &mut ExtractionState, node: TsNode<'_>) {
         // global_variable_decl: attribute* variable_decl ("=" expression)?
         // variable_decl: "var" variable_qualifier? variable_ident_decl
@@ -463,10 +451,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Type aliases
-    // -------------------------------------------------------
-
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         // type_alias_decl: "type" ident "=" type_decl
         let name = find_direct_child_by_kind(node, "ident")
@@ -517,10 +501,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Call site extraction
-    // -------------------------------------------------------
-
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -548,10 +528,6 @@ impl WgslExtractor {
             }
         }
     }
-
-    // -------------------------------------------------------
-    // Utility helpers
-    // -------------------------------------------------------
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {

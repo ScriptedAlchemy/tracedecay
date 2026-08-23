@@ -95,7 +95,6 @@ impl TaskMetadataCache {
     }
 }
 
-/// One Cline-family provider configuration.
 #[derive(Clone)]
 pub struct ClineLikeSource {
     provider: &'static str,

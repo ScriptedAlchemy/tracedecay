@@ -1,5 +1,3 @@
-//! `lsp` module test coverage.
-
 use super::*;
 
 use tracedecay_application::ObservabilityQueryPort;

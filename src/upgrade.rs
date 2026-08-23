@@ -1226,9 +1226,8 @@ mod tests {
     // operations resolve that relative path from CWD instead of the
     // symlink's parent, causing ENOENT.
     //
-    // Our fix: canonicalize the exe path before passing it to self_update.
-    // These tests verify the canonicalization works correctly for every
-    // symlink layout we've seen in the wild.
+    // Canonicalize the exe path before passing it to self_update. These
+    // tests cover every symlink layout we've seen in the wild.
 
     #[cfg(unix)]
     mod symlink_upgrade_regression {
@@ -1236,8 +1235,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         use std::path::PathBuf;
 
-        /// Helper: create a fake binary file in a Homebrew-style Cellar layout.
-        /// Returns (cellar_binary_path, symlink_path, tmp_guard).
+        /// Homebrew-style Cellar layout: `(cellar_binary, symlink, tmp_guard)`.
         fn homebrew_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
             let tmp = tempfile::tempdir().unwrap();
             // Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
@@ -1275,8 +1273,8 @@ mod tests {
 
         #[test]
         fn relative_read_link_fails_from_wrong_cwd() {
-            // This is the exact bug: read_link returns a relative path, and
-            // metadata() resolves it from CWD rather than the symlink's parent.
+            // read_link returns a relative path, and metadata() resolves it
+            // from CWD rather than the symlink's parent.
             let (_real, link, _tmp) = homebrew_layout();
             let target = fs::read_link(&link).unwrap();
 
@@ -1304,9 +1302,8 @@ mod tests {
 
         #[test]
         fn canonical_path_differs_from_symlink_path() {
-            // This is the key property our fix relies on: after canonicalization,
-            // the path differs from the symlink path, which makes self_update
-            // choose the Move code path instead of the buggy self_replace path.
+            // After canonicalization the path differs from the symlink path,
+            // so self_update chooses Move instead of self_replace.
             let (_real, link, _tmp) = homebrew_layout();
             let canonical = link.canonicalize().unwrap();
             assert_ne!(

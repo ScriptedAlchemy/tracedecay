@@ -10,13 +10,11 @@ use super::{
     stable_jsonl_file_id,
 };
 
-/// One newly-read JSONL line: its exact byte range and decoded value.
 pub struct JsonlLine {
     pub offset: i64,
     pub value: Value,
 }
 
-/// New JSONL content read from a file, plus the advanced cursor.
 pub struct NewJsonl {
     pub lines: Vec<JsonlLine>,
     pub new_cursor: StoredCursor,

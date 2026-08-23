@@ -274,7 +274,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
     }
 }
 
-/// Production application operation for the linked Plan 20 configuration and
+/// Production application operation for the linked configuration and
 /// semantic-profile transition. Profile/evaluation/runtime values are resolved
 /// from durable accepted authority by immutable digest; transport callers
 /// cannot submit a `pass` label or executable profile directly.

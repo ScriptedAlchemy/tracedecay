@@ -19,7 +19,7 @@ pub use tracedecay_usecases::graph::health::{
 };
 
 // ---------------------------------------------------------------------------
-// Task 2: Gini Coefficient
+// Gini Coefficient
 // ---------------------------------------------------------------------------
 
 /// Computes the Gini coefficient for a slice of non-negative values.
@@ -67,7 +67,7 @@ pub fn gini_label(gini: f64) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Task 3: Tarjan's SCC / Acyclicity Score
+// Tarjan's SCC / Acyclicity Score
 // ---------------------------------------------------------------------------
 
 /// Computes the acyclicity score for a directed graph.
@@ -84,7 +84,6 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
 
     let sccs = tarjan_scc(adj);
 
-    // Build a set of nodes in nontrivial SCCs (size > 1)
     let mut in_cycle: HashSet<&str> = HashSet::new();
     for scc in &sccs {
         if scc.len() > 1 {
@@ -111,7 +110,7 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
 }
 
 // ---------------------------------------------------------------------------
-// Task 4: Dependency Depth
+// Dependency Depth
 // ---------------------------------------------------------------------------
 
 /// Computes longest dependency chains. Breaks cycles via Tarjan's SCC
@@ -120,7 +119,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
     limit: usize,
 ) -> DepthResult {
-    // Collect all nodes
     let mut all_nodes: HashSet<String> = adj.keys().cloned().collect();
     for targets in adj.values() {
         all_nodes.extend(targets.iter().cloned());
@@ -225,7 +223,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
             }
             chain_sccs.reverse();
 
-            // Map SCC indices back to representative file names
             let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
 
             let mut scc_files = sccs[scc_idx].clone();
@@ -240,7 +237,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Sort by depth descending for convenience
     results.sort_by_key(|ch| std::cmp::Reverse(ch.depth));
 
     DepthResult {
@@ -323,7 +319,7 @@ pub fn depth_score(max_depth: usize, ideal_depth: usize) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Task 5: Modularity Score
+// Modularity Score
 // ---------------------------------------------------------------------------
 
 /// Estimates modularity by removing hub nodes and counting connected components.
@@ -337,7 +333,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
         return (1.0, 0);
     }
 
-    // Collect all nodes
     let mut all_nodes: HashSet<String> = adj.keys().cloned().collect();
     for targets in adj.values() {
         all_nodes.extend(targets.iter().cloned());
@@ -347,7 +342,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
         return (1.0, 0);
     }
 
-    // Build undirected connectivity count per node (fan_in + fan_out)
     let mut connectivity: HashMap<&str, usize> = HashMap::new();
     for node in &all_nodes {
         connectivity.insert(node.as_str(), 0);
@@ -359,7 +353,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Compute mean and stddev
     let n = connectivity.len() as f64;
     let values: Vec<f64> = connectivity.values().map(|&v| v as f64).collect();
     let mean = values.iter().sum::<f64>() / n;
@@ -367,14 +360,12 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     let stddev = variance.sqrt();
     let threshold = mean + 2.0 * stddev;
 
-    // Identify hub nodes
     let hubs: HashSet<&str> = connectivity
         .iter()
         .filter(|&(_, &v)| v as f64 > threshold)
         .map(|(&k, _)| k)
         .collect();
 
-    // Build undirected graph without hubs
     let non_hub_nodes: Vec<&str> = all_nodes
         .iter()
         .map(String::as_str)
@@ -437,7 +428,7 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
 }
 
 // ---------------------------------------------------------------------------
-// Task 6: Composite Health Score
+// Composite Health Score
 // ---------------------------------------------------------------------------
 
 /// Computes quality signal (0–10000) from geometric mean of all five dimensions.

@@ -43,7 +43,6 @@ pub struct WorkAttemptCapacityV1 {
 }
 
 impl WorkAttemptCapacityV1 {
-    /// Constructs the canonical verdict input returned by storage adapters.
     pub fn new(
         global_active: u64,
         repository_active: u64,

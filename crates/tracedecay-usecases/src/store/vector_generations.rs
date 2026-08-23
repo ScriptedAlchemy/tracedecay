@@ -1157,7 +1157,7 @@ impl VectorGenerationStateMachineV1 {
         self.staged.remove(build_id).is_some()
     }
 
-    /// Atomically commit one batch's vector effects, tombstones, Plan 25
+    /// Atomically commit one batch's vector effects, tombstones, code-index
     /// receipt, and next checkpoint. Any validation failure leaves the prior
     /// staged state and checkpoint unchanged.
     pub fn commit_batch(

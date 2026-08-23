@@ -16,7 +16,6 @@ use super::{
     mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
 };
 
-/// Cursor agent.
 pub struct CursorIntegration;
 
 /// Model-invocable skills shipped by the Cursor plugin.

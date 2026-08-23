@@ -290,10 +290,6 @@ fn rightmost_identifier<'s>(node: TsNode<'_>, source: &'s [u8]) -> &'s str {
     found
 }
 
-// ---------------------------------------------------------------------------
-// Per-language configurations
-// ---------------------------------------------------------------------------
-
 pub static RUST_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["if_expression", "match_arm", "else_clause"],
     loop_types: &["for_expression", "while_expression", "loop_expression"],

@@ -31,7 +31,7 @@ use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
 use super::semantic::SemanticConfig;
 
-/// Canonical Plan 20 default for configured-tier proximity warnings.
+/// Canonical default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
 pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 

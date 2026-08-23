@@ -49,7 +49,6 @@ const KIMI_PLUGIN_MANIFEST_RELATIVE: &str = ".kimi-plugin/plugin.json";
 pub(crate) const KIMI_STAGED_PLUGIN_RELATIVE: &str =
     ".tracedecay/host-bundle-stage/kimi/tracedecay";
 
-/// Kimi Code CLI agent (`tracedecay install --agent kimi`).
 pub struct KimiIntegration;
 
 impl AgentIntegration for KimiIntegration {

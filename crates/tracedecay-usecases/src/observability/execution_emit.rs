@@ -1,8 +1,8 @@
 //! Production execution-topology observations projected from owning receipts.
 //!
 //! This module deliberately accepts the bounded application result produced by
-//! the native-integration owner, not caller fields and not a prebuilt Plan 26
-//! payload. A durable preview or receipt can therefore emit the transition it
+//! the native-integration owner, not caller fields and not a prebuilt
+//! observability payload. A durable preview or receipt can therefore emit the transition it
 //! actually proves. Reads, unmounted owners, and results without an owner
 //! receipt return typed unavailable and write nothing.
 
@@ -45,7 +45,7 @@ pub enum NativeIntegrationObservationResultV1 {
     },
 }
 
-/// Persists transitions proved by the mounted Plan 36 owner. A preview proves
+/// Persists transitions proved by the mounted native-integration owner. A preview proves
 /// one dry-run terminal transition; a terminal apply receipt proves one apply
 /// terminal and, only when committed, one native-integrated transition.
 ///
@@ -180,7 +180,7 @@ fn native_integration_envelopes(
         }
         // Status is a read and a replay of a previously emitted owner
         // transition. Snapshot/approval/worktree results do not prove one of
-        // Plan 26's integration phases. Typed unavailability is safer than a
+        // the observability integration phases. Typed unavailability is safer than a
         // duplicate or inferred event.
         NativeIntegrationSurfaceResultV1::StackSnapshot(_)
         | NativeIntegrationSurfaceResultV1::Approval(_)

@@ -19,10 +19,9 @@ pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
 ///
-/// S11: foreign session readers run on the bundled rusqlite engine. The mutex
-/// makes the handle `Sync`, so async ingest futures may hold it across await
-/// points and stay `Send`; every SQL call runs on a blocking thread via
-/// [`SqliteReadConn::with`], keeping the async executor unblocked.
+/// The mutex makes the handle `Sync`, so async ingest futures may hold it
+/// across await points and stay `Send`; every SQL call runs on a blocking
+/// thread via [`SqliteReadConn::with`], keeping the async executor unblocked.
 #[derive(Clone)]
 pub struct SqliteReadConn {
     inner: Arc<Mutex<rusqlite::Connection>>,
@@ -519,12 +518,10 @@ pub enum TranscriptScopeMatcher {
 }
 
 impl TranscriptScopeMatcher {
-    /// Project scope over a single root.
     pub fn project(project_root: &Path) -> Self {
         Self::Project(Arc::new(ProjectRootMatcher::new(project_root)))
     }
 
-    /// Profile scope over every registered project root.
     pub fn profile(registered_roots: &[PathBuf]) -> Self {
         Self::Profile(
             registered_roots
@@ -541,12 +538,10 @@ impl TranscriptScopeMatcher {
         registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
     }
 
-    /// [`Self::project`] resolved through a source-lifetime matcher cache.
     pub fn project_cached(project_root: &Path, cache: &ProjectRootMatcherCache) -> Self {
         Self::Project(cache.get(project_root))
     }
 
-    /// [`Self::profile`] resolved through a source-lifetime matcher cache.
     pub fn profile_cached(registered_roots: &[PathBuf], cache: &ProjectRootMatcherCache) -> Self {
         Self::Profile(
             registered_roots

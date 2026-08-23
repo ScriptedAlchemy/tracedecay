@@ -74,10 +74,7 @@ impl ExtractionState {
 }
 
 impl GoExtractor {
-    /// Extract code graph nodes and edges from a Go source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Go source code to parse.
     pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -160,7 +157,6 @@ impl GoExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package_clause" => Self::visit_package(state, node),
@@ -372,10 +368,8 @@ impl GoExtractor {
             });
         }
 
-        // Extract generic type parameters.
         Self::extract_type_params(state, node, &id);
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -434,10 +428,8 @@ impl GoExtractor {
             });
         }
 
-        // Extract receiver type and create a Receives edge.
         Self::extract_receiver(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -534,7 +526,6 @@ impl GoExtractor {
             });
         }
 
-        // Extract fields from the struct.
         state.node_stack.push((name.to_string(), id.clone()));
         Self::extract_struct_fields(state, struct_type);
         state.node_stack.pop();
@@ -1002,10 +993,6 @@ impl GoExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the receiver type from a `method_declaration` and create a Receives edge.
     fn extract_receiver(state: &mut ExtractionState, node: TsNode<'_>, method_id: &str) {

@@ -81,10 +81,7 @@ impl ExtractionState {
 }
 
 impl ScalaExtractor {
-    /// Extract code graph nodes and edges from a Scala source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Scala source code to parse.
     pub fn extract_scala(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -167,7 +164,6 @@ impl ScalaExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -181,7 +177,6 @@ impl ScalaExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package_clause" => Self::visit_package(state, node),
@@ -200,10 +195,6 @@ impl ScalaExtractor {
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Package
-    // -----------------------------------------------------------------------
 
     /// Extract a package clause.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -265,10 +256,6 @@ impl ScalaExtractor {
             Self::visit_children(state, body);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Imports
-    // -----------------------------------------------------------------------
 
     /// Extract an import declaration as a Use node.
     fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -332,10 +319,6 @@ impl ScalaExtractor {
             file_path: state.file_path.clone(),
         });
     }
-
-    // -----------------------------------------------------------------------
-    // Class / Case Class
-    // -----------------------------------------------------------------------
 
     /// Extract a class definition. Detects case classes via modifiers.
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -410,10 +393,6 @@ impl ScalaExtractor {
         state.node_stack.pop();
     }
 
-    // -----------------------------------------------------------------------
-    // Trait
-    // -----------------------------------------------------------------------
-
     /// Extract a trait definition.
     fn visit_trait(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -479,10 +458,6 @@ impl ScalaExtractor {
         state.inside_trait = prev_inside_trait;
     }
 
-    // -----------------------------------------------------------------------
-    // Object
-    // -----------------------------------------------------------------------
-
     /// Extract an object definition (Scala singleton).
     fn visit_object(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -543,10 +518,6 @@ impl ScalaExtractor {
         state.class_depth -= 1;
         state.node_stack.pop();
     }
-
-    // -----------------------------------------------------------------------
-    // Enum (Scala 3)
-    // -----------------------------------------------------------------------
 
     /// Extract an enum definition.
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -687,10 +658,6 @@ impl ScalaExtractor {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Functions / Methods
-    // -----------------------------------------------------------------------
-
     /// Extract a function/method definition (has a body).
     fn visit_function_def(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -813,10 +780,6 @@ impl ScalaExtractor {
 
         Self::extract_annotations(state, node, &id);
     }
-
-    // -----------------------------------------------------------------------
-    // Val / Var
-    // -----------------------------------------------------------------------
 
     /// Extract a val definition or declaration as a `ValField` node.
     fn visit_val(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -942,10 +905,6 @@ impl ScalaExtractor {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Type definition
-    // -----------------------------------------------------------------------
-
     /// Extract a type alias definition.
     fn visit_type_def(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
@@ -995,10 +954,6 @@ impl ScalaExtractor {
             });
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
 
     /// Extract the name from a node's "name" field.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
@@ -1418,10 +1373,6 @@ impl ScalaExtractor {
         }
         "<unknown>".to_string()
     }
-
-    // -----------------------------------------------------------------------
-    // Annotations
-    // -----------------------------------------------------------------------
 
     /// Extract annotations from a declaration node and create `AnnotationUsage`
     /// nodes and Annotates edges.

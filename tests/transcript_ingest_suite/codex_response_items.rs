@@ -365,7 +365,7 @@ async fn codex_custom_tool_call_exec_is_joined_into_searchable_tool_call() {
     // single row) + apply_patch generic tool_event.
     assert_eq!(stats.messages_upserted, 3);
 
-    // The command text is searchable — the regression the fix targets.
+    // The command text must remain searchable after ingest.
     let results = db
         .search_session_messages(
             "codex",

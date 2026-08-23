@@ -1,5 +1,3 @@
-//! Invocation-observability test coverage.
-
 use super::*;
 use tracedecay_domain::{RepositoryId, WorktreeId};
 

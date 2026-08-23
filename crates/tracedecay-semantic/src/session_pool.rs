@@ -1,7 +1,7 @@
-//! semantic bounded semantic runtime session pool
+//! Bounded embedding session pool
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
-//! Bounded embedding session pool. Sessions are keyed by the complete
+//! Sessions are keyed by the complete
 //! projection/privacy identity (Plan 31: "bounded sessions keyed by the
 //! complete projection/privacy identity"; "Compatible warmed sessions are
 //! pooled under bounded memory, concurrency, idle, and cancellation

@@ -1,4 +1,4 @@
-//! query generation-aware Git query core (Plan 36, `query/21-git-query-core`).
+//! Generation-aware Git query core.
 //!
 //! This module is the typed query layer above the fixed read-only adapter in
 //! [`crate::git_intelligence`]. It composes the adapter's [`GitReadPort`] into
@@ -6,7 +6,7 @@
 //!
 //! - **Typed queries**: current status summary, scoped diff (working tree,
 //!   staged, or commit range), bounded history, path blame, and `HunkRef`
-//!   enumeration. Every result returns the Plan 36 domain values with their
+//!   enumeration. Every result returns the Git domain values with their
 //!   [`GitCoverageV1`] degradation attached; query-level truncation is folded
 //!   into the envelope coverage as [`GitDegradationV1::TruncatedOutput`].
 //! - **Generation-aware joins**: a [`GenerationBoundGitQueryV1`] names the

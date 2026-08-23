@@ -169,12 +169,10 @@ fn is_newer_minor_version_same() {
 
 #[test]
 fn is_beta_returns_bool() {
-    // Just verify it returns a bool and doesn't panic
     let _ = tracedecay::cloud::is_beta();
 }
 
 #[test]
 fn detect_install_method_no_panic() {
-    // Just verify it returns without panic
     let _ = tracedecay::cloud::detect_install_method();
 }

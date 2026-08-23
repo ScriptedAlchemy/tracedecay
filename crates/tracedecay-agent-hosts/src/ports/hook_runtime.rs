@@ -1,7 +1,7 @@
 //! The daemon-backed hook runtime that host integrations call into.
 //!
 //! **Registered ports.** The `hooks/` daemon-side handlers stay in the root
-//! crate per the split plan: they own the daemon handshake, the client
+//! crate: they own the daemon handshake, the client
 //! identity, and the memory-injection settings read. Host installers here need
 //! three narrow answers from that runtime, each expressed below.
 //!

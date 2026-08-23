@@ -1,13 +1,11 @@
-//! Direct surface proof for the Plan 36 native-integration journey.
+//! Direct surface proof for the native-integration journey.
 //!
-//! Plan 36 slice 1 requires `stack_snapshot` and `preflight_native_integration`
-//! on "the shipped application and CLI/MCP surfaces", slice 3 adds
-//! `apply_native_integration`, `native_integration_status`, and
-//! `cancel_native_integration`, and slice 4 requires the whole journey to be
-//! exposed consistently through CLI and MCP over one application result.
-//! The same surface later mounted the explicit-root worktree inventory and
-//! cleanup operations; those bind CLI, MCP, and HTTP, while the transaction
-//! journey still withholds HTTP because apply has no transport fallback.
+//! `stack_snapshot` and `preflight_native_integration` must be callable on
+//! the shipped application and CLI/MCP surfaces. Apply, status, and cancel
+//! join that same journey and must stay exposed consistently through CLI and
+//! MCP over one application result. Explicit-root worktree inventory and
+//! cleanup bind CLI, MCP, and HTTP; the transaction journey still withholds
+//! HTTP because apply has no transport fallback.
 //!
 //! This suite proves the journey is *mounted and callable* end to end at the
 //! surface boundary: canonical operation identity, catalog bindings on both
@@ -15,8 +13,8 @@
 //! that rejects a mismatched or path-bearing request, and a truthful typed
 //! result envelope whose unavailable and cancellation states advance nothing.
 //!
-//! The full multi-repository apply journey (Plan 36 "Direct acceptance") needs
-//! a mounted native-integration runtime and is deliberately not attempted here.
+//! The full multi-repository apply journey needs a mounted native-integration
+//! runtime and is deliberately not attempted here.
 
 use std::collections::BTreeSet;
 

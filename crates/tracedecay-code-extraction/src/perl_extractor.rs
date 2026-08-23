@@ -76,10 +76,7 @@ impl ExtractionState {
 }
 
 impl PerlExtractor {
-    /// Extract code graph nodes and edges from a Perl source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Perl source code to parse.
     pub fn extract_perl(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -163,7 +160,6 @@ impl PerlExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_definition" => Self::visit_function(state, node),
@@ -235,7 +231,6 @@ impl PerlExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -478,10 +473,6 @@ impl PerlExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the function signature (first line of the sub definition).
     fn extract_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {

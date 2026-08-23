@@ -66,9 +66,6 @@ describe("SSE query invalidation", () => {
   });
 
   it("keeps the targeted keys of a canonical batch reachable on their own", () => {
-    // A canonical batch whose events still name a narrower root: while a
-    // whole-projection refresh is already in flight, this is the set the render
-    // layer issues so those events are not silently dropped on the floor.
     const batch = {
       events: [event("project_registry_changed"), event("heartbeat")],
       refetch: true,

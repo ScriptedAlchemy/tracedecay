@@ -73,9 +73,8 @@ use tracedecay_usecases::event_lane::ActivityFamilyV1;
 const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
     (
         "git-index-transaction:commit_index",
-        "Plan 36 (36-git-aware-change-context-and-index-transactions.md): \
-         \"`commit_index` publication is deliberately unavailable (deferred, \
-         2026-08-05)\" — the files ref backend cannot prevent a new loose ref \
+        "`commit_index` publication is deliberately unavailable (deferred, \
+         2026-08-05): the files ref backend cannot prevent a new loose ref \
          appearing between namespace validation and destination publication, \
          so preflight reports typed AtomicRefNamespaceUnavailable and apply \
          returns ProvenNoMutation. The requirement is deferred, not deleted: \
@@ -87,9 +86,8 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
         "In flight 2026-08-07: ActivityFamilyV1::Task is admitted by the \
          canonical activity envelope and rendered by the dashboard event \
          surface, but no production caller publishes the family yet, so the \
-         `task_activity` stream is never emitted. Plan 24 (canonical task/plan \
-         graph and multi-agent executor) owns the producer; drop this row when \
-         a production site publishes ActivityFamilyV1::Task.",
+         `task_activity` stream is never emitted. Drop this row when a \
+         production site publishes ActivityFamilyV1::Task.",
     ),
 ];
 
@@ -98,9 +96,9 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 /// `src/application_surface.rs`.
 ///
 /// These are the operations whose decoded surface request carries callable-code
-/// metadata, and Plan 21 requires CLI, MCP, and HTTP to expose the same
-/// application operations. Restating the set here is deliberate: it is the
-/// reverse authority, so it must not be derived from the thing under test.
+/// metadata. CLI, MCP, and HTTP must expose the same application operations.
+/// Restating the set here is deliberate: it is the reverse authority, so it
+/// must not be derived from the thing under test.
 const CALLABLE_CODE_OPERATIONS: [HttpApplicationOperation; 14] = [
     HttpApplicationOperation::CodeExactOccurrence,
     HttpApplicationOperation::CodePhraseSearch,
@@ -158,10 +156,6 @@ fn report(headline: &str, failures: &[String]) -> String {
         sanctioned_table(),
     )
 }
-
-// --------------------------------------------------------------------------
-// Live fixture
-// --------------------------------------------------------------------------
 
 /// A live daemon over one registered project inside a throwaway profile, plus
 /// the credentials it published for its own HTTP application endpoint.
@@ -299,10 +293,6 @@ fn wait_for_http_authority(path: &Path) -> Value {
         },
     )
 }
-
-// --------------------------------------------------------------------------
-// One assertion helper per surface kind
-// --------------------------------------------------------------------------
 
 /// Whether the live daemon's routing table holds `route_path`.
 ///
@@ -534,10 +524,6 @@ fn binding_resolves(
     })
 }
 
-// --------------------------------------------------------------------------
-// Forward: every catalog binding is mounted on the surface it declares
-// --------------------------------------------------------------------------
-
 #[test]
 fn every_catalog_binding_is_mounted_on_its_declared_surface() {
     let snapshot = build_application_catalog_snapshot().expect("application catalog snapshot");
@@ -675,10 +661,6 @@ const fn surface_label(surface: BindingSurface) -> &'static str {
     }
 }
 
-// --------------------------------------------------------------------------
-// Reverse: every independently declared operation is mounted or sanctioned
-// --------------------------------------------------------------------------
-
 #[test]
 fn every_declared_operation_is_mounted_or_sanctioned() {
     let snapshot = build_application_catalog_snapshot().expect("application catalog snapshot");
@@ -795,9 +777,9 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             continue;
         }
         // An operation the router deliberately withholds (Git preview/apply
-        // and the Plan 36 native-integration journey are CLI/MCP-only, because
-        // apply is an authoritative native mutation with no transport
-        // fallback) must not be required to carry an HTTP catalog binding.
+        // and native-integration apply are CLI/MCP-only, because apply is an
+        // authoritative native mutation with no transport fallback) must not
+        // be required to carry an HTTP catalog binding.
         // `is_http_exposed` is the single authority for that decision, so the
         // catalog requirement and the route requirement consult it alike.
         if !operation.is_http_exposed() {
@@ -820,10 +802,10 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         }
     }
 
-    // -- Callable-code transport parity. ------------------------------------
-    // Plan 21 requires CLI and MCP to expose the same application operations
-    // as HTTP. A code operation reachable on one transport and not the others
-    // is a half-mounted surface, which no single-transport sweep would catch.
+    // Callable-code transport parity: CLI and MCP must expose the same
+    // application operations as HTTP. A code operation reachable on one
+    // transport and not the others is a half-mounted surface, which no
+    // single-transport sweep would catch.
     for operation in CALLABLE_CODE_OPERATIONS {
         let name = operation.as_str();
         for (surface, present) in [

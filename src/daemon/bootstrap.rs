@@ -1,9 +1,5 @@
 //! Foreground daemon bootstrap: `run_foreground` entry points, the Unix
 //! accept/serve loop, socket preparation, and client-task draining.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic,
-//! signatures, or behavior changed. `use super::*` re-exposes every name the
-//! parent `daemon` module had in scope so the moved code resolves unchanged.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

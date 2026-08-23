@@ -14,7 +14,6 @@ fn test_perl_extract_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // Top-level functions: log_message, validate_config
     assert_eq!(
         fns.len(),
         2,
@@ -62,8 +61,6 @@ fn test_perl_extract_methods() {
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
-    // Methods inside packages: Connection::new, connect, disconnect, is_connected,
-    //                          Pool::new, acquire, release
     assert_eq!(
         methods.len(),
         7,
@@ -91,7 +88,6 @@ fn test_perl_extract_use_imports() {
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
-    // use strict, use warnings, use File::Path, use Carp
     assert_eq!(
         uses.len(),
         4,
@@ -154,7 +150,6 @@ fn test_perl_call_sites() {
             .collect::<Vec<_>>()
     );
 
-    // acquire calls Connection->new
     assert!(
         call_refs
             .iter()
@@ -166,7 +161,6 @@ fn test_perl_call_sites() {
             .collect::<Vec<_>>()
     );
 
-    // acquire calls $conn->connect
     assert!(
         call_refs
             .iter()
@@ -178,7 +172,6 @@ fn test_perl_call_sites() {
             .collect::<Vec<_>>()
     );
 
-    // validate_config calls croak
     assert!(
         call_refs.iter().any(|r| r.reference_name == "croak"),
         "should find croak call, got: {:?}",
@@ -212,7 +205,6 @@ fn test_perl_docstrings() {
         doc
     );
 
-    // MAX_RETRIES should have docstring
     let max_retries = result
         .nodes
         .iter()
@@ -228,7 +220,6 @@ fn test_perl_docstrings() {
         max_retries.docstring
     );
 
-    // connect method should have docstring
     let connect = result
         .nodes
         .iter()
@@ -269,10 +260,6 @@ fn test_perl_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 4 Use + 2 Const + 2 Function + 2 Module = 10
-    // Connection module contains: new, connect, disconnect, is_connected = 4
-    // Pool module contains: new, acquire, release = 3
-    // Total: 10 + 4 + 3 = 17
     assert!(
         contains.len() >= 15,
         "should have >= 15 Contains edges, got {}",

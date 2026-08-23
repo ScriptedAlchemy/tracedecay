@@ -76,10 +76,7 @@ impl ExtractionState {
 }
 
 impl SwiftExtractor {
-    /// Extract code graph nodes and edges from a Swift source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Swift source code to parse.
     pub fn extract_swift(file_path: &str, source: &str) -> ExtractionResult {
         let start = Instant::now();
         let tree = match Self::parse_source(source) {
@@ -164,7 +161,6 @@ impl SwiftExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -178,7 +174,6 @@ impl SwiftExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "import_declaration" => Self::visit_import(state, node),
@@ -191,10 +186,6 @@ impl SwiftExtractor {
             _ => {}
         }
     }
-
-    // ----------------------------------
-    // Import
-    // ----------------------------------
 
     /// Extract an import declaration (e.g. `import Foundation`).
     fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -253,10 +244,6 @@ impl SwiftExtractor {
             });
         }
     }
-
-    // ----------------------------------
-    // class_declaration (class, struct, enum, extension)
-    // ----------------------------------
 
     /// Dispatch `class_declaration` based on the `declaration_kind` field.
     ///
@@ -618,10 +605,6 @@ impl SwiftExtractor {
         state.node_stack.pop();
     }
 
-    // ----------------------------------
-    // Protocol
-    // ----------------------------------
-
     /// Extract a protocol declaration (maps to Interface).
     fn visit_protocol(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
@@ -760,10 +743,6 @@ impl SwiftExtractor {
         }
     }
 
-    // ----------------------------------
-    // Function / Method
-    // ----------------------------------
-
     /// Extract a function or method declaration.
     ///
     /// If `class_depth` > 0, it becomes a Method; otherwise a Function.
@@ -835,10 +814,6 @@ impl SwiftExtractor {
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
 
-    // ----------------------------------
-    // Init (Constructor)
-    // ----------------------------------
-
     /// Extract an init declaration as a Constructor node.
     fn visit_init(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = "init".to_string();
@@ -893,10 +868,6 @@ impl SwiftExtractor {
 
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
-
-    // ----------------------------------
-    // Property
-    // ----------------------------------
 
     /// Extract a property declaration (let/var).
     ///
@@ -957,10 +928,6 @@ impl SwiftExtractor {
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
 
-    // ----------------------------------
-    // Typealias
-    // ----------------------------------
-
     /// Extract a typealias declaration.
     fn visit_typealias(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
@@ -1014,10 +981,6 @@ impl SwiftExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the type name from a `class_declaration` node.
     ///

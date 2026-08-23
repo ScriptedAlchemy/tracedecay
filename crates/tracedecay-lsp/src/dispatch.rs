@@ -15,7 +15,6 @@ use crate::rpc::{
 };
 use crate::session::LspRequestId;
 
-/// Known client-originated LSP methods handled by the daemon gateway.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LspClientMethod {
     Initialize,
@@ -142,7 +141,6 @@ pub(crate) enum ParsedIncoming {
     },
 }
 
-/// Validates a decoded JSON-RPC value and classifies it for routing.
 pub(crate) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, RpcFailure)> {
     let Some(object) = value.as_object() else {
         return Err((

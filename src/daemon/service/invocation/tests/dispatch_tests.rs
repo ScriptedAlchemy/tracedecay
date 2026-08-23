@@ -1,5 +1,3 @@
-//! `dispatch` module test coverage.
-
 use super::*;
 
 fn lsp_deadline() -> Deadline {

@@ -1,10 +1,9 @@
-//! OpenCode one-analyzer conformance journey (Plans 27/35).
+//! OpenCode one-analyzer conformance journey.
 //!
-//! Plan 27 requires that OpenCode conformance "starts the TraceDecay custom
-//! LSP with an existing language analyzer present and proves exactly one
-//! analyzer owns that language before, during, and after install, repair,
-//! rollback, and uninstall while TraceDecay findings still project"; Plan 35
-//! repeats the same exactly-one-analyzer-per-language mandate.
+//! OpenCode conformance starts the TraceDecay custom LSP with an existing
+//! language analyzer present and proves exactly one analyzer owns that
+//! language before, during, and after install, repair, rollback, and
+//! uninstall while TraceDecay findings still project.
 //!
 //! The journey drives the real CLI lifecycle (`install`, `reinstall`, a
 //! killed mutation recovered by `host-bundle recover`, `uninstall`) against an

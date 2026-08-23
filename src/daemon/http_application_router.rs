@@ -2,10 +2,6 @@
 //!
 //! Builds the dashboard/API router for one project and installs the cold
 //! resolver the registry uses to mount it on demand.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 

@@ -101,7 +101,6 @@ function BudgetReadModel({
             )}
           />
         ))}
-
       </div>
     </>
   );

@@ -80,7 +80,6 @@ fn test_glsl_extract_struct_fields() {
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
     let field_names: Vec<_> = fields.iter().map(|n| n.name.as_str()).collect();
-    // PointLight fields
     assert!(field_names.contains(&"position"), "fields: {field_names:?}");
     assert!(field_names.contains(&"color"), "fields: {field_names:?}");
     assert!(
@@ -88,7 +87,6 @@ fn test_glsl_extract_struct_fields() {
         "fields: {field_names:?}"
     );
     assert!(field_names.contains(&"radius"), "fields: {field_names:?}");
-    // Material fields
     assert!(field_names.contains(&"albedo"), "fields: {field_names:?}");
     assert!(field_names.contains(&"metallic"), "fields: {field_names:?}");
     assert!(
@@ -257,7 +255,6 @@ fn test_glsl_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     let call_names: Vec<_> = calls.iter().map(|r| r.reference_name.as_str()).collect();
-    // calculatePointLight calls fresnelSchlick, distributionGGX, geometrySchlickGGX
     assert!(
         call_names.contains(&"fresnelSchlick"),
         "calls: {call_names:?}"
@@ -270,7 +267,6 @@ fn test_glsl_call_sites() {
         call_names.contains(&"geometrySchlickGGX"),
         "calls: {call_names:?}"
     );
-    // main calls calculatePointLight
     assert!(
         call_names.contains(&"calculatePointLight"),
         "calls: {call_names:?}"
@@ -293,7 +289,6 @@ fn test_glsl_complexity_metrics() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // calculatePointLight has an if statement and main has a for loop
     let calc = result
         .nodes
         .iter()

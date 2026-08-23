@@ -523,7 +523,6 @@ impl PythonExtractor {
     ) {
         // In tree-sitter-python, `from X import a, b` has children:
         // "from", dotted_name, "import", dotted_name, ",", dotted_name
-        // We need to skip past the "import" keyword to find the imported names.
         let mut cursor = node.walk();
         let mut past_import_keyword = false;
         if cursor.goto_first_child() {

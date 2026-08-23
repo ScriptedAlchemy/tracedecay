@@ -250,7 +250,6 @@ impl Rect {
     );
     assert!(methods.iter().any(|m| m.name == "new"));
     assert!(methods.iter().any(|m| m.name == "area"));
-    // Contains edges from impl to methods
     assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
 }
 
@@ -335,7 +334,6 @@ pub mod inner {
         .collect();
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].name, "inner");
-    // The function inside the module should be extracted too
     let fns: Vec<_> = result
         .nodes
         .iter()
@@ -364,7 +362,6 @@ mod tests {
     let result = extractor.extract("src/lib.rs", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    // The tests module should exist.
     let modules: Vec<_> = result
         .nodes
         .iter()
@@ -560,7 +557,6 @@ impl Greet for Bot {
         .filter(|n| n.kind == NodeKind::Impl)
         .collect();
     assert_eq!(impls.len(), 1);
-    // The impl should reference the trait
     assert!(
         result
             .unresolved_refs
@@ -614,28 +610,24 @@ pub struct Config {
 
     let annot_names: Vec<&str> = annots.iter().map(|a| a.name.as_str()).collect();
 
-    // #[test] on my_test
     assert!(
         annot_names.contains(&"test"),
         "expected 'test' annotation, got: {:?}",
         annot_names
     );
 
-    // #[cfg(test)] on guarded_fn
     assert!(
         annot_names.contains(&"cfg"),
         "expected 'cfg' annotation, got: {:?}",
         annot_names
     );
 
-    // #[allow(dead_code)] on guarded_fn
     assert!(
         annot_names.contains(&"allow"),
         "expected 'allow' annotation, got: {:?}",
         annot_names
     );
 
-    // #[inline] on fast_add
     assert!(
         annot_names.contains(&"inline"),
         "expected 'inline' annotation, got: {:?}",
@@ -656,7 +648,6 @@ pub struct Config {
         annot_names
     );
 
-    // Verify Annotates edges exist
     let annotates_edges: Vec<_> = result
         .edges
         .iter()
@@ -672,7 +663,6 @@ pub struct Config {
         "each AnnotationUsage should have an Annotates edge"
     );
 
-    // Verify Annotates unresolved refs exist
     let annotates_refs: Vec<_> = result
         .unresolved_refs
         .iter()

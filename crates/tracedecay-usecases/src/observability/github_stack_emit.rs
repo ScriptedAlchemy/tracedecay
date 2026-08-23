@@ -109,7 +109,7 @@ pub enum GitHubStackDriftRecoveryErrorV1 {
     InvalidEvidence,
 }
 
-/// Project-scoped Plan 37 receipt owner. Observation time and provider state
+/// Project-scoped GitHub stack receipt owner. Observation time and provider state
 /// come only from the coordinator evidence supplied to emission.
 #[derive(Clone, Debug)]
 pub struct GitHubStackProbeOwnerV1 {

@@ -14,7 +14,7 @@ use crate::error::ApplicationContractError;
 use super::identity::{StorageByteSizeV1, StoreKeyV1, TableNameV1};
 
 /// A store whose project identity no longer resolves to a live repository root
-/// (identity-drift orphan, Plan 38 §2), reported with age and size.
+/// (identity-drift orphan), reported with age and size.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OrphanStoreRecordV1 {
@@ -161,7 +161,7 @@ impl SemanticVectorRetentionRecordV1 {
 }
 
 /// A retention-eligible slice of a store: rows or tables past their configured
-/// window awaiting offload/collection (Plan 38 §3).
+/// window awaiting offload/collection.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionBacklogRecordV1 {

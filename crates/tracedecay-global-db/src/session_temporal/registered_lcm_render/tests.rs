@@ -173,7 +173,6 @@ async fn registered_render_survives_retention_dropped_raw_sources() {
         "raw metadata is read straight off the dropped row, so it must be absent"
     );
 
-    // The child summary reaches its own dropped source the same way.
     let child_expansion = expand(
         &snapshot,
         summary_expand_request("summary-child"),
@@ -371,8 +370,8 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
         .expect("registered read snapshot");
 
     // Canonical content that cannot be verified against the stored payload
-    // hash must be refused outright: fabricating a full raw message from
-    // metadata plus unverifiable content is no longer a journey.
+    // hash must be refused: metadata plus unverifiable content is not a
+    // successful expand.
     let error = expand(
         &snapshot,
         LcmExpandRequest {

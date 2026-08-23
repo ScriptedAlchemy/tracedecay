@@ -1,15 +1,12 @@
-//! Storage-neutral, runtime/store-free code-intelligence contracts for QUERY
-//! (Plan 25: Code Intelligence Indexing).
+//! Storage-neutral, runtime/store-free code-intelligence contracts.
 //!
 //! These values are immutable logical records: no storage rows, no parser
 //! acquisition, no runtime, no transport. Implementations live in
 //! `src/code_index/` (root modules) and `crates/tracedecay-code-index`.
 //!
-//! Ownership: Plan 25 owns these code-specific contracts. Plan 15 owns the
-//! shared retrieval kernel (`crate::retrieval`); Plan 35 owns
-//! `GenerationDiagnosticV1` (`crate::diagnostics`, query/12 packet); Plan 36
-//! owns native read-only Git semantics. This module stores only typed
-//! references to those contracts.
+//! This module stores only typed references to the shared retrieval kernel
+//! (`crate::retrieval`), `GenerationDiagnosticV1` (`crate::diagnostics`),
+//! and native read-only Git semantics.
 
 pub mod graph;
 pub mod identity;

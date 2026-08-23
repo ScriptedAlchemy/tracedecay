@@ -61,7 +61,6 @@ pub struct HostDiscoveryQueueEntry {
     pub path: PathBuf,
 }
 
-/// Terminal disposition of one host-admission attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct HostAdmissionOutcome {
     pub status: HostAdmissionStatus,
@@ -70,7 +69,6 @@ pub struct HostAdmissionOutcome {
     pub reason_code: Option<&'static str>,
 }
 
-/// Counts reported by one bounded projection-queue drain.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostProjectionDrainOutcome {
     pub projected: u64,
@@ -81,7 +79,6 @@ pub struct HostProjectionDrainOutcome {
     pub session_ids: Vec<String>,
 }
 
-/// Which registered authority an admission call must be bound to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostAdmissionScope {
     Project,

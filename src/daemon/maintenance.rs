@@ -1100,10 +1100,10 @@ impl MaintenanceCoordinator {
             succeeded = false;
         }
 
-        // Branch-store GC, relocated here from the watcher backstop: the
-        // watcher owns no store authorities, while this owner already holds
-        // the administration coordinator. Daily cadence, retry-eligible — the
-        // stamp advances only when every mounted project's pass succeeded.
+        // Branch-store GC: the watcher owns no store authorities, while this
+        // owner already holds the administration coordinator. Daily cadence,
+        // retry-eligible — the stamp advances only when every mounted project's
+        // pass succeeded.
         if !self.cancellation.is_cancelled() {
             let gc_due = self
                 .last_branch_gc

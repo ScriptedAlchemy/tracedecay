@@ -1,7 +1,4 @@
 //! Integration tests that run each language extractor against realistic sample files.
-//!
-//! These tests verify that extractors handle real-world code patterns correctly,
-//! producing the expected nodes, edges, and relationships.
 
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;

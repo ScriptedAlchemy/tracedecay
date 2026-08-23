@@ -47,7 +47,7 @@ impl AdvisoryFindingValidityWindowV1 {
     }
 }
 
-/// Canonical findings plus the source's existing Plan 09 provider state.
+/// Canonical findings plus the source's existing provider state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdvisoryFindingContributionBatchV1 {
     pub provider_state: ProviderEvaluationStateV1,

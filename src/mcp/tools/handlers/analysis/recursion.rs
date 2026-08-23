@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_recursion` tool calls.
-///
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
 pub(crate) async fn handle_recursion(

@@ -6,10 +6,6 @@
 //! migrations, the observation/memory/session stores, git and worktree
 //! topology reads, process-level leases, and the privacy detectors.
 //!
-//! It was extracted verbatim from the root `tracedecay` crate; the root keeps
-//! one thin `pub use` shim per module so every historical `crate::<module>`
-//! path still resolves.
-//!
 //! ## Outward seams that could not follow the kernel
 //!
 //! `daemon::store_runtime::session_registry` stayed in the root crate: it

@@ -1431,8 +1431,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         serde_json::from_value(cli_preview.payload.expect("CLI immutable preview"))
             .expect("CLI immutable preview");
 
-    // Plan 36: `commit_index` publication is deliberately unavailable
-    // (deferred, 2026-08-05). The files ref backend locks only names already
+    // `commit_index` publication is deliberately unavailable (deferred,
+    // 2026-08-05). The files ref backend locks only names already
     // present in an update-ref transaction, so nothing prevents a new loose
     // ref appearing between namespace validation and destination publication.
     // Until that is soundly closed, preflight reports this exact typed

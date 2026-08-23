@@ -21,10 +21,6 @@ fn extract_edit_json(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
-// ---------------------------------------------------------------------------
-// Edit tools: tracedecay_str_replace, tracedecay_multi_str_replace, tracedecay_insert_at
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let dir = test_temp_dir();
@@ -699,7 +695,7 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
 
 #[tokio::test]
 async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
-    // Regression: match counts were validated against the ORIGINAL source but
+    // Match counts were validated against the ORIGINAL source but
     // replacements were then applied sequentially against progressively-edited
     // text. When an earlier replacement introduced a duplicate of a later
     // `old_str`, `replacen` clobbered the freshly-inserted copy instead of the
@@ -894,8 +890,8 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
 
 #[tokio::test]
 async fn test_str_replace_unsupported_file_type_succeeds() {
-    // Regression: editing unsupported types (e.g. .css) previously wrote the
-    // file then returned a reindex error, silently mutating the file.
+    // Editing unsupported types (e.g. .css) must not write the file and then
+    // return a reindex error, silently mutating the file.
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
@@ -1010,10 +1006,10 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     );
 }
 
-/// Regression: when ast-grep exits non-zero with empty stderr (no language
-/// inferred from the file extension, or pattern matches nothing), the tool
-/// used to surface `"ast-grep failed: "` — a useless empty trailer. The
-/// message must instead explain the likely cause so the caller can act on it.
+/// When ast-grep exits non-zero with empty stderr (no language inferred
+/// from the file extension, or pattern matches nothing), the tool must not
+/// surface `"ast-grep failed: "` — a useless empty trailer. The message
+/// must explain the likely cause so the caller can act on it.
 #[tokio::test]
 async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     if !tracedecay::mcp::tools::ast_grep_available() {
@@ -1309,7 +1305,6 @@ async fn test_insert_at_ambiguous_anchor() {
     );
 }
 
-// Regression: insert_at must not strip trailing newline (#57)
 #[tokio::test]
 async fn test_insert_at_preserves_trailing_newline() {
     let dir = test_temp_dir();

@@ -1,6 +1,4 @@
-//! Shared test fixtures for the invocation-handler test suite; every
-//! themed submodule below reaches these (and all production items) via
-//! `use super::*;`.
+//! Shared test fixtures for the invocation-handler test suite.
 
 use super::*;
 

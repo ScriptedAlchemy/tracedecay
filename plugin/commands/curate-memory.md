@@ -1,5 +1,5 @@
 ---
-description: Run or inspect final-V2 agent-managed memory curation and its terminal run record.
+description: Run or inspect agent-managed memory curation and its terminal run record.
 argument-hint: "[subject]"
 ---
 

@@ -362,7 +362,6 @@ where
         .collect()
 }
 
-/// Deduplicates an iterator of file path strings into a `Vec<String>`.
 pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();

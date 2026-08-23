@@ -91,10 +91,7 @@ fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
 }
 
 impl BatchExtractor {
-    /// Extract code graph nodes and edges from a Batch source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Batch source code to parse.
     pub fn extract_batch(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -179,7 +176,6 @@ impl BatchExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit one top-level child of the root program node.
     ///
     /// Batch files use labels as function-like constructs. Labels are top-level
     /// siblings in the AST (not containers). We group code between consecutive
@@ -282,7 +278,6 @@ impl BatchExtractor {
             });
         }
 
-        // Extract call sites from siblings belonging to this label's body.
         Self::extract_label_call_sites(state, children, label_index, &id);
     }
 
@@ -359,10 +354,6 @@ impl BatchExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract docstrings from `REM` or `::` comment lines preceding a label.
     ///

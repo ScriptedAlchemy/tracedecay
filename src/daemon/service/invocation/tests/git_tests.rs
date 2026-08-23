@@ -1,5 +1,3 @@
-//! `git` module test coverage.
-
 use super::*;
 
 #[test]

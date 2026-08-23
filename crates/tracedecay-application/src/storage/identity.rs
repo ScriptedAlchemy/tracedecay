@@ -37,7 +37,6 @@ application_identifier!(
 pub struct StorageByteSizeV1(pub u64);
 
 impl StorageByteSizeV1 {
-    /// Zero bytes.
     pub const ZERO: Self = Self(0);
 
     #[must_use]

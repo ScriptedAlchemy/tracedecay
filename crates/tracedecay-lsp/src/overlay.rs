@@ -99,7 +99,6 @@ impl Default for OverlayLimits {
     }
 }
 
-/// Failure while admitting or applying an overlay update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OverlayError {
     InvalidLimits,
@@ -140,7 +139,6 @@ struct DocumentOverlay {
     retained_parse: RetainedOverlayParse,
 }
 
-/// In-memory overlays owned by exactly one LSP client session.
 #[derive(Default)]
 pub struct OverlayStore {
     documents: BTreeMap<String, DocumentOverlay>,
@@ -374,7 +372,6 @@ struct DiagnosticOperationKey {
     overlay_digest: Option<ContentDigest>,
 }
 
-/// Bounded non-blocking broker over canonical diagnostic refresh work.
 pub struct DiagnosticSnapshotAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,

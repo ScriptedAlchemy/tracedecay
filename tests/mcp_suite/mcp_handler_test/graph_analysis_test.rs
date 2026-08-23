@@ -318,10 +318,6 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     assert_eq!(branch["branch_resolution"], json!("stale_serving_branch"));
 }
 
-// ---------------------------------------------------------------------------
-// 14. tracedecay_dead_code
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_dead_code() {
     let (cg, _dir) = setup_project().await;
@@ -334,10 +330,6 @@ async fn test_dead_code() {
         "should have dead_code_count key"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 15. tracedecay_diff_context
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_diff_context() {
@@ -362,10 +354,6 @@ async fn test_diff_context() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 17. tracedecay_circular
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_circular() {
     let (cg, _dir) = setup_project().await;
@@ -375,10 +363,6 @@ async fn test_circular() {
     let text = extract_text(&result.value);
     assert!(text.contains("cycle_count"), "should have cycle_count key");
 }
-
-// ---------------------------------------------------------------------------
-// 20. tracedecay_rename_preview
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_rename_preview() {
@@ -401,10 +385,6 @@ async fn test_rename_preview() {
     assert!(text.contains("node"), "should have node key");
 }
 
-// ---------------------------------------------------------------------------
-// 21. tracedecay_unused_imports
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_unused_imports() {
     let (cg, _dir) = setup_project().await;
@@ -418,10 +398,6 @@ async fn test_unused_imports() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 28. tracedecay_recursion
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_recursion() {
     let (cg, _dir) = setup_project().await;
@@ -431,10 +407,6 @@ async fn test_recursion() {
     let text = extract_text(&result.value);
     assert!(text.contains("cycle_count"), "should have cycle_count key");
 }
-
-// ---------------------------------------------------------------------------
-// 32. tracedecay_changelog — requires git refs, expect graceful error
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_changelog_no_git() {
@@ -502,10 +474,6 @@ async fn pr_context_no_git_returns_structured_git_error() {
     assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
 }
 
-// ---------------------------------------------------------------------------
-// 33. tracedecay_port_status — no matching dirs expected
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_port_status() {
     let (cg, _dir) = setup_project().await;
@@ -527,12 +495,11 @@ async fn test_port_status() {
     close_test_graph(cg).await;
 }
 
-/// Regression: port_status used to match symbols purely on (name,
-/// kind_compat_group), so common method names like `new`, `process`, `fmt`,
-/// or `reset` produced wild cross-type "matches" — e.g. `Biquad::new` would
-/// pair with an unrelated `Adaa::new` simply because both methods are named
-/// "new". The match key must also include the parent type so siblings of
-/// distinct owners stay unmatched.
+/// `port_status` must not match symbols purely on (name, kind_compat_group).
+/// Common method names like `new`, `process`, `fmt`, or `reset` produced
+/// wild cross-type "matches" — e.g. `Biquad::new` pairing with an unrelated
+/// `Adaa::new`. The match key must also include the parent type so siblings
+/// of distinct owners stay unmatched.
 #[tokio::test]
 async fn port_status_does_not_match_methods_of_different_parents() {
     let dir = test_temp_dir();
@@ -639,10 +606,6 @@ async fn port_status_matches_methods_with_same_parent_type() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 34. tracedecay_port_order
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_port_order() {
     let (cg, _dir) = setup_project().await;
@@ -663,10 +626,6 @@ async fn test_port_order() {
     );
     assert!(text.contains("levels"), "should have levels key");
 }
-
-// ---------------------------------------------------------------------------
-// Extra: rename_preview with nonexistent node
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_rename_preview_not_found() {
@@ -721,10 +680,6 @@ async fn test_port_order_missing_source_dir() {
         "port_order without source_dir should error"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_changelog with a real git repo
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn commit_context_clean_worktree_returns_json() {
@@ -814,10 +769,6 @@ async fn test_changelog_with_real_git() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_dead_code with custom kinds parameter
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_dead_code_custom_kinds() {
     let (cg, _dir) = setup_project().await;
@@ -846,10 +797,6 @@ async fn test_dead_code_custom_kinds() {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_gini
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_gini() {
@@ -891,10 +838,6 @@ async fn test_gini_default_metric() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_dependency_depth
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_dependency_depth() {
     let (cg, _dir) = setup_project().await;
@@ -919,10 +862,6 @@ async fn test_dependency_depth() {
         "ideal_depth field should exist"
     );
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_health
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_health_summary() {
@@ -970,10 +909,10 @@ async fn test_health_detailed() {
     assert!(dims.get("modularity").is_some(), "modularity score missing");
 }
 
-/// Issue #83: tracedecay_redundancy must surface AST-isomorphic duplicate
-/// pairs and rank them by composite similarity. Plant two structurally
-/// identical functions in a fixture and assert the pair surfaces in the
-/// top hit with the `definite` severity bucket.
+/// `tracedecay_redundancy` must surface AST-isomorphic duplicate pairs and
+/// rank them by composite similarity. Plant two structurally identical
+/// functions in a fixture and assert the pair surfaces in the top hit with
+/// the `definite` severity bucket.
 #[tokio::test]
 async fn test_redundancy_finds_planted_duplicate() {
     let dir = test_temp_dir();
@@ -1087,9 +1026,9 @@ pub fn unrelated(x: i32) -> i32 {
     assert_eq!(parsed2["pair_count"], parsed["pair_count"]);
 }
 
-/// Issue #82: `details=true` must surface raw counts + interpretation per
-/// dimension, not just the scalar score, so callers don't have to compose
-/// six separate tools to reproduce the breakdown.
+/// `details=true` must surface raw counts + interpretation per dimension,
+/// not just the scalar score, so callers don't have to compose six
+/// separate tools to reproduce the breakdown.
 #[tokio::test]
 async fn test_health_detailed_includes_raw_signals() {
     let (cg, _dir) = setup_project().await;
@@ -1134,10 +1073,6 @@ async fn test_health_detailed_includes_raw_signals() {
     assert!(dims["modularity"].get("interpretation").is_some());
     assert!(dims["redundancy"].get("dead_count").is_some());
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_dsm
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_dsm_stats() {
@@ -1215,10 +1150,6 @@ async fn test_dsm_clusters() {
         text
     );
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_test_risk
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_test_risk() {
@@ -1452,10 +1383,6 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
     close_test_graph(cg).await;
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_todos
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_todos_finds_markers() {
     let dir = test_temp_dir();
@@ -1559,10 +1486,9 @@ async fn test_todos_empty_when_clean() {
     close_test_graph(cg).await;
 }
 
-/// Regression for bug #5: `tracedecay_diff_context.impacted_symbols` must not
-/// list the same downstream node more than once. The sonium report showed
-/// the same id appearing 6+ times consecutively when several modified
-/// symbols all reached the same dependent.
+/// `tracedecay_diff_context.impacted_symbols` must not list the same
+/// downstream node more than once. The same id appeared 6+ times
+/// consecutively when several modified symbols all reached the same dependent.
 #[tokio::test]
 async fn diff_context_dedupes_impacted_symbols() {
     let dir = test_temp_dir();
@@ -1607,8 +1533,8 @@ pub fn second() { dep::shared(); }
     );
 }
 
-/// Regression for bug #6 / review P1: `tracedecay_recursion` must preserve
-/// genuine direct recursion while filtering length-1 self-edge artifacts.
+/// `tracedecay_recursion` must preserve genuine direct recursion while
+/// filtering length-1 self-edge artifacts.
 #[tokio::test]
 async fn recursion_keeps_direct_recursion() {
     let dir = test_temp_dir();
@@ -1730,11 +1656,10 @@ pub fn c() { a(); }
     }
 }
 
-/// Regression for bug #4: `tracedecay_changelog`'s response must not list
-/// directories under `files_not_indexed`. We construct a small git repo
-/// with a real commit history that touches both a real file and a
-/// (synthesised) directory path then verify the handler filters out the
-/// directory.
+/// `tracedecay_changelog`'s response must not list directories under
+/// `files_not_indexed`. A small git repo with a real commit history that
+/// touches both a real file and a synthesised directory path must have the
+/// directory filtered out.
 #[tokio::test]
 async fn changelog_filters_directory_paths() {
     let dir = test_temp_dir();
@@ -1784,11 +1709,10 @@ async fn changelog_filters_directory_paths() {
     }
 }
 
-/// Regression for bug #8b: `tracedecay_unused_imports` must actually flag
-/// unused imports. The previous implementation tested `incoming.is_empty()`
-/// for every Use node, but Use nodes always have at least one incoming
-/// edge (from their containing module/file via Contains), so the
-/// condition never fired and the tool returned 0 on every real codebase.
+/// `tracedecay_unused_imports` must flag unused imports. Testing
+/// `incoming.is_empty()` on every Use node never fires: Use nodes always
+/// have at least one incoming Contains edge from their containing
+/// module/file, so that condition returned 0 on every real codebase.
 #[tokio::test]
 async fn unused_imports_detects_truly_unused() {
     let dir = test_temp_dir();
@@ -1824,11 +1748,10 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for the "empty results on small crates" bug: an import named only
-/// in a nearby comment (like the audit fixture's own
-/// `// Planted unused import: BTreeMap …`) was read as "used" by the text scan
-/// and never flagged. Asserts the masked scan flags it in BOTH markdown and
-/// JSON with file:line, and that a genuinely-used import is NOT flagged.
+/// An import named only in a nearby comment (like the audit fixture's own
+/// `// Planted unused import: BTreeMap …`) must not be read as "used" by the
+/// text scan. The masked scan must flag it in both markdown and JSON with
+/// file:line, and must not flag a genuinely-used import.
 #[tokio::test]
 async fn unused_imports_reports_in_markdown_and_json() {
     let dir = test_temp_dir();
@@ -1936,10 +1859,9 @@ async fn unused_imports_keeps_implicit_format_capture() {
     );
 }
 
-/// Regression for bug #8a: `tracedecay_dead_code` must support `include_public`
-/// so agents can audit pub items with no callers in the indexed scope. The
-/// previous SQL hard-coded `visibility != 'public'`, so on a codebase that
-/// is mostly `pub` the tool reported 0 dead symbols.
+/// `tracedecay_dead_code` must support `include_public` so agents can audit
+/// pub items with no callers in the indexed scope. SQL that hard-codes
+/// `visibility != 'public'` reports 0 dead symbols on a mostly-`pub` codebase.
 #[tokio::test]
 async fn dead_code_with_include_public_finds_pub_unreferenced() {
     let dir = test_temp_dir();
@@ -1992,10 +1914,9 @@ pub fn caller() { called(); }
     );
 }
 
-/// Regression for bug #7: `build_file_adjacency` previously included
-/// `implements` and `extends` edges, which are heavily resolver-fuzzy-bound
-/// to nonsense targets in unrelated files. After the fix, only `uses` and
-/// `calls` edges count for file-level dependency depth.
+/// `build_file_adjacency` must count only `uses` and `calls` for file-level
+/// dependency depth. `implements` and `extends` edges are heavily
+/// resolver-fuzzy-bound to nonsense targets in unrelated files.
 #[tokio::test]
 async fn dependency_depth_excludes_implements_and_extends() {
     let dir = test_temp_dir();
@@ -2059,12 +1980,12 @@ pub trait T {}
     );
 }
 
-/// Regression: `tracedecay_diagnose` must normalize span paths before
-/// looking them up in the graph. cargo emits absolute and (on Windows)
-/// backslash-separated paths; the graph stores project-relative,
-/// forward-slash paths. Without normalization a diagnostic with span
-/// `/abs/path/to/project/src/lib.rs:42:1` or `src\lib.rs:42:1` resolves
-/// to `node: null` even though the file is indexed.
+/// `tracedecay_diagnose` must normalize span paths before looking them up
+/// in the graph. cargo emits absolute and (on Windows) backslash-separated
+/// paths; the graph stores project-relative, forward-slash paths. Without
+/// normalization a diagnostic with span `/abs/path/to/project/src/lib.rs:42:1`
+/// or `src\lib.rs:42:1` resolves to `node: null` even though the file is
+/// indexed.
 #[tokio::test]
 async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let dir = test_temp_dir();
@@ -2179,8 +2100,8 @@ pub fn compute_b(input: i32) -> i32 {
     assert!(top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0);
 }
 
-/// Regression: the resolver's kind-compatibility filter must apply to
-/// the same-file blocklist branches too. Without it, common names like
+/// The resolver's kind-compatibility filter must apply to the same-file
+/// blocklist branches too. Without it, common names like
 /// `new`/`default`/`clone` can still bind a `Calls` reference to a
 /// non-callable same-file symbol — e.g. a const literally named
 /// `default` — when it's the only same-file match for a blocklisted
@@ -2193,9 +2114,9 @@ async fn resolver_blocklist_branch_respects_kind_filter() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Use a struct named after a blocklisted identifier ("new") plus a
-    // call site that the parser definitely treats as a call_expression.
-    // Pre-fix the resolver's same-file blocklist branch would bind the
-    // Calls ref to this struct because no other "new" lives in the file.
+    // call site that the parser treats as a call_expression. The same-file
+    // blocklist branch must not bind the Calls ref to this struct just
+    // because no other "new" lives in the file.
     fs::write(
         project.join("src/lib.rs"),
         r#"
@@ -2239,14 +2160,13 @@ pub fn helper() {}
     }
 }
 
-/// Regression for bug #11: when an `impl Trait for X` reference cannot
-/// resolve to a real trait node (e.g. `Default` lives in std and isn't
-/// indexed), the resolver MUST NOT fuzzy-bind it to an unrelated node
-/// kind. The sonium codebase had a parser `Token` enum whose `Default`
-/// variant became the target of 150 stray `implements` edges from
-/// manual `impl Default for X` blocks, completely poisoning
-/// `tracedecay_rank --edge-kind implements`. Implements/Extends/derives
-/// references must only resolve to trait-shaped targets.
+/// When an `impl Trait for X` reference cannot resolve to a real trait node
+/// (e.g. `Default` lives in std and isn't indexed), the resolver must not
+/// fuzzy-bind it to an unrelated node kind. A parser `Token` enum whose
+/// `Default` variant became the target of 150 stray `implements` edges from
+/// manual `impl Default for X` blocks poisoned `tracedecay_rank --edge-kind
+/// implements`. Implements/Extends/derives references must only resolve to
+/// trait-shaped targets.
 #[tokio::test]
 async fn implements_refs_dont_resolve_to_enum_variants() {
     let dir = test_temp_dir();
@@ -2301,11 +2221,9 @@ impl Default for B { fn default() -> Self { B } }
     );
 }
 
-/// Regression for bug #10: `tracedecay_circular` must report one entry per
-/// strongly-connected component, not every walk through the cycle. The
-/// sonium codebase had 73 "cycles" that were all different DFS paths
-/// through the same SCC. After the SCC refactor, the same data yields
-/// one entry per genuine component.
+/// `tracedecay_circular` must report one entry per strongly-connected
+/// component, not every walk through the cycle. Counting DFS paths through
+/// the same SCC reported 73 "cycles" that were one genuine component.
 #[tokio::test]
 async fn circular_reports_one_entry_per_scc_not_per_walk() {
     let dir = test_temp_dir();
@@ -2314,7 +2232,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Three-file cycle: a uses b, b uses c, c uses a. Multiple DFS walks
-    // through this triangle would have reported 3+ "cycles" pre-fix
+    // through this triangle must not report 3+ "cycles"
     // (a→b→c→a, b→c→a→b, c→a→b→c).
     fs::write(project.join("src/lib.rs"), "mod a; mod b; mod c;\n").unwrap();
     fs::write(
@@ -2357,11 +2275,10 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     assert_eq!(cycle["omitted_member_count"].as_u64(), Some(0));
 }
 
-/// Regression for bug #12: `tracedecay_port_order`'s `cycles` output must
-/// expose the SCCs forming each cycle separately, instead of collapsing
-/// all unsorted nodes into a single mega-blob. Without this, on a real
-/// codebase the cycle entry contained 200+ unrelated symbols and the
-/// agent had no way to know what to break first.
+/// `tracedecay_port_order`'s `cycles` output must expose the SCCs forming
+/// each cycle separately, instead of collapsing all unsorted nodes into a
+/// single mega-blob. Collapsing them packed 200+ unrelated symbols into one
+/// entry with no way to know what to break first.
 #[tokio::test]
 async fn port_order_reports_separate_scc_groups() {
     let dir = test_temp_dir();
@@ -2369,10 +2286,9 @@ async fn port_order_reports_separate_scc_groups() {
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
-    // Two disjoint mutually-recursive pairs: (a, b) and (c, d). Before
-    // the fix, both pairs would be lumped into a single "Mutual
-    // dependency" entry. After the fix, each pair appears as its own
-    // cycle group.
+    // Two disjoint mutually-recursive pairs: (a, b) and (c, d). Each pair
+    // must appear as its own cycle group, not one lumped "Mutual
+    // dependency" entry.
     fs::write(project.join("src/lib.rs"), "pub mod m;\n").unwrap();
     fs::write(
         project.join("src/m.rs"),
@@ -2422,12 +2338,11 @@ pub fn leaf() {}
     }
 }
 
-/// Regression for new bug-report batch (#25): `tracedecay_port_order` must
-/// expose intra-cycle ordering signals so an agent can pick a starting
-/// point inside a 200-symbol SCC instead of staring at an undifferentiated
-/// blob. We expect each cycle entry to carry per-symbol in-cycle degree
-/// data, a file-level member-count breakdown, and explicit `entry_point`
-/// / `break_point_candidate` suggestions.
+/// `tracedecay_port_order` must expose intra-cycle ordering signals so an
+/// agent can pick a starting point inside a 200-symbol SCC instead of
+/// staring at an undifferentiated blob. Each cycle entry must carry
+/// per-symbol in-cycle degree data, a file-level member-count breakdown,
+/// and explicit `entry_point` / `break_point_candidate` suggestions.
 #[tokio::test]
 async fn port_order_provides_intra_cycle_ordering() {
     let dir = test_temp_dir();
@@ -2501,9 +2416,8 @@ pub fn h() { a(); }
     );
 }
 
-/// Regression for the Sonium port-order report: self-edges from fuzzy
-/// resolution (`self.rows.push(...)` inside a method named `push`) should
-/// not make singleton symbols appear as cycles.
+/// Self-edges from fuzzy resolution (`self.rows.push(...)` inside a method
+/// named `push`) must not make singleton symbols appear as cycles.
 #[tokio::test]
 async fn port_order_ignores_self_edges() {
     let dir = test_temp_dir();
@@ -2546,8 +2460,8 @@ impl Triplet {
     );
 }
 
-/// Regression for bug #9: `tracedecay_inheritance_depth` must surface Rust
-/// supertrait chains (`trait T: U`) as `Extends` edges.
+/// `tracedecay_inheritance_depth` must surface Rust supertrait chains
+/// (`trait T: U`) as `Extends` edges.
 #[tokio::test]
 async fn inheritance_depth_walks_rust_supertraits() {
     let dir = test_temp_dir();
@@ -2584,12 +2498,11 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
-/// Regression for new bug-report batch (#26): `tracedecay_circular` must
-/// emit *disjoint* SCCs — no file should appear in more than one cycle
-/// entry. The sonium run reported 216 cycles "sharing long tails", which
-/// would only be possible if the SCC condensation step were broken. This
-/// stress test wires up many disjoint cycles plus DAG-style tails between
-/// them and asserts no file leaks into a second cycle entry.
+/// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
+/// in more than one cycle entry. Cycles "sharing long tails" mean the SCC
+/// condensation step is broken. This stress test wires up many disjoint
+/// cycles plus DAG-style tails between them and asserts no file leaks into
+/// a second cycle entry.
 #[tokio::test]
 async fn circular_emits_disjoint_sccs_under_load() {
     let dir = test_temp_dir();
@@ -2662,11 +2575,10 @@ async fn circular_emits_disjoint_sccs_under_load() {
     }
 }
 
-/// Regression for new bug-report batch (#24): `tracedecay_diff_context`'s
-/// `modified_symbols` must dedup by node id, even when callers pass the
-/// same path multiple times in `files`. The sonium run showed an
-/// `hmatrix.rs` file node listed 7× in a row because the caller had the
-/// same file path duplicated upstream.
+/// `tracedecay_diff_context`'s `modified_symbols` must dedup by node id,
+/// even when callers pass the same path multiple times in `files`. A file
+/// node listed 7× in a row is the caller duplicating the same path
+/// upstream.
 #[tokio::test]
 async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
     let dir = test_temp_dir();
@@ -2704,12 +2616,11 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
     );
 }
 
-/// Regression for new bug-report batch (#23): when a whole subtree is
-/// removed in a diff, `tracedecay_changelog` must not report the deleted
-/// directory under `files_not_indexed`. The previous `is_dir()` filter
-/// missed this case because the path was gone from disk by the time we
-/// checked. The fix uses gix's `entry_mode` flag to skip tree entries
-/// before they're ever pushed into the change list.
+/// When a whole subtree is removed in a diff, `tracedecay_changelog` must
+/// not report the deleted directory under `files_not_indexed`. An `is_dir()`
+/// filter misses this because the path is gone from disk by the time it is
+/// checked. gix's `entry_mode` flag skips tree entries before they enter
+/// the change list.
 #[tokio::test]
 async fn changelog_filters_deleted_directory_entries() {
     let dir = test_temp_dir();
@@ -2754,12 +2665,11 @@ async fn changelog_filters_deleted_directory_entries() {
     );
 }
 
-/// Regression for new bug-report batch (#22): `tracedecay_pr_context` must
-/// NOT explode Cargo.toml (or any .toml/.yaml/.json config file) into one
-/// symbol per `[name]`, `[version]`, `[dependencies]` key. On real PRs a
-/// Cargo.toml change with ~30 dependency lines produced ~70 entries that
-/// pushed the response past 760k tokens. Config files should collapse to
-/// a single summary symbol.
+/// `tracedecay_pr_context` must not explode Cargo.toml (or any
+/// .toml/.yaml/.json config file) into one symbol per `[name]`,
+/// `[version]`, `[dependencies]` key. A Cargo.toml change with ~30
+/// dependency lines produced ~70 entries that pushed the response past
+/// 760k tokens. Config files should collapse to a single summary symbol.
 #[tokio::test]
 async fn pr_context_collapses_cargo_toml_keys() {
     let dir = test_temp_dir();
@@ -2829,13 +2739,10 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
-/// Regression for new bug-report batch (#21): `tracedecay_unused_imports`
-/// must flag genuinely unused identifiers inside grouped `use foo::{A, B}`
-/// imports. Real-world Rust style is dominated by grouped imports
-/// (`use std::collections::{HashMap, HashSet, BTreeMap};`); without
-/// per-identifier splitting, the heuristic could never flag anything from
-/// a grouped import, which is why the user's run reported 0 / 3,404 use
-/// nodes.
+/// `tracedecay_unused_imports` must flag genuinely unused identifiers
+/// inside grouped `use foo::{A, B}` imports. Without per-identifier
+/// splitting, the heuristic never flags anything from a grouped import
+/// (`use std::collections::{HashMap, HashSet, BTreeMap};`).
 #[tokio::test]
 async fn unused_imports_handles_grouped_use() {
     let dir = test_temp_dir();
@@ -2889,15 +2796,12 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for new bug-report batch (#20): `tracedecay_dead_code` must not
-/// consider non-reference edges like `annotates` or `derives_macro` as
-/// "this function is alive" evidence. Previously, a private helper with no
-/// callers but an `#[inline]` (or any other attribute) on it had an
-/// incoming `annotates` edge from the synthesised annotation_usage node,
-/// which the SQL `NOT EXISTS (target = id AND kind != 'contains')` filter
-/// accepted as a live reference. Real-world Rust codebases use attributes
-/// pervasively, which is why the user's run found zero dead functions
-/// across 5,715.
+/// `tracedecay_dead_code` must not treat non-reference edges like
+/// `annotates` or `derives_macro` as "this function is alive" evidence. A
+/// private helper with no callers but an `#[inline]` (or any other
+/// attribute) has an incoming `annotates` edge from the synthesised
+/// annotation_usage node, which `NOT EXISTS (target = id AND kind !=
+/// 'contains')` accepted as a live reference.
 #[tokio::test]
 async fn dead_code_flags_unreferenced_fn_with_attribute() {
     let dir = test_temp_dir();
@@ -2939,10 +2843,10 @@ fn dead_helper_with_attr() {}
     );
 }
 
-/// Regression test for the empty-output bug: `tracedecay_unsafe_patterns`
-/// detected the unsafe block (the JSON payload was correct) but the Markdown
-/// renderer dropped every finding and printed "No diagnostics.", so agents saw
-/// nothing. The default (Markdown) response must now surface the site.
+/// `tracedecay_unsafe_patterns` detected the unsafe block (the JSON payload
+/// was correct) but the Markdown renderer dropped every finding and printed
+/// "No diagnostics.", so agents saw nothing. The default (Markdown) response
+/// must surface the site.
 #[tokio::test]
 async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
     let (cg, _project) = setup_unsafe_block_fixture().await;

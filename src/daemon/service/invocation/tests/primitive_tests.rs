@@ -1,5 +1,3 @@
-//! `primitive` module test coverage.
-
 use super::*;
 
 #[tokio::test]

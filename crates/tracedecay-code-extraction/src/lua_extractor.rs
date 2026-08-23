@@ -73,10 +73,7 @@ impl ExtractionState {
 }
 
 impl LuaExtractor {
-    /// Extract code graph nodes and edges from a Lua source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Lua source code to parse.
     pub fn extract_lua(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -159,7 +156,6 @@ impl LuaExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_declaration" => Self::visit_function_declaration(state, node),
@@ -269,7 +265,6 @@ impl LuaExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -382,10 +377,6 @@ impl LuaExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Emit a Use node for a `require` call.
     fn emit_use_node(state: &mut ExtractionState, node: TsNode<'_>, mod_name: &str) {

@@ -52,10 +52,10 @@ For each future extractor migration:
 Validation commands used for the C/C++ pilot:
 
 ```sh
-cargo nextest run --lib --no-default-features extraction::traversal::tests
-cargo nextest run --no-default-features -E 'binary(=extraction_suite) and test(/^c::/)'
-cargo nextest run --no-default-features -E 'binary(=extraction_suite) and test(/^cpp::/)'
-cargo check --lib --no-default-features
+cargo nextest run -p tracedecay-code-extraction --lib --no-default-features extraction::traversal::tests
+cargo nextest run -p tracedecay-code-extraction --no-default-features --test c
+cargo nextest run -p tracedecay-code-extraction --no-default-features --test cpp
+cargo check -p tracedecay-code-extraction --lib --no-default-features
 ```
 
 The pilot validation passed with 3/3 traversal unit tests, 25/25 C extractor tests, 30/30 C++ extractor tests, and a clean library check.

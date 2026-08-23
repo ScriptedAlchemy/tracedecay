@@ -49,7 +49,6 @@ pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 /// Public because the snapshot capture entry points that return it are public.
 pub use snapshot_observation::SnapshotCaptureOutcome;
 
-/// Search hit for session-message full-text lookup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessageSearchResult {
     pub session: SessionRecord,
@@ -57,14 +56,13 @@ pub struct SessionMessageSearchResult {
     pub score: f64,
 }
 
-/// Inclusive timestamp bounds for session-message full-text search.
+/// Inclusive timestamp bounds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSearchTimeRange {
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
 }
 
-/// Relationship and time filters for session-message full-text search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionSearchFilters<'a> {
     pub scope: SessionSearchScope,
@@ -84,7 +82,6 @@ impl Default for SessionSearchFilters<'_> {
     }
 }
 
-/// Scope filter for session-message full-text search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionSearchScope {
     All,

@@ -11,14 +11,12 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 use super::WorkflowIndexError;
 use crate::{WorkflowAgent, WorkflowRun};
 
-/// Write transaction surface required by workflow ingest upserts.
 pub trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), WorkflowIndexError>> + Send;
 }
 
 /// Authoritative sink one workflow-ingest sweep upserts through.
 ///
-/// This is the inverted seam for the root `GlobalDbWorkflowStore` adapter.
 /// The sweep needs an authority check, a watermark it can advance, and a
 /// run/agent upsert; it needs nothing about the registered database that backs
 /// them.

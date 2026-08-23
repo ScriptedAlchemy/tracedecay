@@ -7,7 +7,6 @@ const MAX_TEST_MAP_FILE_SYMBOLS: usize = 50_000;
 const MAX_TEST_MAP_IMPACT_SYMBOLS: usize = 20_000;
 const MAX_TEST_MAP_RELATIONS_PER_HOP: usize = 20_000;
 
-/// Handles `tracedecay_test_risk` tool calls.
 pub(crate) async fn handle_test_risk(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -44,7 +43,6 @@ pub(crate) async fn handle_test_risk(
     ))
 }
 
-/// Handles `tracedecay_test_map` tool calls.
 pub(crate) async fn handle_test_map(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

@@ -141,7 +141,6 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
     Ok(AffectedTestTraversal { test_distances })
 }
 
-/// Handles `tracedecay_affected` tool calls.
 pub(crate) async fn handle_affected(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

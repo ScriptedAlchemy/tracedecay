@@ -20,14 +20,12 @@ pub struct LspPosition {
     pub character: u32,
 }
 
-/// An LSP range whose endpoints use [`LspPosition`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct LspRange {
     pub start: LspPosition,
     pub end: LspPosition,
 }
 
-/// LSP-compatible diagnostic severities.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DiagnosticSeverity {
     Error,
@@ -45,13 +43,9 @@ pub enum DiagnosticSeverity {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DiagnosticSource {
     Upstream,
-    /// TraceDecay-relayed compiler/toolchain findings.
     TraceDecay,
-    /// GitHub review advisory findings.
     TraceDecayGitHub,
-    /// CI failure-localization advisory findings.
     TraceDecayCi,
-    /// Proximity advisory findings.
     TraceDecayProximity,
 }
 

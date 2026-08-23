@@ -25,7 +25,6 @@ use tree_sitter::Tree;
 pub struct SvelteExtractor;
 
 impl SvelteExtractor {
-    /// Extract nodes and edges from a Svelte source file.
     pub fn extract_svelte(file_path: &str, source: &str) -> ExtractionResult {
         let masked = Self::mask_non_script(source);
         TypeScriptExtractor::extract_typescript(file_path, &masked)

@@ -1,12 +1,10 @@
-//! Versioned language descriptor contracts (Plan 25, "Deterministic
-//! extraction"). One versioned `LanguageDescriptorV1` per language is shared
-//! by extraction, structural search, outline, rewrite, analyzer routing, and
-//! host LSP projection. Descriptors — not extractors — select grammars and
-//! capabilities.
+//! Versioned language descriptor contracts. One versioned
+//! `LanguageDescriptorV1` per language is shared by extraction, structural
+//! search, outline, rewrite, analyzer routing, and host LSP projection.
+//! Descriptors — not extractors — select grammars and capabilities.
 //!
 //! These are pure values: no parser acquisition, no host `ast-grep` binary,
-//! no configuration-owned executable commands or settings (Plan 20 owns
-//! those).
+//! no configuration-owned executable commands or settings.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +12,7 @@ use crate::research::DomainError;
 
 use super::identity::{ExtractorRevision, GrammarRevision, LanguageDescriptorRevision, LanguageId};
 
-/// One versioned language descriptor (Plan 25). The same canonical record
+/// One versioned language descriptor. The same canonical record
 /// supplies extension, language-ID, root-marker, and capability facts for
 /// analyzer routing and host LSP projection; it does not absorb
 /// configuration-owned executable commands or settings.
@@ -34,7 +32,7 @@ pub struct LanguageDescriptorV1 {
     /// Expando (generated/derived file) handling for this language.
     pub expando: ExpandoBehaviorV1,
     /// Whether the descriptor identifies stable member spans, enabling
-    /// `SymbolMember` child chunks (Plan 25).
+    /// `SymbolMember` child chunks.
     pub stable_member_spans: bool,
     /// Declared extraction/navigation capabilities.
     pub capabilities: LanguageCapabilitySetV1,
@@ -116,7 +114,7 @@ pub struct LanguageCapabilitySetV1 {
 }
 
 /// Edge-authority classes recorded on every extracted relationship
-/// (Plan 25: `syntax_exact | name_resolved | compiler_or_lsp_resolved |
+/// (`syntax_exact | name_resolved | compiler_or_lsp_resolved |
 /// dynamic_observed | heuristic_candidate | unknown_unsupported`). Every
 /// graph path preserves its weakest edge authority.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -131,8 +129,8 @@ pub enum EdgeAuthorityV1 {
 }
 
 impl EdgeAuthorityV1 {
-    /// The weaker of two authority classes, used when composing graph paths
-    /// (Plan 25: a path preserves its weakest edge authority).
+    /// The weaker of two authority classes, used when composing graph paths.
+    /// A path preserves its weakest edge authority.
     pub const fn weakest(self, other: Self) -> Self {
         if self.rank() <= other.rank() {
             self

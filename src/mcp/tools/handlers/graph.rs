@@ -203,7 +203,6 @@ fn rendered_context_tool_result(
     }
 }
 
-/// Handles `tracedecay_search` tool calls.
 pub(super) async fn handle_search<F>(
     cg: &TraceDecay,
     graph: F,
@@ -655,7 +654,6 @@ fn append_context_semantic_pending(output: &mut String, value: &Value) {
     }
 }
 
-/// Handles `tracedecay_context` tool calls.
 pub(super) async fn handle_context<F>(
     cg: &TraceDecay,
     graph: F,
@@ -868,7 +866,6 @@ where
     }
 }
 
-/// Handles `tracedecay_callers` tool calls.
 pub(super) async fn handle_callers(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -903,8 +900,6 @@ pub(super) async fn handle_callers(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_callees` tool calls.
-///
 /// Beyond the direct `Calls` edges, this handler also surfaces *trait
 /// dispatch targets*: when a callee is a method whose enclosing scope is a
 /// trait, the concrete impl methods reachable through that trait are added
@@ -983,11 +978,11 @@ pub(super) async fn handle_callees(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
-/// `idx_nodes_name` — no BM25 scoring, no fuzzy match, no qualified-name
-/// suffix walk. Returns every node whose `name` column equals the query
-/// exactly. Useful when you already know the symbol and want the apples-to-
-/// apples cost of an index hit instead of `tracedecay_search`'s ranked query.
+/// Bare-name lookup against `idx_nodes_name` — no BM25 scoring, no fuzzy
+/// match, no qualified-name suffix walk. Returns every node whose `name`
+/// column equals the query exactly. Useful when you already know the symbol
+/// and want the apples-to-apples cost of an index hit instead of
+/// `tracedecay_search`'s ranked query.
 pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1053,7 +1048,6 @@ pub(super) async fn handle_find_exact_symbol(
     Ok(generic_tool_result(cg, &args, &body, touched_files))
 }
 
-/// Handles `tracedecay_impact` tool calls.
 pub(super) async fn handle_impact(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1102,7 +1096,6 @@ pub(super) async fn handle_impact(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_node` tool calls.
 pub(super) async fn handle_node(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1164,7 +1157,6 @@ pub(super) async fn handle_node(
     }
 }
 
-/// Handles `tracedecay_similar` tool calls.
 pub(super) async fn handle_similar(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1332,12 +1324,12 @@ struct RenameReferenceSiteInput {
     evidence_start_byte: u64,
 }
 
-/// Handles `tracedecay_rename_preview` tool calls. READ-ONLY: reports what a
-/// rename of the given symbol WOULD touch — the declaration site and every graph
-/// reference site (incoming edges; outgoing edges reference other symbols and so
-/// are excluded), each with a current-text snippet, plus a per-file count of
-/// literal name occurrences that are NOT backed by a graph edge ("text-only
-/// matches — review manually"). Nothing is rewritten.
+/// READ-ONLY: reports what a rename of the given symbol WOULD touch — the
+/// declaration site and every graph reference site (incoming edges; outgoing
+/// edges reference other symbols and so are excluded), each with a
+/// current-text snippet, plus a per-file count of literal name occurrences
+/// that are NOT backed by a graph edge ("text-only matches — review
+/// manually"). Nothing is rewritten.
 pub(super) async fn handle_rename_preview(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1502,7 +1494,7 @@ pub(super) async fn handle_rename_preview(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
+/// Bulk caller lookup over many IDs.
 pub(super) async fn handle_callers_for(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1587,7 +1579,7 @@ pub(super) async fn handle_callers_for(
     Ok(generic_tool_result(cg, &args, &output, vec![]))
 }
 
-/// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
+/// Cross-run node lookup by name.
 pub(super) async fn handle_by_qualified_name(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1611,9 +1603,9 @@ pub(super) async fn handle_by_qualified_name(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_signature` — signature-only lookup (no body) by
-/// qualified name or node ID. Returns the public-API surface of a symbol so
-/// callers can avoid reading the source file just to inspect the signature.
+/// Signature-only lookup (no body) by qualified name or node ID. Returns
+/// the public-API surface of a symbol so callers can avoid reading the
+/// source file just to inspect the signature.
 pub(super) async fn handle_signature(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1647,7 +1639,7 @@ pub(super) async fn handle_signature(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
+/// Index of `impl Trait for Type` blocks.
 ///
 /// Both `trait` and `type` arguments are optional. With neither, every impl
 /// in the graph is returned (capped by `limit`). Surfaces trait-dispatch
@@ -1751,7 +1743,7 @@ pub(super) async fn handle_impls(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_derives`. Derive annotations are not published in the
+/// Derive annotations are not published in the
 /// verified code graph generation, so a matched symbol reports a typed
 /// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
 pub(super) async fn handle_derives(
@@ -1771,7 +1763,7 @@ pub(super) async fn handle_derives(
     })
 }
 
-/// Handles `tracedecay_implementations` — trait / method implementor lookup.
+/// Trait / method implementor lookup.
 pub(super) async fn handle_implementations(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

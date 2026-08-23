@@ -1,4 +1,4 @@
-//! Daemon-side typed read executor for the code family of the S11 repository
+//! Daemon-side typed read executor for the code family of the repository
 //! read port.
 //!
 //! The runtime `ConcreteRepositoryReadExecutor` rejects

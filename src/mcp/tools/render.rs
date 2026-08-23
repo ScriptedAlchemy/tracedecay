@@ -1098,7 +1098,6 @@ fn column_rank(col: &str) -> (usize, &str) {
 }
 
 fn render_object_array_records(md: &mut Md, arr: &[Value]) {
-    // Collect the union of keys.
     let mut cols: Vec<String> = Vec::new();
     for e in arr {
         if let Some(obj) = e.as_object() {

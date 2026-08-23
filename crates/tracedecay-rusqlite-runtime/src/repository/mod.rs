@@ -14,9 +14,8 @@
 //! are mounted. Every payload and read operation an application actually
 //! constructs today routes through here: facts, observations and cursor
 //! advances, diagnostics, evidence assembly, external sources, retrieval-anchor
-//! dispositions and derivatives. Three
-//! surfaces are wired and tested but not yet constructed by any production
-//! caller, and are retained as the landing zone for their migration:
+//! dispositions and derivatives. Three surfaces are wired and tested here;
+//! their live writers remain elsewhere:
 //!
 //! - the profile/configuration family
 //!   ([`RepositoryWritePayloadV1::Configuration`] and every
@@ -77,9 +76,6 @@ pub use semantic_vector_staging::{
     SEMANTIC_VECTOR_STAGING_SCHEMA, SemanticVectorStagingExactSqlStorage,
 };
 
-// The read operation/result contract now lives in `tracedecay-store`. Re-export
-// the moved types so existing `repository::` paths keep resolving across the
-// workspace.
 pub use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
     EffectsReadOperationV1, EffectsReadResultV1, ExternalSourceReadOperationV1,

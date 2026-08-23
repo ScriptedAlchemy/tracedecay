@@ -1,6 +1,4 @@
-//! semantic vector-generation projector.
-//!
-//! This module consumes query fallback's canonical, generation-bound chunks and emits
+//! Consumes query fallback's canonical, generation-bound chunks and emits
 //! Plan 25 projection receipts plus a store-neutral vector-generation handoff.
 //! It owns no scheduler, query path, profile activation, ANN, or quantization.
 

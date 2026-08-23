@@ -85,7 +85,6 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure `repo` is checked out at its pinned ref under `root/<name>`.
 /// Skips work if the marker file `.bench-ref` already records the right ref.
 pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
     let dir = root.join(repo.name);

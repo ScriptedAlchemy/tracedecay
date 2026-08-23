@@ -3,10 +3,6 @@
 //!
 //! Retirement waits for in-flight requests before aborting, so a rekey or a
 //! shutdown never leaves a store mid-write.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::shutdown_coordination::ShutdownStatus;

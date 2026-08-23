@@ -21,7 +21,6 @@ pub const MAX_PENDING_REQUESTS: usize = 64;
 /// from the four-MiB transport frame limit so noisy documents cannot starve
 /// unrelated interactive requests.
 pub const MAX_PUBLICATION_BYTES: usize = 256 * 1024;
-/// Maximum number of live bridge sessions in one daemon process.
 pub const MAX_LSP_SESSIONS: usize = 64;
 /// Maximum roots admitted into one exact workspace-folder set.
 /// A client may only admit the bounded root set authorized for this session.
@@ -81,7 +80,6 @@ impl fmt::Debug for LspSessionCredential {
     }
 }
 
-/// Credential-bearing bridge access to one daemon LSP session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspSessionAccess {
     session_id: LspSessionId,
@@ -291,7 +289,6 @@ impl AuthorizedLspWorkspace {
     }
 }
 
-/// Session result authorized by the daemon admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizedLspSession {
     pub session_id: LspSessionId,
@@ -351,7 +348,6 @@ struct RegisteredLspSession {
     control: LspSessionControl,
 }
 
-/// Bounded in-memory registry for authenticated protocol sessions.
 #[derive(Debug)]
 pub struct LspSessionRegistry {
     sessions: BTreeMap<LspSessionId, RegisteredLspSession>,
@@ -556,7 +552,6 @@ impl LspSessionRegistry {
     }
 }
 
-/// Typed single-project endpoint used by daemon startup.
 #[derive(Debug)]
 pub struct DaemonLspSessionEndpoint<A> {
     admission: A,

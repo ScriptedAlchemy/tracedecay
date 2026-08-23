@@ -896,9 +896,7 @@ async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
     (directory, TestConnection::open(&database_path))
 }
 
-/// Case 1 — fresh insert. The write path no longer reads the row back, so this
-/// test carries the assertion the removed read-back used to make on every
-/// single ingest: the durable tuple is exactly the derived one.
+/// Case 1 — fresh insert. The durable tuple is exactly the derived one.
 #[tokio::test]
 async fn canonical_effect_insert_persists_the_derived_tuple() {
     let (_directory, connection) = open_effect_store("effect-fresh-insert").await;

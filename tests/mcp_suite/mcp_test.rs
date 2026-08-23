@@ -135,7 +135,7 @@ fn test_ast_grep_tools_follow_capability_gates() {
 fn test_write_and_exec_tools_are_not_read_only() {
     // Tools that mutate files or run subprocesses must advertise
     // `readOnlyHint: false`, otherwise harnesses that auto-approve read-only
-    // tools will edit files / run `cargo test` without prompting. See #94.
+    // tools will edit files / run `cargo test` without prompting.
     let write_or_exec = [
         "tracedecay_str_replace",
         "tracedecay_multi_str_replace",

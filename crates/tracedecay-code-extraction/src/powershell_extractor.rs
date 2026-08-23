@@ -73,10 +73,7 @@ impl ExtractionState {
 }
 
 impl PowerShellExtractor {
-    /// Extract code graph nodes and edges from a PowerShell source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the PowerShell source code to parse.
     pub fn extract_powershell(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -159,7 +156,6 @@ impl PowerShellExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -173,7 +169,6 @@ impl PowerShellExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_statement" => Self::visit_function(state, node),
@@ -391,10 +386,6 @@ impl PowerShellExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the function signature (first line of the definition).
     fn extract_function_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {

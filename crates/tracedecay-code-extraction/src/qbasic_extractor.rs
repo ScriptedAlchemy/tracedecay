@@ -79,10 +79,7 @@ impl ExtractionState {
 }
 
 impl QBasicExtractor {
-    /// Extract code graph nodes and edges from a `QBasic` source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the `QBasic` source code to parse.
     pub fn extract_qbasic(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -550,7 +547,6 @@ impl QBasicExtractor {
             });
         }
 
-        // Extract call sites from within the SUB body.
         state.node_stack.push((name, fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
@@ -619,7 +615,6 @@ impl QBasicExtractor {
             });
         }
 
-        // Extract call sites from within the FUNCTION body.
         state.node_stack.push((name, fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();

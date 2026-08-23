@@ -91,10 +91,7 @@ impl ExtractionState {
 }
 
 impl CobolExtractor {
-    /// Extract code graph nodes and edges from a COBOL source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the COBOL source code to parse.
     pub fn extract_cobol(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -178,7 +175,6 @@ impl CobolExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         if node.kind() == "program_definition" {
             Self::visit_program_definition(state, node);
@@ -554,7 +550,6 @@ impl CobolExtractor {
             });
         }
 
-        // Extract call sites from body statements.
         for child in &children[(start_idx + 1)..end_idx] {
             Self::extract_call_sites_from_node(state, *child, &id);
         }

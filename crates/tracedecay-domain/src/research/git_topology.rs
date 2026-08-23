@@ -839,7 +839,7 @@ impl GitHubStackLayerSnapshotV1 {
     }
 }
 
-/// Exact, payload-free Plan 37 GitHub stack observation. A snapshot exists
+/// Exact, payload-free GitHub stack observation. A snapshot exists
 /// only for an enabled capability and retains the complete linear topology.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

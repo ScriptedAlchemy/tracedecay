@@ -28,7 +28,6 @@ use tree_sitter::Tree;
 pub struct AstroExtractor;
 
 impl AstroExtractor {
-    /// Extract nodes and edges from an Astro source file.
     pub fn extract_astro(file_path: &str, source: &str) -> ExtractionResult {
         let masked = Self::mask_non_frontmatter(source);
         TypeScriptExtractor::extract_typescript(file_path, &masked)

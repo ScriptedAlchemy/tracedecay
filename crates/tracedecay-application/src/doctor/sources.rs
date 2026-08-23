@@ -52,9 +52,6 @@ use super::types::{
 /// diagnostic-provider port convention (std `Future`, no runtime dependency).
 pub type DoctorSourceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-// --- Shared finding builders -------------------------------------------------
-
-/// Build a single-evidence finding for a source producer.
 fn source_finding(
     family: DoctorFindingFamilyV1,
     state: DoctorEvidenceStateV1,
@@ -103,8 +100,6 @@ fn clean_finding(
     };
     source_finding(family, state, reference, completeness, statement)
 }
-
-// --- Configuration authority (Configuration family) --------------------------
 
 /// The observed drift between desired and effective configuration.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -200,8 +195,6 @@ pub trait ConfigurationAuthorityDoctorPort: Send + Sync {
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, ConfigurationAuthorityReadV1>;
 }
-
-// --- Daemon/runtime health (StorageRuntime family) ---------------------------
 
 /// The observed liveness of the daemon/runtime.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -310,8 +303,6 @@ pub trait RuntimeHealthDoctorPort: Send + Sync {
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, RuntimeHealthReadV1>;
 }
-
-// --- Operational runtime authorities (StorageRuntime family) ----------------
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -490,8 +481,6 @@ pub trait OperationalAuditDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, OperationalAuditReadV1>;
 }
 
-// --- Host/agent integration conformance (Advisory family) --------------------
-
 /// The observed conformance of a host/agent integration.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -607,8 +596,6 @@ pub trait HostIntegrationDoctorPort: Send + Sync {
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, HostIntegrationReadV1>;
 }
-
-// --- Canonical advisory feedback (Advisory family) --------------------------
 
 /// One canonical advisory finding projected from the mounted feedback read
 /// model. Identity and scope remain typed until Doctor converts them into
@@ -996,8 +983,6 @@ pub trait AdvisoryFeedbackDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, AdvisoryFeedbackReadV1>;
 }
 
-// --- Code/semantic index mount (SemanticIndex family) ------------------------
-
 /// The observed mount state of the code/semantic index.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -1110,8 +1095,6 @@ pub trait CodeIndexMountDoctorPort: Send + Sync {
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, CodeIndexMountReadV1>;
 }
-
-// --- Language server/analyzer (LanguageServer family) ------------------------
 
 /// Aggregate state of the project-active language-server analyzers.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1234,8 +1217,6 @@ pub trait LanguageServerDoctorPort: Send + Sync {
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, LanguageServerReadV1>;
 }
-
-// --- Durable feedback observations (Observability family) --------------------
 
 /// Freshness state of the canonical durable observation projection.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1426,8 +1407,6 @@ pub trait ObservabilityDoctorPort: Send + Sync {
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, IngestRefusalCensusReadV1>;
 }
-
-// --- Storage retention/size (Storage family) ---------------------------------
 
 /// Why one of the independently consulted storage producers was unresolved.
 ///

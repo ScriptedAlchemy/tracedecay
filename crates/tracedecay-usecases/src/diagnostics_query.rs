@@ -1,11 +1,9 @@
-//! Typed diagnostic query core over [`DiagnosticsStore`] (Plan 35, "Universal
-//! managed diagnostics"; query/22-diagnostic-query-core packet).
+//! Typed diagnostic query core over [`DiagnosticsStore`].
 //!
 //! This module is a pure read path: no writes, no repair, no schema changes.
 //! Every lane returns domain records with explicit coverage — `Complete`,
 //! `Truncated`, or `StoreUnavailable` — so a partial or failed read is never
-//! presented as a clean result (Plan 35: "Partial coverage is never
-//! represented as a clean result"). All list lanes are bounded by a limit
+//! presented as a clean result. All list lanes are bounded by a limit
 //! plus an opaque cursor and are deterministic: records page in ascending
 //! anchor order, chains page in chain order.
 //!
@@ -43,9 +41,8 @@ const CURSOR_PREFIX: &str = "dq1:";
 
 /// Explicit coverage for every diagnostic query lane. A read is either
 /// complete, deterministically truncated with a resumption cursor, or
-/// unavailable because the store could not answer — never silently partial
-/// (Plan 35: engine status and dropped updates "remain visible through typed
-/// status").
+/// unavailable because the store could not answer — never silently partial.
+/// Engine status and dropped updates remain visible through typed status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagnosticQueryCoverage {
     /// The lane returned every matching record.
@@ -128,7 +125,7 @@ impl DiagnosticPage {
     }
 }
 
-/// Point lookup of one record by its Plan 13 anchor.
+/// Point lookup of one record by its retrieval anchor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticAnchorLookup {
     pub record: Option<GenerationDiagnosticV1>,
@@ -175,8 +172,8 @@ pub struct GenerationDiagnosticDiff {
 
 /// Where one entry of the merged current view came from. The durable lane
 /// and the session-only overlay lane stay typed and separate even after
-/// merging (Plan 35: overlay findings "are never published as durable LSP
-/// diagnostics").
+/// merging; overlay findings are never published as durable LSP
+/// diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergedDiagnosticProvenance {
     /// A durable record persisted in the store for the clean generation.
@@ -384,8 +381,7 @@ impl<'a> DiagnosticsQuery<'a> {
     }
 
     /// Stale (superseded or cleared) records bound to `generation`. Stale
-    /// findings remain queryable but never re-enter active publication
-    /// (Plan 35).
+    /// findings remain queryable but never re-enter active publication.
     pub async fn stale_by_generation(
         &self,
         generation: &CodeGenerationId,
@@ -419,7 +415,7 @@ impl<'a> DiagnosticsQuery<'a> {
         }
     }
 
-    /// Fetches one record by its Plan 13 anchor. A miss is `Complete` with
+    /// Fetches one record by its retrieval anchor. A miss is `Complete` with
     /// no record; a store failure is typed `StoreUnavailable`.
     pub async fn by_anchor(
         &self,
@@ -645,7 +641,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// overlay into one deterministic merged view. On the same logical
     /// finding key the overlay entry wins; every entry carries typed
     /// provenance (persisted vs overlay). The overlay lane is session-only
-    /// and is never written back (Plan 35).
+    /// and is never written back.
     pub async fn merged_current_with_overlay(
         &self,
         generation: &CodeGenerationId,

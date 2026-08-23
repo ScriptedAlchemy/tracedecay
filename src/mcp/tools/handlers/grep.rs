@@ -51,7 +51,6 @@ impl From<GrepSearchHit> for GrepHit {
     }
 }
 
-/// Handles `tracedecay_grep` tool calls.
 pub(super) async fn handle_grep(
     cg: &TraceDecay,
     args: Value,

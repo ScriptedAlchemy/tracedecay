@@ -1,9 +1,9 @@
 //! Work evidence adapters over the daemon's mounted retrieval authorities.
 //!
 //! Work admits the exact task/version/accepted-attempt root. The `TaskSession`
-//! path then borrows one canonical Plan-23 snapshot, ranks its compact anchors
-//! through the active evaluated federated profile, reauthorizes Work on both
-//! sides of selection, and hydrates only the globally selected anchors.
+//! path then borrows one canonical session-temporal snapshot, ranks its compact
+//! anchors through the active evaluated federated profile, reauthorizes Work on
+//! both sides of selection, and hydrates only the globally selected anchors.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -59,7 +59,7 @@ pub(crate) trait WorkFederatedQueryAuthorityPortV1: Send + Sync {
     ) -> WorkFederatedQueryAuthorityFutureV1<'a>;
 }
 
-/// Cloneable adapter for the canonical project session retrieval authority.
+/// Adapter for the canonical project session retrieval authority.
 #[derive(Clone)]
 pub(crate) struct DaemonWorkEvidenceRetrievalV1 {
     retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,

@@ -216,7 +216,6 @@ impl ReferenceResolver {
             }
         }
 
-        // Deduplicate suffix entries
         for entries in suffix_cache.values_mut() {
             entries.sort_unstable();
             entries.dedup();
@@ -240,8 +239,6 @@ impl ReferenceResolver {
         let mut import_index: HashMap<String, HashSet<String>> = HashMap::new();
         for node in all_nodes {
             if node.kind == NodeKind::Use {
-                // The name field contains the full use path.
-                // Extract the imported name (last segment after ::).
                 let imported = node.name.rsplit("::").next().unwrap_or(&node.name);
                 if imported != "*" {
                     import_index
@@ -516,7 +513,6 @@ impl ReferenceResolver {
             });
         }
 
-        // Multiple candidates -- score them and pick the best.
         let best = Self::find_best_match(uref, candidates, &self.import_index)?;
 
         Some(ResolvedRef {

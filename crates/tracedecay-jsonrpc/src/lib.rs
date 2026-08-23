@@ -1,9 +1,7 @@
 //! JSON-RPC 2.0 protocol types and the line-oriented transport contract.
 //!
-//! Provides serialization and deserialization of JSON-RPC 2.0 messages used to
-//! communicate between an MCP client and server, plus the async line transport
-//! trait those messages are framed over. This crate owns no I/O, admission, or
-//! daemon authority — concrete transports live with their runtime.
+//! This crate owns no I/O, admission, or daemon authority — concrete
+//! transports live with their runtime.
 
 #![forbid(unsafe_code)]
 
@@ -20,7 +18,6 @@ where
     serde_json::Value::deserialize(deserializer).map(Some)
 }
 
-/// A JSON-RPC 2.0 request received from the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     /// Protocol version; must be `"2.0"`.
@@ -33,30 +30,25 @@ pub struct JsonRpcRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub id: Option<serde_json::Value>,
-    /// The RPC method name.
     pub method: String,
-    /// Optional parameters for the method.
     #[serde(default)]
     pub params: Option<serde_json::Value>,
 }
 
-/// A JSON-RPC 2.0 response sent back to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     /// Protocol version; always `"2.0"`.
     pub jsonrpc: String,
-    /// The request identifier that this response corresponds to.
     pub id: serde_json::Value,
-    /// The result on success; absent on error.
+    /// Present on success; absent on error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
-    /// The error on failure; absent on success.
+    /// Present on failure; absent on success.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 }
 
 impl JsonRpcResponse {
-    /// Creates a successful JSON-RPC response.
     pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
         Self {
             jsonrpc: JSON_RPC_VERSION.to_owned(),
@@ -66,12 +58,10 @@ impl JsonRpcResponse {
         }
     }
 
-    /// Creates an error JSON-RPC response.
     pub fn error(id: serde_json::Value, code: ErrorCode, message: String) -> Self {
         Self::error_with_data(id, code, message, None)
     }
 
-    /// Creates an error JSON-RPC response with optional structured data.
     pub fn error_with_data(
         id: serde_json::Value,
         code: ErrorCode,
@@ -91,37 +81,25 @@ impl JsonRpcResponse {
     }
 }
 
-/// A JSON-RPC 2.0 error object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
-    /// Numeric error code.
     pub code: i32,
-    /// Human-readable error message.
     pub message: String,
-    /// Optional additional data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
-/// Standard JSON-RPC 2.0 error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
-    /// Invalid JSON was received.
     ParseError,
-    /// The request is not a valid JSON-RPC request.
     InvalidRequest,
-    /// The requested method does not exist.
     MethodNotFound,
-    /// Invalid method parameters.
     InvalidParams,
-    /// The request was cancelled before completion.
     RequestCancelled,
-    /// Internal server error.
     InternalError,
 }
 
 impl ErrorCode {
-    /// Returns the numeric error code as defined by JSON-RPC 2.0.
     pub fn as_i32(self) -> i32 {
         match self {
             Self::ParseError => -32700,
@@ -138,29 +116,25 @@ impl ErrorCode {
 // Transport abstraction (zero-cost via monomorphization)
 // ---------------------------------------------------------------------------
 
-/// Async line-oriented transport for JSON-RPC messages.
-///
 /// Implementations are monomorphized at each call site — no dyn dispatch.
 pub trait McpTransport {
-    /// Read the next line from the transport. Returns `None` on EOF.
-    ///
     /// Implementations MUST be cancellation-safe: every server read loop races
     /// this future against shutdown, cancellation, and handler completion in a
     /// `tokio::select!`, so a dropped read must not lose bytes it already
     /// consumed. Buffered implementations satisfy this by keeping the
     /// partial-frame accumulator in the transport (see
     /// `host_admission::BoundedLineReader`) rather than in the future.
+    /// Returns `None` on EOF.
     fn read_line(
         &mut self,
     ) -> impl std::future::Future<Output = std::io::Result<Option<String>>> + Send;
 
-    /// Write a complete line (including trailing newline) to the transport.
+    /// Write a complete line, including the trailing newline.
     fn write_line(
         &mut self,
         line: &str,
     ) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
 
-    /// Flush any buffered output.
     fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
 
     /// Wait until a peer fully closes the connection. A read-side EOF is not

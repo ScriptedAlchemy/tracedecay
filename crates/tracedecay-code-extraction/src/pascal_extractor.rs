@@ -86,10 +86,7 @@ impl ExtractionState {
 }
 
 impl PascalExtractor {
-    /// Extract code graph nodes and edges from a Pascal source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Pascal source code to parse.
     pub fn extract_pascal(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -172,7 +169,6 @@ impl PascalExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -186,7 +182,6 @@ impl PascalExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "program" => Self::visit_program(state, node),
@@ -1203,10 +1198,6 @@ impl PascalExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Find the module name from a program or unit node.
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {

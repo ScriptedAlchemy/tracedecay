@@ -80,7 +80,7 @@ impl StoreSizeSampleV1 {
 ///
 /// `previous_bytes` is the byte total at the prior watermark; `current_bytes` is
 /// the total now. The delta feeds retention/backlog reasoning; a table that only
-/// ever grows (append-only evidence stores, per Plan 38 §3) is the signal that
+/// ever grows (append-only evidence stores) is the signal that
 /// motivates a retention window.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -131,7 +131,7 @@ impl TableGrowthSampleV1 {
 
 /// An owner-configured soft size budget for one store.
 ///
-/// Exceeding the soft limit is a finding, never a silent state (Plan 38 §7).
+/// Exceeding the soft limit is a finding, never a silent state.
 /// The budget is *soft*: it drives a Doctor `OverBudgetStore` finding, not a
 /// hard write rejection.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

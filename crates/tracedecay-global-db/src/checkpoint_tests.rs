@@ -108,9 +108,9 @@ async fn pressured_checkpoint_reports_pinned_reader_and_reclaims_after_release()
     );
 }
 
-/// The full Plan 38 reclaim journey: a PASSIVE-busy WAL past the trigger
-/// stays a typed failure while pinned, and once the reader releases, the
-/// exclusive-maintenance truncation lane drains it to a zero-byte file.
+/// A PASSIVE-busy WAL past the trigger stays a typed failure while pinned,
+/// and once the reader releases, the exclusive-maintenance truncation lane
+/// drains it to a zero-byte file.
 #[tokio::test]
 async fn maintenance_truncate_drains_passive_busy_wal_to_zero_bytes() {
     crate::register_test_schema_installer();

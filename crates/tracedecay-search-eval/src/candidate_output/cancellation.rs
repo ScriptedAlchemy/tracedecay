@@ -25,9 +25,6 @@ pub(super) fn prove_cancellation(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
-    // Cancellation is proven against the production code-index control surface
-    // (typed Cancelled interruption, no publish). The generator records the
-    // required receipt string after this check succeeds.
     let mut files = Vec::new();
     let mut captured = Vec::new();
     let document = workload

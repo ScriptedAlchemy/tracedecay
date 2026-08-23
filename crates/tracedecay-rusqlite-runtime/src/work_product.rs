@@ -5,10 +5,9 @@
 //! `WorkProductEventPortV1` atomically appends to an immutable journal and
 //! records its verified graph version, while `WorkGraphReadPortV1` serves those
 //! verified versions with every projection derived from the same version.
-//! Until this module existed the only implementation of either authority was a
-//! test double, so the whole family —
-//! including the DAG, timeline, causal, workload, and critical-path projections
-//! the Work views draw — had no producer at all.
+//! This adapter is the producer for the whole family, including the DAG,
+//! timeline, causal, workload, and critical-path projections the Work views
+//! draw.
 //!
 //! Three rules hold this adapter to what it can actually prove.
 //!

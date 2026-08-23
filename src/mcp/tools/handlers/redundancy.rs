@@ -17,7 +17,6 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::decode_primitive_request;
 
-/// `tracedecay_redundancy` handler.
 pub(crate) async fn handle_redundancy(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

@@ -331,7 +331,7 @@ impl FeedbackCycleRuntime {
         Ok(self.compose_canonical_result(execution, requested_durability)?)
     }
 
-    /// Runs one canonical Plan 09 cycle with source-backed advisory findings.
+    /// Runs one canonical feedback cycle with source-backed advisory findings.
     /// It reuses this runtime's authorization, diagnostics, impact, and single
     /// durable publication/dedupe path.
     pub async fn run_once_with_advisory(

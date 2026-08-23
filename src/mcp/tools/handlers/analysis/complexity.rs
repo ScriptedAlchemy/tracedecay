@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_complexity` tool calls.
 pub(crate) async fn handle_complexity(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -95,7 +94,6 @@ fn analysis_score(
         .saturating_add(fan_in.get(&symbol.occurrence).copied().unwrap_or(0))
 }
 
-/// Handles `tracedecay_doc_coverage` tool calls.
 pub(crate) async fn handle_doc_coverage(
     _cg: &TraceDecay,
     _graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -108,7 +106,6 @@ pub(crate) async fn handle_doc_coverage(
     ))
 }
 
-/// Handles `tracedecay_god_class` tool calls.
 pub(crate) async fn handle_god_class(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

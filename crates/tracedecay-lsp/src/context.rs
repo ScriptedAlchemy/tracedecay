@@ -38,11 +38,8 @@ impl ContextProjectionKind {
     pub const POST_EDIT_IMPACT: &'static str = "postEditImpact";
     pub const AFFECTED_TESTS: &'static str = "affectedTests";
     pub const TEST_RUN_RESULTS: &'static str = "testRunResults";
-    /// GitHub review ingest contribution of the composed advisory cycle.
     pub const GITHUB_REVIEW: &'static str = "githubReview";
-    /// CI failure localization contribution of the composed advisory cycle.
     pub const CI_FAILURE_LOCALIZATION: &'static str = "ciFailureLocalization";
-    /// Agent proximity contribution of the composed advisory cycle.
     pub const AGENT_PROXIMITY: &'static str = "agentProximity";
 
     /// Advisory contributions the canonical feedback source can expose through
@@ -364,7 +361,6 @@ struct ContextRequestKey {
 type DeliveredContextChanges =
     BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>;
 
-/// Bounded non-blocking broker for canonical context projection work.
 pub struct ContextProjectionAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn CanonicalContextProjectionAuthority>,

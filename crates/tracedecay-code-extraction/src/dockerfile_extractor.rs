@@ -86,10 +86,7 @@ impl ExtractionState {
 }
 
 impl DockerfileExtractor {
-    /// Extract code graph nodes and edges from a Dockerfile source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Dockerfile source code to parse.
     pub fn extract_dockerfile(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -172,7 +169,6 @@ impl DockerfileExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "from_instruction" => Self::visit_from(state, node),

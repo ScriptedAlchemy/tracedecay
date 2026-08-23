@@ -226,15 +226,12 @@ pub fn percent_hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// The feedback-cycle trigger source used by document lifecycle requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticTrigger {
     DocumentSave,
     ExplicitDocumentDiagnostics,
 }
 
-/// A bounded request sent from the gateway to the existing feedback-cycle
-/// application boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedbackCycleRequest {
     pub root_uri: String,
@@ -242,7 +239,6 @@ pub struct FeedbackCycleRequest {
     pub trigger: DiagnosticTrigger,
 }
 
-/// A scheduler/application outcome for a feedback-cycle request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FeedbackCycleResponse {
     Accepted,
@@ -268,7 +264,6 @@ where
     }
 }
 
-/// Methods represented by this bounded LSP gateway surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayMethod {
     TextDocumentDiagnostic,
@@ -316,7 +311,6 @@ impl GatewayMethod {
     }
 }
 
-/// The reason a request cannot be served by this session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MethodUnavailableReason {
     ExplicitlyUnavailable,
@@ -339,7 +333,6 @@ impl MethodUnavailable {
     pub const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
 }
 
-/// The protocol dispatch outcome used by request handlers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GatewayResponse<T> {
     Value(T),
@@ -361,21 +354,18 @@ impl<T> GatewayResponse<T> {
     }
 }
 
-/// LSP `Location` payload shape used by navigation responses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspLocation {
     pub uri: String,
     pub range: LspRange,
 }
 
-/// LSP `Hover` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hover {
     pub contents: String,
     pub range: Option<LspRange>,
 }
 
-/// LSP `DocumentSymbol` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentSymbol {
     pub name: String,
@@ -386,7 +376,6 @@ pub struct DocumentSymbol {
     pub children: Vec<DocumentSymbol>,
 }
 
-/// LSP `SymbolInformation` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSymbol {
     pub name: String,
@@ -395,7 +384,6 @@ pub struct WorkspaceSymbol {
     pub location: LspLocation,
 }
 
-/// LSP `CallHierarchyItem` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallHierarchyItem {
     pub name: String,
@@ -406,21 +394,18 @@ pub struct CallHierarchyItem {
     pub selection_range: LspRange,
 }
 
-/// LSP `CallHierarchyIncomingCall` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IncomingCall {
     pub from: CallHierarchyItem,
     pub from_ranges: Vec<LspRange>,
 }
 
-/// LSP `CallHierarchyOutgoingCall` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutgoingCall {
     pub to: CallHierarchyItem,
     pub from_ranges: Vec<LspRange>,
 }
 
-/// LSP `SignatureHelp` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignatureHelp {
     pub signatures: Vec<String>,
@@ -428,7 +413,6 @@ pub struct SignatureHelp {
     pub active_parameter: Option<u32>,
 }
 
-/// LSP `TypeHierarchyItem` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypeHierarchyItem {
     pub name: String,
@@ -695,7 +679,6 @@ impl LspSemanticOperationOutcome {
 
 pub type LspRuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
-/// Cancellation handle for a runtime task spawned on behalf of an LSP broker.
 pub trait LspRuntimeTask: Send + Sync {
     fn abort(&self);
 }
@@ -708,7 +691,6 @@ pub trait LspRuntimeSpawner: Send + Sync {
 const MAX_RUNTIME_FAILURE_CLASS_BYTES: usize = 96;
 pub const MAX_SEMANTIC_OPERATIONS: usize = MAX_PENDING_REQUESTS * 2;
 
-/// Bounded protocol-safe failure class returned by a runtime authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspRuntimeFailure {
     class: String,
@@ -746,7 +728,6 @@ pub trait FeedbackCycleRuntimePort: Send + Sync {
     ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>>;
 }
 
-/// Bounded non-blocking trigger for canonical feedback work.
 pub struct FeedbackCycleAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn FeedbackCycleRuntimePort>,
@@ -787,7 +768,6 @@ impl FeedbackCyclePort for FeedbackCycleAdapter {
     }
 }
 
-/// Canonical asynchronous owner for one standard analyzer request.
 pub trait LspSemanticRequestAuthority: Send + Sync {
     fn start(
         &self,
@@ -805,7 +785,6 @@ struct SemanticRequestKey {
     request_id: LspRequestId,
 }
 
-/// Bounded non-blocking semantic broker over an asynchronous authority.
 pub struct SemanticProviderAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn LspSemanticRequestAuthority>,
@@ -939,7 +918,6 @@ impl SemanticProviderPort for SemanticProviderAdapter {
     }
 }
 
-/// Cancellation authority for graph/analyzer operations shared by a session.
 pub trait LspAnalyzerCancellationAuthority: Send + Sync {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
 }

@@ -2,7 +2,7 @@
 //!
 //! This module owns only lifetime and delegation. Resolution, validation,
 //! authorization, mutation, audit, and credential semantics remain in the
-//! existing application operations and Plan20 store.
+//! existing application operations and transactional store.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,7 +42,7 @@ type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send 
 pub(crate) const RUNTIME_CONFIGURATION_COMPONENT: &str = "configuration.runtime-cache";
 
 /// Retained project-level control-plane runtime. It owns the one opened
-/// Plan20 store handle and the one application operation facade used by every
+/// transactional store handle and the one application operation facade used by every
 /// local transport.
 pub struct ProjectConfigurationRuntime {
     target: RuntimeConfigurationTarget,

@@ -391,8 +391,8 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
     drop(initial);
     drop(seed_db);
 
-    // All contenders submit through one physical writer runtime. S11 removes
-    // file-lock retry behavior from callers; the runtime owns serialization.
+    // All contenders submit through one physical writer runtime. The runtime
+    // owns serialization; callers do not retry file locks.
     let runtime = TestConnection::open(&db_path);
     let holder = (*runtime).clone();
     let lower_conn = (*runtime).clone();

@@ -1,9 +1,9 @@
 //! Durable Work placement rows: compare-and-swap publication and the
 //! database-enforced exclusivity of a managed target root.
 //!
-//! The exclusivity rule ("linked and isolated placements are canonical,
-//! exclusive, fenced" — Plan 32) is enforced by the partial unique index in
-//! `work/schema.rs`, not only by the service that reads
+//! Linked and isolated placements are exclusive and fenced. That rule is
+//! enforced by the partial unique index in `work/schema.rs`, not only by the
+//! service that reads
 //! [`target_holder`](WorkPlacementStoragePort::target_holder). The read is what
 //! produces a *typed* refusal; the index is what makes the rule survive a crash
 //! between the read and the write.

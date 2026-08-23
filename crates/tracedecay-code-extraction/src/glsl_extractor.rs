@@ -180,10 +180,6 @@ impl GlslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // function_definition
-    // -------------------------------------------------------
-
     fn visit_function_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         let name =
             Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -233,7 +229,6 @@ impl GlslExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -256,10 +251,6 @@ impl GlslExtractor {
             text.trim().trim_end_matches(';').trim().to_string()
         }
     }
-
-    // -------------------------------------------------------
-    // declaration (globals, uniforms, in/out, prototypes)
-    // -------------------------------------------------------
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Function prototype
@@ -423,10 +414,6 @@ impl GlslExtractor {
         None
     }
 
-    // -------------------------------------------------------
-    // struct_specifier
-    // -------------------------------------------------------
-
     fn visit_standalone_struct(state: &mut ExtractionState, node: TsNode<'_>) {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
@@ -572,10 +559,6 @@ impl GlslExtractor {
         None
     }
 
-    // -------------------------------------------------------
-    // Preprocessor
-    // -------------------------------------------------------
-
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
@@ -645,10 +628,6 @@ impl GlslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Call site extraction
-    // -------------------------------------------------------
-
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
             &state.source,
@@ -659,17 +638,9 @@ impl GlslExtractor {
         );
     }
 
-    // -------------------------------------------------------
-    // Docstring extraction
-    // -------------------------------------------------------
-
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         docstring_from_preceding_comments(&state.source, node, clean_c_comment)
     }
-
-    // -------------------------------------------------------
-    // Utility helpers
-    // -------------------------------------------------------
 
     /// Check if a declaration has a GLSL storage qualifier (uniform, in, out, etc.)
     /// or a type qualifier (const, etc.).

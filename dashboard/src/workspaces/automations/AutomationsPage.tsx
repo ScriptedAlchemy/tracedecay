@@ -10,7 +10,6 @@ import {
   useAutomationSkills,
   useSchedulerControl,
   type JobRow,
-  type ListReading,
   type AutomaticFactReceipt,
   type SchedulerControlResult,
   type SkillRow,

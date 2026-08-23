@@ -41,7 +41,6 @@ pub const REVIEW_OUTCOME_LABEL_SCHEMA_REVISION: u32 = 1;
 /// Upper bound on authorized retrieval anchors retained per label.
 pub const REVIEW_OUTCOME_ANCHOR_LIMIT: usize = 8;
 
-/// Exhaustive task-outcome lifecycle labels.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskOutcomeLabelV1 {
@@ -87,7 +86,6 @@ impl TaskOutcomeLabelV1 {
     }
 }
 
-/// Independence of the review that produced a judgment.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewIndependenceV1 {
@@ -138,7 +136,6 @@ impl ReviewJudgmentV1 {
     pub const ALL: [Self; 4] = [Self::Accepted, Self::Rejected, Self::Partial, Self::Unknown];
 }
 
-/// Source class of the evidence behind a label.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeEvidenceSourceV1 {
@@ -172,7 +169,6 @@ impl OutcomeEvidenceSourceV1 {
     }
 }
 
-/// The known cutoff that censored an observation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationCutoffV1 {
@@ -194,7 +190,6 @@ impl ObservationCutoffV1 {
     ];
 }
 
-/// How a label revision resolved conflicting evidence.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LabelConflictResolutionV1 {
@@ -206,7 +201,6 @@ pub enum LabelConflictResolutionV1 {
     Unresolved,
 }
 
-/// Provenance of a conflict or override between label revisions.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LabelConflictProvenanceV1 {
@@ -246,7 +240,6 @@ impl EvidenceHorizonV1 {
     }
 }
 
-/// The work the label is about.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewOutcomeSubjectV1 {
@@ -278,7 +271,6 @@ impl ReviewOutcomeSubjectV1 {
     }
 }
 
-/// Revision and time identity of one label record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewOutcomeIdentityV1 {
@@ -490,7 +482,6 @@ impl RuntimeOutcomeEvidenceV1 {
     }
 }
 
-/// One immutable revision of the canonical review and outcome label.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewOutcomeLabelV1 {

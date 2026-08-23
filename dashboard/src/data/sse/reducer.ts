@@ -204,7 +204,7 @@ export function createSseReducer<TPayload = unknown>(
       return false;
     }
 
-    // Accept the event and advance the watermark; the refetch reseeds later.
+    // Gap: still accept and advance the watermark; the refetch reseeds later.
     if (lastRev !== null && rev > lastRev + 1) {
       requestCanonicalRefresh("revision_gap");
     }

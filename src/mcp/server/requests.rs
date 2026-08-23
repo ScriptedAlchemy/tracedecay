@@ -285,8 +285,6 @@ impl McpServer {
             .is_some_and(|cancellation| cancellation.cancel(mcp_now_micros()))
     }
 
-    /// Dispatches a parsed JSON-RPC request to the appropriate handler.
-    ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
@@ -586,9 +584,7 @@ impl McpServer {
         outcome
     }
 
-    /// Handles the `initialize` method, returning server capabilities.
-    ///
-    /// Also records the caller's negotiated `clientInfo.name` (e.g.
+    /// Records the caller's negotiated `clientInfo.name` (e.g.
     /// `"claude-code"`, `"codex"`, `"cursor"`) so subsequent `tools/call`
     /// analytics events can attribute per-host adoption instead of every
     /// call recording the same opaque `provider="mcp"`. Only the short
@@ -611,7 +607,6 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
-    /// Handles the `tools/list` method, returning all available tool definitions.
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
@@ -652,12 +647,10 @@ impl McpServer {
         }
     }
 
-    /// Handles the `resources/list` method, returning available resources.
     pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
         JsonRpcResponse::success(id, resources_list_result())
     }
 
-    /// Handles the `resources/read` method, returning resource contents.
     pub(crate) async fn handle_resources_read(
         &self,
         id: Value,
@@ -1292,7 +1285,6 @@ impl McpServer {
         ))
     }
 
-    /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,

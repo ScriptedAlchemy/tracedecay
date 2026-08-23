@@ -1,4 +1,3 @@
-/// Counters returned by an ingestion pass.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptIngestStats {
     pub sessions_upserted: u64,

@@ -105,7 +105,6 @@ impl ExtractionState {
 }
 
 impl VbNetExtractor {
-    /// Extract code graph nodes and edges from a VB.NET source file.
     pub fn extract_vbnet(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -188,7 +187,6 @@ impl VbNetExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -202,7 +200,6 @@ impl VbNetExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "imports_statement" => Self::visit_imports(state, node),
@@ -1042,10 +1039,6 @@ impl VbNetExtractor {
         }
     }
 
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
-
     /// Extract the name from a block node (`class_block`, etc.) via the first identifier child.
     fn extract_block_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Block nodes in VB.NET grammar use `name` field
@@ -1333,10 +1326,6 @@ impl VbNetExtractor {
         }
         state.node_text(node)
     }
-
-    // -----------------------------------------------------------------------
-    // Annotations (VB.NET Attributes)
-    // -----------------------------------------------------------------------
 
     /// Extract VB.NET attributes from a node's children (for methods,
     /// constructors, properties) and create `AnnotationUsage` nodes and

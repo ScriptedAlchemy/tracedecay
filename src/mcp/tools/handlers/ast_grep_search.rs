@@ -56,7 +56,6 @@ async fn search_tree_off_thread(
     .await
 }
 
-/// Handles `tracedecay_ast_grep_search` tool calls.
 pub(super) async fn handle_ast_grep_search(
     cg: &TraceDecay,
     args: Value,

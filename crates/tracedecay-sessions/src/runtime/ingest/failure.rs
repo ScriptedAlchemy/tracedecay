@@ -118,7 +118,6 @@ pub(super) fn cancelled_claude_provider_outcome(
         .then(ProviderRunOutcome::skipped)
 }
 
-/// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IngestPassBounds {
     /// Maximum work units discovered before discovery itself is truncated.
@@ -193,7 +192,6 @@ impl IngestPassOutcome {
     }
 }
 
-/// Pure round-robin admission over a discovered unit count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RoundRobinAdmission {
     pub admitted_indices: Vec<usize>,

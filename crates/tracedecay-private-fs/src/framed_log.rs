@@ -5,7 +5,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// How a directory fsync failure is surfaced to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectorySyncPolicy {
     /// Surface every fsync failure.
@@ -36,7 +35,6 @@ pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()>
     }
 }
 
-/// Flush the parent directory of `path`, if any.
 pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
     match path.parent() {
         Some(parent) => sync_directory(parent, policy),

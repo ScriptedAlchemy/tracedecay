@@ -2,7 +2,7 @@ use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::Executor;
 
 /// Adds the durable, project-local authority for native integration
-/// transactions (Plan 36).
+/// transactions.
 ///
 /// Preview and approval rows are immutable commitments; the transaction row
 /// retains the one mutable phase/revision status; terminal receipts are

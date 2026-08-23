@@ -207,7 +207,6 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap(); // not a git repo; git ops no-op
 
-    // Seed a tracked PR branch store entry + its DB file.
     let mut meta = BranchMeta::new("main");
     meta.add_branch("pr/5", "branches/pr_5.db", "main");
     std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
@@ -217,7 +216,6 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     );
     save_branch_meta(data_root.path(), &meta).unwrap();
 
-    // Seed autotrack state marking pr/5 as managed.
     let mut state = PrAutotrackState::default();
     state.managed.insert(
         "pr/5".to_string(),
@@ -430,7 +428,6 @@ async fn partial_discovery_suppresses_removals() {
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap();
 
-    // Seed a managed PR branch store + entry, exactly as the untrack test does.
     let mut meta = BranchMeta::new("main");
     meta.add_branch("pr/5", "branches/pr_5.db", "main");
     std::fs::create_dir_all(data_root.path().join("branches")).unwrap();

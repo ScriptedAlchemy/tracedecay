@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_dsm` tool calls.
 pub(crate) async fn handle_dsm(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

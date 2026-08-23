@@ -223,7 +223,6 @@ where
     Ok(joined)
 }
 
-/// Handles `tracedecay_diff_context` tool calls.
 pub(crate) async fn handle_diff_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -337,7 +336,6 @@ pub(crate) async fn handle_diff_context(
         touched_files,
     ))
 }
-/// Handles `tracedecay_changelog` tool calls.
 pub(crate) async fn handle_changelog(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -433,7 +431,6 @@ pub(crate) async fn handle_changelog(
     ))
 }
 
-/// Handles `tracedecay_commit_context` tool calls.
 pub(crate) async fn handle_commit_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -746,7 +743,6 @@ fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     )
 }
 
-/// Handles `tracedecay_pr_context` tool calls.
 pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
     graph: F,

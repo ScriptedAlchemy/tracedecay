@@ -55,15 +55,6 @@ export function refreshOperation(actions: DashboardLegalActionRefV1[]): string |
   return actions.find((action) => action.kind === 'refresh')?.operation;
 }
 
-/* --------------------------------------------------------------------------
- * Store telemetry dimensions (storage_telemetry_api.rs)
- *
- * The budget and growth dimensions are both *honest* read models: neither ever
- * degrades into a fabricated pass. These presenters keep that honesty in the
- * UI wording — an unset budget is a missing owner *setting* and says so, and a
- * growth read never states a delta without naming the window it covers.
- * ------------------------------------------------------------------------ */
-
 /** Visual tone for a dimension row. `unset` is deliberately its own tone: a
  * budget the owner has not configured must not read like a budget the server
  * could not determine. */

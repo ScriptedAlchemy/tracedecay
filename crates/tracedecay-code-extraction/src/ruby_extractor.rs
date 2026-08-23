@@ -77,10 +77,7 @@ impl ExtractionState {
 }
 
 impl RubyExtractor {
-    /// Extract code graph nodes and edges from a Ruby source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Ruby source code to parse.
     pub fn extract_ruby(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -163,7 +160,6 @@ impl RubyExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -177,7 +173,6 @@ impl RubyExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "method" => Self::visit_method(state, node, false),
@@ -498,10 +493,6 @@ impl RubyExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the superclass from a class definition (`class Foo < Bar`).
     ///

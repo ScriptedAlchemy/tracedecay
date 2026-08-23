@@ -680,12 +680,10 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     let fixture = ProductionDaemon::start();
     let scripts = tempfile::tempdir().expect("provider script directory");
 
-    // ---------------------------------------------------------------------
     // Warming. Mutation preparation is the first product-authority handoff.
     // While the per-project runtime is binding it may answer only the typed
     // retryable unavailable problem; once mounted it supplies the exact
     // command, graph authority, and revision pins the caller must submit.
-    // ---------------------------------------------------------------------
     let create_draft = product_task_create_draft(&fixture);
     let prepared_create = poll_until("the project runtime mount", || {
         let (status, answer) =

@@ -148,7 +148,7 @@ pub struct ProductionFeedbackCyclePartsV1 {
 }
 
 /// Exact saved-generation proximity contribution mounted into the canonical
-/// Plan 09 cycle. Implementations return no durable artifact; publication and
+/// feedback cycle. Implementations return no durable artifact; publication and
 /// dedupe remain owned by `FeedbackCycleRuntime::run_once_with_advisory`.
 pub trait ProductionFeedbackCycleProximityPortV1: Send + Sync {
     fn advisory<'a>(

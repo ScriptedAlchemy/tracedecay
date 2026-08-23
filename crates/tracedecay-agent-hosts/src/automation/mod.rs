@@ -39,8 +39,6 @@ pub use lifecycle::{
     NonEmptyAutomaticFactReceipts,
 };
 
-/// Build a [`TraceDecayError::Config`] from any message-like value.
-///
 /// Canonical home for the `config_error` helper duplicated across the
 /// automation module tree; other automation submodules should call this
 /// instead of re-declaring their own copy.

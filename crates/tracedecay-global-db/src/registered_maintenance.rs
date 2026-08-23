@@ -6,7 +6,7 @@ use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::RegisteredGlobalDb;
 
 /// WAL file size at or above which a completed checkpoint escalates to file
-/// truncation (Plan 38 §6 storage reclaim).
+/// truncation.
 ///
 /// SQLite's passive checkpoint lane backfills WAL frames into the main
 /// database but never shrinks the `-wal` file, so a store that once ballooned
@@ -18,12 +18,11 @@ use crate::RegisteredGlobalDb;
 /// reclaiming.
 pub const REGISTERED_WAL_RECLAIM_TRIGGER_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Measured outcome of one registered WAL checkpoint/compaction pass
-/// (Plan 38 §6).
+/// Measured outcome of one registered WAL checkpoint/compaction pass.
 ///
-/// Byte figures are file-level measurements of the store's `-wal` sidecar,
-/// matching Plan 38's rule that published size evidence stays file- and
-/// directory-level. A missing sidecar measures zero bytes.
+/// Byte figures are file-level measurements of the store's `-wal` sidecar.
+/// Published size evidence stays file- and directory-level. A missing sidecar
+/// measures zero bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisteredWalCheckpointReceiptV1 {
     pub wal_bytes_before: u64,
@@ -50,7 +49,7 @@ pub enum RegisteredWalReclaimV1 {
 
 impl RegisteredGlobalDb {
     /// Runs one WAL checkpoint/compaction pass through this store's
-    /// authorized writer and reports the measured result (Plan 38 §6).
+    /// authorized writer and reports the measured result.
     ///
     /// The checkpoint itself goes through the retained runtime's bounded
     /// checkpoint lane, so a WAL pinned by a live reader under size pressure

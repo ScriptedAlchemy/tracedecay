@@ -1,9 +1,5 @@
 //! Projectless client handling: tool calls served without a mounted project
 //! (user-scoped LCM, message search, dashboard, doctor, version).
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic,
-//! signatures, or behavior changed. `use super::*` re-exposes every name the
-//! parent `daemon` module had in scope so the moved code resolves unchanged.
 
 use serde_json::json;
 

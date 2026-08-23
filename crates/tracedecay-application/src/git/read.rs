@@ -126,7 +126,6 @@ pub trait GitReadPort: GitHistoricalBlobReadPort {
     ) -> Result<Vec<HunkRefV1>, GitIntelligenceError>;
 }
 
-/// Whether a path is one canonical repository-relative path.
 pub fn is_canonical_repository_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')

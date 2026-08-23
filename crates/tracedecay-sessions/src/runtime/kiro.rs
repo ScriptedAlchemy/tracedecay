@@ -74,7 +74,6 @@ const MAX_TRANSCRIPTS_PER_PASS: usize = 512;
 const MAX_TRANSCRIPTS_PER_WORKSPACE: usize = 128;
 const MAX_MESSAGES_PER_SNAPSHOT: usize = 4_096;
 
-/// Kiro IDE transcript locator + parser.
 pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,

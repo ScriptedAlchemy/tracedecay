@@ -18,7 +18,6 @@ struct HookRuntimeErrorContext {
     status: Option<String>,
 }
 
-/// Errors that can occur during code graph operations.
 #[derive(Error, Debug)]
 pub enum TraceDecayError {
     #[error("file error: {message} (path: {path})")]
@@ -74,7 +73,6 @@ pub enum TraceDecayError {
     Automation(#[from] tracedecay_automation::AutomationError),
 }
 
-/// Convenience alias for results using `TraceDecayError`.
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
 impl From<crate::db::engine::Error> for TraceDecayError {

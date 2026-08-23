@@ -76,7 +76,6 @@ fn port_parent_qualifier(kind: &str, qualified_name: &str) -> Option<String> {
     Some(parent_no_generics.trim().to_string())
 }
 
-/// Handles `tracedecay_port_status` tool calls.
 pub(crate) async fn handle_port_status(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

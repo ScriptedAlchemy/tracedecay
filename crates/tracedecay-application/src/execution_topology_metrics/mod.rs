@@ -97,11 +97,11 @@ pub const MAX_EXECUTION_TOPOLOGY_EVENTS_V1: u32 = 10_000;
 pub const EXECUTION_TOPOLOGY_CAPABILITY_ID_V1: &str = "capability.work.topology_metrics";
 pub const EXECUTION_TOPOLOGY_USE_CASE_ID_V1: &str = "use-case.work.topology_metrics";
 
-/// Plan 26 permits at most eight local source-event anchors in a read. These
-/// are registered observation cursors, never event payload identifiers.
+/// A read permits at most eight local source-event anchors. These are
+/// registered observation cursors, never event payload identifiers.
 pub const MAX_EXECUTION_TOPOLOGY_DRILL_ANCHORS_V1: usize = 8;
 
-/// Maximum number of cells returned by one Plan 26 read.
+/// Maximum number of cells returned by one topology-metrics read.
 pub const MAX_EXECUTION_TOPOLOGY_CELLS_V1: usize = 256;
 
 /// Small local cells remain typed but do not expose their value or support

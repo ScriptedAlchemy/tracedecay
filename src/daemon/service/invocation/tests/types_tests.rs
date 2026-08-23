@@ -1,5 +1,3 @@
-//! `types` module test coverage.
-
 use super::*;
 
 #[test]

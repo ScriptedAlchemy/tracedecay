@@ -477,7 +477,6 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
     generic_tool_result(Some(cg.project_root()), args, payload, vec![])
 }
 
-/// Handles `tracedecay_dashboard` tool calls.
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,

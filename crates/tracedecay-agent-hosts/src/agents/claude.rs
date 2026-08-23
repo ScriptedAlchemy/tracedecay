@@ -26,7 +26,6 @@ use super::{
     load_json_file, load_json_file_strict, safe_write_json_file, safe_write_text_file,
 };
 
-/// Claude Code agent.
 pub struct ClaudeIntegration;
 
 impl AgentIntegration for ClaudeIntegration {

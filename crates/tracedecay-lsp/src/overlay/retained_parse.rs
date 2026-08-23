@@ -22,7 +22,6 @@ pub enum OverlayParseState {
     Unavailable(OverlayParseUnavailable),
 }
 
-/// Typed reason an accepted text overlay has no current retained tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverlayParseUnavailable {
     UnsupportedLanguage,

@@ -67,7 +67,6 @@ pub struct GitRepositoryAuthority {
 }
 
 impl GitRepositoryAuthority {
-    /// Discover the repository containing `path`.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
         let repository = gix::discover_opts(
             path,

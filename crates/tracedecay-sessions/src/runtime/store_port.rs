@@ -14,7 +14,6 @@ use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptStoreResult, Tran
 use crate::runtime::SessionRecord;
 use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 
-/// Application boundary required by production transcript ingestion.
 pub trait TranscriptIngestStore: TranscriptStore {
     /// Advances a parse offset only when it moves forward, reading the
     /// current offset as the compare-and-set expectation.

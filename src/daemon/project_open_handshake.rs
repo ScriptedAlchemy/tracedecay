@@ -3,10 +3,6 @@
 //! Classifies the failure modes that first-touch bootstrap may repair -
 //! never-enrolled identity, a missing index, a read-only store - apart from
 //! genuine conflicts, and renders the client-visible refusal.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 

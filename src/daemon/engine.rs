@@ -3,10 +3,6 @@
 //!
 //! Holds the store administration, invocation state, open gates, owner
 //! registries and lifecycle handles that one daemon generation owns.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 use std::collections::HashSet;

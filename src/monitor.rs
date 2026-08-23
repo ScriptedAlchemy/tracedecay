@@ -129,7 +129,6 @@ fn write_entry_inner(
 
     let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
 
-    // Read current write_idx.
     let write_idx = u64::from_le_bytes(
         mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8]
             .try_into()
@@ -138,12 +137,10 @@ fn write_entry_inner(
     let slot = (write_idx as usize) % RING_CAPACITY;
     let off = HEADER_SIZE + slot * ENTRY_SIZE;
 
-    // Write string fields.
     write_str(&mut mmap, off + EOFF_PREFIX, prefix);
     write_str(&mut mmap, off + EOFF_PROJECT, project);
     write_str(&mut mmap, off + EOFF_TOOL, tool_name);
 
-    // Write numeric fields.
     mmap[off + EOFF_DELTA..off + EOFF_DELTA + 8].copy_from_slice(&delta.to_le_bytes());
     mmap[off + EOFF_BEFORE..off + EOFF_BEFORE + 8].copy_from_slice(&before.to_le_bytes());
 
@@ -286,7 +283,6 @@ pub fn run() -> std::io::Result<()> {
         return Ok(());
     };
 
-    // Ensure mmap file exists.
     let mmap_path = dir.join(MMAP_FILENAME);
     if !mmap_path.exists() {
         let f = std::fs::File::create(&mmap_path)?;
@@ -317,7 +313,6 @@ pub fn run() -> std::io::Result<()> {
         }
     }
 
-    // Enter raw mode + alternate screen.
     let mut stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
@@ -330,7 +325,6 @@ pub fn run() -> std::io::Result<()> {
         &mut stdout,
     );
 
-    // Restore terminal.
     execute!(stdout, cursor::Show, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
 
@@ -388,7 +382,6 @@ fn monitor_loop(
             }
         }
 
-        // Re-read mmap for new entries.
         let _ = reader.refresh();
         let current_idx = reader.write_idx();
         if current_idx > *last_idx {
@@ -407,7 +400,6 @@ fn monitor_loop(
             cost_cache.begin_refresh();
         }
 
-        // Render.
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
         let h = height as usize;
@@ -515,7 +507,6 @@ fn monitor_loop(
         }
         all_lines.push(("", format!("TOTAL  {}", format_number(grand_total))));
 
-        // Clamp scroll offset to valid range.
         let max_offset = all_lines.len().saturating_sub(log_lines);
         if scroll_offset > max_offset {
             scroll_offset = max_offset;

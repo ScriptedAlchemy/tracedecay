@@ -2,7 +2,7 @@
 //!
 //! A census is deliberately richer than the flattened observability sample.
 //! Missing classification evidence stays typed here; only a census whose
-//! execution dimensions are all exact may be projected to Plan 26 telemetry.
+//! execution dimensions are all exact may be projected to observability telemetry.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

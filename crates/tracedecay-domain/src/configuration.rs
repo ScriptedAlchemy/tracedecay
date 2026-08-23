@@ -74,7 +74,7 @@ pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_br
 pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
 pub const TELEMETRY_TIMINGS_SETTING_KEY: &str = "telemetry.timings.v1";
 
-/// Exact Plan 20 registry inventory. Keeping this closed list in the domain
+/// Exact registry inventory. Keeping this closed list in the domain
 /// contract prevents adapters and migrations from silently inventing keys.
 pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SOURCE_BINDINGS_SETTING_KEY,

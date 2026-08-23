@@ -215,7 +215,7 @@ pub(super) fn unavailable_model_with_state_at(
     }
 }
 
-/// Every Plan 26 execution-topology descriptor, with its unit and eligible
+/// Every execution-topology descriptor, with its unit and eligible
 /// population. An unreadable horizon still returns one typed-absent row per
 /// descriptor so a consumer never sees a shrinking descriptor set.
 pub const EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [

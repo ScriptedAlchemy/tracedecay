@@ -64,7 +64,6 @@ async fn test_initialized_notification() {
     .await;
 
     // The notification should produce no response; we should only get the ping response.
-    // Filter to find the ping response.
     let ping_responses: Vec<&String> = responses
         .iter()
         .filter(|r| {
@@ -220,7 +219,6 @@ async fn test_tools_list() {
     assert_eq!(resp["id"], 20);
     let tools = resp["result"]["tools"].as_array().unwrap();
     assert!(!tools.is_empty(), "tools list should not be empty");
-    // Verify at least some well-known tools are present.
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         tool_names.contains(&"tracedecay_search"),
@@ -266,7 +264,6 @@ async fn test_tools_call_search() {
     )
     .await;
 
-    // Find the response with id=30 (skip any notifications).
     let resp_str = responses
         .iter()
         .find(|r| {
@@ -277,7 +274,6 @@ async fn test_tools_call_search() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
     let content = resp["result"]["content"].as_array().unwrap();
-    // At least one content item should contain "helper".
     let has_helper = content
         .iter()
         .any(|c| c["text"].as_str().is_some_and(|t| t.contains("helper")));
@@ -1006,14 +1002,12 @@ async fn test_malformed_json() {
     )
     .await;
 
-    // Should have at least 2 responses: parse error + ping response.
     assert!(
         responses.len() >= 2,
         "should have at least 2 responses (parse error + ping), got {}",
         responses.len()
     );
 
-    // First response should be a parse error.
     let error_resp = parse_response(&responses[0]);
     assert!(
         error_resp["error"].is_object(),
@@ -1024,7 +1018,6 @@ async fn test_malformed_json() {
         "should be ParseError (-32700)"
     );
 
-    // Second (or later) should be the ping response.
     let ping_resp = responses
         .iter()
         .find(|r| {
@@ -1058,7 +1051,6 @@ async fn test_blank_lines_skipped() {
     )
     .await;
 
-    // Only the ping response should come through.
     let ping_responses: Vec<&String> = responses
         .iter()
         .filter(|r| {
@@ -1099,7 +1091,6 @@ async fn test_multiple_tool_calls() {
     )
     .await;
 
-    // Collect response IDs (filtering out notifications which have no "id" or null id).
     let response_ids: Vec<i64> = responses
         .iter()
         .filter_map(|r| {
@@ -1431,7 +1422,6 @@ async fn test_error_tracking() {
     )
     .await;
 
-    // Verify the unknown method produced an error.
     let error_resp_str = responses
         .iter()
         .find(|r| {
@@ -1445,7 +1435,6 @@ async fn test_error_tracking() {
         "unknown method should produce error"
     );
 
-    // Check status to verify errors count increased.
     let status_resp_str = responses
         .iter()
         .find(|r| {
@@ -1554,7 +1543,6 @@ async fn test_resources_list() {
         "should have schema resource"
     );
 
-    // All resources should have name, description, and mimeType.
     for resource in resources {
         assert!(resource["name"].is_string(), "resource should have name");
         assert!(

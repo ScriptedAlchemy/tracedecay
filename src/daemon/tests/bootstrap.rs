@@ -236,12 +236,11 @@ pub(super) fn enroll_project_on_disk_only(
     layout
 }
 
-/// Regression: the post-update startup-health probe runs as an ordinary daemon
-/// tool call, which cannot pass `allow_init`. Before this fix the pre-admission
-/// guard consulted only the profile registry, so a project whose store was
-/// fully intact on disk was refused as "not enrolled". Admission must instead
-/// honour the same durable enrollment the authoritative layout resolver
-/// consults first, so the existing store is mounted.
+/// The post-update startup-health probe runs as an ordinary daemon tool call
+/// and cannot pass `allow_init`. Admission must honour the same durable
+/// enrollment the authoritative layout resolver consults first: a project
+/// whose store is intact on disk is not "not enrolled" just because the
+/// profile registry was reset.
 #[cfg(unix)]
 #[tokio::test]
 async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {

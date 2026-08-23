@@ -2,8 +2,6 @@
 //!
 //! `Database` performs the actual same-process handle sharing; this registry
 //! keeps daemon cache aliases and branch-drift rekeys consistent with it.
-//!
-//! `use super::*` reuses the parent module's routing keys and path helpers.
 
 use super::*;
 
@@ -11,9 +9,7 @@ use super::*;
 /// evicted to stay within the registry's capacity bound.
 pub(super) type BoundRouteInsertionV1<Server> = (Server, bool, Vec<(ProjectServerKey, Server)>);
 
-// Fields are `pub(super)`: the entry was private inside the flat `daemon.rs`,
-// which made it visible to every `crate::daemon` descendant — `branch_admin`
-// reads `server` directly, so the split must preserve that reach.
+// Fields are `pub(super)` so `branch_admin` can read `server` directly.
 pub(super) struct DatabaseOwnerEntry<Server> {
     pub(super) server: Server,
     pub(super) last_used: Instant,

@@ -1,16 +1,9 @@
 //! Authorized temporal execution contract.
 //!
-//! Moved down from root `src/application/session/ports.rs`. The only
-//! implementation of [`SessionTemporalExecutionPort`] is
-//! [`super::RegisteredGlobalDbSessionTemporalExecution`] in this module, and
-//! the top-of-stack use-case layer (now `tracedecay-usecases`) already
-//! depends on `global_db` — so the port had to land beside its implementer or
-//! become a cycle.
-//!
-//! The four helpers root's `session::retrieval` drives (`new`,
-//! `with_direct_anchor`, `into_kernel_request`, `validates_report`) were
-//! `pub(crate)` inside the root binary; they are `pub` here so the same
-//! callers keep working across the crate boundary.
+//! The only implementation of [`SessionTemporalExecutionPort`] is
+//! [`super::RegisteredGlobalDbSessionTemporalExecution`] in this module.
+//! Use-case callers depend on `global_db`, so the port lives beside its
+//! implementer to avoid a crate cycle.
 
 use std::fmt;
 use std::future::Future;
@@ -512,10 +505,9 @@ where
 
 /// How current the data behind a temporal execution is.
 ///
-/// Moved down alongside the port that reports it (root
-/// `src/application/session/types.rs`); the freshness verdict is derived
-/// entirely from a `SessionSourceCoverageReceiptV1`, so it carries no
-/// composition-root dependency.
+/// The freshness verdict is derived entirely from a
+/// `SessionSourceCoverageReceiptV1`, so it carries no composition-root
+/// dependency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionDataFreshness {
     Fresh,

@@ -80,10 +80,7 @@ impl ExtractionState {
 }
 
 impl MsBasic2Extractor {
-    /// Extract code graph nodes and edges from an MS BASIC 2.0 source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the BASIC source code to parse.
     pub fn extract_msbasic2(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -141,7 +138,6 @@ impl MsBasic2Extractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Collect the selected program lines before synthesizing declarations.
         let mut selected_lines = Vec::new();
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             if child.kind() == "line" {
@@ -180,7 +176,6 @@ impl MsBasic2Extractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Collect the program lines selected by the parsed extraction scope.
     fn collect_selected_lines<'tree>(
         state: &ExtractionState,
         tree: &'tree Tree,
@@ -466,7 +461,6 @@ impl MsBasic2Extractor {
                         });
                     }
 
-                    // Extract GOSUB/GOTO call sites from the body.
                     for line in &lines[body_start..body_end] {
                         Self::extract_calls_from_line(state, line, &fn_id);
                     }
@@ -508,7 +502,6 @@ impl MsBasic2Extractor {
         let kind = node.kind();
         match kind {
             "gosub_statement" | "goto_statement" => {
-                // Extract the target line number.
                 if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {

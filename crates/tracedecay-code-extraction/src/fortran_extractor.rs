@@ -73,7 +73,6 @@ impl ExtractionState {
 }
 
 impl FortranExtractor {
-    /// Extract code graph nodes and edges from a Fortran source file.
     pub fn extract_fortran(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -157,7 +156,6 @@ impl FortranExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -171,7 +169,6 @@ impl FortranExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "module" => Self::visit_module(state, node),
@@ -722,10 +719,6 @@ impl FortranExtractor {
         }
     }
 
-    // ----------------------------
-    // Name extraction helpers
-    // ----------------------------
-
     /// Find the module name from a module node.
     /// Structure: module -> `module_statement` -> name
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
@@ -804,10 +797,6 @@ impl FortranExtractor {
         }
         false
     }
-
-    // ----------------------------
-    // Signature and docstring helpers
-    // ----------------------------
 
     /// Extract the first line of a node as its signature.
     fn extract_first_line_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {

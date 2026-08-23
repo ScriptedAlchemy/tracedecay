@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// Handles `tracedecay_signature_search` — substring search across the
-/// cached `signature` column on every Function/Method node.
+/// Substring search across the cached `signature` column on every
+/// Function/Method node.
 pub(crate) async fn handle_signature_search(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

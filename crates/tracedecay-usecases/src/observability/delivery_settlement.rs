@@ -24,7 +24,7 @@ pub struct DeliverySettlementEmissionV1 {
 }
 
 /// Canonical owner that commits a reported surface outcome before offering its
-/// complete census to Plan 26 observability. Callers may replay an exact
+/// complete census to observability. Callers may replay an exact
 /// receipt; this type does not scan or fabricate receipts after process loss.
 pub struct DeliverySettlementAuthorityV1 {
     db: RegisteredGlobalDbLeaseV1,

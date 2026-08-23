@@ -26,7 +26,6 @@ pub struct SnapshotCaptureOutcome {
     pub deferred_by_byte_cap: bool,
 }
 
-/// Provider-specific record material needed by the shared snapshot admission loop.
 pub trait SnapshotAdmissionRecord {
     fn provider(&self) -> &'static str;
     fn session_id(&self) -> &str;
@@ -44,7 +43,6 @@ pub trait SnapshotAdmissionRecord {
     }
 }
 
-/// Builds the canonical capture request shared by every snapshot provider.
 pub fn snapshot_capture_request<R>(
     record: &R,
     scope: ObservationScopeV1,
@@ -96,7 +94,6 @@ where
     .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })
 }
 
-/// Post-record snapshot cursor shared by provider capture-request tests.
 #[cfg(test)]
 pub fn snapshot_cursor_after(
     provider: &'static str,
@@ -161,7 +158,6 @@ where
     Ok(runner.finish())
 }
 
-/// Owns byte accounting and durable admission state for one snapshot-provider sweep.
 pub struct SnapshotAdmissionRunner {
     provider: &'static str,
     budget: IngestByteBudget,

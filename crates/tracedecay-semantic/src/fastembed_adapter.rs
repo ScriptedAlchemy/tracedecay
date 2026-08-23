@@ -1,4 +1,4 @@
-//! semantic `FastEmbed` semantic adapter
+//! `FastEmbed` embedding runtime adapter
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Root-private embedding runtime port surface. This file owns the typed

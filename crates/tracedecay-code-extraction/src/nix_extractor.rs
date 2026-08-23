@@ -193,9 +193,7 @@ impl NixExtractor {
         }
     }
 
-    /// Visit a let expression. Process bindings inside `binding_set` and the body.
     fn visit_let_expression(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Process binding_set for definitions
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -628,7 +626,6 @@ impl NixExtractor {
                 Self::visit_children_for_defs(state, node);
             }
             "let_expression" => {
-                // Process bindings and body
                 Self::visit_let_expression(state, node);
             }
             "attrset_expression" => {
@@ -641,7 +638,6 @@ impl NixExtractor {
         }
     }
 
-    /// Helper to recurse into children looking for definitions.
     fn visit_children_for_defs(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -655,7 +651,6 @@ impl NixExtractor {
         }
     }
 
-    /// Check if the file path ends with `flake.nix`.
     fn is_flake_file(state: &ExtractionState) -> bool {
         state.file_path.ends_with("flake.nix")
     }

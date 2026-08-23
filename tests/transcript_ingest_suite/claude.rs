@@ -1094,8 +1094,8 @@ async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].session.session_id, "agent-worker");
 
-    // Regression: a plain session with no PR links, edits, or subagent facts
-    // must not gain any of the new session-metadata keys.
+    // A plain session with no PR links, edits, or subagent facts must not
+    // gain any of the new session-metadata keys.
     let session = db
         .get_session("claude", "parent-claude")
         .await

@@ -40,7 +40,7 @@ pub enum SemanticActivationCoordinationErrorV1 {
     Runtime(#[from] SemanticRuntimeControlErrorV1),
 }
 
-/// Application coordinator for an already-authorized Plan 20 mutation and its
+/// Application coordinator for an already-authorized configuration mutation and its
 /// linked semantic profile transition. It never selects profiles, fabricates
 /// grants, or exposes a transport endpoint.
 pub struct ProductionSemanticActivationCoordinatorV1 {

@@ -2,10 +2,6 @@
 //!
 //! Long-lived-process opt-in for session-store maintenance, and the periodic
 //! semantic artifact GC whose task is joined during daemon shutdown.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use std::sync::Arc;
 

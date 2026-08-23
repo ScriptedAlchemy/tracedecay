@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Kinds of nodes in the code graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
     File,
@@ -241,7 +240,6 @@ impl NodeKind {
     }
 }
 
-/// Kinds of edges in the code graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
     Contains,
@@ -290,7 +288,6 @@ impl EdgeKind {
     }
 }
 
-/// Visibility of a code item.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Visibility {
     Pub,
@@ -322,7 +319,6 @@ impl Visibility {
     }
 }
 
-/// A node in the code graph representing a code entity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
@@ -365,7 +361,6 @@ pub struct Node {
     pub parent_id: Option<String>,
 }
 
-/// An edge in the code graph representing a relationship between nodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     pub source: String,
@@ -374,7 +369,6 @@ pub struct Edge {
     pub line: Option<u32>,
 }
 
-/// Record tracking an indexed file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRecord {
     pub path: String,
@@ -385,7 +379,6 @@ pub struct FileRecord {
     pub node_count: u32,
 }
 
-/// An unresolved reference found during parsing, to be resolved later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnresolvedRef {
     pub from_node_id: String,
@@ -396,7 +389,6 @@ pub struct UnresolvedRef {
     pub file_path: String,
 }
 
-/// Result of extracting code entities from a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
     pub nodes: Vec<Node>,
@@ -477,7 +469,6 @@ impl ExtractionResult {
     }
 }
 
-/// A subgraph containing a subset of nodes and edges.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Subgraph {
     pub nodes: Vec<Node>,
@@ -485,7 +476,6 @@ pub struct Subgraph {
     pub roots: Vec<String>,
 }
 
-/// A search result pairing a node with a relevance score.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub node: Node,
@@ -499,7 +489,6 @@ pub struct IndexCoverageHint {
     pub suggested_command: String,
 }
 
-/// Direction for graph traversal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TraversalDirection {
     Outgoing,
@@ -507,7 +496,6 @@ pub enum TraversalDirection {
     Both,
 }
 
-/// Options controlling graph traversal behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraversalOptions {
     pub max_depth: u32,
@@ -531,7 +519,6 @@ impl Default for TraversalOptions {
     }
 }
 
-/// Statistics about the code graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {
     pub node_count: u64,
@@ -553,7 +540,6 @@ pub struct GraphStats {
     pub last_sync_duration_ms: u64,
 }
 
-/// Options for building an LLM context from the graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildContextOptions {
     pub max_nodes: usize,
@@ -602,14 +588,12 @@ impl Default for BuildContextOptions {
     }
 }
 
-/// Output format for CLI results.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputFormat {
     Markdown,
     Json,
 }
 
-/// Context assembled for a task, combining graph data with code blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskContext {
     pub query: String,
@@ -622,7 +606,6 @@ pub struct TaskContext {
     pub seen_node_ids: Vec<String>,
 }
 
-/// A block of source code extracted from a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeBlock {
     pub content: String,
@@ -649,7 +632,6 @@ pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32)
     format!("{}:{}", kind.as_str(), &hex_str[..32])
 }
 
-/// Result of resolving references in the graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionResult {
     pub resolved: Vec<ResolvedRef>,
@@ -658,7 +640,6 @@ pub struct ResolutionResult {
     pub resolved_count: usize,
 }
 
-/// A reference that has been resolved to a target node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedRef {
     pub original: UnresolvedRef,

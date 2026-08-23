@@ -75,7 +75,7 @@ impl NativeIntegrationSelectionBindingV1 {
     }
 }
 
-/// Exact Plan 16 identity passed to the injected topology authority.
+/// Exact identity passed to the injected topology authority.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeIntegrationStackResolutionRequestV1 {

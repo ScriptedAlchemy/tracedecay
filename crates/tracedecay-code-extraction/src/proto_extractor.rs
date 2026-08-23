@@ -70,7 +70,6 @@ impl ExtractionState {
 }
 
 impl ProtoExtractor {
-    /// Extract code graph nodes and edges from a Protobuf source file.
     pub fn extract_proto(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -153,7 +152,6 @@ impl ProtoExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package" => Self::visit_package(state, node),
@@ -760,10 +758,6 @@ impl ProtoExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper methods
-    // ----------------------------
 
     /// Extract docstrings from `// comment` lines preceding definitions.
     ///

@@ -146,7 +146,6 @@ async fn drive_messages(
     responses
 }
 
-/// Helper to build a JSON-RPC request string.
 pub(crate) fn jsonrpc_request(id: Value, method: &str, params: Value) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -162,7 +161,6 @@ pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
         .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
 }
 
-/// Helper to build a JSON-RPC notification string (no id).
 pub(crate) fn jsonrpc_notification(method: &str) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -180,7 +178,6 @@ pub(crate) fn jsonrpc_notification_with_params(method: &str, params: Value) -> S
     .unwrap()
 }
 
-/// Parses a JSON-RPC response and returns it.
 pub(crate) fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }

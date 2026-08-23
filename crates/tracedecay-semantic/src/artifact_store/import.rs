@@ -1,7 +1,5 @@
 //! Resumable import, staging, and revoke/rollback-retain flows for
-//! ModelArtifactStore. Split out of artifact_store.rs to keep the facade
-//! under the 1000-line hygiene ceiling; pure structural move, no behavior
-//! change.
+//! ModelArtifactStore.
 
 use super::*;
 

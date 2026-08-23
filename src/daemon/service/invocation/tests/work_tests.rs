@@ -1,5 +1,3 @@
-//! `work` module test coverage.
-
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};

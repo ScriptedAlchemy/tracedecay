@@ -1,5 +1,4 @@
-//! Generation-scoped retention for the append-only observation evidence stores
-//! (plan 38 §3, final clause).
+//! Generation-scoped retention for the append-only observation evidence stores.
 //!
 //! The observation store keeps three append-only, forever-growing evidence
 //! tables that dominated one observed `sessions.db`:
@@ -11,9 +10,8 @@
 //! * `observation_repository_provenance` — the repository-provenance payload
 //!   (`availability_json` + `capture_json`, 1.4 GB measured).
 //!
-//! Plan 38 §3 makes these gain "generation-scoped retention tied to anchor
-//! dispositions — superseded and deleted dispositions release their storage."
-//! This module is the retention pass that does exactly that, mirroring the
+//! Superseded and deleted dispositions release their storage. This module
+//! is the retention pass that does that, mirroring the
 //! sibling LCM slice ([`tracedecay_sessions::runtime::lcm::retention`]): a bounded,
 //! DryRun/Apply, before/after-measured engine.
 //!
@@ -31,10 +29,9 @@
 //! * `deleted` — the evidence was retired (user request, retention, redaction,
 //!   …).
 //!
-//! Only `superseded` and `deleted` current states release storage. This is the
-//! plan's non-goal ("no lossy deletion of live, referenced evidence") expressed
-//! directly in SQL: the `active`/`unavailable` predicate branch is simply never
-//! selected.
+//! Only `superseded` and `deleted` current states release storage. Live and
+//! source-unavailable evidence is never released: the `active`/`unavailable`
+//! predicate branch is never selected.
 //!
 //! # Ledger-vs-payload design decision
 //!

@@ -1,13 +1,7 @@
-//! Kernel-owned slice of the root `branch` module.
+//! Shared branch-add lock and current-branch read used by `branch_meta` and
+//! `worktree`.
 //!
-//! `branch_meta` and `worktree` moved into this crate and they need three
-//! branch items: the shared branch-add lock (both the try and blocking
-//! variants) and the current-branch read. Those definitions live here; the
-//! root `branch` module re-exports them so `crate::branch::<item>` keeps
-//! resolving on both sides of the split.
-//!
-//! Everything else about branch tracking (admin mutations, snapshots, GC)
-//! stays in the root module.
+//! Admin mutations, snapshots, and GC stay in the root `branch` module.
 
 use std::path::Path;
 

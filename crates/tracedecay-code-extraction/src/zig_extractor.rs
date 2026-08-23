@@ -76,10 +76,7 @@ impl ExtractionState {
 }
 
 impl ZigExtractor {
-    /// Extract code graph nodes and edges from a Zig source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Zig source code to parse.
     pub fn extract_zig(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -163,7 +160,6 @@ impl ZigExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "variable_declaration" => Self::visit_variable_declaration(state, node),
@@ -172,10 +168,6 @@ impl ZigExtractor {
             _ => {}
         }
     }
-
-    // ----------------------------------
-    // variable_declaration
-    // ----------------------------------
 
     /// Visit a `variable_declaration` node.
     ///
@@ -254,10 +246,6 @@ impl ZigExtractor {
             .is_some_and(|n| state.node_text(n) == "@import")
     }
 
-    // ----------------------------------
-    // Import (@import)
-    // ----------------------------------
-
     /// Extract an import declaration: `const X = @import("module")`.
     fn visit_import(
         state: &mut ExtractionState,
@@ -323,10 +311,6 @@ impl ZigExtractor {
         let text = state.node_text(content);
         if text.is_empty() { None } else { Some(text) }
     }
-
-    // ----------------------------------
-    // Struct
-    // ----------------------------------
 
     /// Extract a struct definition: `const Point = struct { ... }`.
     fn visit_struct(
@@ -404,10 +388,6 @@ impl ZigExtractor {
             }
         }
     }
-
-    // ----------------------------------
-    // Enum
-    // ----------------------------------
 
     /// Extract an enum definition: `const LogLevel = enum { ... }`.
     fn visit_enum(
@@ -532,10 +512,6 @@ impl ZigExtractor {
         }
     }
 
-    // ----------------------------------
-    // Const (plain)
-    // ----------------------------------
-
     /// Extract a plain constant: `const max_connections: u32 = 100`.
     fn visit_const(state: &mut ExtractionState, node: TsNode<'_>, name: &str) {
         let docstring = Self::extract_docstring(state, node);
@@ -583,10 +559,6 @@ impl ZigExtractor {
             });
         }
     }
-
-    // ----------------------------------
-    // Field
-    // ----------------------------------
 
     /// Extract a field from a `container_field` inside a struct.
     fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -638,10 +610,6 @@ impl ZigExtractor {
             });
         }
     }
-
-    // ----------------------------------
-    // Function / Method
-    // ----------------------------------
 
     /// Extract a function or method declaration.
     ///
@@ -712,10 +680,6 @@ impl ZigExtractor {
         Self::extract_call_sites(state, node, &id);
     }
 
-    // ----------------------------------
-    // Test declaration
-    // ----------------------------------
-
     /// Extract a test declaration: `test "name" { ... }`.
     fn visit_test(state: &mut ExtractionState, node: TsNode<'_>) {
         // The test name is in a string child.
@@ -777,10 +741,6 @@ impl ZigExtractor {
 
         Self::extract_call_sites(state, node, &id);
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Check if a `function_declaration` node has the `pub` keyword.
     ///

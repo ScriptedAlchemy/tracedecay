@@ -289,7 +289,6 @@ async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedSc
     })
 }
 
-/// Handles `tracedecay_analytics` tool calls.
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,

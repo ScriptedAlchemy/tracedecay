@@ -74,8 +74,7 @@ function createRenderClock(connection: SseConnection): RenderClock {
 const EventsContext = createContext<SseConnection | null>(null);
 const RenderClockContext = createContext<RenderClock | null>(null);
 
-/** Mounts one event-stream connection for the whole app (plan: workspaces
- * never open ad hoc EventSources). */
+/** One app-wide event-stream connection; workspaces never open EventSources. */
 export function EventsProvider({ children, url }: { children: ReactNode; url?: string }) {
   const connection = useMemo(() => connectEvents(url), [url]);
   const clock = useMemo(() => createRenderClock(connection), [connection]);

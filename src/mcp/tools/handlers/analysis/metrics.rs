@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_rank` tool calls.
 pub(crate) async fn handle_rank(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -125,7 +124,6 @@ pub(crate) async fn handle_rank(
     ))
 }
 
-/// Handles `tracedecay_largest` tool calls.
 pub(crate) async fn handle_largest(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -186,7 +184,6 @@ pub(crate) async fn handle_largest(
     ))
 }
 
-/// Handles `tracedecay_coupling` tool calls.
 pub(crate) async fn handle_coupling(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -273,7 +270,6 @@ pub(crate) async fn handle_coupling(
     ))
 }
 
-/// Handles `tracedecay_inheritance_depth` tool calls.
 pub(crate) async fn handle_inheritance_depth(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -362,7 +358,6 @@ fn inheritance_depth(
     Ok(depth)
 }
 
-/// Handles `tracedecay_distribution` tool calls.
 pub(crate) async fn handle_distribution(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

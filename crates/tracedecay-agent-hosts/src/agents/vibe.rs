@@ -24,10 +24,8 @@ use crate::errors::Result;
 
 use super::{AgentIntegration, DoctorCounters, HealthcheckContext};
 
-/// Mistral Vibe agent.
 pub struct VibeIntegration;
 
-/// Returns the Vibe home directory.
 /// Respects `VIBE_HOME` only when it falls under `home` (so tests with
 /// temp-dir homes are not polluted by the real user's environment).
 fn vibe_home(home: &Path) -> std::path::PathBuf {

@@ -3,10 +3,6 @@
 //! Owns the typed refusals a route open can raise (capacity, cancellation,
 //! warming), the handshake-to-route mapping, the open and maintenance gates,
 //! and the portable owner reconciler.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 

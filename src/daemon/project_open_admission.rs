@@ -4,9 +4,6 @@
 //! Tracks which project opens are running, which failed, and how long a failed
 //! open stays backed off, so a repeated request neither stampedes nor retries a
 //! known-unrepairable store.
-//!
-//! `use super::*` re-exposes the daemon authorities used by these admission
-//! and ownership records.
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet, HashSet};

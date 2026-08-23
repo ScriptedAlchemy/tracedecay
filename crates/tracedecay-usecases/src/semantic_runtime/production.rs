@@ -688,7 +688,7 @@ impl ProductionSemanticRuntimeV1 {
             .build_id()
             .clone();
 
-        // Replay workload (Plan 31): the first writer begins the durable
+        // Replay workload: the first writer begins the durable
         // stage and dies before committing; a fresh store partition recovers
         // that stage and drives the identical prepared batch through commit
         // and publication. This measures the real replay path — durable

@@ -1,6 +1,4 @@
 //! I/O and validation primitives for the model artifact store.
-//! Split out of artifact_store.rs to keep the facade under the 1000-line
-//! hygiene ceiling; pure structural move, no behavior change.
 
 use super::*;
 

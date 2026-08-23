@@ -57,7 +57,6 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
     "vibe_session_location_provenance",
 );
 
-/// Vibe session locator + parser.
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,

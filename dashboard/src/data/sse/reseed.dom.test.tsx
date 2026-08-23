@@ -1,16 +1,7 @@
 /**
- * The canonical-refresh transaction, driven end to end by the render layer.
- *
- * `coalescing.dom.test.tsx` proves the render ceiling and that one overflow
- * produces one invalidation. These cases prove the other half: what happens to
- * signals and events raised *while* that one invalidation is still in flight.
- * A whole-projection refresh settles only after every active query refetches,
- * which routinely outlasts several 100 ms ticks, so the window is wide and
- * everything that lands in it has to survive.
- *
- * The window is held open explicitly — `invalidateQueries` is replaced by a
- * promise this file settles by hand — so no case depends on a wall clock. The
- * SSE clock is vitest's fake timer, advanced by exactly one tick period.
+ * Canonical-refresh mid-flight: signals and events that arrive while
+ * `invalidateQueries` is parked. The window is held open by hand so no case
+ * depends on a wall clock; the SSE clock is a fake timer, one tick at a time.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render } from '@testing-library/react';
@@ -184,9 +175,6 @@ describe('SSE canonical refresh — events during the window', () => {
     expect(refresh.spy).toHaveBeenCalledTimes(1);
     expect(refresh.spy).toHaveBeenCalledWith();
 
-    // A registry change lands inside the window, in a batch that also carries a
-    // canonical flag of its own. Draining that batch and then discarding it
-    // threw away an invalidation the event had already earned.
     await tick(() => {
       source.emit('project_registry', frame('project_registry', 'project_registry_changed', 1));
       source.emit('project_registry', frame('project_registry', 'project_registry_changed', 5));
@@ -207,9 +195,6 @@ describe('SSE canonical refresh — signals during the window', () => {
     await openRefreshWithGap(source);
     expect(refresh.spy).toHaveBeenCalledTimes(1);
 
-    // A second gap, inside the window. The drain clears the batch's refetch
-    // flag, so this signal only survives if the reducer remembers it as an
-    // epoch the in-flight refresh cannot claim to have covered.
     await tick(() => {
       source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 20));
     });
