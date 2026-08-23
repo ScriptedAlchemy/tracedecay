@@ -1323,14 +1323,26 @@ fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
 #[test]
 fn the_ceiling_reports_a_typed_retryable_problem() {
     let error = tool_dispatch_deadline_error("tracedecay_context", TOOL_DISPATCH_CEILING);
-    let rendered = error.to_string();
-    assert!(
-        rendered.contains("tracedecay_context"),
-        "the problem must name the tool, got {rendered:?}",
+    let (reason_code, retryable, detail) = error
+        .project_route_context()
+        .expect("the ceiling must surface a typed project-route problem, not an opaque error");
+    assert_eq!(
+        reason_code, "tool_dispatch_deadline_exceeded",
+        "the ceiling must keep its own reason code so callers can branch on it",
     );
     assert!(
-        rendered.contains("dispatch ceiling"),
-        "the problem must name the ceiling, got {rendered:?}",
+        retryable,
+        "a dispatch-ceiling cancellation is retryable: nothing was committed",
+    );
+    // The typed fields carry the shape; only the detail names the subject, so
+    // these two checks assert information the typed fields cannot express.
+    assert!(
+        detail.contains("tracedecay_context"),
+        "the problem must name the tool it cancelled, got {detail:?}",
+    );
+    assert!(
+        detail.contains(&format!("{}s", TOOL_DISPATCH_CEILING.as_secs())),
+        "the problem must name the budget it enforced, got {detail:?}",
     );
 }
 
