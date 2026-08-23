@@ -637,11 +637,13 @@ where
         let candidates = picks
             .into_iter()
             .take(limit)
-            .map(|(item, evidence, applicability)| WorkExperienceCandidateV1 {
-                item: item.clone(),
-                evidence: evidence.iter().copied().cloned().collect(),
-                applicability,
-            })
+            .map(
+                |(item, evidence, applicability)| WorkExperienceCandidateV1 {
+                    item: item.clone(),
+                    evidence: evidence.iter().copied().cloned().collect(),
+                    applicability,
+                },
+            )
             .collect::<Vec<_>>();
         let returned = bounded(candidates.len())?;
         let coverage = if omitted == 0 {

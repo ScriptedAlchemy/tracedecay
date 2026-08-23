@@ -1759,8 +1759,12 @@ impl ProductionSemanticRuntimeV1 {
             return Ok(Arc::clone(&cached.port));
         }
         let port = Arc::new(
-            PublishedSemanticVectorReadPortV1::new(active, search_index_key.clone(), code_generation)
-                .map_err(|_| SemanticQueryServiceError::InvalidFallback)?,
+            PublishedSemanticVectorReadPortV1::new(
+                active,
+                search_index_key.clone(),
+                code_generation,
+            )
+            .map_err(|_| SemanticQueryServiceError::InvalidFallback)?,
         );
         if let Ok(mut guard) = self.vector_read_cache.lock() {
             *guard = Some(CachedPublishedVectorsV1 {

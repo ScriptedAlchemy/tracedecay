@@ -1,7 +1,7 @@
 use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
 use super::{
-    EnvGuard, HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id, mint_hint_id,
-    record_hint_emitted, record_hook_invoked,
+    EnvGuard, HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
+    mint_hint_id, record_hint_emitted, record_hook_invoked,
 };
 use crate::config::USER_DATA_DIR_ENV;
 use std::collections::HashSet;

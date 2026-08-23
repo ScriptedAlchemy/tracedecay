@@ -30,8 +30,8 @@ use crate::automation::skill_targets::{
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    McpUninstallPolicy, backup_config_file, config_backup_path, install_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
+    UpdatePluginOutcome, backup_config_file, config_backup_path, install_mcp_server_entry,
     load_json_file, load_json_file_strict, mcp_config_has_tracedecay, safe_write_json_file,
     uninstall_mcp_server_entry,
 };

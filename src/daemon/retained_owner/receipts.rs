@@ -573,9 +573,7 @@ impl std::io::Write for CountingSink {
     }
 }
 
-fn count_serialized_bytes<T: Serialize>(
-    value: &T,
-) -> Result<u64, RetainedSurfaceExecutionErrorV1> {
+fn count_serialized_bytes<T: Serialize>(value: &T) -> Result<u64, RetainedSurfaceExecutionErrorV1> {
     let mut output = CountingSink { written: 0 };
     serde_json::to_writer(&mut output, value)
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;

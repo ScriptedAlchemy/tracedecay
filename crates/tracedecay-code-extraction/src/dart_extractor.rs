@@ -1237,7 +1237,12 @@ impl DartExtractor {
         let docstring = Self::extract_docstring(state, decl_node);
         let text = state.node_str(decl_node);
         let signature = if let Some(body) = decl_node.child_by_field_name("body") {
-            Some(state.text_before(decl_node, body.start_byte()).trim().to_string())
+            Some(
+                state
+                    .text_before(decl_node, body.start_byte())
+                    .trim()
+                    .to_string(),
+            )
         } else if let Some(pos) = text.find('{') {
             Some(text[..pos].trim().to_string())
         } else if let Some(pos) = text.find("=>") {
@@ -1314,7 +1319,12 @@ impl DartExtractor {
 
         let docstring = Self::extract_docstring(state, decl_node);
         let signature = if let Some(body) = decl_node.child_by_field_name("body") {
-            Some(state.text_before(decl_node, body.start_byte()).trim().to_string())
+            Some(
+                state
+                    .text_before(decl_node, body.start_byte())
+                    .trim()
+                    .to_string(),
+            )
         } else if let Some(pos) = text.find('{') {
             Some(text[..pos].trim().to_string())
         } else {
@@ -1625,7 +1635,10 @@ impl DartExtractor {
     /// Extract a signature by slicing to the body child, else the first `{`.
     fn extract_signature_to_brace(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(body) = node.child_by_field_name("body") {
-            return state.text_before(node, body.start_byte()).trim().to_string();
+            return state
+                .text_before(node, body.start_byte())
+                .trim()
+                .to_string();
         }
         let text = state.node_str(node);
         if let Some(brace_pos) = text.find('{') {

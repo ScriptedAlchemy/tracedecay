@@ -250,10 +250,7 @@ mod frame_base64 {
     use serde::{Deserializer, Serializer};
     use std::fmt;
 
-    pub(super) fn serialize<S: Serializer>(
-        bytes: &[u8],
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&STANDARD.encode(bytes))
     }
 

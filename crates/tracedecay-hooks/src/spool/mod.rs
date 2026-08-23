@@ -518,7 +518,10 @@ impl HookSpoolV1 {
     }
 
     fn pending_bytes(&self) -> u64 {
-        self.pending_by_session.values().map(|(_, bytes)| *bytes).sum()
+        self.pending_by_session
+            .values()
+            .map(|(_, bytes)| *bytes)
+            .sum()
     }
 
     fn forget_pending_event(&mut self, event_id: [u8; 16], removed_index: usize) {

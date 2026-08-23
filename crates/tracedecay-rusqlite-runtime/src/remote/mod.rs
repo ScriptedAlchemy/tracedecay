@@ -696,8 +696,8 @@ impl RemoteSqliteStorageV1 {
         let capture = self
             .decrypt_frame(event_id, key_revision, nonce, ciphertext.clone())
             .map_err(RemoteSqliteStorageErrorV1::from)?;
-        let actual_digest = canonical_sha256(&capture)
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let actual_digest =
+            canonical_sha256(&capture).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let canonical_event_id = canonical_remote_event_id_v1(&capture)
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         if actual_digest.as_str() != frame_digest.as_str() || event_id != canonical_event_id {

@@ -620,9 +620,8 @@ fn component_assets(
     files
         .into_iter()
         .map(|(path, body)| {
-            render_compiled_asset(body, tracedecay_bin).map(|rendered| {
-                (format!("{prefix}/{path}"), rendered.into_bytes())
-            })
+            render_compiled_asset(body, tracedecay_bin)
+                .map(|rendered| (format!("{prefix}/{path}"), rendered.into_bytes()))
         })
         .collect()
 }

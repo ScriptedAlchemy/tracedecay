@@ -151,7 +151,7 @@ pub(super) async fn publish_candidate_generation(
              FROM session_temporal_generations WHERE session_id = ?1",
             params![session_id],
         )
-            .await?;
+        .await?;
     let max_generation: i64 = max_rows
         .next()
         .await?

@@ -3054,10 +3054,10 @@ mod path_tests {
 
     // The symlink-escape test that exercises open_project_file is unix-only.
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
-    #[cfg(unix)]
     use super::open_project_file;
     use super::validated_document_path;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn admitted_root() -> (TempDir, std::path::PathBuf, Url, Dir) {
         let temp = TempDir::new().expect("temporary directory");

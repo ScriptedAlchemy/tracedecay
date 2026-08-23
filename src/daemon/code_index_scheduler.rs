@@ -198,7 +198,8 @@ impl SharedCodeIndexBytePoolV1 {
                 .saturating_mul(2)
         {
             pool.retain(|_, entry| entry.strong_count() > 0);
-            self.last_prune_len.store(pool.len().max(1), Ordering::Relaxed);
+            self.last_prune_len
+                .store(pool.len().max(1), Ordering::Relaxed);
         }
         (digest, shared)
     }
@@ -2985,7 +2986,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision
             });
-            let active_content_identity = latest_snapshot.map(|snapshot| &snapshot.content_identity);
+            let active_content_identity =
+                latest_snapshot.map(|snapshot| &snapshot.content_identity);
             if self
                 .latest_content_identity
                 .as_ref()
@@ -3876,7 +3878,10 @@ fn sha256_private_file_hex_and_size(
             "code text artifact named file changed while hashing".to_owned(),
         ));
     }
-    Ok((encode_lowercase_hex(&hasher.finalize()), file_metadata.len()))
+    Ok((
+        encode_lowercase_hex(&hasher.finalize()),
+        file_metadata.len(),
+    ))
 }
 
 fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {

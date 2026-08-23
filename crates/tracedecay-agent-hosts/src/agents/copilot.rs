@@ -355,7 +355,11 @@ fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
         dc,
         &settings_path,
         load_json_file,
-        |settings| settings.get("mcpServers").and_then(|servers| servers.get("tracedecay")),
+        |settings| {
+            settings
+                .get("mcpServers")
+                .and_then(|servers| servers.get("tracedecay"))
+        },
         &format!(
             "{} not found — run `tracedecay install --agent copilot` if you use Copilot CLI",
             settings_path.display()

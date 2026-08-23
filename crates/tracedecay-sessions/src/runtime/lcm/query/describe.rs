@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use super::*;
 use super::super::util::{SQLITE_IN_BATCH_SIZE, sql_in_placeholders};
+use super::*;
 
 pub(super) async fn raw_message_overviews(
     conn: &(impl QueryExecutor + ?Sized),

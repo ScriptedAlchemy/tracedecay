@@ -1410,14 +1410,12 @@ async fn stage_rebuild_session(
             None => read_session(conn, &expected.provider, &expected.session_id).await?,
         };
     let session = match actual {
-        Some(actual) => {
-            reconcile_session_rows(&actual, &expected).ok_or_else(|| {
-                ProjectionStoreError::OutputCollision {
-                    provider: expected.provider.clone(),
-                    message_id: format!("session:{}", expected.session_id),
-                }
-            })?
-        }
+        Some(actual) => reconcile_session_rows(&actual, &expected).ok_or_else(|| {
+            ProjectionStoreError::OutputCollision {
+                provider: expected.provider.clone(),
+                message_id: format!("session:{}", expected.session_id),
+            }
+        })?,
         None => expected,
     };
     let json = encode_json(&session, "encode staged projection session")?;

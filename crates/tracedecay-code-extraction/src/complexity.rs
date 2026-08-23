@@ -199,7 +199,11 @@ fn push_children<'a>(stack: &mut Vec<(TsNode<'a>, u32)>, parent: TsNode<'a>, dep
 ///
 /// Returns a `&str` borrowed from `source`: this runs for every call
 /// expression in the per-node loop, so it must not allocate.
-fn extract_call_name<'s>(node: TsNode<'_>, method_field: &str, source: &'s [u8]) -> Option<&'s str> {
+fn extract_call_name<'s>(
+    node: TsNode<'_>,
+    method_field: &str,
+    source: &'s [u8],
+) -> Option<&'s str> {
     // Try the configured field name first.
     if !method_field.is_empty()
         && let Some(field_node) = node.child_by_field_name(method_field)

@@ -3,8 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 
 use super::super::token_count::{
-    ContentFingerprint, TokenCountCache, content_fingerprint, count_text_tokens,
-    counting_available,
+    ContentFingerprint, TokenCountCache, content_fingerprint, count_text_tokens, counting_available,
 };
 use super::{
     DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
@@ -297,9 +296,7 @@ fn count_displayed_token_batch(
             .collect::<Vec<_>>()
     };
     match tokio::runtime::Handle::try_current() {
-        Ok(handle)
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-        {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| {
                 handle
                     .block_on(tokio::task::spawn_blocking(count))

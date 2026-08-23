@@ -1052,7 +1052,12 @@ fn validate_revision_collisions(
                     .digest()
                     .as_str()
                     .to_owned(),
-                mutation.observation().revision().digest().as_str().to_owned(),
+                mutation
+                    .observation()
+                    .revision()
+                    .digest()
+                    .as_str()
+                    .to_owned(),
             );
             let encoded = encodings.get(mutation.mutation_digest().as_str());
             if stored

@@ -82,7 +82,8 @@ impl QueryExecutor for RowVisitCounter<'_> {
             }
             replay.push(Row::from_values(values));
         }
-        self.rows_visited.set(self.rows_visited.get() + replay.len());
+        self.rows_visited
+            .set(self.rows_visited.get() + replay.len());
         Ok(Rows::from_parts(columns, replay))
     }
 }

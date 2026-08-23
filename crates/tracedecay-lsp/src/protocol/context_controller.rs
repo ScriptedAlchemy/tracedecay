@@ -34,8 +34,7 @@ impl std::io::Write for CountingSink {
 
 fn json_payload_exceeds(value: &Value, max_bytes: usize) -> bool {
     let mut output = CountingSink { written: 0 };
-    serde_json::to_writer(&mut output, value)
-        .map_or(true, |_| output.written > max_bytes as u64)
+    serde_json::to_writer(&mut output, value).map_or(true, |_| output.written > max_bytes as u64)
 }
 
 fn context_envelope_value<T: Serialize>(

@@ -279,11 +279,7 @@ fn tokens_saved_query(project_path: Option<&str>) -> (String, Vec<Value>) {
     (sql, values)
 }
 
-fn savings_scope_query(
-    select: &str,
-    project_id: Option<&str>,
-    since: i64,
-) -> (String, Vec<Value>) {
+fn savings_scope_query(select: &str, project_id: Option<&str>, since: i64) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
     push_optional_analytics_filter(&mut clauses, &mut values, "project_path", project_id);

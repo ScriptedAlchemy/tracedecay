@@ -100,9 +100,7 @@ impl AutomationSkipReasonV1 {
             | Self::NothingToReview => task == AutomationTaskV1::MemoryCurator,
             Self::SessionReflectorDisabled
             | Self::NoNewSessionActivity
-            | Self::ShippedFactProposalHistoryRetired => {
-                task == AutomationTaskV1::SessionReflector
-            }
+            | Self::ShippedFactProposalHistoryRetired => task == AutomationTaskV1::SessionReflector,
             // Skill writer and combined review retrieve the same session
             // evidence surface as the reflector. A typed evidence skip must
             // remain a skip for those tasks instead of failing settlement.
@@ -126,9 +124,7 @@ impl AutomationSkipReasonV1 {
             ),
             Self::SkillWriterDisabled => task == AutomationTaskV1::SkillWriter,
             Self::CombinedReviewDisabled => task == AutomationTaskV1::CombinedReview,
-            Self::UserJobDisabled | Self::JobCommandsDisabled => {
-                task == AutomationTaskV1::UserJob
-            }
+            Self::UserJobDisabled | Self::JobCommandsDisabled => task == AutomationTaskV1::UserJob,
             Self::AutomationDisabled
             | Self::DelegatedHostMode
             | Self::BackendDisabled

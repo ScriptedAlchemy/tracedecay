@@ -8,8 +8,8 @@ use crate::error::rollback_failure;
 use crate::schema::{
     ENTITY_KEY_PROPERTY, ENTITY_LABEL, FORMAT_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
     PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, RELATION_LABEL,
-    SEQUENCE_PROPERTY, edge_properties, entity_key_label, entity_labels, entity_properties,
-    encoded_namespace_key, projection_properties, projection_state_label, publication_key_label,
+    SEQUENCE_PROPERTY, edge_properties, encoded_namespace_key, entity_key_label, entity_labels,
+    entity_properties, projection_properties, projection_state_label, publication_key_label,
     publication_properties, relation_locator_labels, relation_properties, relation_type_for_kind,
     stable_key_from_encoded,
 };
@@ -560,9 +560,12 @@ fn validate_references(
         match mutation {
             GraphMutation::DeleteRelation(identity) => {
                 let key = stable_key_from_encoded(&encoded_namespace, identity.as_str());
-                if let Some(owner) =
-                    relation_owner(&relations, &existing.relations, &encoded_namespace, identity)
-                    && owner != batch.projection
+                if let Some(owner) = relation_owner(
+                    &relations,
+                    &existing.relations,
+                    &encoded_namespace,
+                    identity,
+                ) && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }

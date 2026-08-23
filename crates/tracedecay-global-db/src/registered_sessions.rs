@@ -484,11 +484,15 @@ impl RegisteredGlobalDb {
                     }
                 };
                 let Some(session) = row_to_session(&row) else {
-                    tracing::warn!("session message search dropped a row with an unreadable session");
+                    tracing::warn!(
+                        "session message search dropped a row with an unreadable session"
+                    );
                     continue;
                 };
                 let Some(message) = row_to_message(&row, 13) else {
-                    tracing::warn!("session message search dropped a row with an unreadable message");
+                    tracing::warn!(
+                        "session message search dropped a row with an unreadable message"
+                    );
                     continue;
                 };
                 let score = row.get::<f64>(26).map_or(0.0, |rank| -rank);
@@ -649,11 +653,15 @@ impl RegisteredGlobalDb {
                     }
                 };
                 let Some(session) = row_to_session(&row) else {
-                    tracing::warn!("legacy session search dropped a row with an unreadable session");
+                    tracing::warn!(
+                        "legacy session search dropped a row with an unreadable session"
+                    );
                     continue;
                 };
                 let Some(message) = row_to_message(&row, 13) else {
-                    tracing::warn!("legacy session search dropped a row with an unreadable message");
+                    tracing::warn!(
+                        "legacy session search dropped a row with an unreadable message"
+                    );
                     continue;
                 };
                 results.push(SessionMessageSearchResult {

@@ -972,10 +972,12 @@ fn bind_blame_lines(
     lines
         .iter()
         .zip(symbols_by_line)
-        .map(|(line, symbol_occurrence_ids)| GenerationGitBlameLineJoinV1 {
-            line: line.clone(),
-            symbol_occurrence_ids,
-        })
+        .map(
+            |(line, symbol_occurrence_ids)| GenerationGitBlameLineJoinV1 {
+                line: line.clone(),
+                symbol_occurrence_ids,
+            },
+        )
         .collect()
 }
 

@@ -60,7 +60,10 @@ pub(super) fn worktree_stat_signature_for(
         buf.extend_from_slice(&mtime_nanos.to_le_bytes());
         buf.push(0xff);
     }
-    Ok(encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&buf)))
+    Ok(encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(&buf),
+    ))
 }
 
 /// Durable binding between one sealed generation and the exact ordinary plus

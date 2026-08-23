@@ -1,5 +1,5 @@
-use super::*;
 use super::super::util;
+use super::*;
 
 pub async fn load_session(
     conn: &(impl QueryExecutor + ?Sized),

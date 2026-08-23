@@ -64,7 +64,11 @@ impl AgentIntegration for AntigravityIntegration {
 
     fn has_tracedecay(&self, home: &Path) -> bool {
         super::mcp_config_has_tracedecay(&mcp_config_path(home), "mcpServers", load_json_file)
-            || super::mcp_config_has_tracedecay(&cli_plugin_path(home), "mcpServers", load_json_file)
+            || super::mcp_config_has_tracedecay(
+                &cli_plugin_path(home),
+                "mcpServers",
+                load_json_file,
+            )
     }
 }
 

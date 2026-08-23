@@ -659,8 +659,7 @@ impl GlslExtractor {
                     return true;
                 }
                 // Wrapped in type_qualifier: `type_qualifier > const`
-                if kind == "type_qualifier"
-                    && find_direct_child_by_kind(child, qualifier).is_some()
+                if kind == "type_qualifier" && find_direct_child_by_kind(child, qualifier).is_some()
                 {
                     return true;
                 }

@@ -15,10 +15,10 @@ use tracedecay_domain::{
 };
 
 use super::CodeIndexSchedulerRegistryV1;
-use super::registry::unique_mounted_for_scope;
 use super::query_runtime::{
     ExecutedQuerySearchV1, QuerySearchExecutionErrorV1, QuerySearchExecutionRequestV1,
 };
+use super::registry::unique_mounted_for_scope;
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;

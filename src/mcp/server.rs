@@ -646,8 +646,7 @@ impl McpServer {
                 let mut matches = Vec::new();
                 for server in &retained_servers {
                     let graph = server.cg_snapshot().await;
-                    let root =
-                        crate::lifecycle_lease::canonical_or_original(graph.project_root());
+                    let root = crate::lifecycle_lease::canonical_or_original(graph.project_root());
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });

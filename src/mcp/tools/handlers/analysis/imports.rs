@@ -248,13 +248,7 @@ pub(crate) async fn handle_unused_imports(
                     break;
                 }
             }
-            Ok((
-                unused,
-                touched,
-                scanned_files,
-                last_scanned,
-                partial_reason,
-            ))
+            Ok((unused, touched, scanned_files, last_scanned, partial_reason))
         })
         .await
         .map_err(|join_error| TraceDecayError::Config {

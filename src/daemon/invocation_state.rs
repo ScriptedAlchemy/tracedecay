@@ -506,8 +506,7 @@ impl DaemonInvocationState {
             let Some(request_lease) = self.service.admit_project_request_resolved(
                 &locator.canonical_root,
                 Some(&locator.canonical_root),
-            )
-            else {
+            ) else {
                 let Ok(generation) = unavailable_root_generation(
                     scope,
                     tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
@@ -849,14 +848,14 @@ enum ParsedMultiRootOperationV1 {
 
 fn parse_multi_root_operation(
     operation: &tracedecay_application::MultiRootOperationV1,
-) -> std::result::Result<ParsedMultiRootOperationV1, service::invocation::DaemonInvocationProblem>
-{
+) -> std::result::Result<ParsedMultiRootOperationV1, service::invocation::DaemonInvocationProblem> {
     match operation {
         tracedecay_application::MultiRootOperationV1::Work { request } => {
-            let request = serde_json::from_value::<
-                service::invocation::WorkApplicationInvocationV1,
-            >(request.clone())
-            .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            let request =
+                serde_json::from_value::<service::invocation::WorkApplicationInvocationV1>(
+                    request.clone(),
+                )
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
             if !matches!(
                 request,
                 service::invocation::WorkApplicationInvocationV1::Views(_)

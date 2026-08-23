@@ -119,9 +119,7 @@ pub struct AffectedTestTraversal {
     pub test_distances: HashMap<String, usize>,
 }
 
-pub fn rank_affected_tests(
-    test_distances: &HashMap<String, usize>,
-) -> Vec<RankedAffectedTest> {
+pub fn rank_affected_tests(test_distances: &HashMap<String, usize>) -> Vec<RankedAffectedTest> {
     let mut ranked = test_distances
         .iter()
         .map(|(path, distance)| RankedAffectedTest {

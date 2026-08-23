@@ -206,7 +206,9 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
 }
 
 fn usage_u64(usage: &Value, aliases: &[&str]) -> Option<u64> {
-    aliases.iter().find_map(|key| canonical_u64(usage.get(*key)))
+    aliases
+        .iter()
+        .find_map(|key| canonical_u64(usage.get(*key)))
 }
 
 fn canonical_u64(value: Option<&Value>) -> Option<u64> {

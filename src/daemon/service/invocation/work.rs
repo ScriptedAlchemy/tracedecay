@@ -22,8 +22,8 @@ use outcome::{
     work_topology_unavailable_problem,
 };
 pub(super) use outcome::{work_background_context, work_blocked_interval_recovery_context};
-pub(super) use workflow_dispatch::execute_workflow_application;
 use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
+pub(super) use workflow_dispatch::execute_workflow_application;
 use workflow_fan_out::reconcile_active_workflow_fan_out;
 
 pub(super) fn application_problem(

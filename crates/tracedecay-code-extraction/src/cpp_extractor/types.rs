@@ -180,8 +180,10 @@ impl CppExtractor {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_str(child).to_string());
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |child| state.node_str(child).to_string(),
+        );
         if name == "<anonymous>" {
             return;
         }
@@ -193,8 +195,10 @@ impl CppExtractor {
         if find_direct_child_by_kind(node, "enumerator_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_str(child).to_string());
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |child| state.node_str(child).to_string(),
+        );
         if name == "<anonymous>" {
             return;
         }

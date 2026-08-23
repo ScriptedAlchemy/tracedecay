@@ -345,7 +345,12 @@ impl ObjcExtractor {
         let end_column = node.end_position().column as u32;
         let signature = find_direct_child_by_kind(node, "enumerator_list")
             .or_else(|| find_direct_child_by_kind(node, "compound_statement"))
-            .map(|body| state.text_before(node, body.start_byte()).trim().to_string())
+            .map(|body| {
+                state
+                    .text_before(node, body.start_byte())
+                    .trim()
+                    .to_string()
+            })
             .or_else(|| {
                 let text = state.node_str(node);
                 text.find('{').map(|pos| text[..pos].trim().to_string())
@@ -1282,7 +1287,10 @@ impl ObjcExtractor {
             .child_by_field_name("body")
             .or_else(|| find_direct_child_by_kind(node, "compound_statement"))
         {
-            return state.text_before(node, body.start_byte()).trim().to_string();
+            return state
+                .text_before(node, body.start_byte())
+                .trim()
+                .to_string();
         }
         let text = state.node_str(node);
         if let Some(brace_pos) = text.find('{') {

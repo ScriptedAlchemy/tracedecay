@@ -649,8 +649,10 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::SessionWorkflow) => {
-                    boxed_send(dispatch_session_workflow_tools(tool_name, cg, args, options))
-                        .await
+                    boxed_send(dispatch_session_workflow_tools(
+                        tool_name, cg, args, options,
+                    ))
+                    .await
                 }
                 // Typed daemon surface tools already returned above; reaching here means
                 // the name resolves to no reachable dispatch entry.

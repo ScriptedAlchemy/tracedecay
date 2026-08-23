@@ -655,7 +655,9 @@ async fn probe_fact_lineage_tx(
     {
         observed_event = true;
         match row_optional_string(&row, 0, QUERY_OPERATION)?.as_deref() {
-            Some("assertion_recorded") if matches!(latest_assertion, LatestLineageField::Absent) => {
+            Some("assertion_recorded")
+                if matches!(latest_assertion, LatestLineageField::Absent) =>
+            {
                 latest_assertion =
                     LatestLineageField::Present(row_optional_string(&row, 1, QUERY_OPERATION)?);
             }

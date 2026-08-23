@@ -244,7 +244,9 @@ pub(super) fn encode_field(field: LexicalFieldV1) -> Result<String, CodeLexicalA
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-pub(super) fn encode_exact_field(field: ExactFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
+pub(super) fn encode_exact_field(
+    field: ExactFieldV1,
+) -> Result<String, CodeLexicalArtifactErrorV1> {
     serde_json::to_string(&field)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }

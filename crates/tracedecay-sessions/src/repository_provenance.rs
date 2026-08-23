@@ -861,11 +861,8 @@ fn privacy_bound_digest(
     for frame in frames {
         hash_frame(&mut hasher, frame);
     }
-    PrivacyDomainBoundLocatorDigest::new(encode_tagged_lowercase_hex(
-        "sha256:",
-        &hasher.finalize(),
-    ))
-    .ok()
+    PrivacyDomainBoundLocatorDigest::new(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
+        .ok()
 }
 
 fn derive_project_privacy_domain_salt(project_id: &ProjectId) -> [u8; 32] {

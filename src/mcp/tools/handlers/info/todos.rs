@@ -103,11 +103,12 @@ pub(crate) async fn handle_todos(
                 continue;
             }
             let project_path = ProjectPath::resolve(&project_root, Path::new(file))?;
-            let source = crate::sync::read_source_file(&project_path.absolute_path()).map_err(
-                |error| TraceDecayError::Config {
-                    message: format!("cannot read indexed source '{file}': {error}"),
-                },
-            )?;
+            let source =
+                crate::sync::read_source_file(&project_path.absolute_path()).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!("cannot read indexed source '{file}': {error}"),
+                    }
+                })?;
             let nodes = symbols_by_file.get(file);
 
             for (idx, line) in source.lines().enumerate() {

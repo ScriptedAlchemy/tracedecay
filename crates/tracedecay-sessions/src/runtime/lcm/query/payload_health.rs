@@ -187,8 +187,7 @@ pub async fn payload_health_detail(
             continue;
         }
 
-        if deep && payload_has_integrity_mismatch(storage_root, payload_ref, conn).await?
-        {
+        if deep && payload_has_integrity_mismatch(storage_root, payload_ref, conn).await? {
             integrity_mismatch_count += 1;
             if integrity_mismatch_refs.len() < sample_limit {
                 integrity_mismatch_refs.push(payload_ref.clone());
@@ -519,8 +518,7 @@ fn payload_unreferenced_samples(
         if samples.len() >= sample_limit {
             break;
         }
-        let eligible_at =
-            unreferenced_eligible_at(unreferenced_marks, payload_ref, grace_seconds);
+        let eligible_at = unreferenced_eligible_at(unreferenced_marks, payload_ref, grace_seconds);
         let grace_remaining_seconds = eligible_at.map(|ts| ts.saturating_sub(now).max(0));
         samples.push(PayloadRefStatusSample {
             payload_ref: payload_ref.clone(),

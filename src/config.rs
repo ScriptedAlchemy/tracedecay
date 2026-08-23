@@ -8,6 +8,7 @@ use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::clock::now_micros;
+use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
@@ -23,7 +24,6 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
-use tracedecay_domain::ProjectId;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::GlobalDbConfigurationControlStore;

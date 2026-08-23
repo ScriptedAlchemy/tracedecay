@@ -48,8 +48,14 @@ pub(super) async fn resolve_external_manifest(
 
     let stored_hash: String = row.get(0).map_err(super::hydration_failure)?;
     let kind: String = row.get(1).map_err(super::hydration_failure)?;
-    let byte_count = nonnegative_usize(row.get::<Option<i64>>(2).map_err(super::hydration_failure)?)?;
-    let char_count = nonnegative_usize(row.get::<Option<i64>>(3).map_err(super::hydration_failure)?)?;
+    let byte_count = nonnegative_usize(
+        row.get::<Option<i64>>(2)
+            .map_err(super::hydration_failure)?,
+    )?;
+    let char_count = nonnegative_usize(
+        row.get::<Option<i64>>(3)
+            .map_err(super::hydration_failure)?,
+    )?;
     let metadata: Option<String> = row.get(4).map_err(super::hydration_failure)?;
     let external_created_at: i64 = row.get(5).map_err(super::hydration_failure)?;
     let manifest_session: Option<String> = row.get(6).map_err(super::hydration_failure)?;
@@ -57,7 +63,12 @@ pub(super) async fn resolve_external_manifest(
     let manifest_json: Option<String> = row.get(8).map_err(super::hydration_failure)?;
     let receipt_id: Option<String> = row.get(9).map_err(super::hydration_failure)?;
     let manifest_created_at: Option<i64> = row.get(10).map_err(super::hydration_failure)?;
-    if rows.next().await.map_err(super::hydration_failure)?.is_some() {
+    if rows
+        .next()
+        .await
+        .map_err(super::hydration_failure)?
+        .is_some()
+    {
         return Ok(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
         ));
@@ -120,13 +131,22 @@ pub(super) async fn resolve_external_manifest(
         )
         .await
         .map_err(super::hydration_failure)?;
-    let Some(publication_row) = publication_rows.next().await.map_err(super::hydration_failure)? else {
+    let Some(publication_row) = publication_rows
+        .next()
+        .await
+        .map_err(super::hydration_failure)?
+    else {
         return Ok(unverifiable());
     };
     let summary_id: String = publication_row.get(0).map_err(super::hydration_failure)?;
     let publication_json: String = publication_row.get(1).map_err(super::hydration_failure)?;
     let publication_created_at: i64 = publication_row.get(2).map_err(super::hydration_failure)?;
-    if publication_rows.next().await.map_err(super::hydration_failure)?.is_some() {
+    if publication_rows
+        .next()
+        .await
+        .map_err(super::hydration_failure)?
+        .is_some()
+    {
         return Ok(unverifiable());
     }
     let publication: CanonicalPublicationManifest = match serde_json::from_str(&publication_json) {

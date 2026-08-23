@@ -74,11 +74,7 @@ pub(crate) fn encoded_namespace_key(namespace: &GraphNamespace) -> String {
 }
 
 pub(crate) fn stable_key_from_encoded(encoded_namespace: &str, identity: &str) -> String {
-    format!(
-        "{}:{}",
-        encoded_namespace,
-        hex::encode(identity.as_bytes())
-    )
+    format!("{}:{}", encoded_namespace, hex::encode(identity.as_bytes()))
 }
 
 pub(crate) fn stable_key(namespace: &GraphNamespace, identity: &str) -> String {

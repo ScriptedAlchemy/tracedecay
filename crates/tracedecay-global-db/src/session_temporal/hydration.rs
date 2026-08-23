@@ -355,8 +355,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
 ) -> Result<SessionMessageRecord, HydrationError> {
     let text = String::from_utf8(bytes.to_vec()).map_err(hydration_failure)?;
 
-    let generation =
-        i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
     let project_key = snapshot
         .request()
         .authorized_root()
@@ -459,11 +458,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
         || compatibility_session
             .as_deref()
             .is_some_and(|compatibility_session| compatibility_session != session_id)
-        || rows
-            .next()
-            .await
-            .map_err(hydration_failure)?
-            .is_some()
+        || rows.next().await.map_err(hydration_failure)?.is_some()
     {
         return Err(HydrationError::Unavailable);
     }
@@ -581,10 +576,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
                         .await
                         .map_err(hydration_failure)?
                         .ok_or(HydrationError::Unavailable)?;
-                    let content = Zeroizing::new(
-                        row.get::<String>(0)
-                            .map_err(hydration_failure)?,
-                    );
+                    let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
                     bounded_copy(content.as_bytes(), max_bytes, control)
                 }
                 PayloadSource::External {
@@ -639,12 +631,7 @@ async fn read_occurrence_content(
         .map_err(hydration_failure)?
         .ok_or(HydrationError::Unavailable)?;
     let observation_json: String = row.get(0).map_err(hydration_failure)?;
-    if rows
-        .next()
-        .await
-        .map_err(hydration_failure)?
-        .is_some()
-    {
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
         return Err(HydrationError::Unavailable);
     }
     control.checkpoint()?;
@@ -1107,8 +1094,7 @@ async fn summary_has_provider_evidence(
     if source_anchors.is_empty() {
         return Ok(false);
     }
-    let encoded_anchors =
-        serde_json::to_string(&source_anchors).map_err(hydration_failure)?;
+    let encoded_anchors = serde_json::to_string(&source_anchors).map_err(hydration_failure)?;
     let mut rows = conn
         .query(
             "SELECT EXISTS (

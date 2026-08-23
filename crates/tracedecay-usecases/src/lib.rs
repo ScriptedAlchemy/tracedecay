@@ -81,9 +81,9 @@ pub mod edit;
 pub mod event_lane;
 // Public because `tracedecay-global-db` reaches the runtime external-source
 // store through the root shim.
+pub mod analytics_bridge;
 pub mod external_source_store;
 pub mod feedback;
-pub mod analytics_bridge;
 pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;

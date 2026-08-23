@@ -226,12 +226,11 @@ pub fn materialize_generation_increment(
                     .map(|(prior, current)| (prior.clone(), current.clone()))
                     .collect::<BTreeMap<_, _>>();
                 for (prior_occurrence, current_occurrence) in occurrence_map {
-                    let prior_symbol =
-                        prior_symbols_by_occurrence
-                            .get(&prior_occurrence)
-                            .ok_or_else(|| {
-                                ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
-                            })?;
+                    let prior_symbol = prior_symbols_by_occurrence
+                        .get(&prior_occurrence)
+                        .ok_or_else(|| {
+                            ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
+                        })?;
                     let mut current_symbol = (*prior_symbol).clone();
                     current_symbol.occurrence = current_occurrence;
                     symbols.push(current_symbol);

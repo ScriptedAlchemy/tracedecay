@@ -58,7 +58,11 @@ impl AgentIntegration for ZedIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        super::mcp_config_has_tracedecay(&zed_settings_path(home), "context_servers", load_jsonc_file)
+        super::mcp_config_has_tracedecay(
+            &zed_settings_path(home),
+            "context_servers",
+            load_jsonc_file,
+        )
     }
 }
 

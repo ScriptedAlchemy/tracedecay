@@ -391,7 +391,10 @@ impl SharedHookProjectRouteCache {
     }
 
     pub(crate) fn snapshot(&self) -> crate::errors::Result<HookProjectRouteCache> {
-        let state = self.inner.lock().map_err(|_| Self::unavailable("snapshot"))?;
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| Self::unavailable("snapshot"))?;
         let mut cache = state.cache.clone();
         cache.shared_generation = Some(state.generation);
         Ok(cache)
@@ -412,7 +415,10 @@ impl SharedHookProjectRouteCache {
         &self,
         target: &mut HookProjectRouteCache,
     ) -> crate::errors::Result<()> {
-        let state = self.inner.lock().map_err(|_| Self::unavailable("snapshot"))?;
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| Self::unavailable("snapshot"))?;
         if target.shared_generation == Some(state.generation) {
             return Ok(());
         }

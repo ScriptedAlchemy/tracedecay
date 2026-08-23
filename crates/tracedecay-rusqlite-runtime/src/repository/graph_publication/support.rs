@@ -863,9 +863,7 @@ fn read_retained_source(
             "retired graph replay source identity is not unique".to_owned(),
         ));
     }
-    rows.pop()
-        .map(|mut row| blob_at(&mut row, 0))
-        .transpose()
+    rows.pop().map(|mut row| blob_at(&mut row, 0)).transpose()
 }
 
 pub(super) fn one_replay(

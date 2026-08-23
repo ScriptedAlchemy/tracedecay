@@ -237,13 +237,7 @@ pub async fn hook_claude_post_compact() -> i32 {
         &event,
         &parsed,
     );
-    let args = compact_daemon_args(
-        "claude_compact",
-        "claude",
-        root.is_none(),
-        &event,
-        None,
-    );
+    let args = compact_daemon_args("claude_compact", "claude", root.is_none(), &event, None);
     if let Err(error) =
         super::daemon_hook_action(root.as_deref(), args, Some(&hook_telemetry)).await
     {

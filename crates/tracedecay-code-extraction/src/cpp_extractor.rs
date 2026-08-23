@@ -236,8 +236,10 @@ impl CppExtractor {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_str(n).to_string(),
+        );
 
         if name == "<anonymous>" {
             return;
@@ -258,8 +260,10 @@ impl CppExtractor {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_str(n).to_string(),
+        );
 
         if name == "<anonymous>" {
             return;
@@ -379,8 +383,10 @@ impl CppExtractor {
             return;
         }
 
-        let name = find_descendant_by_kind(node, "field_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
+        let name = find_descendant_by_kind(node, "field_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_str(n).to_string(),
+        );
 
         if name == "<anonymous>" {
             return;
@@ -444,7 +450,10 @@ impl CppExtractor {
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
             .or_else(|| find_direct_child_by_kind(node, "namespace_identifier"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_str(n).to_string());
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_str(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;

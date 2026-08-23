@@ -1255,7 +1255,8 @@ impl VectorGenerationStateMachineV1 {
                         let tombstone = tombstone_by_chunk
                             .get(&receipt.chunk_id)
                             .ok_or(VectorGenerationStoreErrorV1::BatchIdentityMismatch)?;
-                        if receipt.prior_chunk_digest.as_ref() != Some(&tombstone.prior_chunk_digest)
+                        if receipt.prior_chunk_digest.as_ref()
+                            != Some(&tombstone.prior_chunk_digest)
                         {
                             return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
                         }
@@ -1306,7 +1307,8 @@ impl VectorGenerationStateMachineV1 {
             next.embedding_key = Some(prepared.embedding_key.clone());
         }
         for receipt in &prepared.receipt.receipts {
-            next.committed_chunk_effects.insert(receipt.chunk_id.clone());
+            next.committed_chunk_effects
+                .insert(receipt.chunk_id.clone());
             match receipt.operation {
                 ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
                     let vector = vector_by_chunk.get(&receipt.chunk_id).ok_or_else(|| {

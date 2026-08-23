@@ -22,11 +22,11 @@ use super::{
     GitHubProviderLifecycleV1, GitHubReviewAnchorSeedV1, GitHubSourceAccessAuthorityV1,
 };
 use crate::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
+use crate::git_intelligence::NativeGitIntelligence;
 use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
-use crate::git_intelligence::NativeGitIntelligence;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.advisory.github.code-anchor.v1";

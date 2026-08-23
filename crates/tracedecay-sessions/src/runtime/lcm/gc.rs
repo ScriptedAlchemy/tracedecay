@@ -1042,10 +1042,11 @@ async fn tombstone_dangling_refs_in_transaction(
     .await?;
     let mut total = 0usize;
     for row in rows {
-        if !row
-            .texts()
-            .any(|text| dangling.iter().any(|payload_ref| text.contains(payload_ref)))
-        {
+        if !row.texts().any(|text| {
+            dangling
+                .iter()
+                .any(|payload_ref| text.contains(payload_ref))
+        }) {
             continue;
         }
         let store_id = row.store_id;

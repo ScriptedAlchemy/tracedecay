@@ -1067,7 +1067,14 @@ pub(crate) async fn seed_lcm_session_message_for_provider(
     ordinal: i64,
 ) {
     seed_lcm_message_with_role(
-        cg, provider, session_id, message_id, text, ordinal, "assistant", "message",
+        cg,
+        provider,
+        session_id,
+        message_id,
+        text,
+        ordinal,
+        "assistant",
+        "message",
     )
     .await;
 }
@@ -1082,7 +1089,14 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
     ordinal: i64,
 ) {
     seed_lcm_message_with_role(
-        cg, provider, session_id, message_id, text, ordinal, "tool", "tool_result",
+        cg,
+        provider,
+        session_id,
+        message_id,
+        text,
+        ordinal,
+        "tool",
+        "tool_result",
     )
     .await;
 }

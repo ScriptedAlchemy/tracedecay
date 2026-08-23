@@ -51,10 +51,8 @@ fn streaming_digest_matches_digest_of_canonical_bytes() {
         "nested": {"z": null, "a": [true, "line\nfeed", 42]},
     });
     let bytes = canonical_json_bytes(&value).unwrap();
-    let expected = crate::canonical_text::encode_tagged_lowercase_hex(
-        "sha256:",
-        &Sha256::digest(&bytes),
-    );
+    let expected =
+        crate::canonical_text::encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
 
     assert_eq!(canonical_sha256(&value).unwrap().as_str(), expected);
     let (combined_bytes, combined_digest) = canonical_json_bytes_and_sha256(&value).unwrap();

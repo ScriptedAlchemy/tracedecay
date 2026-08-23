@@ -766,11 +766,12 @@ impl GraphDb {
         if quarantined.is_empty() {
             return Ok(());
         }
-        let is_quarantined = quarantined
-            .iter()
-            .any(|(quarantined_namespace, quarantined_projection)| {
-                quarantined_namespace == namespace && quarantined_projection == projection
-            });
+        let is_quarantined =
+            quarantined
+                .iter()
+                .any(|(quarantined_namespace, quarantined_projection)| {
+                    quarantined_namespace == namespace && quarantined_projection == projection
+                });
         if is_quarantined {
             Err(projection_mismatch(
                 namespace,

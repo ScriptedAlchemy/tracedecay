@@ -278,9 +278,9 @@ impl ObservationStore for GlobalDbObservationStore {
             ));
         }
         let existing = read_runtime_stored_observation(runtime, &observation_id)?;
-        let collision = existing.as_ref().map(|existing| {
-            classify_observation_collision(existing.observation(), observation)
-        });
+        let collision = existing
+            .as_ref()
+            .map(|existing| classify_observation_collision(existing.observation(), observation));
         let canonical_payload_revision = existing.as_ref().is_some_and(|existing| {
             is_canonical_payload_revision_replay(existing.observation(), observation)
         });
@@ -456,14 +456,13 @@ impl ObservationStore for GlobalDbObservationStore {
                 existing.commit_receipt().clone(),
             ));
         }
-        let (command_bytes, command_digest) =
-            canonical_json_bytes_and_sha256(&runtime_observation_command(&write)).map_err(
-                |error| {
-                    runtime_storage_error("derive observation runtime identity", error.to_string())
-                },
-            )?;
-        let idempotency_key =
-            format!("observation.{}", runtime_digest_suffix(&command_digest)?);
+        let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(
+            &runtime_observation_command(&write),
+        )
+        .map_err(|error| {
+            runtime_storage_error("derive observation runtime identity", error.to_string())
+        })?;
+        let idempotency_key = format!("observation.{}", runtime_digest_suffix(&command_digest)?);
         let candidate = write.observation().clone();
         let candidate_cursor = write.next_cursor().clone();
         let outcome = submit_runtime_write(
@@ -556,10 +555,12 @@ impl ObservationStore for GlobalDbObservationStore {
         });
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
         let payload = RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance));
-        let (command_bytes, command_digest) =
-            canonical_json_bytes_and_sha256(&runtime_command_value(&payload)?).map_err(|error| {
-                runtime_storage_error("advance observation source cursor", error.to_string())
-            })?;
+        let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(
+            &runtime_command_value(&payload)?,
+        )
+        .map_err(|error| {
+            runtime_storage_error("advance observation source cursor", error.to_string())
+        })?;
         let outcome = submit_runtime_write(
             runtime,
             payload,

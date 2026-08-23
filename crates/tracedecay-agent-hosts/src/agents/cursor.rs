@@ -11,8 +11,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    McpUninstallPolicy, backup_and_write_json, load_json_file, load_jsonc_file_strict,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
+    UpdatePluginOutcome, backup_and_write_json, load_json_file, load_jsonc_file_strict,
     mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
 };
 
@@ -773,7 +773,6 @@ fn legacy_rule_has_tracedecay(rule_path: &Path) -> bool {
     std::fs::read_to_string(rule_path)
         .is_ok_and(|contents| contents.contains("tracedecay MCP tools"))
 }
-
 
 fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     if !hooks_path.exists() {

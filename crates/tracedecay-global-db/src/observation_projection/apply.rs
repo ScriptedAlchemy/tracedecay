@@ -244,10 +244,7 @@ async fn derive_projection_with_alias_from_generation(
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
-fn goal_objective_from_content(
-    content: Option<&serde_json::Value>,
-    content_text: &str,
-) -> String {
+fn goal_objective_from_content(content: Option<&serde_json::Value>, content_text: &str) -> String {
     content
         .and_then(|content| content.get("objective"))
         .and_then(serde_json::Value::as_str)
@@ -629,12 +626,14 @@ async fn apply_rows(
     }
     let projected_message = match transition {
         MessageTransition::Insert | MessageTransition::Supersede => message,
-        MessageTransition::Retain => existing
-            .as_ref()
-            .ok_or_else(|| ProjectionStoreError::OutputCollision {
-                provider: message.provider.clone(),
-                message_id: message.message_id.clone(),
-            })?,
+        MessageTransition::Retain => {
+            existing
+                .as_ref()
+                .ok_or_else(|| ProjectionStoreError::OutputCollision {
+                    provider: message.provider.clone(),
+                    message_id: message.message_id.clone(),
+                })?
+        }
     };
     if projected_message.provider != "hermes" && !preserve_protected_payload {
         upsert_projected_raw_message(conn, projected_message).await?;

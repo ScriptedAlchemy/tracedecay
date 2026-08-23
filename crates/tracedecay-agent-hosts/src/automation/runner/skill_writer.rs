@@ -600,19 +600,21 @@ pub(super) async fn finalize_skill_writer_success(
                 ExternalSkillDeploymentDisposition::Unavailable
             }
         };
-        Some(crate::automation::jobs::effect_receipt::skill_writing_receipt(
-            run_id,
-            proposal_outcome.created.len(),
-            proposal_outcome.updated.len(),
-            proposal_outcome.consolidations.len(),
-            deployment,
-            sha256_json(&json!({
-                "created": &proposal_outcome.created,
-                "updated": &proposal_outcome.updated,
-                "consolidations": &proposal_outcome.consolidations,
-                "deployment": &proposal_outcome.deployment,
-            }))?,
-        ))
+        Some(
+            crate::automation::jobs::effect_receipt::skill_writing_receipt(
+                run_id,
+                proposal_outcome.created.len(),
+                proposal_outcome.updated.len(),
+                proposal_outcome.consolidations.len(),
+                deployment,
+                sha256_json(&json!({
+                    "created": &proposal_outcome.created,
+                    "updated": &proposal_outcome.updated,
+                    "consolidations": &proposal_outcome.consolidations,
+                    "deployment": &proposal_outcome.deployment,
+                }))?,
+            ),
+        )
     } else {
         None
     };

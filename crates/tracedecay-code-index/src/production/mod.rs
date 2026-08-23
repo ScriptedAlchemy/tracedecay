@@ -576,9 +576,9 @@ impl CodeIndexPublishedGenerationV1 {
             let Some(first) = chunks.next() else {
                 return ChunkPolicyRevisionSummaryV1::Empty;
             };
-            if chunks.any(|chunk| {
-                chunk.sensitivity.policy_revision != first.sensitivity.policy_revision
-            }) {
+            if chunks
+                .any(|chunk| chunk.sensitivity.policy_revision != first.sensitivity.policy_revision)
+            {
                 ChunkPolicyRevisionSummaryV1::Mixed
             } else {
                 ChunkPolicyRevisionSummaryV1::Uniform(first.sensitivity.policy_revision.clone())

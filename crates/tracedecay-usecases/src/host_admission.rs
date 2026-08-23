@@ -870,9 +870,7 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
                 Some("external_source_projection_pending"),
             )
         }
-        CaptureObservationOutcome::AcceptedForReplay { .. } => {
-            external_source_projection_pending()
-        }
+        CaptureObservationOutcome::AcceptedForReplay { .. } => external_source_projection_pending(),
         CaptureObservationOutcome::Persisted { outcome, .. } => match *outcome {
             ObservationPersistOutcome::Committed(_) => {
                 admission_outcome(HostAdmissionStatus::Committed, false, None)

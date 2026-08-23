@@ -18,10 +18,10 @@ use super::query::{
     RemoteExactObservationResultV1, RemoteQueryAuthorizationEvidenceV1,
     RemoteQueryAuthorizationPortV1, RemoteQueryClockPortV1, RemoteQueryCompleteValueV1,
     RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1, SystemRemoteQueryClockV1,
-    query_protocol_failure,
-    remote_exact_observation_query_result_contract_v1, validate_composition,
-    validate_protocol_authority_binding, validate_result_identity, validate_returned_authority,
-    validate_returned_observation_identity, validate_returned_provenance,
+    query_protocol_failure, remote_exact_observation_query_result_contract_v1,
+    validate_composition, validate_protocol_authority_binding, validate_result_identity,
+    validate_returned_authority, validate_returned_observation_identity,
+    validate_returned_provenance,
 };
 use crate::{RequestId, ResolvedScope};
 use tracedecay_domain::{

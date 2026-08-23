@@ -465,11 +465,7 @@ impl McpServer {
             .span_observation_debounce
             .lock()
             .map_or(true, |mut debounce| {
-                debounce.should_record(
-                    &session_pre_key,
-                    ts,
-                    DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
-                )
+                debounce.should_record(&session_pre_key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
             });
         if !should_derive {
             return;
@@ -494,13 +490,11 @@ impl McpServer {
             // spawn git, so it runs on the blocking pool, off the
             // notification hot path.
             let derived = tokio::task::spawn_blocking(move || {
-                let worktree_raw =
-                    crate::worktree::git_worktree_root(&cwd).unwrap_or(project_root);
+                let worktree_raw = crate::worktree::git_worktree_root(&cwd).unwrap_or(project_root);
                 let worktree_raw =
                     hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
                         .ok()?;
-                let worktree =
-                    git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
+                let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
                 let branch =
                     bounded_identifier(crate::branch::current_branch(&worktree_raw).as_deref());
                 Some((worktree, branch))
@@ -513,12 +507,13 @@ impl McpServer {
             // Hook routes are provider-agnostic: leave provider empty.
             let key =
                 git_correlation::span_debounce_key("", &session_id, branch.as_deref(), &worktree);
-            let should_record = server
-                .span_observation_debounce
-                .lock()
-                .map_or(true, |mut debounce| {
-                    debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
-                });
+            let should_record =
+                server
+                    .span_observation_debounce
+                    .lock()
+                    .map_or(true, |mut debounce| {
+                        debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+                    });
             if !should_record {
                 return;
             }

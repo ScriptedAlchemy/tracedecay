@@ -252,13 +252,15 @@ pub(crate) fn load_entity_locator(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<EntityLocator>, GraphDbError> {
-    Ok(load_indexed_entity_node(database, namespace, identity)?.map(
-        |(node, _, stored_namespace, projection)| EntityLocator {
-            node,
-            namespace: stored_namespace,
-            projection,
-        },
-    ))
+    Ok(
+        load_indexed_entity_node(database, namespace, identity)?.map(
+            |(node, _, stored_namespace, projection)| EntityLocator {
+                node,
+                namespace: stored_namespace,
+                projection,
+            },
+        ),
+    )
 }
 
 pub(crate) fn load_entity(
@@ -309,7 +311,8 @@ fn load_requested_relations(
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(relation) = load_relation_cached(database, namespace, &identity, &mut endpoints)?
+        if let Some(relation) =
+            load_relation_cached(database, namespace, &identity, &mut endpoints)?
         {
             loaded.insert(key, relation);
         }
@@ -410,11 +413,7 @@ pub(crate) fn load_relation_by_locator(
     database: &GrafeoDB,
     locator_id: NodeId,
 ) -> Result<StoredRelation, GraphDbError> {
-    load_relation_by_locator_cached(
-        database,
-        locator_id,
-        &mut EndpointIdentityCache::default(),
-    )
+    load_relation_by_locator_cached(database, locator_id, &mut EndpointIdentityCache::default())
 }
 
 pub(crate) fn load_relation_by_locator_cached(
@@ -518,14 +517,20 @@ pub(crate) fn relation_references_for_entity(
     database: &GrafeoDB,
     entity: NodeId,
 ) -> Result<Vec<RelationReference>, GraphDbError> {
-    incident_edge_ids(database, entity, &[Direction::Outgoing, Direction::Incoming])
-        .into_iter()
-        .filter_map(|edge| match load_relation_reference_by_edge(database, edge) {
+    incident_edge_ids(
+        database,
+        entity,
+        &[Direction::Outgoing, Direction::Incoming],
+    )
+    .into_iter()
+    .filter_map(
+        |edge| match load_relation_reference_by_edge(database, edge) {
             Ok(Some(relation)) => Some(Ok(relation)),
             Ok(None) => None,
             Err(error) => Some(Err(error)),
-        })
-        .collect()
+        },
+    )
+    .collect()
 }
 
 fn load_relation_projection_by_edge(
@@ -548,12 +553,13 @@ fn load_relation_reference_by_edge(
     else {
         return Ok(None);
     };
-    let locator = database
-        .graph_store()
-        .get_node(locator_id)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "indexed relation locator is unreadable".to_owned(),
-        })?;
+    let locator =
+        database
+            .graph_store()
+            .get_node(locator_id)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "indexed relation locator is unreadable".to_owned(),
+            })?;
     let identity = GraphRelationId::new(required_string(
         locator.get_property(RELATION_ID_PROPERTY),
         "relation identity",

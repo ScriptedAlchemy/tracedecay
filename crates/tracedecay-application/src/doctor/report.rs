@@ -600,7 +600,7 @@ impl<'a> DoctorReportComposerV1<'a> {
                 entries.push(DoctorReportEntryV1::new(finding, None)?);
             }
         }
-            Ok((entries, strongest_consultation(consultations)?))
+        Ok((entries, strongest_consultation(consultations)?))
     }
 
     async fn compose_host(
@@ -662,7 +662,7 @@ impl<'a> DoctorReportComposerV1<'a> {
             }
             consultations.push(consultation);
         }
-            Ok((entries, strongest_consultation(consultations)?))
+        Ok((entries, strongest_consultation(consultations)?))
     }
 
     async fn compose_code_index(

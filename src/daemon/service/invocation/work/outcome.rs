@@ -54,7 +54,9 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
         | WorkProductApplicationErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkProductApplicationErrorV1::Cancelled => ApplicationProblem::cancelled_before_admission(),
+        WorkProductApplicationErrorV1::Cancelled => {
+            ApplicationProblem::cancelled_before_admission()
+        }
         WorkProductApplicationErrorV1::TimedOut => ApplicationProblem::timed_out_before_admission(),
         WorkProductApplicationErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
             diagnostic: SafeDiagnostic {
@@ -83,14 +85,18 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
                 legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
             }
         }
-        WorkProductApplicationErrorV1::VersionConflict => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.graph_version_conflict".to_owned(),
-            message: "The Work graph version does not match the request".to_owned(),
-        }),
-        WorkProductApplicationErrorV1::RevisionConflict => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.graph_revision_conflict".to_owned(),
-            message: "The Work policy, configuration, or catalog revision changed".to_owned(),
-        }),
+        WorkProductApplicationErrorV1::VersionConflict => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "work.graph_version_conflict".to_owned(),
+                message: "The Work graph version does not match the request".to_owned(),
+            })
+        }
+        WorkProductApplicationErrorV1::RevisionConflict => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "work.graph_revision_conflict".to_owned(),
+                message: "The Work policy, configuration, or catalog revision changed".to_owned(),
+            })
+        }
         WorkProductApplicationErrorV1::EvidenceContinuationStale => {
             ApplicationProblem::stale(SafeDiagnostic {
                 code: "work.evidence_continuation_stale".to_owned(),

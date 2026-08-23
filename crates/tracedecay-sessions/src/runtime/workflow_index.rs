@@ -44,7 +44,9 @@ pub enum WorkflowIndexError {
     /// Caller-supplied argument was invalid (empty run id, …).
     InvalidArgument(String),
     /// A required higher-level read authority was not supplied.
-    AuthorityUnavailable { authority: &'static str },
+    AuthorityUnavailable {
+        authority: &'static str,
+    },
 }
 
 impl std::fmt::Display for WorkflowIndexError {

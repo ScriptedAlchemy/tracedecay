@@ -164,10 +164,8 @@ pub(super) fn build_record_query_with_relations(
     }
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);
     let record_scope = RecordScopeSql::new(scope, scope_param, generation_param);
-    let retained_summary_provider = retained_summary_provider_predicate(
-        provider_param,
-        &record_scope.summary_generation,
-    );
+    let retained_summary_provider =
+        retained_summary_provider_predicate(provider_param, &record_scope.summary_generation);
     let sql = format!(
         "WITH candidate_input(
              ordinal, session_id, anchor_id, derived_kind, retriever_record_id
@@ -565,10 +563,7 @@ pub(super) fn build_record_query_with_relations(
     Ok(RecordQuery { sql, params })
 }
 
-fn retained_summary_provider_predicate(
-    provider_param: usize,
-    summary_generation: &str,
-) -> String {
+fn retained_summary_provider_predicate(provider_param: usize, summary_generation: &str) -> String {
     format!(
         "(?{provider_param} IS NULL OR EXISTS (
                    SELECT 1

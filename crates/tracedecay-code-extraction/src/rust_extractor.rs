@@ -464,7 +464,9 @@ impl RustExtractor {
                 loop {
                     let child = cursor.node();
                     let kind = child.kind();
-                    if kind != "," && kind != ":" && kind != "+"
+                    if kind != ","
+                        && kind != ":"
+                        && kind != "+"
                         && let Some(bound_name) = Self::extract_trait_bound_name(state, child)
                     {
                         state.unresolved_refs.push(UnresolvedRef {

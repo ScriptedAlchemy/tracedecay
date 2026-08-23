@@ -3408,7 +3408,10 @@ where
 
 fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, CandidateOutputError> {
     let bytes = canonical_json_bytes(value)?;
-    Ok(encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes)))
+    Ok(encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(bytes),
+    ))
 }
 
 fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CandidateOutputError> {

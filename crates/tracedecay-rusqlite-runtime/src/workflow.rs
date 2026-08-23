@@ -429,10 +429,7 @@ fn workflow_effect_codec_unavailable() -> WorkflowEffectAuthorityErrorV1 {
     )
 }
 
-fn statement(
-    sql: &str,
-    params: Vec<ExactSqlValue>,
-) -> Result<ExactSqlStatement, ExactSqlError> {
+fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
     ExactSqlStatement::new(sql.to_owned(), params)
 }
 

@@ -813,12 +813,7 @@ impl GraphDb {
                 ));
             }
             visits.push(VerifiedTraversalVisit {
-                entity: typed_entity_ref(
-                    database,
-                    node,
-                    &namespace_projection,
-                    &mut endpoints,
-                )?,
+                entity: typed_entity_ref(database, node, &namespace_projection, &mut endpoints)?,
                 depth,
                 via_relation,
             });
@@ -862,9 +857,8 @@ impl GraphDb {
                     };
                     let stored = load_relation_by_edge_cached(database, edge_id, &mut endpoints)?
                         .ok_or_else(|| GraphDbError::Corrupt {
-                            message: "verified traversal edge has no typed relation locator"
-                                .to_owned(),
-                        })?;
+                        message: "verified traversal edge has no typed relation locator".to_owned(),
+                    })?;
                     let (neighbor_namespace, neighbor_identity) =
                         endpoints.identity(database, neighbor)?;
                     let Some(entity_projection) =

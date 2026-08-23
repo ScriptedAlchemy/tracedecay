@@ -46,8 +46,8 @@ impl TemporalCandidateExport {
                 .to_owned(),
         )
         .map_err(candidate_export_contract)?;
-        let source_namespace = SourceNamespace::try_from("session".to_owned())
-            .map_err(candidate_export_contract)?;
+        let source_namespace =
+            SourceNamespace::try_from("session".to_owned()).map_err(candidate_export_contract)?;
         let mut participants_by_session_source = BTreeMap::new();
         for entry in self.snapshot.participant_manifest().entries() {
             participants_by_session_source

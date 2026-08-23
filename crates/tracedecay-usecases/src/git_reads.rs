@@ -25,12 +25,12 @@ use tracedecay_graph_db::{GraphCancellation, GraphDbError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_store::FactReadControl;
 
-use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
 use crate::git_intelligence::NativeGitIntelligence;
 use crate::git_query::{
     GenerationBoundGitQueryV1, GenerationGitJoinV1, GitQueryBounds, GitQueryEngine,
     GitQueryEnvelopeV1, GitQueryError,
 };
+use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalQueryRequestV1, HistoricalSourceAuthorizationV1,
 };

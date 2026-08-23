@@ -1898,10 +1898,7 @@ struct CheapStoreInspect {
     manifest_root: Option<PathBuf>,
 }
 
-fn inspect_store_leaf_cheap_sync(
-    profile_root: &Path,
-    data_root: &Path,
-) -> CheapStoreInspect {
+fn inspect_store_leaf_cheap_sync(profile_root: &Path, data_root: &Path) -> CheapStoreInspect {
     let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
     let expected_manifest_bytes = match read_regular_file(&manifest_path) {
         RegularFileSnapshot::Bytes(bytes) => Some(bytes),

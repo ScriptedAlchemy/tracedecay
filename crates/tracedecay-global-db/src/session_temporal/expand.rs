@@ -6,9 +6,9 @@ use serde::de::DeserializeOwned;
 use tracedecay_domain::{
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, ProjectionOutputOrdinalV1, RetrievalAnchorId,
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
-    SessionSummaryIdV1, SessionSummaryRecordV1, SignedCursorKeyRefV1,
-    SummaryPublicationMetadataV1, SummarySourceHorizonV1, TemporalAssertionRecordV1,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
+    SessionSummaryIdV1, SessionSummaryRecordV1, SignedCursorKeyRefV1, SummaryPublicationMetadataV1,
+    SummarySourceHorizonV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
+    UtcMicros,
 };
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
@@ -397,10 +397,7 @@ async fn assertions_for_anchors(
     read: &DatabaseEngineReadSnapshot,
     session_id: &SessionId,
     generation: i64,
-    occurrence_anchors: &[(
-        tracedecay_domain::MessageOccurrenceIdV1,
-        RetrievalAnchorId,
-    )],
+    occurrence_anchors: &[(tracedecay_domain::MessageOccurrenceIdV1, RetrievalAnchorId)],
     temporal_mode: &str,
     cutoff: i64,
     mut remaining: usize,
@@ -486,8 +483,8 @@ async fn summary_anchors_for(
     if summary_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let encoded_ids = serde_json::to_string(summary_ids)
-        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let encoded_ids =
+        serde_json::to_string(summary_ids).map_err(|error| storage(EXPAND_OPERATION, error))?;
     let mut rows = read
         .query(
             "SELECT summary_id, summary_anchor_id
@@ -714,8 +711,8 @@ fn occurrence_from_row(
     row: &Row,
     session_id: &SessionId,
 ) -> SessionStoreResult<MessageOccurrenceRecordV1> {
-    let projection_output_ordinal = u32::try_from(row_get::<i64>(row, 2)?)
-        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let projection_output_ordinal =
+        u32::try_from(row_get::<i64>(row, 2)?).map_err(|error| storage(EXPAND_OPERATION, error))?;
     let record = MessageOccurrenceRecordV1 {
         occurrence_id: decode_text(row_get(row, 0)?)?,
         source_observation_id: decode_text(row_get(row, 1)?)?,

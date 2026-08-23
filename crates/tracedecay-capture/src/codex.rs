@@ -338,8 +338,14 @@ fn append_uncorrelated_codex_usage_fact(
     usage: &Value,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
-    let [input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens] =
-        codex_usage_counters(usage);
+    let [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+    ] = codex_usage_counters(usage);
     let mut missing_dimensions = BTreeSet::from([
         ProviderUsageContractDimensionV1::Scope,
         ProviderUsageContractDimensionV1::CounterSemantics,
@@ -368,8 +374,14 @@ fn append_codex_usage_fact(
     native_field: &str,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
-    let [input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens] =
-        codex_usage_counters(usage);
+    let [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+    ] = codex_usage_counters(usage);
     let counters = if [
         input_tokens,
         output_tokens,

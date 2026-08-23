@@ -9,9 +9,7 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .then_with(|| source_validity_rank(right).cmp(&source_validity_rank(left)))
         .then_with(|| left.anchor_id.cmp(&right.anchor_id))
         .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
-        .then_with(|| {
-            ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right))
-        })
+        .then_with(|| ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right)))
 }
 
 pub(super) fn exact_class_rank(class: ExactClass) -> u8 {
@@ -37,9 +35,7 @@ pub(super) fn source_validity_rank(candidate: &FusedCandidate) -> u8 {
         .unwrap_or(0)
 }
 
-pub(super) fn ordered_occurrence_id_refs(
-    candidate: &FusedCandidate,
-) -> Vec<&SourceOccurrenceId> {
+pub(super) fn ordered_occurrence_id_refs(candidate: &FusedCandidate) -> Vec<&SourceOccurrenceId> {
     let mut occurrences = candidate
         .occurrences
         .iter()

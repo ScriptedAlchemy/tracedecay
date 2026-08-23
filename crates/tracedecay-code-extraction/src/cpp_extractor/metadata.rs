@@ -16,8 +16,10 @@ use crate::{
 
 impl CppExtractor {
     pub(super) fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_str(child).to_string());
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |child| state.node_str(child).to_string(),
+        );
         let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -139,8 +141,10 @@ impl CppExtractor {
     }
 
     fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_str(child).to_string());
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |child| state.node_str(child).to_string(),
+        );
         let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;

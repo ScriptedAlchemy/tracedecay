@@ -6,7 +6,9 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{
+    Error as EngineError, Executor, QueryExecutor, Row, params,
+};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
