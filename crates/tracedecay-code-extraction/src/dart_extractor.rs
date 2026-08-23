@@ -69,9 +69,17 @@ impl ExtractionState {
 
     /// Gets the text of a tree-sitter node from the source.
     fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+        self.node_str(node).to_string()
+    }
+
+    fn node_str(&self, node: TsNode<'_>) -> &str {
+        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    }
+
+    fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
+        let start = node.start_byte();
+        let end = end_byte.min(self.source.len()).max(start);
+        std::str::from_utf8(&self.source[start..end]).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -1042,7 +1050,6 @@ impl DartExtractor {
             }
         }
 
-        // Process function signature if found.
         if let Some(sig) = func_sig {
             if state.class_depth > 0 {
                 Self::visit_method_from_sig(state, sig, func_body);
@@ -1141,10 +1148,11 @@ impl DartExtractor {
     fn visit_constructor(state: &mut ExtractionState, decl_node: TsNode<'_>, sig_node: TsNode<'_>) {
         let name = Self::extract_constructor_name(state, sig_node);
         let docstring = Self::extract_docstring(state, decl_node);
-        let text = state.node_text(decl_node);
-        let signature = text.find('{').map_or_else(
-            || Some(text.trim().trim_end_matches(';').trim().to_string()),
-            |pos| Some(text[..pos].trim().to_string()),
+        let signature = Some(
+            Self::extract_signature_to_brace(state, decl_node)
+                .trim_end_matches(';')
+                .trim()
+                .to_string(),
         );
 
         let start_line = decl_node.start_position().row as u32;
@@ -1227,16 +1235,16 @@ impl DartExtractor {
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, decl_node);
-        let text = state.node_text(decl_node);
-        let signature = text.find('{').map_or_else(
-            || {
-                text.find("=>").map_or_else(
-                    || Some(text.trim().to_string()),
-                    |pos| Some(text[..pos].trim().to_string()),
-                )
-            },
-            |pos| Some(text[..pos].trim().to_string()),
-        );
+        let text = state.node_str(decl_node);
+        let signature = if let Some(body) = decl_node.child_by_field_name("body") {
+            Some(state.text_before(decl_node, body.start_byte()).trim().to_string())
+        } else if let Some(pos) = text.find('{') {
+            Some(text[..pos].trim().to_string())
+        } else if let Some(pos) = text.find("=>") {
+            Some(text[..pos].trim().to_string())
+        } else {
+            Some(text.trim().to_string())
+        };
 
         let start_line = decl_node.start_position().row as u32;
         let end_line = decl_node.end_position().row as u32;
@@ -1288,7 +1296,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_operator(state: &mut ExtractionState, decl_node: TsNode<'_>, _sig_node: TsNode<'_>) {
-        let text = state.node_text(decl_node);
+        let text = state.node_str(decl_node);
         let name = text.find("operator").map_or_else(
             || "operator".to_string(),
             |pos| {
@@ -1305,10 +1313,13 @@ impl DartExtractor {
         let name = format!("operator {name}");
 
         let docstring = Self::extract_docstring(state, decl_node);
-        let signature = text.find('{').map_or_else(
-            || Some(text.trim().to_string()),
-            |pos| Some(text[..pos].trim().to_string()),
-        );
+        let signature = if let Some(body) = decl_node.child_by_field_name("body") {
+            Some(state.text_before(decl_node, body.start_byte()).trim().to_string())
+        } else if let Some(pos) = text.find('{') {
+            Some(text[..pos].trim().to_string())
+        } else {
+            Some(text.trim().to_string())
+        };
 
         let start_line = decl_node.start_position().row as u32;
         let end_line = decl_node.end_position().row as u32;
@@ -1611,9 +1622,12 @@ impl DartExtractor {
     // Helper extraction methods
     // ----------------------------
 
-    /// Extract a signature by trimming at the first `{`.
+    /// Extract a signature by slicing to the body child, else the first `{`.
     fn extract_signature_to_brace(state: &ExtractionState, node: TsNode<'_>) -> String {
-        let text = state.node_text(node);
+        if let Some(body) = node.child_by_field_name("body") {
+            return state.text_before(node, body.start_byte()).trim().to_string();
+        }
+        let text = state.node_str(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {

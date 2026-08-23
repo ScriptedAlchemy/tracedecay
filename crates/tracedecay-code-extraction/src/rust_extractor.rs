@@ -78,10 +78,7 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl RustExtractor {
-    /// Extract code graph nodes and edges from a Rust source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Rust source code to parse.
     pub fn extract(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -164,7 +161,6 @@ impl RustExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all named children of a node.
     fn visit_children(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -178,7 +174,6 @@ impl RustExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         match node.kind() {
             "function_item" | "function_signature_item" => Self::visit_function(state, node),
@@ -465,20 +460,25 @@ impl RustExtractor {
         // params (`'a`) and generic args.
         if let Some(bounds) = node.child_by_field_name("bounds") {
             let mut cursor = bounds.walk();
-            for child in bounds.children(&mut cursor) {
-                let kind = child.kind();
-                if kind == "," || kind == ":" || kind == "+" {
-                    continue;
-                }
-                if let Some(bound_name) = Self::extract_trait_bound_name(state, child) {
-                    state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: id.clone(),
-                        reference_name: bound_name,
-                        reference_kind: EdgeKind::Extends,
-                        line: child.start_position().row as u32,
-                        column: child.start_position().column as u32,
-                        file_path: state.file_path.clone(),
-                    });
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    let kind = child.kind();
+                    if kind != "," && kind != ":" && kind != "+"
+                        && let Some(bound_name) = Self::extract_trait_bound_name(state, child)
+                    {
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: id.clone(),
+                            reference_name: bound_name,
+                            reference_kind: EdgeKind::Extends,
+                            line: child.start_position().row as u32,
+                            column: child.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                        });
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
                 }
             }
         }
@@ -501,9 +501,15 @@ impl RustExtractor {
             "scoped_type_identifier" | "generic_type" => {
                 let mut cursor = bound.walk();
                 let mut name = None;
-                for c in bound.children(&mut cursor) {
-                    if c.kind() == "type_identifier" {
-                        name = Some(state.node_text(c).to_string());
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        if child.kind() == "type_identifier" {
+                            name = Some(state.node_text(child).to_string());
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
                     }
                 }
                 name
@@ -892,10 +898,6 @@ impl RustExtractor {
         }
     }
 
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
-
     /// Extract the name of a node by looking for a "name" field child.
     fn extract_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
         node.child_by_field_name("name")
@@ -942,8 +944,10 @@ impl RustExtractor {
     /// Extract the function signature (everything from `fn` up to the body `{`).
     fn extract_function_signature(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
         let text = state.node_text(node);
-        // Find the opening brace and take everything before it.
-        if let Some(brace_pos) = text.find('{') {
+        if let Some(body) = node.child_by_field_name("body") {
+            let offset = body.start_byte() - node.start_byte();
+            text[..offset].trim().to_string()
+        } else if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {
             // For trait method declarations without a body (ending with `;`).
@@ -954,8 +958,10 @@ impl RustExtractor {
     /// Extract the struct signature (the header line).
     fn extract_struct_signature(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
         let text = state.node_text(node);
-        // Take the first line, or up to the opening brace.
-        if let Some(brace_pos) = text.find('{') {
+        if let Some(body) = node.child_by_field_name("body") {
+            let offset = body.start_byte() - node.start_byte();
+            text[..offset].trim().to_string()
+        } else if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {
             text.lines().next().unwrap_or("").trim().to_string()
