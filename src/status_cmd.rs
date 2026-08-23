@@ -6,20 +6,23 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tracedecay_application::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
 
+use crate::commands::reject_truncation_envelope;
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
 /// project resolution and every daemon RPC. Override with
-/// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests.
+/// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests. Values above 24h
+/// fail closed so the budget cannot exceed the supported monotonic range.
 const DEFAULT_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+const STATUS_DEADLINE_ENV: &str = "TRACEDECAY_STATUS_DEADLINE_MS";
 
-fn status_command_deadline() -> Duration {
-    std::env::var("TRACEDECAY_STATUS_DEADLINE_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_STATUS_COMMAND_DEADLINE)
+fn status_command_deadline() -> tracedecay::errors::Result<Duration> {
+    commands::env_duration_ms(
+        STATUS_DEADLINE_ENV,
+        DEFAULT_STATUS_COMMAND_DEADLINE,
+        MAX_STATUS_COMMAND_DEADLINE,
+    )
 }
 
 fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
@@ -28,35 +31,6 @@ fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
 
 fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
     stdout_is_terminal
-}
-
-fn is_truncation_envelope(value: &Value) -> bool {
-    value.get("truncated").and_then(Value::as_bool) == Some(true)
-        && value
-            .get("original_chars")
-            .and_then(Value::as_u64)
-            .is_some()
-        && value.get("preview").and_then(Value::as_str).is_some()
-}
-
-fn reject_truncation_envelope(value: &Value, tool_name: &str) -> tracedecay::errors::Result<()> {
-    if !is_truncation_envelope(value) {
-        return Ok(());
-    }
-    let original_chars = value.get("original_chars").and_then(Value::as_u64);
-    let handle = value.get("handle").and_then(Value::as_str);
-    let message = match (original_chars, handle) {
-        (Some(chars), Some(handle)) => format!(
-            "daemon tool {tool_name} returned truncated JSON ({chars} chars); \
-             recover with tracedecay_retrieve handle={handle}"
-        ),
-        (Some(chars), None) => format!(
-            "daemon tool {tool_name} returned truncated JSON ({chars} chars) \
-             without a retrieval handle"
-        ),
-        _ => format!("daemon tool {tool_name} returned truncated JSON"),
-    };
-    Err(tracedecay::errors::TraceDecayError::Config { message })
 }
 
 /// Compact CLI status args: keep graph identity fields while skipping the
@@ -144,7 +118,8 @@ pub(crate) async fn handle_status_command(
     short: bool,
     runtime: bool,
 ) -> tracedecay::errors::Result<()> {
-    let deadline = Instant::now() + status_command_deadline();
+    let budget = status_command_deadline()?;
+    let deadline = Instant::now() + budget;
     timeout_at(
         deadline,
         handle_status_command_within(
@@ -162,8 +137,8 @@ pub(crate) async fn handle_status_command(
         message: format!(
             "status did not complete within {}s; the daemon may still be \
              starting or opening this project — retry, or raise \
-             TRACEDECAY_STATUS_DEADLINE_MS",
-            status_command_deadline().as_secs()
+             {STATUS_DEADLINE_ENV}",
+            budget.as_secs()
         ),
     })?
 }

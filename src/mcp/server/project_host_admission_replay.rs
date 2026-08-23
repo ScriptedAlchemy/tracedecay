@@ -14,13 +14,9 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use tracedecay_usecases::host_admission::{
-    HostAdmissionOutcome, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
-    replay_backoff,
+    HostAdmissionOutcome, REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker,
+    classify_replay_pass, replay_backoff,
 };
-
-/// Matches the per-profile worker's cap so both replay workers apply the same
-/// documented backoff schedule, saturating at the shared 2s absolute ceiling.
-const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;

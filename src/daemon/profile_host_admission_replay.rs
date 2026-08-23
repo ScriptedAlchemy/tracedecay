@@ -17,13 +17,12 @@ use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 
 use tracedecay_usecases::host_admission::{
-    HostAdmissionOutcome, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
-    replay_backoff,
+    HostAdmissionOutcome, REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker,
+    classify_replay_pass, replay_backoff,
 };
 
 use super::log_daemon_event;
 
-const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
 const BOOTSTRAP_RUNNING: u8 = 0;
 const BOOTSTRAP_READY: u8 = 1;

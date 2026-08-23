@@ -37,7 +37,9 @@ mod wire;
 pub use disposition::{
     HostAdmissionDispositionClass, HostAdmissionStatus, HostAdmissionTelemetryDisposition,
 };
-pub use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
+pub use replay::{
+    REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, classify_replay_pass, replay_backoff,
+};
 
 pub use runtime::{DurableHostAdmission, HostAdmissionRuntime};
 pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
