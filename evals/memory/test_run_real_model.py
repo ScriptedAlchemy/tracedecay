@@ -15,12 +15,12 @@ SPEC = importlib.util.spec_from_file_location("run_real_model", MODULE_PATH)
 run_real_model = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_real_model)
 
-BENCHMARK_PATH = MODULE_PATH.parent.parent / "benchmark_data" / "run_benchmarks.py"
+BENCHMARK_PATH = MODULE_PATH.parent.parent.parent / "benchmark_data" / "run_benchmarks.py"
 BENCHMARK_SPEC = importlib.util.spec_from_file_location("run_benchmarks", BENCHMARK_PATH)
 run_benchmarks = importlib.util.module_from_spec(BENCHMARK_SPEC)
 BENCHMARK_SPEC.loader.exec_module(run_benchmarks)
 
-SCORE_PATH = MODULE_PATH.parent / "hermetic" / "score.py"
+SCORE_PATH = MODULE_PATH.parent.parent / "hermetic" / "score.py"
 SCORE_SPEC = importlib.util.spec_from_file_location("hermetic_score", SCORE_PATH)
 hermetic_score = importlib.util.module_from_spec(SCORE_SPEC)
 SCORE_SPEC.loader.exec_module(hermetic_score)

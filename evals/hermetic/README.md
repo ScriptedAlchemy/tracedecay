@@ -8,14 +8,14 @@ sessions depend on the real `~/.claude`, `~/.tracedecay`, and
 
 ```bash
 # One-shot: build + isolate + install + index + one trivial scenario.
-eval/hermetic/run.sh smoke --agent claude --model sonnet --debug --keep
-eval/hermetic/run.sh smoke --agent codex --debug --keep
+evals/hermetic/run.sh smoke --agent claude --model sonnet --debug --keep
+evals/hermetic/run.sh smoke --agent codex --debug --keep
 
 # Full corpus against a reusable env:
-ENV=$(eval/hermetic/run.sh setup --agent claude --debug)
-eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
-eval/hermetic/run.sh run   --agent claude --env-dir "$ENV" --corpus my-corpus.jsonl --model sonnet
-eval/hermetic/run.sh teardown --env-dir "$ENV"
+ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
+evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
+evals/hermetic/run.sh run   --agent claude --env-dir "$ENV" --corpus my-corpus.jsonl --model sonnet
+evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
 ## Why a naive PATH override is not enough
@@ -109,7 +109,7 @@ Optional per-scenario fields:
   `tracedecay tool` plus this fragment are counted as `tool_cmd_attempts`.
 
 `project_dir` may be an absolute path or **`fixture:<name>`**, resolved at run
-time to `<env>/fixtures/<name>` (staged copies of `eval/hermetic/fixtures/*`).
+time to `<env>/fixtures/<name>` (staged copies of `evals/hermetic/fixtures/*`).
 Use `run.sh fixtures --env-dir "$ENV"` to copy and index fixtures without a
 full corpus run; `run --reps N` re-stages fixtures automatically before each
 rep after the first.
@@ -138,15 +138,15 @@ Each scored row in `results.jsonl` also records derived fields: **`verify_pass`*
 The args-ergonomics corpus compares MCP-first behavior with CLI fallback:
 
 ```bash
-ENV=$(eval/hermetic/run.sh setup --agent claude --debug)
-eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
-eval/hermetic/run.sh run --agent claude --env-dir "$ENV" \
-  --corpus eval/hermetic/corpora/tool-args-ergonomics.jsonl --model sonnet
+ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
+evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
+evals/hermetic/run.sh run --agent claude --env-dir "$ENV" \
+  --corpus evals/hermetic/corpora/tool-args-ergonomics.jsonl --model sonnet
 
-ENV=$(eval/hermetic/run.sh setup --agent codex --debug)
-eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
-eval/hermetic/run.sh run --agent codex --env-dir "$ENV" \
-  --corpus eval/hermetic/corpora/tool-args-ergonomics.jsonl
+ENV=$(evals/hermetic/run.sh setup --agent codex --debug)
+evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
+evals/hermetic/run.sh run --agent codex --env-dir "$ENV" \
+  --corpus evals/hermetic/corpora/tool-args-ergonomics.jsonl
 ```
 
 Outputs land in `<env>/results/`: `results.jsonl` (one scored object per
@@ -185,7 +185,7 @@ the code change (plus model noise), not to drift in the user's real environment.
 
 ## Fact-store adoption scorecard
 
-The `eval/hermetic/corpora/fact-store-adoption.jsonl` corpus measures whether a
+The `evals/hermetic/corpora/fact-store-adoption.jsonl` corpus measures whether a
 real agent actually **uses project memory** the way the tools intend: whether it
 **stores** durable facts (`tracedecay_fact_store`), **recalls** them when they
 would help, and — the headline metric — gives **feedback** on the facts it used
@@ -200,13 +200,13 @@ how close the agent is to the intended loop.
 Run recipe (adapted from the reusable-env examples above):
 
 ```bash
-ENV=$(eval/hermetic/run.sh setup --agent claude --debug)
-eval/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
-eval/hermetic/run.sh run --agent claude --env-dir "$ENV" \
-  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl --model sonnet
-python3 eval/hermetic/scorecard.py "$ENV"/results/results.jsonl \
-  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl
-eval/hermetic/run.sh teardown --env-dir "$ENV"
+ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
+evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
+evals/hermetic/run.sh run --agent claude --env-dir "$ENV" \
+  --corpus evals/hermetic/corpora/fact-store-adoption.jsonl --model sonnet
+python3 evals/hermetic/scorecard.py "$ENV"/results/results.jsonl \
+  --corpus evals/hermetic/corpora/fact-store-adoption.jsonl
+evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
 This is **not CI**. It runs deliberately, hits the real Anthropic API, and

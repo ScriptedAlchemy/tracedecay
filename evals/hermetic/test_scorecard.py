@@ -5,7 +5,7 @@ No live model, no filesystem beyond a couple of temp files, no network. Feeds a
 synthetic in-memory results list through ``scorecard.aggregate`` and asserts the
 computed adoption percentages per bucket, overall, and the feedback headline.
 
-Run:  python3 eval/hermetic/test_scorecard.py
+Run:  python3 evals/hermetic/test_scorecard.py
 """
 
 from __future__ import annotations

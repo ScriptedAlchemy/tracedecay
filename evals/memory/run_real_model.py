@@ -15,7 +15,7 @@ The deterministic no-LLM layer lives in `tests/memory_eval_test.rs` and runs
 as part of the normal cargo test suite. CI never calls this script.
 
 Example:
-    python3 eval/run_real_model.py --scenario memory-no-pollution \
+    python3 evals/memory/run_real_model.py --scenario memory-no-pollution \
         --agent-turn --i-understand-model-cost
 """
 
@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
-REPO_ROOT = EVAL_DIR.parent
+REPO_ROOT = EVAL_DIR.parent.parent
 SCENARIO_DIR = EVAL_DIR / "scenarios"
 RUNS_DIR = EVAL_DIR / "runs"
 

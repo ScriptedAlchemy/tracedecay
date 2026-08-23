@@ -2,7 +2,7 @@
 """Adoption scorecard: turn a hermetic run's ``results.jsonl`` into a
 fact-store adoption metric.
 
-The hermetic harness (``eval/hermetic/run.sh`` + ``score.py``) emits one scored
+The hermetic harness (``evals/hermetic/run.sh`` + ``score.py``) emits one scored
 JSON object per scenario into ``results.jsonl``. Each row carries at least:
 
     id, category, rep, pass (bool), expected_tools_missing, verify_pass, ...
@@ -34,7 +34,7 @@ Definitions:
 
 Usage:
 
-    python3 eval/hermetic/scorecard.py <results.jsonl> [--corpus <corpus.jsonl>]
+    python3 evals/hermetic/scorecard.py <results.jsonl> [--corpus <corpus.jsonl>]
 
 Emits a human-readable table on stdout followed by a machine JSON block
 (delimited so a baseline diff can extract it) — exit 0 even on an empty or

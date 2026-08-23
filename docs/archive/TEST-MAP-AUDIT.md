@@ -81,7 +81,7 @@ The ceiling, though, is ~27%. **3,196 of 4,397 source functions (72.7%) are unre
 | Has callers, chain never reaches a test | 1,063 | Genuinely exercised but the chain breaks at a dispatch/process boundary |
 | Of the unreachable, are `method` nodes | 1,788 | Strong trait-impl / dynamic-dispatch signal |
 
-Non-`src/` remainder (357 unreachable): `dashboard/` Python (242 — no cross-language edges), `scripts/` (51), `benchmark_data/`/`benches/` (42), `eval/` (16), `build.rs` (5) — code the Rust test suite structurally cannot call.
+Non-`src/` remainder (357 unreachable): `dashboard/` Python (242 — no cross-language edges), `scripts/` (51), `benchmark_data/`/`benches/` (42), `evals/` (16), `build.rs` (5) — code the Rust test suite structurally cannot call.
 
 ---
 
