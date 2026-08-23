@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -2062,12 +2063,13 @@ fn insert_exact(
     let mut encoded_fields = BTreeMap::new();
     for term in &row.exact_terms {
         let field = exact_field_for_kind(term.kind());
-        if let std::collections::btree_map::Entry::Vacant(slot) = encoded_fields.entry(field) {
-            slot.insert(encode_exact_field(field)?);
-        }
+        let encoded = match encoded_fields.entry(field) {
+            Entry::Vacant(slot) => &*slot.insert(encode_exact_field(field)?),
+            Entry::Occupied(slot) => slot.into_mut(),
+        };
         insert_exact_posting(
             transaction,
-            &encoded_fields[&field],
+            encoded,
             canonical_projected_exact_term(term),
             document,
         )?;
