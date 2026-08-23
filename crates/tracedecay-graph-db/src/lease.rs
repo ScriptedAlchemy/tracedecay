@@ -401,7 +401,9 @@ impl VerifiedGraphSnapshot {
         operation: impl FnOnce() -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
         let _lease: ArcRwLockReadGuard<RawRwLock, ()> =
-            self.database.inner.snapshot_gate.read_arc();
+            crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_SNAPSHOT_GATE_READ, || {
+                self.database.inner.snapshot_gate.read_arc()
+            });
         operation()
     }
 

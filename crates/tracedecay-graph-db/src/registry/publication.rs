@@ -30,6 +30,7 @@ use crate::{
 };
 
 impl GraphDbRegistry {
+    #[hotpath::measure(label = "graph_db.replay_pool.retire", impl_type = "GraphDbRegistry")]
     pub fn retire_one_code_generation_replay(
         &self,
         registration: GraphDbRegistration,
@@ -195,9 +196,7 @@ impl GraphDbRegistry {
             return Ok(GraphReplayCollectionOutcome::Absent);
         }
         let selected = {
-            let mut state = database.inner.verified_generations.write().map_err(|_| {
-                GraphDbError::unavailable("verified graph generation state lock is poisoned")
-            })?;
+            let mut state = database.wait_verified_generations_write()?;
             for head in state.heads.values() {
                 retain_lease_closure(head, &mut retained);
             }
@@ -274,6 +273,7 @@ impl GraphDbRegistry {
         }
     }
 
+    #[hotpath::measure(label = "graph_db.replay_pool.finalize", impl_type = "GraphDbRegistry")]
     pub fn finalize_one_code_generation_replay_cleanup(
         &self,
         registration: GraphDbRegistration,
@@ -442,6 +442,7 @@ impl GraphDbRegistry {
         self.publish_verified_inner(&operation, authority, context, publication_key, None, true)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.publish", impl_type = "GraphDbRegistry")]
     fn publish_verified_inner(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -485,6 +486,14 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
+        crate::hotpath::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
+        crate::hotpath::record_hydration_source(if has_supplied_manifest {
+            crate::hotpath::HydrationSource::Supplied
+        } else if metadata_only {
+            crate::hotpath::HydrationSource::Metadata
+        } else {
+            crate::hotpath::HydrationSource::Replay
+        });
         let current = authority
             .verified_head(&publication_key.projection, context)
             .map_err(map_publication_error)?;

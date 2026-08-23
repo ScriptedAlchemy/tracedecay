@@ -339,6 +339,7 @@ impl GraphGenerationManifestProvider for InlineOnlyGraphGenerationManifestProvid
     }
 }
 
+#[hotpath::measure(label = "graph_db.generation.replay.decode")]
 pub(crate) fn checked_decode_replay_source(
     payload: &[u8],
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -356,11 +357,29 @@ pub(crate) fn checked_decode_replay_source(
         return Err(error);
     }
     check()?;
-    decoded.map_err(|error| {
+    let source = decoded.map_err(|error| {
         GraphDbError::invalid(format!(
             "canonical graph generation replay is invalid: {error}"
         ))
-    })
+    })?;
+    crate::hotpath::record_counts(0, 0, 1, payload.len());
+    crate::hotpath::record_hydration_source(hydration_source(&source));
+    Ok(source)
+}
+
+fn hydration_source(source: &GraphGenerationReplaySource) -> crate::hotpath::HydrationSource {
+    match source {
+        GraphGenerationReplaySource::InlineManifest(_) => crate::hotpath::HydrationSource::Inline,
+        GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
+            crate::hotpath::HydrationSource::Metadata
+        }
+        GraphGenerationReplaySource::SealedCodeGeneration(_) => {
+            crate::hotpath::HydrationSource::Sealed
+        }
+        GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
+            crate::hotpath::HydrationSource::SemanticVector
+        }
+    }
 }
 
 pub(super) fn validate_sealed_replay(

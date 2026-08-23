@@ -84,6 +84,7 @@ pub struct GraphProjectionLabelPage {
 }
 
 impl GraphDb {
+    #[hotpath::measure(label = "graph_db.projection.read", impl_type = "GraphDb")]
     pub fn read_projection(
         &self,
         request: GraphProjectionReadRequest,
@@ -91,9 +92,13 @@ impl GraphDb {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        read_projection(database, request)
+        let page = read_projection(database, request)?;
+        crate::hotpath::record_counts(page.entities.len(), page.relations.len(), 0, 0);
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        Ok(page)
     }
 
+    #[hotpath::measure(label = "graph_db.projection.telemetry", impl_type = "GraphDb")]
     pub fn projection_telemetry(
         &self,
         request: GraphProjectionTelemetryRequest,
@@ -101,7 +106,17 @@ impl GraphDb {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        projection_telemetry(database, request)
+        let telemetry = projection_telemetry(database, request)?;
+        if let Some(telemetry) = &telemetry {
+            crate::hotpath::record_counts(
+                usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
+                usize::try_from(telemetry.relation_count).unwrap_or(usize::MAX),
+                0,
+                0,
+            );
+        }
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Live);
+        Ok(telemetry)
     }
 
     /// Reads one bounded exact-label page from a projection-scoped native
@@ -160,14 +175,18 @@ impl GraphSnapshot {
         &self,
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
-        self.database.read_projection(request)
+        let page = self.database.read_projection(request)?;
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        Ok(page)
     }
 
     pub fn projection_telemetry(
         &self,
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
-        self.database.projection_telemetry(request)
+        let telemetry = self.database.projection_telemetry(request)?;
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        Ok(telemetry)
     }
 }
 

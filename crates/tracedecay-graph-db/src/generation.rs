@@ -178,6 +178,10 @@ impl GraphGenerationManifest {
         Ok(manifest)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.replay.hydrate",
+        impl_type = "GraphGenerationManifest"
+    )]
     pub fn from_replay(
         publication: &GraphPublicationReplayV1,
         provider: &dyn GraphGenerationManifestProvider,
@@ -228,6 +232,8 @@ impl GraphGenerationManifest {
             return Err(GraphDbError::Conflict);
         }
         check()?;
+        crate::hotpath::record_counts(manifest.entities.len(), manifest.relations.len(), 1, 0);
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Replay);
         Ok(manifest)
     }
 

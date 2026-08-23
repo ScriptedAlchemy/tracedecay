@@ -29,6 +29,10 @@ pub struct VerifiedGenerationBatchApply {
 }
 
 impl GraphDbRegistry {
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.begin",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn begin_verified_generation(
         &self,
         registration: GraphDbRegistration,
@@ -210,6 +214,10 @@ impl GraphDbRegistry {
         }
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.apply",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn apply_verified_generation_batch(
         &self,
         registration: GraphDbRegistration,

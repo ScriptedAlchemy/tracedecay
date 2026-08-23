@@ -134,6 +134,7 @@ impl GraphDb {
         self.apply_generation_unverified_with_digest(manifest, &expected, check)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.stage", impl_type = "GraphDb")]
     pub(crate) fn apply_generation_unverified_with_digest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -155,6 +156,14 @@ impl GraphDb {
             return Ok(commit);
         }
         let pages = generation_stage_pages(manifest)?;
+        let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
+        crate::hotpath::record_counts(
+            manifest.entities.len(),
+            manifest.relations.len(),
+            0,
+            generation_bytes,
+        );
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Staged);
         for (index, page) in pages.iter().enumerate() {
             check()?;
             self.apply_generation_stage_page_with_context(
@@ -177,7 +186,7 @@ impl GraphDb {
         manifest: &GraphGenerationManifest,
         context: &GenerationStageContext,
     ) -> Result<Option<GraphCommit>, GraphDbError> {
-        let _snapshot_gate = self.inner.snapshot_gate.upgradable_read();
+        let _snapshot_gate = self.wait_snapshot_gate_upgradable();
         let existing = {
             let guard = self.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -197,9 +206,7 @@ impl GraphDb {
         {
             return Ok(None);
         }
-        let mut verified = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut verified = self.wait_verified_generations_write()?;
         verified.collected.remove(&context.locator);
         verified.stored.insert(
             context.locator.clone(),
@@ -357,9 +364,7 @@ impl GraphDb {
                 ))
             },
             |_database, commit, ()| {
-                let mut verified = self.inner.verified_generations.write().map_err(|_| {
-                    GraphDbError::unavailable("verified graph generation state lock is poisoned")
-                })?;
+                let mut verified = self.wait_verified_generations_write()?;
                 verified.collected.remove(&context.locator);
                 verified.stored.insert(
                     context.locator.clone(),
@@ -370,6 +375,7 @@ impl GraphDb {
         )
     }
 
+    #[hotpath::measure(label = "graph_db.generation.reopen", impl_type = "GraphDb")]
     pub(crate) fn reopen_and_verify_existing_generation(
         &self,
         manifest: &GraphGenerationManifest,
@@ -390,12 +396,13 @@ impl GraphDb {
         // so it runs behind an upgradable claim: snapshot readers proceed
         // while every writer still queues behind this guard, keeping the
         // reopened rows stable for the digest.
-        let snapshot_gate = self.inner.snapshot_gate.write();
+        let snapshot_gate = self.wait_snapshot_gate_write();
         {
             let mut database_guard =
-                self.inner.database.write().map_err(|_| {
-                    GraphDbError::unavailable("graph database write lock is poisoned")
-                })?;
+                crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_DATABASE_WRITE, || {
+                    self.inner.database.write()
+                })
+                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             self.ensure_available()?;
             check()?;
             let mut state_guard = self.state_write_guard()?;
@@ -484,12 +491,16 @@ impl GraphDb {
         // database file). The re-verification afterwards is read-only again,
         // so the gate downgrades back to upgradable and snapshot readers are
         // admitted while the repaired rows stream through the proof.
-        let write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
+        let write_gate =
+            crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE, || {
+                RwLockUpgradableReadGuard::upgrade(snapshot_gate)
+            });
         {
             let mut database_guard =
-                self.inner.database.write().map_err(|_| {
-                    GraphDbError::unavailable("graph database write lock is poisoned")
-                })?;
+                crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_DATABASE_WRITE, || {
+                    self.inner.database.write()
+                })
+                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             let mut state_guard = self.state_write_guard()?;
             let mut quarantined_guard = self
                 .inner
@@ -536,14 +547,30 @@ impl GraphDb {
             verify_recovered_generation(database, manifest, expected, check)
         };
         match verify_result {
-            Ok(verified) => Ok((commit, verified)),
+            Ok(verified) => {
+                crate::hotpath::record_counts(
+                    manifest.entities.len(),
+                    manifest.relations.len(),
+                    0,
+                    0,
+                );
+                crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Recovered);
+                Ok((commit, verified))
+            }
             Err(error) => {
                 // Restoring the durable quarantine marker rewrites the file,
                 // so the failure path re-takes the exclusive claim.
-                let _write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
-                let mut database_guard = self.inner.database.write().map_err(|_| {
-                    GraphDbError::unavailable("graph database write lock is poisoned")
-                })?;
+                let _write_gate = crate::hotpath::wait_lock(
+                    crate::hotpath::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
+                    || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
+                );
+                let mut database_guard =
+                    crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_DATABASE_WRITE, || {
+                        self.inner.database.write()
+                    })
+                    .map_err(|_| {
+                        GraphDbError::unavailable("graph database write lock is poisoned")
+                    })?;
                 let mut state_guard = self.state_write_guard()?;
                 let mut quarantined_guard =
                     self.inner.quarantined_projections.write().map_err(|_| {
@@ -579,9 +606,7 @@ impl GraphDb {
         &self,
         lease: std::sync::Arc<VerifiedGenerationLease>,
     ) -> Result<Option<std::sync::Arc<VerifiedGenerationLease>>, GraphDbError> {
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.install(lease)
     }
 
@@ -589,9 +614,7 @@ impl GraphDb {
         &self,
         lease: &std::sync::Arc<VerifiedGenerationLease>,
     ) -> Result<(), GraphDbError> {
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.remember(lease)
     }
 
@@ -609,9 +632,7 @@ impl GraphDb {
                 .map(|projection| projection.commit)
         };
         let Some(commit) = commit else {
-            let mut state = self.inner.verified_generations.write().map_err(|_| {
-                GraphDbError::unavailable("verified graph generation state lock is poisoned")
-            })?;
+            let mut state = self.wait_verified_generations_write()?;
             state.known.remove(locator);
             state.quarantined.remove(locator);
             state.stored.remove(locator);
@@ -626,9 +647,7 @@ impl GraphDb {
             commit.watermark,
             check,
         )?;
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.known.remove(locator);
         state.quarantined.remove(locator);
         state.stored.remove(locator);
@@ -770,6 +789,7 @@ impl GraphDb {
         .map(Some)
     }
 
+    #[hotpath::measure(label = "graph_db.traversal.verified", impl_type = "GraphDb")]
     pub(crate) fn traverse_generation(
         &self,
         snapshot: &VerifiedGraphSnapshot,
@@ -888,6 +908,12 @@ impl GraphDb {
                 }
             }
         }
+        let edges = visits
+            .iter()
+            .filter(|visit| visit.via_relation.is_some())
+            .count();
+        crate::hotpath::record_counts(visits.len(), edges, 0, 0);
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
         Ok(VerifiedTraversalResult { visits })
     }
 
@@ -946,11 +972,11 @@ impl GraphDb {
         let locator =
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let physical_namespace = locator.physical_namespace()?;
-        let _snapshot_gate = self.inner.snapshot_gate.write();
-        let mut database_guard = self
-            .inner
-            .database
-            .write()
+        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let mut database_guard =
+            crate::hotpath::wait_lock(crate::hotpath::LOCK_WAIT_DATABASE_WRITE, || {
+                self.inner.database.write()
+            })
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         let mut format_state = self.state_write_guard()?;
         let mut projection_quarantine = self
@@ -993,9 +1019,7 @@ impl GraphDb {
         *format_state = recovered_state;
         *projection_quarantine = recovered_quarantine;
         *database_guard = Some(recovered);
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.quarantine(locator);
         Ok(())
     }

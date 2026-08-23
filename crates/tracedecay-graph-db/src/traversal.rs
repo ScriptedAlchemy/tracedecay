@@ -75,7 +75,9 @@ pub struct TraversalResult {
 
 impl GraphSnapshot {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
-        self.database.traverse(request)
+        let result = self.database.traverse(request)?;
+        crate::hotpath::record_hydration_source(crate::hotpath::HydrationSource::Snapshot);
+        Ok(result)
     }
 
     /// Reads bounded outgoing relations while retaining this snapshot's

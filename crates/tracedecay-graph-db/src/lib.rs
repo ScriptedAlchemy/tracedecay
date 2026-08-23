@@ -3,6 +3,7 @@ mod error;
 mod generation;
 mod generation_runtime;
 mod generation_staging_runtime;
+mod hotpath;
 mod lease;
 mod limits;
 mod location;
