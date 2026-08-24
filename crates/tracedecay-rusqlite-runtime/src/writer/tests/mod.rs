@@ -19,15 +19,16 @@ use tracedecay_store::{
     RepositoryWritePayloadV1, RetrievalAnchorDispositionRecordV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
     RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
-    VerifiedStoreLocatorV1,
+    VerifiedStoreLocatorV1, WAL_HARD_LIMIT_BYTES, WAL_SOFT_LIMIT_BYTES, WalBudgetV1,
 };
 
 use super::*;
 use crate::{
     checkpoint::{
-        CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointKind,
-        CheckpointMode, CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult,
-        MaintenanceCheckpointMode, WalPressure, WalSample,
+        CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
+        CheckpointKind, CheckpointMode, CheckpointOutcome, CheckpointPressure,
+        CheckpointReport, CheckpointResult, MaintenanceCheckpointMode, WalPressure,
+        WalSample,
     },
     maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
     test_support::{binding, metadata, request, scope},
@@ -451,6 +452,29 @@ fn start(
     .unwrap()
 }
 
+fn start_with_admission(
+    database: &TestDatabase,
+    request: &RuntimeSubmitRequestV1,
+    applied: Arc<AtomicU64>,
+    admission: AdmissionConfigV1,
+) -> PersistentWriter {
+    let binding = binding(&request.envelope().metadata);
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+    );
+    PersistentWriter::start_with_persistence(
+        ExistingWriterLocator::new(binding, locator, database.0.clone()).unwrap(),
+        admission,
+        Box::new(TestPersistence {
+            applied,
+            sequence: 0,
+        }),
+    )
+    .unwrap()
+}
+
 fn start_with_persistence(
     database: &TestDatabase,
     request: &RuntimeSubmitRequestV1,
@@ -611,3 +635,105 @@ mod authority;
 mod backup;
 mod checkpoint;
 mod interruption;
+
+/// The operator's configured WAL budget must reach the checkpoint controller.
+///
+/// `actor_commits_before_reply_and_releases_admission` pins the default: one
+/// small write leaves the WAL below the 32 MiB soft limit, so the scheduled
+/// checkpoint reports `BelowSoft`. Configuring a one-byte soft limit must flip
+/// that same observation - any non-empty WAL is now over pressure, so a PASSIVE
+/// checkpoint has to run. Asserts the published decision, never a duration or a
+/// WAL byte count.
+#[test]
+fn scheduled_checkpoint_honors_the_configured_wal_budget() {
+    let database = TestDatabase::new();
+    let request = request(metadata("operation.wal.budget", "key.wal.budget", 'w'));
+    let admission = AdmissionConfigV1 {
+        wal: WalBudgetV1 {
+            soft_limit_bytes: 1,
+            hard_limit_bytes: 2,
+        },
+        ..AdmissionConfigV1::default()
+    };
+    admission
+        .validate()
+        .expect("a one-byte soft limit is an admissible operator configuration");
+    let writer = start_with_admission(&database, &request, Arc::new(AtomicU64::new(0)), admission);
+    let checkpoint = writer.checkpoint_handle();
+    let mut checkpoint_status = checkpoint.status_subscription();
+    let probe = Arc::new(Probe::new(&request, None));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
+    assert!(matches!(outcome, RuntimeSubmitOutcomeV1::Committed { .. }));
+    runtime
+        .block_on(checkpoint_status.changed())
+        .expect("writer publishes a scheduled WAL sample");
+
+    let latest = checkpoint_status.borrow().latest.clone();
+    assert!(
+        !matches!(latest, Some(CheckpointOutcome::BelowSoft { .. })),
+        "configured soft limit never reached the controller; got {latest:?}"
+    );
+    assert!(
+        matches!(
+            latest,
+            Some(
+                CheckpointOutcome::Complete {
+                    kind: CheckpointKind::Passive,
+                    ..
+                } | CheckpointOutcome::Pending {
+                    kind: CheckpointKind::Passive,
+                    ..
+                }
+            )
+        ),
+        "expected a scheduled PASSIVE checkpoint; got {latest:?}"
+    );
+    writer.shutdown_and_join().unwrap();
+}
+
+/// Honouring the configured budget must not be able to weaken durability.
+///
+/// `AdmissionConfigV1::validate` caps the soft and hard limits at exactly the
+/// values `CheckpointConfig::default()` used to hardcode, so every admissible
+/// budget is at or below the previous thresholds: the writer can only reach a
+/// checkpoint sooner than it did before, never later. Anything above the
+/// ceilings is rejected before a writer can start.
+#[test]
+fn no_admissible_wal_budget_relaxes_the_previous_checkpoint_thresholds() {
+    let previous = CheckpointConfig::default();
+
+    let ceiling = AdmissionConfigV1 {
+        wal: WalBudgetV1 {
+            soft_limit_bytes: WAL_SOFT_LIMIT_BYTES,
+            hard_limit_bytes: WAL_HARD_LIMIT_BYTES,
+        },
+        ..AdmissionConfigV1::default()
+    };
+    ceiling.validate().expect("the ceilings are admissible");
+    assert_eq!(ceiling.wal.soft_limit_bytes, previous.soft_wal_bytes);
+    assert_eq!(ceiling.wal.hard_limit_bytes, previous.hard_wal_bytes);
+
+    for budget in [
+        WalBudgetV1 {
+            soft_limit_bytes: WAL_SOFT_LIMIT_BYTES + 1,
+            hard_limit_bytes: WAL_HARD_LIMIT_BYTES,
+        },
+        WalBudgetV1 {
+            soft_limit_bytes: WAL_SOFT_LIMIT_BYTES,
+            hard_limit_bytes: WAL_HARD_LIMIT_BYTES + 1,
+        },
+    ] {
+        let over = AdmissionConfigV1 {
+            wal: budget,
+            ..AdmissionConfigV1::default()
+        };
+        assert!(
+            over.validate().is_err(),
+            "a budget above the contract ceiling must never reach a writer"
+        );
+    }
+}

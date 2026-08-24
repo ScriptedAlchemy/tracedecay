@@ -180,9 +180,21 @@ impl Worker {
             }
             None => None,
         };
+        // The checkpoint thresholds are the operator's admitted WAL budget, not
+        // this crate's defaults. `PersistentWriter::start_with_persistence` has
+        // already run `AdmissionConfigV1::validate`, which caps the soft limit
+        // at `WAL_SOFT_LIMIT_BYTES` and the hard limit at `WAL_HARD_LIMIT_BYTES`
+        // -- the two values `CheckpointConfig::default()` hardcodes. A
+        // configured budget can therefore only lower a threshold, never raise
+        // one, so honouring it can only checkpoint more often than before.
+        // `WriterCheckpointController::new` re-validates and fails startup
+        // closed rather than trusting the value.
         let mut checkpoint = match WriterCheckpointController::new(
             RusqliteCheckpointDriver::new(connection),
-            CheckpointConfig::default(),
+            CheckpointConfig {
+                soft_wal_bytes: self.config.wal.soft_limit_bytes,
+                hard_wal_bytes: self.config.wal.hard_limit_bytes,
+            },
         ) {
             Ok(checkpoint) => checkpoint,
             Err(_) => return self.fail_start(WriterStartError::CheckpointSetupFailed),
