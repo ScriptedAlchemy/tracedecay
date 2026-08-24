@@ -2,6 +2,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
 use tempfile::NamedTempFile;
+use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
     ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_immutable_reader,
@@ -63,6 +64,35 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
         .execute_batch("CREATE TABLE initialized(value)")
         .expect("non-destructive writer initialization");
     assert!(connection.execute_batch("DROP TABLE initialized").is_err());
+}
+
+/// `wal_autocheckpoint = 0` means SQLite never shrinks the WAL on its own, and
+/// a checkpoint resets WAL *contents* without returning the file's blocks. The
+/// writer must therefore declare the retained WAL span explicitly.
+#[test]
+fn writer_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
+    let file = database();
+    let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
+
+    assert_eq!(
+        pragma_i64(&connection, "journal_size_limit"),
+        i64::try_from(WAL_SOFT_LIMIT_BYTES).expect("soft limit fits in i64"),
+        "writer must cap the retained WAL file at the configurable soft-limit ceiling"
+    );
+}
+
+/// Maintenance connections are the offline RESTART/TRUNCATE path, so they reset
+/// the WAL too and must carry the same retention bound.
+#[test]
+fn maintenance_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
+    let file = database();
+    let connection = open(file.path(), ConnectionMode::Maintenance).expect("maintenance policy");
+
+    assert_eq!(
+        pragma_i64(&connection, "journal_size_limit"),
+        i64::try_from(WAL_SOFT_LIMIT_BYTES).expect("soft limit fits in i64"),
+        "maintenance must cap the retained WAL file at the configurable soft-limit ceiling"
+    );
 }
 
 #[test]
