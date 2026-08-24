@@ -282,7 +282,7 @@ pub(super) fn code_index_reconcile_sink(
         let schedulers = schedulers.clone();
         let activation = Arc::clone(&activation);
         Box::pin(async move {
-            if schedulers.request_authoritative_reconcile(&root).await {
+            if schedulers.notify_hook_overflow(&root).await {
                 true
             } else {
                 activation.notify_hook_overflow(&root).await

@@ -728,6 +728,7 @@ enum CommandFamily {
 }
 
 impl CommandFamily {
+    #[cfg(feature = "hotpath")]
     fn as_profile_label(self) -> &'static str {
         match self {
             Self::Project => "project",
