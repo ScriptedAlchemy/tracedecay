@@ -76,6 +76,7 @@
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
 
+pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
