@@ -179,6 +179,38 @@ pub struct HookCompletedReadinessDistributions {
     pub(crate) disposition_values_folded_to_unknown: u64,
 }
 
+/// Read-only intake accounting for callers outside this crate.
+///
+/// The fields stay crate-private so no caller can assemble or mutate a
+/// distribution that did not come from a real aggregation pass; these
+/// accessors only expose the counts an observer needs to assert on.
+impl HookCompletedReadinessDistributions {
+    #[must_use]
+    pub fn source_event(&self) -> &str {
+        &self.source_event
+    }
+
+    #[must_use]
+    pub const fn input_rows_received(&self) -> u64 {
+        self.input_rows_received
+    }
+
+    #[must_use]
+    pub const fn input_rows_processed(&self) -> u64 {
+        self.input_rows_processed
+    }
+
+    #[must_use]
+    pub const fn input_rows_dropped_at_cap(&self) -> u64 {
+        self.input_rows_dropped_at_cap
+    }
+
+    #[must_use]
+    pub const fn events_considered(&self) -> u64 {
+        self.events_considered
+    }
+}
+
 #[derive(Default)]
 struct MutableNumericSummary {
     present_count: u64,
