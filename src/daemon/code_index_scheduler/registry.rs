@@ -691,8 +691,7 @@ impl Drop for PendingWakeClaimV1 {
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
-    /// Retained process-memory sampler handle; observed only by tests today.
-    pub(super) _resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
+    pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     /// Owners whose project was retired (remote deletion, replacement) but whose
@@ -1930,7 +1929,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&self.byte_pool),
         )
         .map(|mut scheduler| {
-            scheduler.bind_resident_memory(Arc::clone(&self._resident_memory));
+            scheduler.bind_resident_memory(Arc::clone(&self.resident_memory));
             scheduler
         })
     }
@@ -1985,6 +1984,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 runtime: graph_runtime,
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
+                resident_memory: Arc::clone(&self.resident_memory),
             },
         )
         .await
@@ -2161,7 +2161,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
         let open_semantic_schedule = semantic_schedule.clone();
-        let open_resident_memory = Arc::clone(&self._resident_memory);
+        let open_resident_memory = Arc::clone(&self.resident_memory);
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             Self::pause_cold_mount_open_for_test(&open_project_root);

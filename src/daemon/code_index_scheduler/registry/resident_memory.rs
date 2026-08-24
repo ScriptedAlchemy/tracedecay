@@ -27,7 +27,7 @@ impl CodeIndexSchedulerRegistryV1 {
             tokio::sync::broadcast::channel(super::GENERATION_PUBLICATION_CHANNEL_CAPACITY);
         Self {
             max_worktrees,
-            _resident_memory: resident_memory,
+            resident_memory,
             byte_pool: Arc::new(super::SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),
             retiring: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),
@@ -50,6 +50,6 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     pub(in crate::daemon) fn process_resident_memory(&self) -> Arc<ProcessResidentMemoryV1> {
-        Arc::clone(&self._resident_memory)
+        Arc::clone(&self.resident_memory)
     }
 }

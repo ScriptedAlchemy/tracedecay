@@ -5,7 +5,8 @@ use std::sync::{
 };
 
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
-use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
+use tracedecay_graph_db::{GraphCancellation, GraphGenerationMemoryPlanV1, SealedGraphStateDigest};
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 use super::{
     CodeGraphProjectionError, CodeGraphServingAuthorityV1, CodeIndexProductionErrorV1,
@@ -89,6 +90,7 @@ pub(super) enum CodeGraphActivationAuthorityV1 {
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         project_database: Arc<crate::db::Database>,
         policy: Arc<AtomicBool>,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
     },
     #[cfg(test)]
     Memory { policy: Arc<AtomicBool> },
@@ -157,8 +159,27 @@ impl CodeGraphActivationAuthorityV1 {
             Self::Persistent {
                 runtime,
                 project_database,
+                resident_memory,
                 ..
             } => {
+                // Every code-graph projection contains the current-generation
+                // entity even when the source snapshot has no files, chunks,
+                // symbols, imports, or edges. Grafeo's persistent LPG store has
+                // no finite native-heap bound for that first mutation, so the
+                // process authority cannot issue a truthful reservation.
+                let memory_plan = GraphGenerationMemoryPlanV1::for_native_mutation_count(1);
+                if memory_plan == GraphGenerationMemoryPlanV1::NativeHeapUpperBoundUnavailable {
+                    let limit = resident_memory.snapshot().limit_bytes;
+                    latest.refuse_graph_activation(
+                        "persistent code graph activation has no bounded native-memory plan",
+                    );
+                    return Err(CodeIndexSchedulerErrorV1::GraphProjection(
+                        CodeGraphProjectionError::BudgetExhausted {
+                            budget: "resident_memory".to_owned(),
+                            limit,
+                        },
+                    ));
+                }
                 let generation_id = latest.generation().manifest().generation_id.clone();
                 let retained = runtime
                     .retain_code_graph_runtime(

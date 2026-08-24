@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -8861,6 +8862,111 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
         "a retained generation cannot serve after persistent graph replay fails"
     );
     registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
+}
+
+/// Persistent graph activation must enter the process-wide resident-memory
+/// authority before it mutates the already-open native graph with a code
+/// generation. The canonical authority supplies the reported limit but cannot
+/// issue a truthful reservation without a finite native-memory plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_graph_activation_refuses_unplannable_generation_before_native_publication() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (latest, replay_binding, repository_id, worktree_id) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let replay_binding = scheduler
+            .code_graph_replay_binding(&latest.generation().manifest().generation_id)
+            .expect("sealed replay binding");
+        let snapshot = latest.generation().snapshot();
+        let repository_id = snapshot.repository.clone();
+        let worktree_id = snapshot.worktree.clone().expect("worktree identity");
+        (latest, replay_binding, repository_id, worktree_id)
+    };
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    crate::storage::pin_fixture_repository_identity(fixture.path(), project_id.as_str())
+        .expect("project enrollment");
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        94,
+        "resident-memory graph activation refusal",
+    )
+    .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity,
+        )
+        .await
+        .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("writable project database");
+    let native_graph_path = project_database.database_path().with_extension("grafeo");
+    let native_graph_before = std::fs::read(&native_graph_path).expect("baseline native graph");
+
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(1).expect("nonzero resident-memory capacity"),
+    ));
+    let graph_activation = super::graph_activation::CodeGraphActivationAuthorityV1::Persistent {
+        runtime: Arc::clone(&graph_runtime),
+        project_database,
+        policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        resident_memory: resident_memory.clone(),
+    };
+
+    let error = graph_activation
+        .activate(
+            &project_id,
+            &repository_id,
+            &worktree_id,
+            latest,
+            replay_binding,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+        .expect_err("unplannable persistent activation must be refused");
+    assert!(
+        matches!(
+            &error,
+            super::CodeIndexSchedulerErrorV1::GraphProjection(
+                crate::code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
+                    budget,
+                    limit: 1,
+                }
+            ) if budget == "resident_memory"
+        ),
+        "resident-memory refusal must remain typed: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&native_graph_path).expect("native graph after refusal"),
+        native_graph_before,
+        "resident-memory denial must precede native graph mutation"
+    );
+    assert_eq!(
+        resident_memory.snapshot().used_bytes,
+        0,
+        "a denied activation must retain no resident-memory charge"
+    );
+
     graph_runtime
         .shutdown_memory_graph_reconciliation_tasks()
         .await
