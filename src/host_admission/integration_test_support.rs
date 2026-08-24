@@ -290,6 +290,7 @@ impl HostAdmissionTestRuntimeV1 {
             status: HostAdmissionStatus::Unavailable,
             retryable: false,
             reason_code: Some("project_authority_unbound"),
+            recovery: None,
         })?;
         self.facade()
             .get_source_cursor(
