@@ -3,11 +3,11 @@ use super::{
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
     HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, PackageHookAction, ProfileStorageAction,
     RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault, async_worker_threads,
-    command_profile_label, daemon_cpu_threads_from, hotpath_focus_is_valid,
-    hotpath_output_format_is_none, hotpath_output_format_is_valid, hotpath_output_path_is_valid,
-    hotpath_requires_protocol_safe_output, is_daemon_run, is_full_component_set_adoption,
-    is_local_install_command, should_skip_agent_install_check, should_skip_startup_maintenance,
-    stderr_tracing_default, validate_host_bundle_options,
+    command_profile_label, daemon_cpu_threads_from, hotpath_activation_requested,
+    hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
+    hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
+    is_full_component_set_adoption, is_local_install_command, should_skip_agent_install_check,
+    should_skip_startup_maintenance, stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -45,6 +45,30 @@ fn hotpath_output_format_validation_matches_the_pinned_runtime() {
     assert!(!hotpath_output_format_is_none(Some(std::ffi::OsStr::new(
         "json"
     ))));
+}
+
+#[test]
+fn hotpath_requires_explicit_runtime_activation() {
+    assert!(!hotpath_activation_requested(None));
+    for inactive in ["", "0", "false", "yes", "on"] {
+        assert!(!hotpath_activation_requested(Some(std::ffi::OsStr::new(
+            inactive,
+        ))));
+    }
+    for active in ["1", "true", "TRUE"] {
+        assert!(hotpath_activation_requested(Some(std::ffi::OsStr::new(
+            active,
+        ))));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_unicode_hotpath_activation_is_inactive() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let value = std::ffi::OsString::from_vec(vec![0xff]);
+    assert!(!hotpath_activation_requested(Some(value.as_os_str())));
 }
 
 #[test]
@@ -506,6 +530,14 @@ fn non_hook_commands_keep_warnings_on_stderr() {
 fn doctor_skips_startup_maintenance() {
     let command = Commands::Doctor;
     assert!(should_skip_startup_maintenance(&command));
+}
+
+#[test]
+fn wipe_skips_optional_startup_maintenance() {
+    let command = parse_command(&["wipe", "--all", "--yes"]);
+
+    assert!(should_skip_startup_maintenance(&command));
+    assert!(should_skip_agent_install_check(&command));
 }
 
 #[test]
