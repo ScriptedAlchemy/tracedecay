@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tracedecay_store::{
@@ -26,6 +27,35 @@ use super::{
 };
 
 const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
+
+/// Maximum owner sequences bound into one `IN (...)` dependency lookup.
+///
+/// This is **not** `REFERENCED_ANCHOR_BATCH` from
+/// `tracedecay-runtime-core/src/store/memory/crud/commit.rs` (500): that
+/// constant bounds *parameters* per query, which is not the binding
+/// constraint here. The binding constraint is the exact-SQL transport's
+/// `MAX_QUERY_ROWS` cap (10,000 result rows; see
+/// `tracedecay-rusqlite-runtime/src/exact_sql/mod.rs`) -- a query that
+/// returns more rows than that fails with `ExactSqlError::QueryLimitExceeded`,
+/// which this module's `query()` wrapper turns into
+/// `GraphPublicationStoreErrorV1::Infrastructure`.
+///
+/// Each owner in a chunk can contribute up to
+/// `MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 + 1` rows (256 + 1 = 257): the
+/// `+ 1` is the `ROW_NUMBER() OVER (PARTITION BY owner ...) <= MAX + 1`
+/// window below, which reproduces `read_dependencies`'s per-owner
+/// `LIMIT MAX + 1` corruption-guard sentinel (an owner with more than
+/// `MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1` real dependency rows is
+/// corrupt, and this sentinel row is what lets the post-query
+/// `entry.len() > MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1` check below
+/// detect that instead of the read silently truncating). So a chunk must
+/// satisfy `chunk_size * (MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 + 1) <=
+/// MAX_QUERY_ROWS`, i.e. `chunk_size <= 10_000 / 257 = 38` (floor: 38 *
+/// 257 = 9_766 <= 10_000, while 39 * 257 = 10_023 > 10_000). At the old
+/// 500-owner chunk size, a single page of >= 40 replays each carrying the
+/// valid maximum of 256 dependencies (40 * 256 = 10_240 rows) already
+/// exceeded the row cap in one chunk.
+const GRAPH_REPLAY_DEPENDENCY_BATCH: usize = 38;
 
 pub(super) fn begin(
     handle: &ExactSqlHandle,
@@ -614,8 +644,13 @@ pub(super) fn read_replays_by_sequences(
             "enumerated graph replay disappeared in its read transaction".to_owned(),
         ));
     }
+    let mut dependencies_by_owner = read_dependencies_batch(transaction, sequences, false)?;
     rows.into_iter()
-        .map(|row| decode_row(transaction, row))
+        .map(|row| {
+            let sequence = integer_at(&row, 0)?;
+            let dependencies = dependencies_by_owner.remove(&sequence).unwrap_or_default();
+            decode_row_with_dependencies(row, dependencies)
+        })
         .collect()
 }
 
@@ -846,6 +881,103 @@ fn read_dependencies(
     Ok(dependencies)
 }
 
+/// Batched form of [`read_dependencies`] for a whole replay set: one
+/// chunked `IN (...)` query per [`GRAPH_REPLAY_DEPENDENCY_BATCH`]-sized
+/// slice of owner sequences instead of one query per replay.
+///
+/// Returns every owner's dependencies keyed by its sequence. An owner with
+/// no dependency rows is simply absent from the map (callers treat a
+/// missing entry the same as an empty `Vec`, matching what a per-sequence
+/// `read_dependencies` call would have returned).
+///
+/// A `ROW_NUMBER() OVER (PARTITION BY owner ORDER BY ordinal ASC)` window
+/// reproduces the per-owner `LIMIT {MAX + 1}` guard from
+/// `read_dependencies` inside the single batched query, so a corrupt owner
+/// with a runaway dependency count is still caught (and still bounded to
+/// `MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 + 1` rows read for that owner)
+/// rather than only being caught once all of its rows are buffered.
+fn read_dependencies_batch(
+    transaction: &impl ExactQueryAuthority,
+    sequences: &[i64],
+    retired: bool,
+) -> GraphPublicationStoreResultV1<HashMap<i64, Vec<GraphDependencyGenerationIdentityV1>>> {
+    let mut dependencies_by_owner: HashMap<i64, Vec<GraphDependencyGenerationIdentityV1>> =
+        HashMap::with_capacity(sequences.len());
+    if sequences.is_empty() {
+        return Ok(dependencies_by_owner);
+    }
+    let (table, owner_column) = if retired {
+        (
+            "graph_publication_replay_tombstone_dependencies_v1",
+            "tombstone_replay_sequence",
+        )
+    } else {
+        (
+            "graph_publication_replay_dependencies_v1",
+            "owner_replay_sequence",
+        )
+    };
+    let dependency_rank_limit = i64::try_from(MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 + 1)
+        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?;
+    for chunk in sequences.chunks(GRAPH_REPLAY_DEPENDENCY_BATCH) {
+        let placeholders = (1..=chunk.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let limit_placeholder = chunk.len() + 1;
+        let rows = query(
+            transaction,
+            format!(
+                "SELECT owner, ordinal, shard_id, namespace, projection, generation
+                 FROM (
+                     SELECT {owner_column} AS owner, ordinal, shard_id, namespace,
+                            projection, generation,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY {owner_column} ORDER BY ordinal ASC
+                            ) AS dependency_rank
+                     FROM {table}
+                     WHERE {owner_column} IN ({placeholders})
+                 )
+                 WHERE dependency_rank <= ?{limit_placeholder}
+                 ORDER BY owner ASC, ordinal ASC"
+            ),
+            chunk
+                .iter()
+                .copied()
+                .map(ExactSqlValue::Integer)
+                .chain(std::iter::once(ExactSqlValue::Integer(
+                    dependency_rank_limit,
+                )))
+                .collect(),
+        )?;
+        for mut row in rows {
+            let owner = integer_at(&row, 0)?;
+            let ordinal = integer_at(&row, 1)?;
+            let entry = dependencies_by_owner.entry(owner).or_default();
+            if usize::try_from(ordinal).ok() != Some(entry.len()) {
+                return Err(GraphPublicationStoreErrorV1::Corrupt(
+                    "graph replay dependency ordinals are not contiguous".to_owned(),
+                ));
+            }
+            entry.push(GraphDependencyGenerationIdentityV1::new(
+                GraphProjectionIdentityV1 {
+                    shard_id: serde_json::from_str::<StoreShardIdV1>(&text_at(&mut row, 2)?)
+                        .map_err(corrupt)?,
+                    namespace: GraphNamespaceV1::new(text_at(&mut row, 3)?).map_err(corrupt)?,
+                    projection: GraphProjectionIdV1::new(text_at(&mut row, 4)?).map_err(corrupt)?,
+                },
+                GraphGenerationIdV1::new(text_at(&mut row, 5)?).map_err(corrupt)?,
+            ));
+            if entry.len() > MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 {
+                return Err(GraphPublicationStoreErrorV1::Corrupt(
+                    "graph replay dependency count exceeds the contract limit".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(dependencies_by_owner)
+}
+
 fn read_retained_source(
     transaction: &impl ExactQueryAuthority,
     sequence: i64,
@@ -896,7 +1028,20 @@ pub(super) fn one_tombstone(
 
 pub(super) fn decode_row(
     transaction: &impl ExactQueryAuthority,
+    row: ExactSqlRow,
+) -> GraphPublicationStoreResultV1<GraphPublicationReplayRecordV1> {
+    let sequence = integer_at(&row, 0)?;
+    let dependencies = read_dependencies(transaction, sequence, false)?;
+    decode_row_with_dependencies(row, dependencies)
+}
+
+/// Same decode as [`decode_row`], but takes already-fetched dependencies
+/// instead of querying for them. Lets a caller batch-fetch dependencies for
+/// a whole replay set (see [`read_dependencies_batch`]) and then decode
+/// each row without an additional per-row query.
+fn decode_row_with_dependencies(
     mut row: ExactSqlRow,
+    dependencies: Vec<GraphDependencyGenerationIdentityV1>,
 ) -> GraphPublicationStoreResultV1<GraphPublicationReplayRecordV1> {
     let sequence = integer_at(&row, 0)?;
     decode_replay(
@@ -915,7 +1060,7 @@ pub(super) fn decode_row(
             canonical_replay_source_digest: text_at(&mut row, 11)?,
             canonical_replay_source: blob_at(&mut row, 12)?,
         },
-        read_dependencies(transaction, sequence, false)?,
+        dependencies,
     )
 }
 
@@ -1058,4 +1203,556 @@ pub(super) fn text(value: impl Into<String>) -> ExactSqlValue {
 
 pub(super) fn optional_text(value: Option<String>) -> ExactSqlValue {
     value.map_or(ExactSqlValue::Null, ExactSqlValue::Text)
+}
+
+/// Falsifiable RED/GREEN coverage for [`read_dependencies_batch`]: asserts
+/// on SQL query counts and returned data, never on elapsed time.
+///
+/// This lives inside `support` (rather than the richer `graph_publication`
+/// test tree) because [`ExactQueryAuthority`] and the per-replay dependency
+/// helpers it exercises are private to the `exact`/`support` module pair.
+#[cfg(test)]
+mod dependency_batch_tests {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use rusqlite::Savepoint;
+    use tempfile::TempDir;
+    use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
+    use tracedecay_store::{
+        AdmissionConfigV1, GraphDependencyGenerationClosureDigestV1,
+        GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationReplayV1,
+        GraphPublicationStoreV1, GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1,
+        GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1,
+        RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1,
+        RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+        StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    };
+
+    use super::*;
+    use crate::exact_sql::ExactSqlRows;
+    use crate::reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool};
+    use crate::repository::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
+    use crate::{ExistingWriterLocator, PersistentWriter, StorageOperationExecutor};
+
+    struct NoWrites;
+
+    impl StorageOperationExecutor for NoWrites {
+        fn execute(
+            &mut self,
+            _savepoint: &Savepoint<'_>,
+            _payload: &RepositoryWritePayloadV1,
+        ) -> rusqlite::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Fixture {
+        _directory: TempDir,
+        _writer: PersistentWriter,
+        _readers: ReaderPool<ExactSqlOnlyReaderV1>,
+        handle: ExactSqlHandle,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let directory = TempDir::new().unwrap();
+            let path = directory
+                .path()
+                .join("graph-publication-dependency-batch.sqlite3");
+            drop(rusqlite::Connection::open(&path).unwrap());
+            let path = path.canonicalize().unwrap();
+            let shard_id = StoreShardIdV1::project(
+                BrainId::new("brain.dependency-batch").unwrap(),
+                UserProfileId::new("profile.dependency-batch").unwrap(),
+                ProjectId::new("project.dependency-batch").unwrap(),
+            );
+            let binding = StoreRuntimeBindingV1::new(
+                shard_id,
+                StoreIncarnationV1::new(3).unwrap(),
+                tracedecay_store::StoreAuthorityEpochV1::new(11).unwrap(),
+            );
+            let locator = VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                StoreIncarnationV1::new(3).unwrap(),
+                LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            );
+            let writer = PersistentWriter::start(
+                ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
+                AdmissionConfigV1::default(),
+                NoWrites,
+            )
+            .unwrap();
+            let readers = ReaderPool::start(
+                ExistingReaderLocator::new(binding, locator, path).unwrap(),
+                AdmissionConfigV1::default().readers,
+                ExactSqlOnlyReaderV1,
+            )
+            .unwrap();
+            let handle = ExactSqlHandle::attach(&writer, &readers).unwrap();
+            handle
+                .execute_batch(GRAPH_PUBLICATION_SCHEMA_V1.to_owned())
+                .unwrap();
+            Self {
+                _directory: directory,
+                _writer: writer,
+                _readers: readers,
+                handle,
+            }
+        }
+
+        fn storage(&self) -> GraphPublicationExactSqlStorage {
+            GraphPublicationExactSqlStorage::from_authorized_handle(self.handle.clone()).unwrap()
+        }
+    }
+
+    struct Probe {
+        cancellation: RuntimeCancellationIdentityV1,
+        deadline: RuntimeDeadlineV1,
+        commit_started: AtomicBool,
+    }
+
+    impl RuntimeRequestProbeV1 for Probe {
+        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+            &self.cancellation
+        }
+
+        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+            &self.deadline
+        }
+
+        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+            None
+        }
+
+        fn try_begin_commit(&self) -> bool {
+            self.commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        }
+    }
+
+    fn context(suffix: &str) -> GraphPublicationOperationContextV1<'static> {
+        let cancellation = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!("cancellation.{suffix}"))
+                .unwrap(),
+            generation: 1,
+        };
+        let deadline = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!("deadline.{suffix}")).unwrap(),
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: UtcMicros(1),
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        };
+        // Leaked deliberately: the operation context's probe reference must
+        // outlive this helper call, and this is test-only setup, never
+        // production code.
+        let probe: &'static Probe = &*Box::leak(Box::new(Probe {
+            cancellation,
+            deadline,
+            commit_started: AtomicBool::new(false),
+        }));
+        GraphPublicationOperationContextV1::new(&control, probe).unwrap()
+    }
+
+    fn digest(byte: char) -> String {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    /// A valid hex digit character for `digest()`, cycling over `index`.
+    /// Unlike a plain ASCII letter range, every value this returns is
+    /// hex-canonical, so it is safe to feed straight into `digest()`.
+    fn hex_digit(index: usize) -> char {
+        let value = u8::try_from(index % 16).unwrap();
+        char::from_digit(u32::from(value), 16).unwrap()
+    }
+
+    fn projection(name: &str) -> GraphProjectionIdentityV1 {
+        GraphProjectionIdentityV1 {
+            shard_id: StoreShardIdV1::project(
+                BrainId::new("brain.dependency-batch").unwrap(),
+                UserProfileId::new("profile.dependency-batch").unwrap(),
+                ProjectId::new("project.dependency-batch").unwrap(),
+            ),
+            namespace: GraphNamespaceV1::new("project").unwrap(),
+            projection: GraphProjectionIdV1::new(name).unwrap(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replay(
+        name: &str,
+        generation: &str,
+        input_byte: char,
+        recovered_byte: char,
+        dependencies: Vec<GraphDependencyGenerationIdentityV1>,
+        source: &[u8],
+    ) -> GraphPublicationReplayV1 {
+        GraphPublicationReplayV1::new(
+            GraphPublicationKeyV1::new(
+                projection(name),
+                GraphGenerationIdV1::new(generation).unwrap(),
+                GraphPublicationIdempotencyKeyV1::new(format!("publish.{name}")).unwrap(),
+            ),
+            GraphPublicationInputDigestV1::new(digest(input_byte)).unwrap(),
+            GraphDependencyGenerationClosureDigestV1::new(digest('d')).unwrap(),
+            dependencies,
+            None,
+            GraphRecoveredGenerationDigestV1::new(digest(recovered_byte)).unwrap(),
+            source.to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn append_and_verify(
+        storage: &mut GraphPublicationExactSqlStorage,
+        name: &str,
+        generation: &str,
+        byte: char,
+    ) -> GraphPublicationReplayV1 {
+        let publication = replay(name, generation, byte, byte, Vec::new(), name.as_bytes());
+        let append_context = context(&format!("{name}.append"));
+        assert!(matches!(
+            storage
+                .append_replay(&publication, &append_context)
+                .unwrap(),
+            GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+        let cas_context = context(&format!("{name}.cas"));
+        let request = GraphVerifiedHeadCompareAndSwapV1 {
+            publication_key: publication.key.clone(),
+            input_digest: publication.input_digest.clone(),
+            dependency_generation_closure_digest: publication
+                .dependency_generation_closure_digest
+                .clone(),
+            recovered_digest: publication.expected_recovered_digest.clone(),
+            expected_prior_head: publication.expected_prior_head.clone(),
+        };
+        assert!(matches!(
+            storage
+                .compare_and_swap_verified_head(&request, &cas_context)
+                .unwrap(),
+            GraphVerifiedHeadCasOutcomeV1::Advanced(_)
+        ));
+        publication
+    }
+
+    fn append_owner(
+        storage: &mut GraphPublicationExactSqlStorage,
+        name: &str,
+        byte: char,
+        dependencies: Vec<GraphDependencyGenerationIdentityV1>,
+    ) -> i64 {
+        let publication = replay(
+            name,
+            &format!("generation.{name}"),
+            byte,
+            byte,
+            dependencies,
+            name.as_bytes(),
+        );
+        let append_context = context(&format!("{name}.append"));
+        match storage
+            .append_replay(&publication, &append_context)
+            .unwrap()
+        {
+            GraphReplayAppendOutcomeV1::Appended(record) => {
+                sequence_to_i64(record.sequence).unwrap()
+            }
+            other => panic!("unexpected append outcome for {name}: {other:?}"),
+        }
+    }
+
+    /// Wraps a real [`ExactSqlTransaction`] and counts every
+    /// [`ExactQueryAuthority::exact_query`] invocation made through it,
+    /// while still executing each query for real against the underlying
+    /// transaction.
+    ///
+    /// This counts invocations directly rather than matching on
+    /// `statement.sql` text: a counter built on `sql.contains(needle)`
+    /// would keep passing across a harmless SQL rewrite (a column
+    /// reorder, an added `AS` alias, a comment) that changes the query's
+    /// text without changing its behavior, and could double-count any
+    /// unrelated statement that happens to mention the same table name.
+    /// Each `QueryCounter` is built fresh immediately before the single
+    /// isolated operation under test, so counting every call it observes
+    /// already scopes the count to that operation -- no text filter is
+    /// needed to keep unrelated statements out.
+    struct QueryCounter<'a> {
+        inner: &'a ExactSqlTransaction,
+        hits: Cell<usize>,
+    }
+
+    impl<'a> QueryCounter<'a> {
+        fn new(inner: &'a ExactSqlTransaction) -> Self {
+            Self {
+                inner,
+                hits: Cell::new(0),
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.get()
+        }
+    }
+
+    impl ExactQueryAuthority for QueryCounter<'_> {
+        fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
+            self.hits.set(self.hits.get() + 1);
+            self.inner.exact_query(statement)
+        }
+    }
+
+    /// RED (pre-fix behaviour, reproduced explicitly below): calling
+    /// `read_dependencies` once per replay in a set of N replays issues N
+    /// queries against `graph_publication_replay_dependencies_v1`.
+    ///
+    /// GREEN (this crate's current behaviour): `read_dependencies_batch`
+    /// issues exactly one query for the same replay set and returns exactly
+    /// the same per-owner dependency data, in the same per-owner ordinal
+    /// order, as the looped per-replay reads.
+    #[test]
+    fn read_dependencies_batch_matches_looped_reads_in_one_query() {
+        let fixture = Fixture::new();
+        let mut storage = fixture.storage();
+
+        // Two verified targets that every owner below depends on. Ordinal
+        // order inside a replay's dependency list is the domain's own
+        // ascending-`Ord` order for `GraphDependencyGenerationIdentityV1`
+        // (projection then generation), so listing "dep-a" before "dep-b"
+        // here is already canonical.
+        let dep_a = append_and_verify(&mut storage, "dep-a", "generation.dep-a", 'a');
+        let dep_b = append_and_verify(&mut storage, "dep-b", "generation.dep-b", 'b');
+        let dependencies = vec![
+            GraphDependencyGenerationIdentityV1::new(
+                dep_a.key.projection.clone(),
+                dep_a.key.generation.clone(),
+            ),
+            GraphDependencyGenerationIdentityV1::new(
+                dep_b.key.projection.clone(),
+                dep_b.key.generation.clone(),
+            ),
+        ];
+
+        let owner_sequences: Vec<i64> = ["owner-1", "owner-2", "owner-3"]
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let byte = char::from(b'c' + u8::try_from(index).unwrap());
+                append_owner(&mut storage, name, byte, dependencies.clone())
+            })
+            .collect();
+        assert_eq!(owner_sequences.len(), 3);
+
+        let transaction = fixture.handle.begin_immediate().unwrap();
+
+        let batch_counter = QueryCounter::new(&transaction);
+        let mut batched = read_dependencies_batch(&batch_counter, &owner_sequences, false).unwrap();
+        assert_eq!(
+            batch_counter.hits(),
+            1,
+            "batched dependency read must issue exactly one query for the whole replay set, \
+             regardless of how many replays it covers"
+        );
+
+        let loop_counter = QueryCounter::new(&transaction);
+        let mut looped: HashMap<i64, Vec<GraphDependencyGenerationIdentityV1>> = HashMap::new();
+        for sequence in &owner_sequences {
+            let dependencies = read_dependencies(&loop_counter, *sequence, false).unwrap();
+            looped.insert(*sequence, dependencies);
+        }
+        assert_eq!(
+            loop_counter.hits(),
+            owner_sequences.len(),
+            "looped per-replay reads reproduce the pre-fix N+1 query shape this change removes"
+        );
+
+        for sequence in &owner_sequences {
+            assert_eq!(
+                batched.remove(sequence),
+                looped.remove(sequence),
+                "batched dependency read must return the same ordinal-ordered dependencies \
+                 for sequence {sequence} as a per-replay read_dependencies call"
+            );
+        }
+        assert!(batched.is_empty());
+        assert!(looped.is_empty());
+
+        transaction.rollback().unwrap();
+    }
+
+    /// RED (the bug this test reproduces): at the pre-fix 500-owner chunk
+    /// size, a single chunk could bind an entire page of replays -- each
+    /// carrying up to `MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1` (256)
+    /// dependencies -- into one `IN (...)` dependency query. A page of 40
+    /// such replays already produces `40 * 256 = 10_240` result rows,
+    /// which exceeds the exact-SQL transport's 10_000-row `MAX_QUERY_ROWS`
+    /// cap (`tracedecay-rusqlite-runtime/src/exact_sql/mod.rs`) and turns
+    /// into `GraphPublicationStoreErrorV1::Infrastructure` -- a real page
+    /// well under the 4 MiB replay-page payload limit with short
+    /// identifiers, and a case the former per-owner queries (bounded to
+    /// 256 rows apiece) never hit.
+    ///
+    /// GREEN (this crate's current behaviour): `GRAPH_REPLAY_DEPENDENCY_BATCH`
+    /// is derived from the row budget (`10_000 / 257 = 38`, preserving the
+    /// `MAX + 1` corruption-guard sentinel), so the same 40-owner,
+    /// 256-dependency page splits into two chunks (38 and 2 owners; 9_766
+    /// and 512 rows) and `read_dependencies_batch` succeeds, returning
+    /// every owner's full dependency set intact.
+    #[test]
+    fn read_dependencies_batch_stays_under_the_row_cap_for_a_full_dependency_page() {
+        const DEPENDENCY_TARGET_COUNT: usize = MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1;
+        // Matches the reviewer's exact worked example: 40 owners at the
+        // valid maximum of 256 dependencies each overflows the row cap at
+        // the old 500-owner chunk size.
+        const OWNER_COUNT: usize = 40;
+
+        let fixture = Fixture::new();
+        let mut storage = fixture.storage();
+
+        // 256 distinct dependency targets. Every owner below depends on
+        // all 256 of them; the dependency table's
+        // UNIQUE(owner_replay_sequence, shard_id, namespace, projection)
+        // constraint is scoped per owner, so reusing the same 256 targets
+        // across all 40 owners is legal and keeps setup linear in
+        // (targets + owners) rather than (targets * owners).
+        let target_sequences: Vec<i64> = (0..DEPENDENCY_TARGET_COUNT)
+            .map(|index| {
+                let name = format!("dep-target-{index}");
+                append_owner(&mut storage, &name, hex_digit(index), Vec::new())
+            })
+            .collect();
+
+        // 40 owners. Each is created with zero *declared* dependencies:
+        // `read_dependencies_batch` reads the
+        // `graph_publication_replay_dependencies_v1` table directly, not
+        // the domain-level dependency list `GraphPublicationReplayV1::new`
+        // validates, so the 256 real dependency rows per owner are
+        // inserted separately below.
+        let owner_sequences: Vec<i64> = (0..OWNER_COUNT)
+            .map(|index| {
+                let name = format!("dep-owner-{index}");
+                append_owner(&mut storage, &name, hex_digit(index), Vec::new())
+            })
+            .collect();
+
+        // Fetch each target's own stored (shard_id, namespace, projection,
+        // generation) text so the directly-inserted dependency rows below
+        // satisfy the dependency table's foreign key exactly, without
+        // duplicating the store's internal encoding.
+        let transaction = fixture.handle.begin_immediate().unwrap();
+        let target_placeholders = (1..=target_sequences.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut target_rows = query(
+            &transaction,
+            format!(
+                "SELECT sequence, shard_id, namespace, projection, generation
+                 FROM graph_publication_replay_v1
+                 WHERE sequence IN ({target_placeholders})
+                 ORDER BY sequence ASC"
+            ),
+            target_sequences
+                .iter()
+                .copied()
+                .map(ExactSqlValue::Integer)
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(target_rows.len(), DEPENDENCY_TARGET_COUNT);
+        let targets: Vec<(i64, String, String, String, String)> = target_rows
+            .iter_mut()
+            .map(|row| {
+                (
+                    integer_at(row, 0).unwrap(),
+                    text_at(row, 1).unwrap(),
+                    text_at(row, 2).unwrap(),
+                    text_at(row, 3).unwrap(),
+                    text_at(row, 4).unwrap(),
+                )
+            })
+            .collect();
+
+        // Give every owner all 256 targets as dependencies, inserted
+        // directly. This bypasses `insert_verified_dependencies`'s
+        // verified-head check -- a domain rule this read-path test does
+        // not need, since the dependency table's own foreign key only
+        // requires the target row to exist in
+        // `graph_publication_replay_v1`, which it already does.
+        for &owner in &owner_sequences {
+            let mut sql = String::from(
+                "INSERT INTO graph_publication_replay_dependencies_v1 (
+                    owner_replay_sequence, ordinal, dependency_replay_sequence,
+                    shard_id, namespace, projection, generation
+                 ) VALUES ",
+            );
+            let mut params = Vec::with_capacity(targets.len() * 7);
+            for (ordinal, (dependency_sequence, shard_id, namespace, projection, generation)) in
+                targets.iter().enumerate()
+            {
+                if ordinal > 0 {
+                    sql.push_str(", ");
+                }
+                let base = params.len();
+                sql.push_str(&format!(
+                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4,
+                    base + 5,
+                    base + 6,
+                    base + 7,
+                ));
+                params.push(ExactSqlValue::Integer(owner));
+                params.push(ExactSqlValue::Integer(i64::try_from(ordinal).unwrap()));
+                params.push(ExactSqlValue::Integer(*dependency_sequence));
+                params.push(text(shard_id.clone()));
+                params.push(text(namespace.clone()));
+                params.push(text(projection.clone()));
+                params.push(text(generation.clone()));
+            }
+            execute(&transaction, &sql, params).unwrap();
+        }
+        commit(transaction).unwrap();
+
+        let total_rows = OWNER_COUNT * DEPENDENCY_TARGET_COUNT;
+        assert!(
+            total_rows > 10_000,
+            "test setup must exceed the exact-SQL transport's row cap to be a real \
+             reproduction of the bug; got {total_rows} rows"
+        );
+
+        let transaction = fixture.handle.begin_immediate().unwrap();
+        let counter = QueryCounter::new(&transaction);
+        let mut batched = read_dependencies_batch(&counter, &owner_sequences, false)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "read_dependencies_batch must stay under the exact-SQL row cap for a \
+                     full {OWNER_COUNT}-owner page with {DEPENDENCY_TARGET_COUNT} \
+                     dependencies each ({total_rows} rows): {error:?}"
+                )
+            });
+        assert_eq!(
+            counter.hits(),
+            owner_sequences
+                .len()
+                .div_ceil(GRAPH_REPLAY_DEPENDENCY_BATCH),
+            "expected the {OWNER_COUNT}-owner page to split into \
+             ceil({OWNER_COUNT} / GRAPH_REPLAY_DEPENDENCY_BATCH) chunks"
+        );
+        for &owner in &owner_sequences {
+            let dependencies = batched
+                .remove(&owner)
+                .unwrap_or_else(|| panic!("owner {owner} is missing from the batched read"));
+            assert_eq!(dependencies.len(), DEPENDENCY_TARGET_COUNT);
+        }
+        assert!(batched.is_empty());
+
+        transaction.rollback().unwrap();
+    }
 }

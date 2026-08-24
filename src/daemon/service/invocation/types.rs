@@ -724,6 +724,10 @@ impl InvocationProjectRuntimeIdentityV1 {
             && project_roots.contains(&self.project_root)
     }
 
+    pub(super) fn profile_id(&self) -> &UserProfileId {
+        &self.profile_id
+    }
+
     pub(super) fn matches_locator(&self, locator: &RegisteredRootLocatorV1) -> bool {
         self.profile_id == locator.profile.profile_id
             && self.project_id == locator.project_id

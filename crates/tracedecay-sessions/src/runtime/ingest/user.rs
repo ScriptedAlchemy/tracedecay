@@ -29,6 +29,11 @@ pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
 }
 
+pub struct CodexHookIngestOutcome {
+    pub stats: TranscriptIngestStats,
+    pub source_deferred: bool,
+}
+
 pub async fn registered_project_roots_from<A: SessionIngestAuthority>(
     global: &A,
 ) -> Option<Vec<PathBuf>> {
@@ -46,17 +51,73 @@ pub async fn try_ingest_user_codex_sessions_with_db_and_admission(
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
     admission: &dyn HostAdmission,
-) -> source::TranscriptIngestResult<TranscriptIngestStats> {
+    max_new_bytes: Option<u64>,
+) -> source::TranscriptIngestResult<CodexHookIngestOutcome> {
+    if let Some(session_id) = session_id.as_deref() {
+        let Some(source) = codex::CodexSource::new() else {
+            return Ok(CodexHookIngestOutcome {
+                stats: TranscriptIngestStats::default(),
+                source_deferred: false,
+            });
+        };
+        let session_id_owned = session_id.to_owned();
+        let lookup = tokio::task::spawn_blocking(move || {
+            source.find_session_transcript_paths_bounded(&session_id_owned)
+        })
+        .await
+        .map_err(|_| source::TranscriptIngestError::BlockingScanTaskFailed {
+            provider: "codex",
+        })??;
+        let cancellation = ObservationCancellation::default();
+        let mut remaining = max_new_bytes;
+        let mut source_deferred = lookup.source_deferred;
+        for path in lookup.paths {
+            if remaining == Some(0) {
+                source_deferred = true;
+                break;
+            }
+            let progress = codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+                &path,
+                Some(session_id),
+                &registered_roots,
+                admission,
+                remaining,
+                &cancellation,
+            )
+            .await?;
+            if let Some(available) = remaining {
+                remaining = Some(available.saturating_sub(progress.bytes_consumed));
+            }
+            if progress.source_deferred {
+                source_deferred = true;
+                break;
+            }
+        }
+        let stats = drain_observation_projections(
+            admission,
+            &ObservationScopeV1::Profile,
+            "codex",
+            &cancellation,
+        )
+        .await?;
+        return Ok(CodexHookIngestOutcome {
+            stats,
+            source_deferred,
+        });
+    }
     try_ingest_user_codex_sessions_with_db_bounded(
         profile_root,
         session_id,
         registered_roots,
         admission,
-        None,
+        max_new_bytes,
         &ObservationCancellation::default(),
     )
     .await
-    .map(|outcome| outcome.stats)
+    .map(|outcome| CodexHookIngestOutcome {
+        stats: outcome.stats,
+        source_deferred: outcome.deferred_by_byte_cap,
+    })
 }
 
 pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
@@ -74,17 +135,18 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         admission,
         max_total_new_bytes,
         cancellation,
-        0,
+        codex::CodexDiscoveryFrontier::initial(),
+        None,
     )
     .await
-    .map(|(outcome, _)| outcome)
+    .map(|result| result.outcome)
 }
 
 /// Recent-first Codex catch-up: discovery serves the newest sessions first and
-/// rotates a bounded slice through the historical backlog at the packed
-/// `history_rotation` frontier. Returns the advanced frontier so the caller
-/// persists it durably — the backlog stays tracked pending work behind the
-/// present, never a dropped range.
+/// advances a bounded slice through the historical backlog under a typed
+/// versioned epoch/sweep frontier. The advanced frontier is committable only after
+/// every selected source finished, so cancellation and byte deferral repeat
+/// the same discovery window at least once.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_ingest_user_codex_sessions_rotated(
     _profile_root: &Path,
@@ -93,36 +155,65 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     admission: &dyn HostAdmission,
     max_total_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-    history_rotation: u64,
-) -> source::TranscriptIngestResult<(BoundedProviderOutcome, u64)> {
+    frontier: codex::CodexDiscoveryFrontier,
+    discovery_state: Option<(&codex::CodexDiscoveryHub, &str)>,
+) -> source::TranscriptIngestResult<CodexUserIngestOutcome> {
     let Some(source) = codex::CodexSource::new() else {
-        return Ok((
-            BoundedProviderOutcome {
+        return Ok(CodexUserIngestOutcome {
+            outcome: BoundedProviderOutcome {
                 stats: TranscriptIngestStats::default(),
                 bytes_consumed: 0,
                 deferred_by_byte_cap: false,
             },
-            0,
-        ));
+            committable_frontier: None,
+        });
     };
     let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
-    let pass = source.discover_transcript_paths_with_rotation(
-        TranscriptDiscoveryBounds::default_walk(),
-        history_rotation,
-    );
-    let next_history_rotation = pass.next_history_rotation;
-    let discovery = pass.report;
+    let pass = match discovery_state {
+        Some((hub, consumer)) => match hub
+            .discover(
+                consumer,
+                &source,
+                TranscriptDiscoveryBounds::default_walk(),
+                frontier,
+            )
+            .await?
+        {
+            codex::CodexDiscoveryDelivery::Ready(pass) => pass,
+            codex::CodexDiscoveryDelivery::Waiting => {
+                return Ok(CodexUserIngestOutcome {
+                    outcome: BoundedProviderOutcome {
+                        stats: TranscriptIngestStats::default(),
+                        bytes_consumed: 0,
+                        deferred_by_byte_cap: true,
+                    },
+                    committable_frontier: None,
+                });
+            }
+        },
+        None => std::sync::Arc::new(source.discover_transcript_paths_with_frontier(
+            TranscriptDiscoveryBounds::default_walk(),
+            frontier,
+        )?),
+    };
+    let next_frontier = pass.next_frontier;
+    let discovery = &pass.report;
     let mut remaining = max_total_new_bytes;
     let mut bytes_consumed = 0u64;
     let mut deferred_by_byte_cap = discovery.is_truncated();
-    let paths = discovery.paths;
-    for path in paths {
-        if cancellation.is_cancelled() {
+    let mut frontier_committable = true;
+    for path in &discovery.paths {
+        if remaining == Some(0) {
+            deferred_by_byte_cap = true;
+            frontier_committable = false;
             break;
+        }
+        if cancellation.is_cancelled() {
+            return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
         let progress =
             codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
-                &path,
+                path,
                 session_id.as_deref(),
                 &registered_roots,
                 admission,
@@ -131,6 +222,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             )
             .await?;
         deferred_by_byte_cap |= progress.source_deferred;
+        frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
         if let Some(available) = remaining {
             remaining = Some(available.saturating_sub(progress.bytes_consumed));
@@ -143,14 +235,19 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         cancellation,
     )
     .await?;
-    Ok((
-        BoundedProviderOutcome {
+    Ok(CodexUserIngestOutcome {
+        outcome: BoundedProviderOutcome {
             stats,
             bytes_consumed,
             deferred_by_byte_cap,
         },
-        next_history_rotation,
-    ))
+        committable_frontier: frontier_committable.then_some(next_frontier),
+    })
+}
+
+pub(super) struct CodexUserIngestOutcome {
+    pub(super) outcome: BoundedProviderOutcome,
+    pub(super) committable_frontier: Option<codex::CodexDiscoveryFrontier>,
 }
 
 pub(super) struct BoundedProviderOutcome {
@@ -400,6 +497,53 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
     bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
 ) -> IngestPassOutcome {
+    ingest_user_global_sources_for_provider_with_roots_bounded_inner(
+        registered,
+        profile_root,
+        provider,
+        roots,
+        bounds,
+        cancellation,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_and_codex_state<
+    A: SessionIngestAuthority,
+>(
+    registered: (&BrainId, &UserProfileId, &A),
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    roots: Vec<PathBuf>,
+    bounds: IngestPassBounds,
+    cancellation: &ObservationCancellation,
+    codex_discovery: &codex::CodexDiscoveryHub,
+    codex_consumer: &str,
+) -> IngestPassOutcome {
+    ingest_user_global_sources_for_provider_with_roots_bounded_inner(
+        registered,
+        profile_root,
+        provider,
+        roots,
+        bounds,
+        cancellation,
+        Some((codex_discovery, codex_consumer)),
+    )
+    .await
+}
+
+async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
+    A: SessionIngestAuthority,
+>(
+    registered: (&BrainId, &UserProfileId, &A),
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    roots: Vec<PathBuf>,
+    bounds: IngestPassBounds,
+    cancellation: &ObservationCancellation,
+    codex_discovery: Option<(&codex::CodexDiscoveryHub, &str)>,
+) -> IngestPassOutcome {
     let (brain_id, profile_id, registered) = registered;
     let shard = &registered.shard_id();
     if shard.brain_id != *brain_id
@@ -475,6 +619,7 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
                 candidate,
                 grant,
                 cancellation,
+                codex_discovery,
             )
             .await;
             claude_projected_session_ids.extend(provider_run.claude_projected_session_ids);

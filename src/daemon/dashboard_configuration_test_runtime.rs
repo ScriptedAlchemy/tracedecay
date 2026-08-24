@@ -268,9 +268,13 @@ fn unavailable_error(
     )
 }
 
-pub(crate) async fn dashboard_configuration_runtime_for_test(
+pub(crate) async fn dashboard_configuration_authorities_for_test(
     cg: Arc<TraceDecay>,
-) -> Result<Arc<dyn DashboardApplicationRuntime>> {
+    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+) -> Result<(
+    Arc<dyn DashboardApplicationRuntime>,
+    Arc<dyn crate::dashboard::DashboardProfileCodeIndexWorkerSettingsPort>,
+)> {
     let project_root = cg.project_root().canonicalize()?;
     let project_id = cg
         .configuration_runtime()
@@ -286,6 +290,22 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
         ),
     );
+    let user_profile_id = cg.store_runtime_registry().profile_id().clone();
+    let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
+        profile_database.clone(),
+        &user_profile_id,
+    )
+    .await?;
+    let resident_snapshot = resident_memory.snapshot();
+    tracedecay_code_index::parallelism::install_worker_plan(
+        configured,
+        resident_snapshot
+            .limit_bytes
+            .saturating_sub(resident_snapshot.used_bytes),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("dashboard test code-index worker plan was refused: {error}"),
+    })?;
     let service = DaemonInvocationService::with_code_index_schedulers(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory),
     );
@@ -306,7 +326,6 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             message: format!("dashboard test configuration actor is invalid: {error}"),
         }
     })?;
-    let user_profile_id = cg.store_runtime_registry().profile_id().clone();
     DaemonConfigurationRuntimeRegistrar::new(&service)
         .register(
             project_root.clone(),
@@ -330,14 +349,22 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
     .ok_or_else(|| TraceDecayError::Config {
         message: "dashboard configuration batch operation is not registered".to_owned(),
     })?;
-    Ok(Arc::new(DashboardConfigurationRuntimeForTestV1 {
+    let application_runtime = Arc::new(DashboardConfigurationRuntimeForTestV1 {
         service,
         lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
-        project_root,
+        project_root: project_root.clone(),
         scope,
-        user_profile_id,
+        user_profile_id: user_profile_id.clone(),
         result_contract: operation.result_contract().clone(),
-    }))
+    });
+    let profile_code_index_worker_settings =
+        crate::mcp::tools::handlers::dashboard::compose_dashboard_profile_code_index_worker_settings(
+            profile_database,
+            user_profile_id,
+            project_root,
+            &application_runtime.service,
+        );
+    Ok((application_runtime, profile_code_index_worker_settings))
 }
 
 /// Registers the same retained application runtime production project-open

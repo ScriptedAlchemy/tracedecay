@@ -309,3 +309,82 @@ fn lcm_compatibility_definitions_expose_only_opaque_continuation_cursors() {
         "relevance"
     );
 }
+
+/// The MCP tool catalog is static per build, so `tools/list` must not
+/// re-assemble every JSON schema on each request.
+///
+/// Falsifiable on a count, never a duration: the assembly counter may advance
+/// at most once for the whole process, however many callers ask for it.
+#[test]
+fn maximal_tool_definitions_are_assembled_once_per_process() {
+    use std::sync::atomic::Ordering;
+
+    let first = get_maximal_tool_definitions().expect("tool definitions");
+    // Read the baseline *after* the first call so the one legitimate build is
+    // already counted; a cached registry can never advance it again.
+    let baseline = MAXIMAL_DEFINITION_BUILDS.load(Ordering::SeqCst);
+
+    for _ in 0..8 {
+        let again = get_maximal_tool_definitions().expect("tool definitions");
+        assert_eq!(
+            again.len(),
+            first.len(),
+            "the cached registry must serve the same tool set"
+        );
+    }
+
+    assert_eq!(
+        MAXIMAL_DEFINITION_BUILDS.load(Ordering::SeqCst),
+        baseline,
+        "the maximal tool registry was re-assembled after it had already been \
+         built; tools/list rebuilds the whole catalog per request"
+    );
+}
+
+/// Caching the registry must not freeze anything session-scoped into it.
+///
+/// The per-session passes mutate the vector they are handed, so every caller
+/// has to receive an independent clone. If the cache handed out shared state,
+/// one session's context budget would be visible to the next.
+#[test]
+fn per_session_budget_does_not_leak_through_the_cached_registry() {
+    fn context_description(definitions: &[ToolDefinition]) -> String {
+        definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_context")
+            .map(|definition| definition.description.clone())
+            .expect("tracedecay_context is advertised")
+    }
+
+    let small = get_tool_definitions_with_budget(11, 2).expect("tool definitions");
+    let small_description = context_description(&small);
+    assert!(
+        small_description.contains("2 calls maximum"),
+        "budget must reach the context description: {small_description}"
+    );
+
+    let large = get_tool_definitions_with_budget(999_999, 9).expect("tool definitions");
+    let large_description = context_description(&large);
+    assert!(
+        large_description.contains("9 calls maximum"),
+        "budget must reach the context description: {large_description}"
+    );
+
+    assert_ne!(
+        small_description, large_description,
+        "two sessions with different budgets must not share one description"
+    );
+    assert_eq!(
+        context_description(&small),
+        small_description,
+        "the earlier session's definitions must not be rewritten by a later one"
+    );
+
+    // A third, unbudgeted read must still see the neutral registry.
+    let neutral = get_tool_definitions().expect("tool definitions");
+    let neutral_description = context_description(&neutral);
+    assert!(
+        !neutral_description.contains("9 calls maximum"),
+        "an unbudgeted caller inherited another session's budget: {neutral_description}"
+    );
+}

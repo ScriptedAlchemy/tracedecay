@@ -927,16 +927,26 @@ mod source_matcher_cache_tests {
 #[allow(clippy::unwrap_used)]
 mod recent_first_discovery_tests {
     use std::collections::BTreeSet;
+    use std::io::Write as _;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use tempfile::TempDir;
 
     use super::CodexSource;
     use crate::admission::test_support::MemoryHostAdmission;
-    use crate::runtime::codex::{effective_history_rotation, history_rotation_sweep_complete};
+    use crate::runtime::codex::{
+        CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
+        CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
+        CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
+        IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
+        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, indexed_replay_pass,
+        replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
+    };
     use crate::runtime::source::{
-        HostProviderCoverage, TranscriptDiscoveryBounds, persist_codex_history_frontier,
-        persist_host_provider_coverage, read_codex_history_frontier, read_host_provider_coverage,
+        HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
+        persist_codex_history_frontier, persist_host_provider_coverage,
+        read_codex_history_frontier, read_host_provider_coverage,
     };
 
     /// Creates `sessions/YYYY/MM/DD/rollout-<name>.jsonl` under the Codex home.
@@ -950,6 +960,727 @@ mod recent_first_discovery_tests {
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, "{}\n").unwrap();
         path
+    }
+
+    fn retained_pass(
+        source: &CodexSource,
+        state: &mut CodexDiscoveryState,
+        bounds: TranscriptDiscoveryBounds,
+        frontier: CodexDiscoveryFrontier,
+    ) -> super::super::CodexDiscoveryPass {
+        let pass = source
+            .discover_transcript_paths_with_state(bounds, frontier, state)
+            .unwrap();
+        state.acknowledge();
+        pass
+    }
+
+    async fn drain_hub_consumer(
+        hub: &CodexDiscoveryHub,
+        consumer: &str,
+        source: &CodexSource,
+        bounds: TranscriptDiscoveryBounds,
+        mut frontier: CodexDiscoveryFrontier,
+    ) -> (Vec<PathBuf>, CodexDiscoveryFrontier) {
+        let mut paths = Vec::new();
+        for _ in 0..4096 {
+            match hub
+                .discover(consumer, source, bounds, frontier)
+                .await
+                .expect("bounded hub discovery")
+            {
+                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Ready(pass) => {
+                    paths.extend(pass.report.paths.iter().cloned());
+                    frontier = pass.next_frontier;
+                    hub.acknowledge(consumer);
+                    if frontier.is_complete() {
+                        return (paths, frontier);
+                    }
+                }
+            }
+        }
+        panic!("bounded hub discovery did not converge");
+    }
+
+    #[test]
+    fn indexed_replay_starts_at_the_acknowledged_btree_position() {
+        let mut index = CodexReplayIndex::default();
+        index.complete = true;
+        index.frontier = CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
+            high: 1,
+            low: 2,
+            files: 8192,
+        });
+        for value in 0..8192 {
+            index.paths.insert(CodexIndexedPath {
+                root_order: 0,
+                path: PathBuf::from(format!("/sessions/rollout-{value:05}.jsonl")),
+            });
+        }
+        let position = CodexIndexedPath {
+            root_order: 0,
+            path: PathBuf::from("/sessions/rollout-07999.jsonl"),
+        };
+        reset_replay_index_entries_visited_for_test();
+
+        let (pass, _) = indexed_replay_pass(
+            &index,
+            TranscriptDiscoveryBounds::from_discovered_units(8),
+            CodexDiscoveryFrontier::initial(),
+            Some(&position),
+        )
+        .expect("indexed replay page");
+
+        assert_eq!(pass.report.paths.len(), 8);
+        assert!(
+            replay_index_entries_visited_for_test() <= 9,
+            "an acknowledged tail position must not rescan the B-tree prefix"
+        );
+    }
+
+    #[test]
+    fn indexed_replay_preserves_recent_sessions_before_archive() {
+        let mut index = CodexReplayIndex::default();
+        index.complete = true;
+        index.frontier = CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
+            high: 1,
+            low: 2,
+            files: 3,
+        });
+        let newest = CodexIndexedPath {
+            root_order: 0,
+            path: PathBuf::from("/sessions/2026/08/24/rollout-new.jsonl"),
+        };
+        let oldest = CodexIndexedPath {
+            root_order: 0,
+            path: PathBuf::from("/sessions/2025/01/01/rollout-old.jsonl"),
+        };
+        let archived = CodexIndexedPath {
+            root_order: 1,
+            path: PathBuf::from("/archive/rollout-archived.jsonl"),
+        };
+        index
+            .paths
+            .extend([oldest.clone(), archived.clone(), newest.clone()]);
+
+        let (pass, _) = indexed_replay_pass(
+            &index,
+            TranscriptDiscoveryBounds::from_discovered_units(8),
+            CodexDiscoveryFrontier::initial(),
+            None,
+        )
+        .expect("ordered indexed replay");
+
+        assert_eq!(
+            pass.report.paths,
+            vec![newest.path, oldest.path, archived.path]
+        );
+    }
+
+    #[test]
+    fn exact_hook_source_capacity_never_evicts_an_incomplete_scan() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let mut authority = CodexExactSessionPathAuthority::default();
+        for index in 0..MAX_EXACT_HOOK_SOURCE_AUTHORITIES {
+            let source = CodexDiscoverySourceKey {
+                sessions_dir: PathBuf::from(format!("/sessions/{index}")),
+                archived_sessions_dir: PathBuf::from(format!("/archive/{index}")),
+            };
+            authority
+                .source_index_or_admit(source)
+                .expect("bounded pending source authority");
+        }
+
+        let error = authority
+            .source_index_or_admit(CodexDiscoverySourceKey {
+                sessions_dir: PathBuf::from("/sessions/excess"),
+                archived_sessions_dir: PathBuf::from("/archive/excess"),
+            })
+            .expect_err("an excess source must receive typed backpressure");
+        assert!(matches!(
+            error,
+            TranscriptIngestError::BackgroundResourceUnavailable {
+                provider: "codex",
+                resource: "exact-session source lookup capacity",
+            }
+        ));
+    }
+
+    #[test]
+    fn exact_hook_request_capacity_never_evicts_an_incomplete_lookup() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let mut authority = CodexExactSessionPathAuthority::default();
+        let source = authority
+            .source_index_or_admit(CodexDiscoverySourceKey {
+                sessions_dir: PathBuf::from("/sessions"),
+                archived_sessions_dir: PathBuf::from("/archive"),
+            })
+            .unwrap();
+        for index in 0..MAX_EXACT_HOOK_SESSION_REQUESTS {
+            authority
+                .request_index_or_admit(source, format!("session-{index}"))
+                .expect("bounded pending request authority");
+        }
+
+        let error = authority
+            .request_index_or_admit(source, "session-excess".to_owned())
+            .expect_err("an excess request must receive typed backpressure");
+        assert!(matches!(
+            error,
+            TranscriptIngestError::BackgroundResourceUnavailable {
+                provider: "codex",
+                resource: "exact-session request lookup capacity",
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_hub_fans_one_immutable_generation_to_profile_and_projects() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let expected = write_dated_rollout(home, ("2026", "08", "23"), "shared");
+        let hub = CodexDiscoveryHub::default();
+        for consumer in ["profile", "project-a", "project-b"] {
+            hub.register(consumer, Some(home));
+        }
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let first = match hub
+            .discover(
+                "profile",
+                &source,
+                bounds,
+                CodexDiscoveryFrontier::initial(),
+            )
+            .await
+            .unwrap()
+        {
+            CodexDiscoveryDelivery::Ready(pass) => pass,
+            CodexDiscoveryDelivery::Waiting => panic!("first scanner unexpectedly waited"),
+        };
+        assert_eq!(first.report.paths, vec![expected]);
+        for consumer in ["project-a", "project-b"] {
+            let delivered = match hub
+                .discover(consumer, &source, bounds, CodexDiscoveryFrontier::initial())
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => panic!("queued consumer unexpectedly waited"),
+            };
+            assert!(Arc::ptr_eq(&first, &delivered));
+        }
+    }
+
+    #[tokio::test]
+    async fn unacknowledged_budget_delivery_reuses_the_exact_immutable_generation() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let expected = write_dated_rollout(home, ("2026", "08", "23"), "budget-retry");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("profile", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let frontier = CodexDiscoveryFrontier::initial();
+
+        let first = match hub
+            .discover("profile", &source, bounds, frontier)
+            .await
+            .unwrap()
+        {
+            CodexDiscoveryDelivery::Ready(pass) => pass,
+            CodexDiscoveryDelivery::Waiting => panic!("initial delivery unexpectedly waited"),
+        };
+        assert_eq!(first.report.paths, vec![expected]);
+        let retry = match hub
+            .discover("profile", &source, bounds, frontier)
+            .await
+            .unwrap()
+        {
+            CodexDiscoveryDelivery::Ready(pass) => pass,
+            CodexDiscoveryDelivery::Waiting => panic!("budget retry unexpectedly waited"),
+        };
+
+        assert!(
+            Arc::ptr_eq(&first, &retry),
+            "ordinary byte deferral must retain the immutable pass instead of rescanning"
+        );
+        assert_eq!(retry.report.files_considered, first.report.files_considered);
+    }
+
+    #[tokio::test]
+    async fn shared_hub_never_fans_paths_across_source_homes() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let first_home = TempDir::new().unwrap();
+        let second_home = TempDir::new().unwrap();
+        let first_path = write_dated_rollout(first_home.path(), ("2026", "08", "23"), "first-home");
+        let second_path =
+            write_dated_rollout(second_home.path(), ("2026", "08", "23"), "second-home");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("first", Some(first_home.path()));
+        hub.register("second", Some(second_home.path()));
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let first_source = CodexSource::with_home(first_home.path());
+        let second_source = CodexSource::with_home(second_home.path());
+
+        let first = hub
+            .discover(
+                "first",
+                &first_source,
+                bounds,
+                CodexDiscoveryFrontier::initial(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(first, CodexDiscoveryDelivery::Ready(_)));
+        let (second, second_frontier) = drain_hub_consumer(
+            &hub,
+            "second",
+            &second_source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert_eq!(second, vec![second_path]);
+        assert!(second_frontier.is_complete());
+        assert!(!second.contains(&first_path));
+    }
+
+    #[tokio::test]
+    async fn slow_shared_consumer_falls_to_replay_without_blocking_healthy_progress() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let file_count =
+            crate::runtime::jsonl_observation_admission::shared_jsonl_preparation_workers() + 1;
+        for index in 0..file_count {
+            write_dated_rollout(home, ("2026", "08", "23"), &format!("slow-{index:02}"));
+        }
+        let hub = CodexDiscoveryHub::default();
+        hub.register("healthy", Some(home));
+        hub.register("slow", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut delivered = 0usize;
+        for _ in 0..128 {
+            let pass = match hub
+                .discover("healthy", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => continue,
+            };
+            delivered = delivered.saturating_add(pass.report.paths.len());
+            frontier = pass.next_frontier;
+            hub.acknowledge("healthy");
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert_eq!(delivered, file_count);
+        assert!(frontier.is_complete());
+
+        let (replay, replay_frontier) = drain_hub_consumer(
+            &hub,
+            "slow",
+            &source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert_eq!(replay.len(), file_count);
+        assert!(replay_frontier.is_complete());
+    }
+
+    #[tokio::test]
+    async fn two_laggers_share_one_memory_bounded_replay_enumeration() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let expected = (0..73)
+            .map(|index| {
+                write_dated_rollout(home, ("2026", "08", "23"), &format!("lag-{index:03}"))
+            })
+            .collect::<BTreeSet<_>>();
+        let hub = CodexDiscoveryHub::default();
+        hub.register("healthy", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let (_, healthy_frontier) = drain_hub_consumer(
+            &hub,
+            "healthy",
+            &source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert!(healthy_frontier.is_complete());
+        hub.register("lagger-a", Some(home));
+        hub.register("lagger-b", Some(home));
+
+        let (first, first_frontier) = drain_hub_consumer(
+            &hub,
+            "lagger-a",
+            &source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        let healthy_probe = hub
+            .discover("healthy", &source, bounds, healthy_frontier)
+            .await
+            .expect("healthy consumer remains responsive during replay");
+        assert!(matches!(healthy_probe, CodexDiscoveryDelivery::Ready(_)));
+        hub.acknowledge("healthy");
+        let (second, second_frontier) = drain_hub_consumer(
+            &hub,
+            "lagger-b",
+            &source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+
+        assert_eq!(first.into_iter().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(second.into_iter().collect::<BTreeSet<_>>(), expected);
+        assert!(first_frontier.is_complete());
+        assert!(second_frontier.is_complete());
+        let inner = hub.inner.lock().unwrap();
+        let index = inner
+            .replay_indexes
+            .get(&source.discovery_key())
+            .expect("one source replay index");
+        assert_eq!(index.completed_enumerations, 1);
+        assert_eq!(index.files_considered, 73);
+        assert!(!index._memory.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_secondary_source_rebuilds_after_add_and_delete() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let primary = TempDir::new().unwrap();
+        let secondary = TempDir::new().unwrap();
+        write_dated_rollout(primary.path(), ("2026", "08", "23"), "primary");
+        let removed = write_dated_rollout(secondary.path(), ("2026", "08", "23"), "secondary-old");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("primary", Some(primary.path()));
+        let primary_source = CodexSource::with_home(primary.path());
+        let secondary_source = CodexSource::with_home(secondary.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let (_, primary_frontier) = drain_hub_consumer(
+            &hub,
+            "primary",
+            &primary_source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert!(primary_frontier.is_complete());
+        hub.register("secondary", Some(secondary.path()));
+        let (initial, secondary_frontier) = drain_hub_consumer(
+            &hub,
+            "secondary",
+            &secondary_source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert_eq!(initial, vec![removed.clone()]);
+        let (unchanged, unchanged_frontier) = drain_hub_consumer(
+            &hub,
+            "secondary",
+            &secondary_source,
+            bounds,
+            secondary_frontier,
+        )
+        .await;
+        assert!(unchanged.is_empty());
+        assert_eq!(unchanged_frontier, secondary_frontier);
+        assert_eq!(
+            hub.inner
+                .lock()
+                .unwrap()
+                .replay_indexes
+                .get(&secondary_source.discovery_key())
+                .expect("secondary replay index")
+                .completed_enumerations,
+            1,
+            "an unchanged retained probe must not enumerate the corpus again"
+        );
+        std::fs::remove_file(&removed).unwrap();
+        let added = write_dated_rollout(secondary.path(), ("2026", "08", "24"), "secondary-new");
+
+        let (rebuilt, rebuilt_frontier) = drain_hub_consumer(
+            &hub,
+            "secondary",
+            &secondary_source,
+            bounds,
+            secondary_frontier,
+        )
+        .await;
+
+        assert_eq!(rebuilt, vec![added]);
+        assert!(rebuilt_frontier.is_complete());
+        assert_ne!(rebuilt_frontier, secondary_frontier);
+        let inner = hub.inner.lock().unwrap();
+        let index = inner
+            .replay_indexes
+            .get(&secondary_source.discovery_key())
+            .expect("secondary replay index");
+        assert_eq!(index.completed_enumerations, 2);
+        assert!(!index.paths.iter().any(|entry| entry.path == removed));
+    }
+
+    #[tokio::test]
+    async fn replay_index_retires_after_the_last_source_consumer() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let primary = TempDir::new().unwrap();
+        let secondary = TempDir::new().unwrap();
+        write_dated_rollout(primary.path(), ("2026", "08", "23"), "primary");
+        write_dated_rollout(secondary.path(), ("2026", "08", "23"), "secondary");
+        let hub = CodexDiscoveryHub::default();
+        let primary_source = CodexSource::with_home(primary.path());
+        let secondary_source = CodexSource::with_home(secondary.path());
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        hub.register("primary", Some(primary.path()));
+        let (_, primary_frontier) = drain_hub_consumer(
+            &hub,
+            "primary",
+            &primary_source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert!(primary_frontier.is_complete());
+        hub.register("secondary-a", Some(secondary.path()));
+        hub.register("secondary-b", Some(secondary.path()));
+        let (_, secondary_frontier) = drain_hub_consumer(
+            &hub,
+            "secondary-a",
+            &secondary_source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert!(secondary_frontier.is_complete());
+        let source_key = secondary_source.discovery_key();
+        assert!(
+            hub.inner
+                .lock()
+                .unwrap()
+                .replay_indexes
+                .contains_key(&source_key)
+        );
+
+        hub.deregister("secondary-a");
+        assert!(
+            hub.inner
+                .lock()
+                .unwrap()
+                .replay_indexes
+                .contains_key(&source_key)
+        );
+        hub.deregister("secondary-b");
+        assert!(
+            !hub.inner
+                .lock()
+                .unwrap()
+                .replay_indexes
+                .contains_key(&source_key),
+            "the last source consumer releases retained paths and scanner memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_registration_release_keeps_surviving_consumer_live() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        write_dated_rollout(home, ("2026", "08", "23"), "lease");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("same", Some(home));
+        hub.register("same", Some(home));
+        hub.deregister("same");
+
+        let delivery = hub
+            .discover(
+                "same",
+                &CodexSource::with_home(home),
+                TranscriptDiscoveryBounds::from_discovered_units(8),
+                CodexDiscoveryFrontier::initial(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(delivery, CodexDiscoveryDelivery::Ready(_)));
+    }
+
+    #[tokio::test]
+    async fn deregistered_consumer_is_never_implicitly_resurrected() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let hub = CodexDiscoveryHub::default();
+        hub.register("retired", Some(home));
+        hub.deregister("retired");
+
+        let result = hub
+            .discover(
+                "retired",
+                &CodexSource::with_home(home),
+                TranscriptDiscoveryBounds::from_discovered_units(8),
+                CodexDiscoveryFrontier::initial(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. })
+        ));
+    }
+
+    #[test]
+    fn exact_hook_session_lookup_converges_in_bounded_retained_slices() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let directory = home.join(".codex/sessions/2026/08/23");
+        std::fs::create_dir_all(&directory).unwrap();
+        for index in 0..4_100 {
+            std::fs::write(
+                directory.join(format!("rollout-distractor-{index:04}.jsonl")),
+                b"{}\n",
+            )
+            .unwrap();
+        }
+        let session_id = "0198-session-beyond-default-budget";
+        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
+        std::fs::write(&expected, b"{}\n").unwrap();
+
+        let source = CodexSource::with_home(home);
+        let mut calls = 0_u64;
+        let paths = loop {
+            calls += 1;
+            let lookup = source
+                .find_session_transcript_paths_bounded(session_id)
+                .unwrap();
+            assert!(
+                lookup.files_considered <= EXACT_HOOK_DISCOVERY_UNITS_PER_CALL as u64,
+                "one hook call exceeded its filesystem work budget"
+            );
+            if !lookup.paths.is_empty() {
+                break lookup.paths;
+            }
+            assert!(lookup.source_deferred);
+            assert!(calls < 100, "retained lookup did not converge");
+        };
+
+        assert!(calls > 1, "fixture did not exercise retained continuation");
+        assert_eq!(paths, vec![expected]);
+        let cached = source
+            .find_session_transcript_paths_bounded(session_id)
+            .unwrap();
+        assert_eq!(cached.files_considered, 0);
+        assert_eq!(cached.paths, paths);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_hook_session_lookup_follows_and_deduplicates_file_symlinks() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let directory = home.join(".codex/sessions/2026/08/23");
+        std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "0198-symlink-session";
+        let target = directory.join(format!("rollout-{session_id}.jsonl"));
+        std::fs::write(&target, b"{}\n").unwrap();
+        symlink(
+            &target,
+            directory.join(format!("rollout-copy-{session_id}.jsonl")),
+        )
+        .unwrap();
+
+        let lookup = CodexSource::with_home(home)
+            .find_session_transcript_paths_bounded(session_id)
+            .unwrap();
+
+        assert_eq!(lookup.paths, vec![target]);
+    }
+
+    #[test]
+    fn distinct_exact_hook_ids_share_one_monotonic_source_index() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let directory = home.join(".codex/sessions/2026/08/23");
+        std::fs::create_dir_all(&directory).unwrap();
+        let target_id = "indexed-before-late-request";
+        let expected = directory.join(format!("rollout-{target_id}.jsonl"));
+        std::fs::write(&expected, b"{}\n").unwrap();
+        for index in 0..192 {
+            std::fs::write(
+                directory.join(format!("rollout-index-{index:04}.jsonl")),
+                b"{}\n",
+            )
+            .unwrap();
+        }
+        let source = CodexSource::with_home(home);
+
+        let mut completed = false;
+        for index in 0..MAX_EXACT_HOOK_SESSION_REQUESTS {
+            let lookup = source
+                .find_session_transcript_paths_bounded(&format!("missing-drive-{index:03}"))
+                .expect("distinct lookup must advance the shared source sweep");
+            if !lookup.source_deferred {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "distinct IDs did not converge the retained source sweep"
+        );
+        for index in 0..80 {
+            source
+                .find_session_transcript_paths_bounded(&format!("missing-after-{index:03}"))
+                .expect("completed requests may rotate without resetting source discovery");
+        }
+
+        let target = source
+            .find_session_transcript_paths_bounded(target_id)
+            .expect("late target must resolve from the retained source index");
+        assert_eq!(target.files_considered, 0);
+        assert_eq!(target.paths, vec![expected]);
+    }
+
+    #[test]
+    fn stale_exact_lookup_lease_cannot_reinsert_an_evicted_source() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let source = CodexSource::with_home(temp.path());
+        let key = source.discovery_key();
+        let mut authority = CodexExactSessionPathAuthority::default();
+        let stale_index = authority.source_index_or_admit(key.clone()).unwrap();
+        authority
+            .request_index_or_admit(stale_index, "stale".to_owned())
+            .unwrap();
+        let stale_lease = authority.sources[stale_index].lease;
+        authority.sources.remove(stale_index);
+
+        let replacement_index = authority.source_index_or_admit(key.clone()).unwrap();
+        let replacement_lease = authority.sources[replacement_index].lease;
+
+        assert_ne!(stale_lease, replacement_lease);
+        assert!(matches!(
+            authority.source_for_lease_mut(&key, stale_lease, "stale exact lookup lease"),
+            Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. })
+        ));
+        assert!(authority.sources[replacement_index].discovery.is_some());
     }
 
     /// The starvation regression: with a historical backlog far larger than the
@@ -974,7 +1705,22 @@ mod recent_first_discovery_tests {
         // Cap far below the backlog so oldest-first discovery could never
         // reach the newest file.
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-        let pass = CodexSource::with_home(home).discover_transcript_paths_with_rotation(bounds, 0);
+        let source = CodexSource::with_home(home);
+        let mut state = CodexDiscoveryState::default();
+        let mut pass = retained_pass(
+            &source,
+            &mut state,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        );
+        while pass.report.paths.is_empty() {
+            pass = retained_pass(
+                &source,
+                &mut state,
+                bounds,
+                CodexDiscoveryFrontier::initial(),
+            );
+        }
 
         assert_eq!(
             pass.report.paths.first(),
@@ -985,21 +1731,128 @@ mod recent_first_discovery_tests {
             pass.report.is_truncated(),
             "an over-cap backlog must report truncation so catch-up stays scheduled"
         );
-        assert_eq!(
-            pass.report.files_considered, 121,
-            "files_considered is the exact jsonl tree, including the unvisited backlog"
-        );
-        assert_eq!(
-            u64::try_from(pass.report.paths.len()).unwrap(),
-            16,
-            "retention stays capped; only the considered counter includes the backlog"
-        );
+        assert!(pass.report.paths.len() <= bounds.max_files);
     }
 
-    /// Coverage: advancing the rotation frontier across passes must visit every
-    /// historical bucket — tracked pending work, never a skipped range.
+    /// An unchanged completed corpus is truly idle: it must not hand the same
+    /// recent slice back to the JSONL scanner on every background poll.
     #[test]
-    fn codex_history_rotation_covers_every_backlog_bucket_across_passes() {
+    fn codex_complete_frontier_idles_without_selecting_files() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let active = write_dated_rollout(home, ("2026", "08", "17"), "today");
+        let source = CodexSource::with_home(home);
+        let mut state = CodexDiscoveryState::default();
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+
+        let mut completed = retained_pass(
+            &source,
+            &mut state,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        );
+        while !completed.next_frontier.is_complete() {
+            completed = retained_pass(
+                &source,
+                &mut state,
+                bounds,
+                CodexDiscoveryFrontier::initial(),
+            );
+        }
+        assert!(completed.next_frontier.is_complete());
+
+        let idle = retained_pass(&source, &mut state, bounds, completed.next_frontier);
+        assert!(idle.next_frontier.is_complete());
+        assert!(idle.report.paths.is_empty());
+        assert!(!idle.report.is_truncated());
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&active)
+            .unwrap();
+        file.write_all(b"{}\n").unwrap();
+        let awakened = retained_pass(&source, &mut state, bounds, completed.next_frontier);
+        assert!(awakened.report.is_truncated());
+        assert!(!awakened.next_frontier.is_complete());
+    }
+
+    /// A file-count watermark cannot distinguish deletion plus addition. The
+    /// corpus epoch must invalidate completion even when cardinality is fixed.
+    #[test]
+    fn codex_constant_cardinality_replacement_invalidates_completion() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let removed = write_dated_rollout(home, ("2026", "08", "17"), "removed");
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+
+        let completed = source
+            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
+            .unwrap()
+            .next_frontier;
+        assert!(completed.is_complete());
+
+        std::fs::remove_file(removed).unwrap();
+        let added = write_dated_rollout(home, ("2026", "08", "17"), "added");
+        let changed = source
+            .discover_transcript_paths_with_frontier(bounds, completed)
+            .unwrap();
+
+        assert!(changed.report.paths.contains(&added));
+        assert_ne!(changed.next_frontier.epoch, completed.epoch);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn codex_same_path_same_size_preserved_mtime_replacement_changes_epoch() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let path = write_dated_rollout(home, ("2026", "08", "17"), "replaced");
+        let original_mtime =
+            filetime::FileTime::from_last_modification_time(&std::fs::metadata(&path).unwrap());
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+        let completed = source
+            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
+            .unwrap()
+            .next_frontier;
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        filetime::set_file_mtime(&path, original_mtime).unwrap();
+        let replaced = source
+            .discover_transcript_paths_with_frontier(bounds, completed)
+            .unwrap();
+
+        assert_ne!(replaced.next_frontier.epoch, completed.epoch);
+        assert_eq!(replaced.report.paths, vec![path]);
+    }
+
+    #[test]
+    fn codex_recent_selection_keeps_dated_sessions_before_archive() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let dated = write_dated_rollout(home, ("2026", "08", "17"), "dated");
+        let archive_dir = home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let archived = archive_dir.join("rollout-zzzz.jsonl");
+        std::fs::write(&archived, "{}\n").unwrap();
+
+        let pass = CodexSource::with_home(home)
+            .discover_transcript_paths_with_frontier(
+                TranscriptDiscoveryBounds::from_discovered_units(8),
+                CodexDiscoveryFrontier::initial(),
+            )
+            .unwrap();
+
+        assert_eq!(pass.report.paths.first(), Some(&dated));
+        assert!(pass.report.paths.contains(&archived));
+    }
+
+    /// Coverage: retained traversal across passes must visit every historical
+    /// file — tracked pending work, never a skipped range.
+    #[test]
+    fn codex_history_frontier_covers_every_backlog_file_across_passes() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
         let mut all: BTreeSet<PathBuf> = BTreeSet::new();
@@ -1017,18 +1870,15 @@ mod recent_first_discovery_tests {
         // 8 units/pass: 7 recent + 1 history slice against 25 files.
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
         let source = CodexSource::with_home(home);
+        let mut state = CodexDiscoveryState::default();
 
-        let mut rotation = 0u64;
+        let mut frontier = CodexDiscoveryFrontier::initial();
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
         for _pass in 0..64 {
-            let pass = source.discover_transcript_paths_with_rotation(bounds, rotation);
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
             covered.extend(pass.report.paths.iter().cloned());
-            assert!(
-                pass.next_history_rotation > rotation,
-                "a truncated pass must advance the rotation so the backlog converges"
-            );
-            rotation = pass.next_history_rotation;
-            if covered.len() == all.len() {
+            frontier = pass.next_frontier;
+            if covered.len() == all.len() && frontier.is_complete() {
                 break;
             }
         }
@@ -1037,62 +1887,189 @@ mod recent_first_discovery_tests {
             "rotating passes must cover the entire backlog, no skipped-and-forgotten range"
         );
         assert!(
-            history_rotation_sweep_complete(rotation),
+            frontier.is_complete(),
             "covering every backlog file must persist the sweep-complete watermark on the frontier"
         );
-        let settled = source.discover_transcript_paths_with_rotation(bounds, rotation);
+        let settled = retained_pass(&source, &mut state, bounds, frontier);
         assert!(
             !settled.report.is_truncated(),
-            "after history rotation visits every file, idle polls must report complete"
+            "after the history sweep visits every file, idle polls must report complete"
         );
+        assert_eq!(settled.report.files_considered, 0);
         assert_eq!(
-            settled.report.files_considered,
-            u64::try_from(all.len()).unwrap()
-        );
-        assert_eq!(
-            settled.next_history_rotation, rotation,
+            settled.next_frontier, frontier,
             "an idle complete pass must keep the durable watermark, not restart from zero"
         );
+        assert!(settled.report.paths.is_empty());
 
         write_dated_rollout(home, ("2026", "08", "18"), "newer");
-        let grown = source.discover_transcript_paths_with_rotation(bounds, rotation);
+        let grown = retained_pass(&source, &mut state, bounds, frontier);
         assert!(
             grown.report.is_truncated(),
             "new files must clear the complete watermark so history is walked again"
         );
         assert!(
-            !history_rotation_sweep_complete(grown.next_history_rotation),
-            "growth must strip the complete bit until the new tree is covered"
+            !grown.next_frontier.is_complete(),
+            "growth must invalidate completion until the new tree is covered"
         );
     }
 
-    /// A backlog under the cap needs no rotation: one pass discovers everything
+    #[test]
+    fn codex_history_frontier_converges_beyond_discovery_byte_budget() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let mut all = BTreeSet::new();
+        for item in 0..24 {
+            all.insert(write_dated_rollout(
+                home,
+                ("2025", "11", "01"),
+                &format!("byte-budget-{item:02}"),
+            ));
+        }
+        let per_candidate = all
+            .iter()
+            .map(|path| {
+                u64::try_from(crate::runtime::source::path_byte_len(path)).unwrap()
+                    + u64::try_from(std::mem::size_of::<std::fs::Metadata>()).unwrap()
+            })
+            .max()
+            .unwrap();
+        let mut bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        bounds.max_discovery_bytes = per_candidate * 2;
+        let source = CodexSource::with_home(home);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut covered = BTreeSet::new();
+
+        for _pass in 0..64 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            assert!(pass.report.bytes_charged <= bounds.max_discovery_bytes);
+            covered.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+
+        assert_eq!(covered, all);
+        assert!(frontier.is_complete());
+        let restarted = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(restarted.report.paths.is_empty());
+        assert!(!restarted.report.is_truncated());
+    }
+
+    #[test]
+    fn codex_changing_recent_file_does_not_pin_history_cursor() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let mut all = BTreeSet::new();
+        for item in 0..24 {
+            all.insert(write_dated_rollout(
+                home,
+                ("2025", "11", "01"),
+                &format!("moving-{item:02}"),
+            ));
+        }
+        let changing = write_dated_rollout(home, ("2026", "08", "17"), "changing");
+        all.insert(changing.clone());
+        let source = CodexSource::with_home(home);
+        let mut state = CodexDiscoveryState::default();
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut covered = BTreeSet::new();
+
+        for pass_index in 0..64 {
+            std::fs::write(&changing, format!("{{\"pass\":{pass_index}}}\n")).unwrap();
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            covered.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if covered == all {
+                break;
+            }
+        }
+
+        assert_eq!(covered, all, "epoch churn must not restart at cursor zero");
+    }
+
+    #[test]
+    fn codex_idle_validation_eventually_rediscovers_append_outside_active_window() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let mut files = BTreeSet::new();
+        for item in 0..60 {
+            files.insert(write_dated_rollout(
+                home,
+                ("2025", "11", "01"),
+                &format!("idle-{item:03}"),
+            ));
+        }
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        for _ in 0..1_000 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete());
+
+        let oldest = files.first().unwrap().clone();
+        let idle = state.idle.as_mut().expect("completed idle authority");
+        assert!(
+            !idle.active_files.iter().any(|file| file.path == oldest),
+            "fixture must mutate a file outside the bounded active window"
+        );
+        idle.completed_probe_cycles = IDLE_FULL_VALIDATION_CYCLES - 1;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&oldest)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+
+        let mut rediscovered = false;
+        for _ in 0..2_000 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            rediscovered |= pass.report.paths.contains(&oldest);
+            frontier = pass.next_frontier;
+            if rediscovered {
+                break;
+            }
+        }
+        assert!(
+            rediscovered,
+            "bounded idle authority must eventually validate files outside its active window"
+        );
+    }
+
+    /// A backlog under the cap needs no catch-up: one pass discovers everything
     /// and reports no truncation, so no catch-up is scheduled.
     #[test]
-    fn codex_discovery_under_cap_is_complete_without_rotation() {
+    fn codex_discovery_under_cap_is_complete_in_one_pass() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
         let a = write_dated_rollout(home, ("2026", "08", "16"), "yesterday");
         let b = write_dated_rollout(home, ("2026", "08", "17"), "today");
 
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-        let pass = CodexSource::with_home(home).discover_transcript_paths_with_rotation(bounds, 0);
+        let pass = CodexSource::with_home(home)
+            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
+            .unwrap();
 
         assert_eq!(pass.report.paths, vec![b, a], "newest-first ordering");
         assert_eq!(pass.report.files_considered, 2);
         assert!(!pass.report.is_truncated());
-        assert_eq!(
-            pass.next_history_rotation, 0,
-            "a complete pass leaves the rotation frontier untouched"
-        );
+        assert!(pass.next_frontier.is_complete());
     }
 
     /// A single historical bucket larger than the whole per-pass budget must
-    /// converge file-by-file through the intra-bucket offset instead of
-    /// starving its tail (rotation jumping past it) or pinning forever
-    /// (rotation never advancing).
+    /// converge file-by-file through the retained directory iterator instead
+    /// of starving its tail or pinning forever.
     #[test]
-    fn codex_oversized_bucket_converges_through_intra_bucket_offset() {
+    fn codex_oversized_bucket_converges_through_retained_traversal() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
         let mut all: BTreeSet<PathBuf> = BTreeSet::new();
@@ -1108,19 +2085,21 @@ mod recent_first_discovery_tests {
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
         let source = CodexSource::with_home(home);
 
-        let mut rotation = 0u64;
+        let mut frontier = CodexDiscoveryFrontier::initial();
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
         for _pass in 0..64 {
-            let pass = source.discover_transcript_paths_with_rotation(bounds, rotation);
+            let pass = source
+                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .unwrap();
             covered.extend(pass.report.paths.iter().cloned());
             if covered.len() == all.len() {
                 break;
             }
             assert!(
-                pass.next_history_rotation > rotation,
-                "an unfinished oversized bucket must still advance the intra-bucket offset"
+                pass.next_frontier != frontier,
+                "an unfinished oversized bucket must still advance its cursor"
             );
-            rotation = pass.next_history_rotation;
+            frontier = pass.next_frontier;
         }
         assert_eq!(
             covered, all,
@@ -1153,12 +2132,14 @@ mod recent_first_discovery_tests {
         let admission = MemoryHostAdmission::default();
         let scope = tracedecay_domain::ObservationScopeV1::Profile;
 
-        let mut rotation = 0u64;
+        let mut frontier = CodexDiscoveryFrontier::initial();
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
         for _pass in 0..64 {
-            let pass = source.discover_transcript_paths_with_rotation(bounds, rotation);
+            let pass = source
+                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .unwrap();
             covered.extend(pass.report.paths.iter().cloned());
-            persist_codex_history_frontier(&admission, &scope, pass.next_history_rotation)
+            persist_codex_history_frontier(&admission, &scope, frontier, pass.next_frontier)
                 .await
                 .unwrap();
             let coverage = if pass.report.is_truncated() {
@@ -1175,13 +2156,13 @@ mod recent_first_discovery_tests {
             )
             .await
             .unwrap();
-            rotation = pass.next_history_rotation;
+            frontier = pass.next_frontier;
             if covered.len() == all.len() && !pass.report.is_truncated() {
                 break;
             }
         }
         assert_eq!(covered, all);
-        assert!(history_rotation_sweep_complete(rotation));
+        assert!(frontier.is_complete());
 
         let stored = read_codex_history_frontier(&admission, &scope)
             .await
@@ -1190,31 +2171,29 @@ mod recent_first_discovery_tests {
             .await
             .unwrap();
         assert_eq!(coverage, Some(HostProviderCoverage::Complete));
-        assert_eq!(stored, rotation);
-        assert!(history_rotation_sweep_complete(stored));
+        assert_eq!(stored, frontier);
+        assert!(stored.is_complete());
 
-        let restarted = CodexSource::with_home(home).discover_transcript_paths_with_rotation(
-            bounds,
-            effective_history_rotation(stored, true),
-        );
+        let restarted = CodexSource::with_home(home)
+            .discover_transcript_paths_with_frontier(bounds, stored.for_coverage(true))
+            .unwrap();
         assert!(
             !restarted.report.is_truncated(),
             "a process that only reloads admission offsets must idle complete"
         );
-        assert_eq!(restarted.next_history_rotation, stored);
+        assert_eq!(restarted.next_frontier, stored);
+        assert!(restarted.report.paths.is_empty());
+
+        let added = write_dated_rollout(home, ("2026", "08", "18"), "after-restart");
+        let awakened = CodexSource::with_home(home)
+            .discover_transcript_paths_with_frontier(bounds, stored)
+            .unwrap();
+        assert!(awakened.report.paths.contains(&added));
+        assert!(!awakened.next_frontier.is_complete());
     }
 
-    /// The counts driving the sweep watermark and the paths discovery selects
-    /// must describe the same population: `remaining_older_jsonl` compares the
-    /// count against selection progress, so a counter that disagrees leaves the
-    /// remainder permanently non-zero and history rotation never settles.
-    ///
-    /// Symlink-to-file candidates are the case where the two could drift, and
-    /// they are deliberately retained by discovery (`source/discovery.rs`
-    /// includes them by link-path extension while refusing to recurse into
-    /// symlinked directories). The counter must therefore follow symlinks too —
-    /// this pins that agreement so a future switch to `DirEntry::file_type`,
-    /// which reports symlinks as neither file nor dir, cannot land silently.
+    /// Symlink-to-file candidates belong to the same ordered snapshot as
+    /// regular files; otherwise the epoch and selected population diverge.
     #[test]
     #[cfg(unix)]
     fn jsonl_counts_and_discovery_selection_describe_the_same_files() {
@@ -1224,56 +2203,86 @@ mod recent_first_discovery_tests {
         let bucket = real.parent().unwrap();
         std::os::unix::fs::symlink(&real, bucket.join("rollout-link.jsonl")).unwrap();
 
-        let counted = super::super::count_jsonl_in_dir(bucket);
         let selected = CodexSource::with_home(home)
-            .discover_transcript_paths_with_rotation(
+            .discover_transcript_paths_with_frontier(
                 TranscriptDiscoveryBounds::from_discovered_units(64),
-                0,
+                CodexDiscoveryFrontier::initial(),
             )
+            .unwrap()
             .report
             .paths
             .len();
 
         assert_eq!(selected, 2, "discovery retains symlink-to-file candidates");
-        assert_eq!(
-            counted, selected as u64,
-            "the sweep watermark must count exactly what discovery selects"
-        );
     }
 
-    /// The per-bucket jsonl counts feed two consumers — the sweep watermark's
-    /// total and the history phase's remainder — and both must read one
-    /// measurement. Counting per consumer re-`read_dir`s every bucket, which on
-    /// a large tree is the difference between one metadata sweep and several.
+    /// A non-directory source root is an I/O failure, not an empty Complete
+    /// corpus. Providers can therefore retry without persisting discovery or
+    /// coverage state.
     #[test]
-    fn bucket_counts_are_measured_once_per_pass_not_once_per_consumer() {
+    fn codex_non_directory_root_is_a_typed_discovery_error() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
-        for day in 1..=6 {
-            for item in 0..4 {
-                write_dated_rollout(
-                    home,
-                    ("2025", "11", &format!("{day:02}")),
-                    &format!("old-{day:02}-{item}"),
-                );
-            }
-        }
-        let buckets: Vec<PathBuf> = (1..=6)
-            .map(|day| {
-                home.join(".codex/sessions/2025/11")
-                    .join(format!("{day:02}"))
-            })
-            .collect();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/sessions"), b"not a directory").unwrap();
 
-        let counts = super::super::JsonlBucketCounts::measure(&buckets);
-        assert_eq!(counts.total, 24, "6 buckets x 4 rollouts");
-        assert_eq!(counts.per_bucket, vec![4; 6]);
+        let error = CodexSource::with_home(home)
+            .discover_transcript_paths_with_frontier(
+                TranscriptDiscoveryBounds::from_discovered_units(8),
+                CodexDiscoveryFrontier::initial(),
+            )
+            .unwrap_err();
 
-        // The remainder consumer reads the same measurement rather than
-        // re-listing: with two buckets already completed, four buckets remain.
+        assert!(matches!(
+            error,
+            crate::runtime::source::TranscriptIngestError::ScanIo { .. }
+        ));
+    }
+
+    /// The durable epoch stores both digest halves directly. This catches a
+    /// regression back to bit packing, masking, saturation, or clamping.
+    #[test]
+    fn codex_frontier_round_trip_preserves_full_width_epoch() {
+        let frontier = CodexDiscoveryFrontier::in_progress(CodexCorpusEpoch {
+            high: u64::MAX,
+            low: u64::MAX - 1,
+            files: u64::MAX - 2,
+        });
+        let (stored_frontier, stored_epoch) = frontier.into_parse_offsets();
+
+        let reloaded =
+            CodexDiscoveryFrontier::from_parse_offsets(stored_frontier, stored_epoch).unwrap();
+
+        assert_eq!(reloaded, frontier);
+    }
+
+    #[tokio::test]
+    async fn project_frontier_cas_persists_non_monotonic_epoch_fields_exactly() {
+        let admission = MemoryHostAdmission::default();
+        let scope = tracedecay_domain::ObservationScopeV1::Profile;
+        let high = CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
+            high: u64::MAX,
+            low: u64::MAX,
+            files: 7,
+        });
+        let lower = CodexDiscoveryFrontier::in_progress(CodexCorpusEpoch {
+            high: 1,
+            low: 2,
+            files: 7,
+        });
+
+        persist_codex_history_frontier(&admission, &scope, CodexDiscoveryFrontier::initial(), high)
+            .await
+            .unwrap();
+        persist_codex_history_frontier(&admission, &scope, high, lower)
+            .await
+            .unwrap();
+
         assert_eq!(
-            super::super::remaining_older_jsonl(&counts.per_bucket, 0, 2, 0),
-            16
+            read_codex_history_frontier(&admission, &scope)
+                .await
+                .unwrap(),
+            lower
         );
     }
 }

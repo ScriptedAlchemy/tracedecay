@@ -23,7 +23,8 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use super::super::RegisteredGlobalDb;
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
-    digest_bytes, persist_session_temporal_projection_batch_in_transaction,
+    ProjectionProgressBaseline, digest_bytes,
+    persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
     validate_final_projection_receipt,
 };
@@ -315,6 +316,23 @@ impl RegisteredGlobalDb {
         SessionRefreshProgressV1,
         SessionTemporalProjectionBatchReceiptV1,
     )> {
+        self.persist_session_refresh_projection_batch_controlled_result(
+            progress,
+            batch,
+            ExecutionControl::default(),
+        )
+        .await
+    }
+
+    pub async fn persist_session_refresh_projection_batch_controlled_result(
+        &self,
+        progress: SessionRefreshProgressV1,
+        batch: SessionTemporalProjectionBatchV1,
+        execution_control: ExecutionControl,
+    ) -> SessionStoreResult<(
+        SessionRefreshProgressV1,
+        SessionTemporalProjectionBatchReceiptV1,
+    )> {
         validate_progress_batch_identity(&progress, &batch)?;
         let transaction = self
             .begin_write_transaction()
@@ -336,9 +354,13 @@ impl RegisteredGlobalDb {
         {
             if progress_logically_equal(&existing, &progress) {
                 require_progress_batch_ordinal(&progress, batch.batch_ordinal())?;
-                let receipt =
-                    persist_session_temporal_projection_batch_in_transaction(&transaction, &batch)
-                        .await?;
+                let receipt = persist_session_temporal_projection_batch_in_transaction(
+                    &transaction,
+                    &batch,
+                    &execution_control,
+                    ProjectionProgressBaseline::SeededFromActive,
+                )
+                .await?;
                 require_batch_binding(
                     &transaction,
                     progress.session_id(),
@@ -347,6 +369,7 @@ impl RegisteredGlobalDb {
                     batch.generation(),
                 )
                 .await?;
+                checkpoint_relation_rebuild_control(&execution_control)?;
                 transaction
                     .commit()
                     .await
@@ -360,9 +383,14 @@ impl RegisteredGlobalDb {
             }
         }
 
-        seed_active_projection_in_transaction(&transaction, &batch).await?;
-        let receipt =
-            persist_session_temporal_projection_batch_in_transaction(&transaction, &batch).await?;
+        seed_active_projection_in_transaction(&transaction, &batch, &execution_control).await?;
+        let receipt = persist_session_temporal_projection_batch_in_transaction(
+            &transaction,
+            &batch,
+            &execution_control,
+            ProjectionProgressBaseline::SeededFromActive,
+        )
+        .await?;
         validate_next_progress(
             &transaction,
             &progress,
@@ -380,6 +408,7 @@ impl RegisteredGlobalDb {
             progress.updated_at(),
         )
         .await?;
+        checkpoint_relation_rebuild_control(&execution_control)?;
         transaction
             .commit()
             .await
@@ -531,6 +560,7 @@ impl RegisteredGlobalDb {
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_completion(&receipt, &request)?;
+            checkpoint_relation_rebuild_control(&execution_control)?;
             transaction
                 .commit()
                 .await
@@ -569,6 +599,7 @@ impl RegisteredGlobalDb {
             binding.generation,
             &binding.watermarks,
             &relation_projection,
+            &execution_control,
         )
         .await?;
         validate_candidate_frontier(
@@ -577,6 +608,7 @@ impl RegisteredGlobalDb {
             generation_i64(binding.generation, COMPLETE_REFRESH)?,
             binding.target_frontier,
             &relation_projection,
+            &execution_control,
         )
         .await?;
         let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
@@ -605,6 +637,7 @@ impl RegisteredGlobalDb {
             terminal_at,
         )
         .await?;
+        checkpoint_relation_rebuild_control(&execution_control)?;
         transaction
             .commit()
             .await
@@ -1429,7 +1462,7 @@ async fn projection_receipt_copy_count(
 ) -> SessionStoreResult<u64> {
     let mut rows = conn
         .query(
-            "SELECT copy_count
+            "SELECT committed_copy_count
              FROM session_temporal_projection_receipts
              WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
             params![
@@ -1562,16 +1595,11 @@ async fn projection_receipt_item_count(
 ) -> SessionStoreResult<usize> {
     let mut rows = conn
         .query(
-            "SELECT current.occurrence_count + current.copy_count + current.assertion_count,
-                    previous.occurrence_count + previous.copy_count + previous.assertion_count
-             FROM session_temporal_projection_receipts AS current
-             LEFT JOIN session_temporal_projection_receipts AS previous
-               ON previous.session_id = current.session_id
-              AND previous.generation = current.generation
-              AND previous.batch_ordinal = current.batch_ordinal - 1
-             WHERE current.session_id = ?1
-               AND current.generation = ?2
-               AND current.batch_ordinal = ?3",
+            "SELECT batch_item_count
+             FROM session_temporal_projection_receipts
+             WHERE session_id = ?1
+               AND generation = ?2
+               AND batch_ordinal = ?3",
             params![
                 session_id.as_str(),
                 generation_i64(generation, PERSIST_REFRESH)?,
@@ -1589,26 +1617,10 @@ async fn projection_receipt_item_count(
             context: "refresh progress projection receipt",
         });
     };
-    let current: i64 = row
+    let batch_items: i64 = row
         .get(0)
         .map_err(|error| storage(PERSIST_REFRESH, error))?;
-    let previous: Option<i64> = row
-        .get(1)
-        .map_err(|error| storage(PERSIST_REFRESH, error))?;
-    let delta = if batch_ordinal == 0 {
-        current
-    } else {
-        let previous = previous.ok_or(SessionStoreError::InvalidStateTransition {
-            context: "refresh progress predecessor projection receipt",
-        })?;
-        current
-            .checked_sub(previous)
-            .filter(|value| *value >= 0)
-            .ok_or(SessionStoreError::InvalidStateTransition {
-                context: "refresh progress projection receipt is non-monotonic",
-            })?
-    };
-    usize::try_from(delta).map_err(|error| storage(PERSIST_REFRESH, error))
+    usize::try_from(batch_items).map_err(|error| storage(PERSIST_REFRESH, error))
 }
 
 async fn read_progress(

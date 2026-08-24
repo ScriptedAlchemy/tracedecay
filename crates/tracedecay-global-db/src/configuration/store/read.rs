@@ -80,6 +80,13 @@ pub(super) fn validate_snapshot_registry_completeness(
 ) -> ConfigurationStoreResult<()> {
     let registry = ConfigurationRegistry::core()
         .map_err(|error| invalid_store_data(format!("load configuration registry: {error}")))?;
+    validate_snapshot_registry_completeness_with_registry(snapshot, &registry)
+}
+
+pub(super) fn validate_snapshot_registry_completeness_with_registry(
+    snapshot: &ConfigurationSnapshotV1,
+    registry: &ConfigurationRegistry,
+) -> ConfigurationStoreResult<()> {
     let expected = registry
         .definitions()
         .map(|definition| definition.key.clone())

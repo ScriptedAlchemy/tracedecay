@@ -130,9 +130,13 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
         return;
     };
 
-    let title = test_call_title(state, args)
-        .or_else(|| test_call_root_callee(state, call).map(str::to_string))
-        .unwrap_or_else(TypeScriptExtractor::anonymous_name);
+    // Empty suite titles are legal. Keep their containment and call edges, but
+    // use the extractor-wide anonymous placeholder instead of a blank name.
+    let title = TypeScriptExtractor::clean_name(
+        &test_call_title(state, args)
+            .or_else(|| test_call_root_callee(state, call).map(str::to_string))
+            .unwrap_or_else(TypeScriptExtractor::anonymous_name),
+    );
 
     let start_line = call.start_position().row as u32;
     let end_line = call.end_position().row as u32;

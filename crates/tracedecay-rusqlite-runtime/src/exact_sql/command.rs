@@ -54,6 +54,14 @@ pub(crate) enum WriterCommand {
 
 const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
 
+/// Takes SQLite's write lock on the worker thread, retrying while it is busy.
+///
+/// This is measured separately from the caller-side begin it serves. The two
+/// run on different threads — the caller waits on a channel while this waits on
+/// the lock — so reporting both under one label sums a queue wait and a lock
+/// wait into a single population whose mean and p95 describe neither. Keep the
+/// names distinct: the split is what says whether a slow begin was blocked by
+/// SQLite or merely by the worker being busy with something else.
 pub(super) fn begin_transaction_with_busy_retry<'connection>(
     connection: &'connection Connection,
     behavior: TransactionBehavior,
@@ -62,7 +70,7 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
-    hotpath::measure_block!("rusqlite.begin_immediate", {
+    hotpath::measure_block!("rusqlite.exact_sql.write_lock", {
         retry_busy_begin(
             || Transaction::new_unchecked(connection, behavior),
             shutdown_requested,

@@ -14,6 +14,7 @@ import {
   settingsInputClass,
 } from './settingsChrome.ts';
 import type {
+  CodeIndexWorkerSettingsValues,
   ProjectSettingsValues,
   SettingsScope,
   SettingsValidationError,
@@ -128,62 +129,278 @@ export function ProjectSettingsFields({
 
 export function UserSettingsFields({
   values,
+  codeIndexWorkers,
   errors,
+  dirty,
+  codeIndexWorkersDirty,
+  writable,
+  codeIndexWorkersWritable,
+  onChange,
+  onCodeIndexWorkersChange,
+  onReview,
+  onCodeIndexWorkersReview,
+}: {
+  values: UserSettingsValues;
+  codeIndexWorkers: CodeIndexWorkerSettingsValues;
+  errors: readonly SettingsValidationError[];
+  dirty: boolean;
+  codeIndexWorkersDirty: boolean;
+  writable: SettingsWriteGate;
+  codeIndexWorkersWritable: SettingsWriteGate;
+  onChange: (values: UserSettingsValues) => void;
+  onCodeIndexWorkersChange: (values: CodeIndexWorkerSettingsValues) => void;
+  onReview: () => void;
+  onCodeIndexWorkersReview: () => void;
+}) {
+  return (
+    <div className="grid gap-3">
+      <fieldset
+        className="min-w-0 border border-edge-subtle bg-surface-1 p-3"
+        disabled={writable.state !== 'writable'}
+      >
+        <legend className="px-1 text-xs font-semibold text-text-primary">User settings</legend>
+        {writable.state === 'writable' ? (
+          <>
+            <WritableScopeNote gate={writable} />
+            <EditState scope="user" dirty={dirty} />
+          </>
+        ) : (
+          <ReadOnlyScope scope="user" gate={writable} />
+        )}
+        <div className="grid gap-2">
+          <SettingsInput
+            label="Watcher debounce"
+            value={values.watcher_debounce}
+            error={errorFor(errors, 'watcher_debounce')}
+            onChange={(value) => onChange({ ...values, watcher_debounce: value })}
+          />
+          <SettingsInput
+            label="Extraction timeout (seconds)"
+            inputMode="numeric"
+            value={values.extraction_timeout_secs}
+            error={errorFor(errors, 'extraction_timeout_secs')}
+            onChange={(value) => onChange({ ...values, extraction_timeout_secs: value })}
+          />
+          <SettingsCheckbox
+            label="Upload enabled"
+            checked={values.upload_enabled}
+            error={errorFor(errors, 'upload_enabled')}
+            onChange={(checked) => onChange({ ...values, upload_enabled: checked })}
+          />
+        </div>
+        {writable.state === 'writable' ? (
+          <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
+            Review user changes
+          </button>
+        ) : null}
+        <FieldError error={errorFor(errors, 'user')} />
+      </fieldset>
+      <CodeIndexWorkersField
+        values={codeIndexWorkers}
+        error={errorFor(errors, 'code_index_workers')}
+        dirty={codeIndexWorkersDirty}
+        writable={codeIndexWorkersWritable}
+        onChange={onCodeIndexWorkersChange}
+        onReview={onCodeIndexWorkersReview}
+      />
+    </div>
+  );
+}
+
+function CodeIndexWorkersField({
+  values,
+  error,
   dirty,
   writable,
   onChange,
   onReview,
 }: {
-  values: UserSettingsValues;
-  errors: readonly SettingsValidationError[];
+  values: CodeIndexWorkerSettingsValues;
+  error?: string;
   dirty: boolean;
   writable: SettingsWriteGate;
-  onChange: (values: UserSettingsValues) => void;
+  onChange: (values: CodeIndexWorkerSettingsValues) => void;
   onReview: () => void;
 }) {
+  const automaticId = useId();
+  const exactId = useId();
+  const workersId = useId();
+  const errorId = useId();
+  const exactWorkers =
+    values.code_index_workers.mode === 'exact' ? values.code_index_workers.workers : 1;
+  const status = values.code_index_worker_status;
+  const exactWorkerMaximum = status
+    ? Math.min(status.available_logical_cpus, status.memory_safe_workers)
+    : 65_535;
+
   return (
     <fieldset
-      className="min-w-0 border border-edge-subtle bg-surface-1 p-3"
+      className="grid gap-2 border border-edge-subtle bg-surface-0 p-3"
       disabled={writable.state !== 'writable'}
     >
-      <legend className="px-1 text-xs font-semibold text-text-primary">User settings</legend>
-      {writable.state === 'writable' ? (
-        <>
-          <WritableScopeNote gate={writable} />
-          <EditState scope="user" dirty={dirty} />
-        </>
-      ) : (
-        <ReadOnlyScope scope="user" gate={writable} />
-      )}
-      <div className="grid gap-2">
-        <SettingsInput
-          label="Watcher debounce"
-          value={values.watcher_debounce}
-          error={errorFor(errors, 'watcher_debounce')}
-          onChange={(value) => onChange({ ...values, watcher_debounce: value })}
-        />
-        <SettingsInput
-          label="Extraction timeout (seconds)"
-          inputMode="numeric"
-          value={values.extraction_timeout_secs}
-          error={errorFor(errors, 'extraction_timeout_secs')}
-          onChange={(value) => onChange({ ...values, extraction_timeout_secs: value })}
-        />
-        <SettingsCheckbox
-          label="Upload enabled"
-          checked={values.upload_enabled}
-          error={errorFor(errors, 'upload_enabled')}
-          onChange={(checked) => onChange({ ...values, upload_enabled: checked })}
-        />
+      <legend className="px-1 text-xs font-semibold text-text-primary">Code-index workers</legend>
+      <div>
+        {writable.state === 'writable' ? (
+          <>
+            <WritableScopeNote gate={writable} />
+            <EditState scope="code_index_workers" dirty={dirty} />
+          </>
+        ) : (
+          <ReadOnlyScope scope="code_index_workers" gate={writable} />
+        )}
+        <p className="mt-1 text-2xs text-text-muted">
+          The profile persists this selection. A saved worker change takes effect after the daemon
+          restarts.
+        </p>
+        {status ? (
+          <p className="mt-1 text-2xs text-text-muted">
+            The current daemon can admit up to {exactWorkerMaximum} exact workers, bounded by
+            logical CPUs and memory safety.
+          </p>
+        ) : null}
       </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className={settingsCheckboxRowClass} htmlFor={automaticId}>
+          <input
+            id={automaticId}
+            type="radio"
+            name="code-index-workers-mode"
+            className="td-check"
+            checked={values.code_index_workers.mode === 'automatic'}
+            onChange={() =>
+              onChange({ ...values, code_index_workers: { mode: 'automatic' } })
+            }
+          />
+          <span className="min-w-0 pr-2">
+            Automatic
+            <span className="block text-2xs text-text-muted">
+              Let the daemon choose a memory-safe number of available cores.
+            </span>
+          </span>
+        </label>
+        <div className="grid gap-1">
+          <label className={settingsCheckboxRowClass} htmlFor={exactId}>
+            <input
+              id={exactId}
+              type="radio"
+              name="code-index-workers-mode"
+              className="td-check"
+              checked={values.code_index_workers.mode === 'exact'}
+              onChange={() =>
+                onChange({
+                  ...values,
+                  code_index_workers: { mode: 'exact', workers: exactWorkers },
+                })
+              }
+            />
+            <span className="min-w-0 pr-2">Exact number of cores</span>
+          </label>
+          <label className="grid gap-1 text-2xs text-text-secondary" htmlFor={workersId}>
+            <span>Code-index worker count</span>
+            <input
+              id={workersId}
+              type="number"
+              min={1}
+              max={exactWorkerMaximum}
+              step={1}
+              inputMode="numeric"
+              disabled={values.code_index_workers.mode !== 'exact'}
+              value={values.code_index_workers.mode === 'exact' ? String(exactWorkers) : ''}
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? errorId : undefined}
+              onChange={(event) =>
+                onChange({
+                  ...values,
+                  code_index_workers: { mode: 'exact', workers: Number(event.target.value) },
+                })
+              }
+              className={settingsInputClass}
+            />
+          </label>
+        </div>
+      </div>
+      <FieldError id={errorId} error={error} />
+      {status ? <CodeIndexWorkerStatus status={status} /> : <CodeIndexWorkerStatusUnavailable />}
       {writable.state === 'writable' ? (
-        <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
-          Review user changes
+        <button type="button" className={settingsButtonClass} onClick={onReview}>
+          Review code-index worker change
         </button>
       ) : null}
-      <FieldError error={errorFor(errors, 'user')} />
     </fieldset>
   );
+}
+
+function CodeIndexWorkerStatus({
+  status,
+}: {
+  status: NonNullable<CodeIndexWorkerSettingsValues['code_index_worker_status']>;
+}) {
+  const requested =
+    status.environment_override_workers == null
+      ? selectionLabel(status.configured)
+      : `${status.environment_override_workers} via TRACEDECAY_INDEX_WORKERS`;
+  return (
+    <div className="grid gap-2 border-t border-edge-subtle pt-2 text-2xs text-text-secondary">
+      <h4 className="font-semibold text-text-primary">Running worker plan</h4>
+      {status.environment_override_workers != null ? (
+        <p className="border border-state-unsupported-schema bg-surface-1 p-2 text-text-primary">
+          TRACEDECAY_INDEX_WORKERS={status.environment_override_workers} overrides the persisted
+          worker selection for this running daemon.
+        </p>
+      ) : null}
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
+        <WorkerPlanValue label="Configured" value={selectionLabel(status.configured)} />
+        <WorkerPlanValue label="Requested" value={requested} />
+        <WorkerPlanValue label="Effective" value={`${status.effective_workers} workers`} />
+        <WorkerPlanValue label="Memory-safe" value={`${status.memory_safe_workers} workers`} />
+        <WorkerPlanValue label="Logical CPUs" value={String(status.available_logical_cpus)} />
+        <WorkerPlanValue label="Limiting reason" value={limitingReasonLabel(status.limiting_reason)} />
+      </dl>
+    </div>
+  );
+}
+
+function CodeIndexWorkerStatusUnavailable() {
+  return (
+    <p className="border-t border-edge-subtle pt-2 text-2xs text-text-muted">
+      Current CPU and memory admission limits are unavailable. An exact worker count will be
+      evaluated when the daemon restarts.
+    </p>
+  );
+}
+
+function WorkerPlanValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="text-text-muted">{label}</dt>
+      <dd className="font-medium text-text-primary">{value}</dd>
+    </div>
+  );
+}
+
+function selectionLabel(selection: CodeIndexWorkerSettingsValues['code_index_workers']): string {
+  return selection.mode === 'automatic' ? 'Automatic' : `${selection.workers} workers`;
+}
+
+function limitingReasonLabel(
+  reason: NonNullable<CodeIndexWorkerSettingsValues['code_index_worker_status']>['limiting_reason'],
+): string {
+  switch (reason) {
+    case 'automatic_all_cores':
+      return 'Automatic: all available cores';
+    case 'automatic_half_cores':
+      return 'Automatic: half of available cores';
+    case 'resident_memory':
+      return 'Memory safety limit';
+    case 'configured_exact':
+      return 'Configured exact count';
+    case 'environment_override':
+      return 'TRACEDECAY_INDEX_WORKERS override';
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
+  }
 }
 
 function SettingsInput({
@@ -325,10 +542,11 @@ function EditState({ scope, dirty }: { scope: SettingsScope; dirty: boolean }) {
  * token and loses the treatment that only suited a four-word tag.
  */
 function ReadOnlyScope({ scope, gate }: { scope: SettingsScope; gate: SettingsWriteGate }) {
+  const scopeLabel = scope === 'code_index_workers' ? 'code-index worker' : scope;
   const reason = ((): string => {
     switch (gate.state) {
       case 'unauthorized':
-        return `this dashboard is not authorized to apply ${scope} settings`;
+        return `this dashboard is not authorized to apply ${scopeLabel} settings`;
       case 'read_only':
       case 'unknown':
         return gate.reason;

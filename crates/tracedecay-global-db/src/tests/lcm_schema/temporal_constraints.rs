@@ -304,6 +304,111 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
 }
 
 #[tokio::test]
+async fn temporal_schema_uses_explicit_projection_receipt_progress_counts() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("temporal schema initialization should not error");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "INSERT INTO session_temporal_generations (
+            session_id, generation, state, frozen_watermarks_json, created_at
+         ) VALUES
+            ('truthful-progress', 1, 'building', '{}', 100),
+            ('corrupt-progress', 1, 'building', '{}', 100);
+         INSERT INTO session_refresh_operations (
+            session_id, operation_id, request_digest, target_frontier_json,
+            state, created_at, updated_at
+         ) VALUES
+            ('truthful-progress', 'refresh-one',
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+             '{\"observed_through\":10,\"committed_through\":0}',
+             'running', 100, 100),
+            ('corrupt-progress', 'refresh-one',
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+             '{\"observed_through\":10,\"committed_through\":0}',
+             'running', 100, 100);
+         INSERT INTO session_refresh_bindings (
+            session_id, operation_id, scope_kind, source_frontier, target_frontier,
+            projector_version, config_digest, generation, frozen_watermarks_json,
+            binding_digest, created_at
+         ) VALUES
+            ('truthful-progress', 'refresh-one', 'session_store', 0, 10,
+             'session-temporal-projector.v1',
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+             1, '{}',
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+             100),
+            ('corrupt-progress', 'refresh-one', 'session_store', 0, 10,
+             'session-temporal-projector.v1',
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+             1, '{}',
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+             100);
+         INSERT INTO session_temporal_projection_receipts (
+            session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
+            source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
+            occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+            copy_count, copy_digest, assertion_count, assertion_digest,
+            supersession_count, supersession_digest, current_count, current_digest,
+            fts_count, fts_digest, committed_at
+         ) VALUES
+            ('truthful-progress', 1, 0,
+             'sha256:1000000000000000000000000000000000000000000000000000000000000000',
+             '{}', 0, 5, 3, 3, 1,
+             0, 'sha256:1100000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:1200000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:1300000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:1400000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:1500000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:1600000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:1700000000000000000000000000000000000000000000000000000000000000',
+             101),
+            ('corrupt-progress', 1, 0,
+             'sha256:2000000000000000000000000000000000000000000000000000000000000000',
+             '{}', 0, 5, 3, 4, 1,
+             0, 'sha256:2100000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:2200000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:2300000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:2400000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:2500000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:2600000000000000000000000000000000000000000000000000000000000000',
+             0, 'sha256:2700000000000000000000000000000000000000000000000000000000000000',
+             101);",
+    )
+    .await
+    .unwrap();
+
+    let progress_insert = |session_id: &str| {
+        format!(
+            "INSERT INTO session_refresh_progress (
+                session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
+                committed_batches, committed_records, recorded_at
+             ) VALUES (
+                '{session_id}', 'refresh-one', 0,
+                '{{\"observed_through\":10,\"committed_through\":5}}',
+                '{{\"visible\":3,\"hidden\":0,\"unknown\":0,\"redacted\":0}}',
+                1, 3, 101
+             )"
+        )
+    };
+    conn.execute(&progress_insert("truthful-progress"), ())
+        .await
+        .expect("intermediate progress must use cumulative item counts when coverage is deferred");
+    assert!(
+        conn.execute(&progress_insert("corrupt-progress"), ())
+            .await
+            .is_err(),
+        "progress must reject a mismatched explicit cumulative item count"
+    );
+}
+
+#[tokio::test]
 async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -396,6 +501,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
         "INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
             source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
@@ -403,7 +509,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          ) VALUES (
             'refresh-session', 1, 0,
             'sha256:1000000000000000000000000000000000000000000000000000000000000000',
-            '{}', 4, 4,
+            '{}', 4, 4, 0, 0, 0,
             0, 'sha256:1100000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:1200000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:1300000000000000000000000000000000000000000000000000000000000000',
@@ -473,6 +579,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
         "INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
             source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
@@ -480,7 +587,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          ) VALUES (
             'refresh-session', 1, 1,
             'sha256:2000000000000000000000000000000000000000000000000000000000000000',
-            '{}', 4, 10,
+            '{}', 4, 10, 0, 0, 0,
             0, 'sha256:2100000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2200000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2300000000000000000000000000000000000000000000000000000000000000',
@@ -493,6 +600,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
             source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
@@ -500,7 +608,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          ) VALUES (
             'refresh-session', 1, 2,
             'sha256:2900000000000000000000000000000000000000000000000000000000000000',
-            '{}', 10, 10,
+            '{}', 10, 10, 0, 0, 0,
             0, 'sha256:2910000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2920000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2930000000000000000000000000000000000000000000000000000000000000',
@@ -734,6 +842,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
         "INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
             source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
@@ -741,7 +850,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          ) VALUES (
             'refresh-session', 2, 0,
             'sha256:4000000000000000000000000000000000000000000000000000000000000000',
-            '{}', 4, 4,
+            '{}', 4, 4, 0, 0, 0,
             0, 'sha256:4100000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:4200000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:4300000000000000000000000000000000000000000000000000000000000000',
@@ -876,6 +985,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
             source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
@@ -883,7 +993,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          ) VALUES (
             'refresh-zero', 1, 0,
             'sha256:3300000000000000000000000000000000000000000000000000000000000000',
-            '{}', 0, 0,
+            '{}', 0, 0, 0, 0, 0,
             0, 'sha256:3310000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:3320000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:3330000000000000000000000000000000000000000000000000000000000000',
@@ -939,6 +1049,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
             source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
@@ -946,7 +1057,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
          ) VALUES (
             'refresh-over-source', 1, 0,
             'sha256:3500000000000000000000000000000000000000000000000000000000000000',
-            '{}', 1, 0,
+            '{}', 1, 0, 0, 0, 0,
             0, 'sha256:3510000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:3520000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:3530000000000000000000000000000000000000000000000000000000000000',
@@ -1192,12 +1303,13 @@ async fn temporal_schema_keeps_append_only_authority_immutable() {
          INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest,
             frozen_watermarks_json, source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
             fts_count, fts_digest, committed_at
          ) VALUES (
-            'append-session', 1, 0, 'batch', '{}', 0, 0,
+            'append-session', 1, 0, 'batch', '{}', 0, 0, 0, 0, 0,
             0, 'occurrence', 0, 'dimension', 0, 'copy', 0, 'assertion',
             0, 'supersession', 0, 'current', 0, 'fts', 100
          );",
