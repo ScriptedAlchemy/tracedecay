@@ -3,6 +3,7 @@ use super::{
     AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb, RemoteDeletionCleanupState,
     RemoteDeletionFailureCode, RemoteDeletionPhase, RemoteDeletionTarget, RemoteDeletionTombstone,
     RemoteDeletionTombstoneRecordOutcome, RemoteDeletionTombstoneTransitionOutcome,
+    TranscriptPersistenceError,
 };
 
 pub mod harness;
@@ -807,6 +808,71 @@ async fn analytics_import_cursor_conflict_rolls_back_events() {
         db.get_parse_offset("hook_analytics:fixture").await,
         Some(claimed)
     );
+}
+
+#[tokio::test]
+async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
+    let harness = RegisteredGlobalDbHarness::open("parse-offset-pair-conflict").await;
+    let db = &harness.registered;
+    let first = ParseOffset {
+        byte_offset: 1,
+        mtime: 2,
+        file_id: 3,
+    };
+    let second = ParseOffset {
+        byte_offset: 4,
+        mtime: 5,
+        file_id: 6,
+    };
+    db.set_parse_offset("pair:first", first).await.unwrap();
+    db.set_parse_offset("pair:second", second).await.unwrap();
+
+    let result = db
+        .replace_parse_offset_pair_result(
+            (
+                "pair:first",
+                first,
+                ParseOffset {
+                    byte_offset: 7,
+                    mtime: 8,
+                    file_id: 9,
+                },
+            ),
+            (
+                "pair:second",
+                ParseOffset::default(),
+                ParseOffset {
+                    byte_offset: 10,
+                    mtime: 11,
+                    file_id: 12,
+                },
+            ),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(TranscriptPersistenceError::PairConflict { path, .. })
+            if path == "pair:second"
+    ));
+    assert_eq!(db.get_parse_offset("pair:first").await, Some(first));
+    assert_eq!(db.get_parse_offset("pair:second").await, Some(second));
+}
+
+#[tokio::test]
+async fn parse_offset_pair_rejects_one_key_without_writing() {
+    let harness = RegisteredGlobalDbHarness::open("parse-offset-pair-same-key").await;
+    let db = &harness.registered;
+
+    let result = db
+        .replace_parse_offset_pair_result(
+            ("pair:same", ParseOffset::default(), ParseOffset::default()),
+            ("pair:same", ParseOffset::default(), ParseOffset::default()),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(db.get_parse_offset("pair:same").await, None);
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@ use rusqlite::{
     limits::Limit,
 };
 use sha2::{Digest, Sha256};
+use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 
@@ -25,6 +26,36 @@ const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 /// statements a store issues; 128 covers the repeated catalog without
 /// holding an unbounded compile cache.
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
+
+/// WAL bytes this runtime keeps allocated across a checkpoint that resets the
+/// log.
+///
+/// A checkpoint returns WAL *contents* to the database; it does not return the
+/// WAL file's blocks. `journal_size_limit` is the only control that does, and
+/// SQLite's default (`-1`) never shrinks the file — so an isolated write burst
+/// pins the WAL at its high-water mark for the life of the database. This
+/// runtime is more exposed than most, because it sets `wal_autocheckpoint = 0`
+/// and drives every checkpoint from [`crate::checkpoint`]: SQLite will not
+/// opportunistically reset the log on our behalf.
+///
+/// The number is the checkpoint controller's soft-limit ceiling
+/// ([`WAL_SOFT_LIMIT_BYTES`], the largest soft limit an operator may configure
+/// under `AdmissionConfigV1::validate`), for two reasons that bracket it from
+/// both sides:
+///
+/// - Not lower. Below the soft limit is the band the controller deliberately
+///   declines to checkpoint, so it is exactly the WAL span this runtime expects
+///   to reuse continuously. Truncating into it would hand back blocks that the
+///   next writes immediately re-extend, converting reclaim into per-commit file
+///   growth and metadata I/O on the write path.
+/// - Not higher. Above the soft limit is the exceptional band the controller
+///   only tolerates while readers or snapshot leases block a checkpoint (up to
+///   the 256 MiB hard limit). That overage is a symptom of transient blocking,
+///   not a working set, and must not become permanent on-disk cost.
+///
+/// This is a file-size bound only: it takes effect after a checkpoint has
+/// already persisted the frames, so it cannot lose a committed write.
+const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 
 /// Pins and identifies the exact regular file that an attachment is about to
 /// open. The descriptor stays alive until every SQLite worker has reported
@@ -607,6 +638,15 @@ fn apply_pragmas(
             .pragma_update(None, "synchronous", "NORMAL")
             .map_err(|source| policy("synchronous mode", source))?;
     }
+    // Applied after the journal mode is settled, on every lane that can reset
+    // the log: the writer owns scheduled checkpoints, maintenance owns the
+    // offline RESTART/TRUNCATE path. Readers never reset a log, so bounding
+    // one there would be inert.
+    if mode == ConnectionMode::Writer || mode == ConnectionMode::Maintenance {
+        connection
+            .pragma_update(None, "journal_size_limit", RETAINED_WAL_BYTES)
+            .map_err(|source| policy("retained WAL bytes", source))?;
+    }
     if mode == ConnectionMode::Reader {
         connection
             .pragma_update(None, "query_only", true)
@@ -631,9 +671,12 @@ fn apply_pragmas(
             verify_pragma_text(connection, "journal_mode", "wal")?;
             verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
             verify_pragma_i64(connection, "synchronous", 1)?;
+            verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,
-        ConnectionMode::Maintenance => {}
+        ConnectionMode::Maintenance => {
+            verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
+        }
     }
     Ok(())
 }

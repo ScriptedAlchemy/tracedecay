@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +8,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, SessionId, SessionProjectionGenerationV1,
     UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params, params_from_iter};
 use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult};
 
 pub(super) const BEGIN_OPERATION: &str = "begin session temporal generation";
@@ -182,4 +183,77 @@ pub(super) async fn read_observation(
     let observation =
         serde_json::from_str(&encoded).map_err(|error| storage(PERSIST_OPERATION, error))?;
     Ok((sequence, observation))
+}
+
+/// The largest `observation_id IN (...)` batch one observation prefetch binds,
+/// kept clear of `SQLite`'s default variable ceiling.
+const OBSERVATION_READ_BATCH: usize = 500;
+
+/// Prefetches the observations a projection pass is about to decode.
+///
+/// `observations.observation_id` is `UNIQUE`, so each id matches at most one row
+/// and the map holds exactly what the equivalent per-id `read_observation` calls
+/// would have returned. Ids that are absent are simply missing from the map:
+/// reporting a missing observation stays with the caller so it still surfaces in
+/// the caller's own iteration order, with the same message.
+pub(super) async fn read_observations(
+    conn: &impl QueryExecutor,
+    observation_ids: &[CanonicalObservationIdV1],
+) -> SessionStoreResult<HashMap<String, (u64, DurableObservationV1)>> {
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for observation_id in observation_ids {
+        if seen.insert(observation_id.as_str()) {
+            unique.push(observation_id.as_str());
+        }
+    }
+    let mut observations = HashMap::with_capacity(unique.len());
+    if unique.is_empty() {
+        return Ok(observations);
+    }
+    for chunk in unique.chunks(OBSERVATION_READ_BATCH) {
+        let placeholders = (1..=chunk.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT observation_id, sequence, observation_json
+             FROM observations
+             WHERE observation_id IN ({placeholders})"
+        );
+        let mut rows = conn
+            .query(&sql, params_from_iter(chunk.iter().copied()))
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?
+        {
+            let observation_id: String = row
+                .get(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let sequence: i64 = row
+                .get(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let sequence =
+                u64::try_from(sequence).map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let encoded: String = row
+                .get(2)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let observation = serde_json::from_str(&encoded)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            observations.insert(observation_id, (sequence, observation));
+        }
+    }
+    Ok(observations)
+}
+
+/// The error `read_observation` raises for an id the store does not hold, reused
+/// by callers that resolve prefetched observations out of a batch map.
+pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> SessionStoreError {
+    storage_message(
+        PERSIST_OPERATION,
+        format!("source observation {} is missing", observation_id.as_str()),
+    )
 }

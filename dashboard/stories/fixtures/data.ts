@@ -2247,9 +2247,9 @@ const storageFindings = envelope({
 /* ==========================================================================
  * /api/settings (settings_api.rs::get_settings) and /api/capabilities
  * (mod.rs::capabilities). Settings answers a DashboardEnvelopeV1 whose
- * payload is `SettingsPayloadV1`. Both editable scopes settle through the one
- * cataloged daemon configuration effect: `configuration_batch` appears only
- * when the daemon-owned configuration control plane is mounted.
+ * payload is `SettingsPayloadV1`. Project and ordinary user settings use the
+ * cataloged `configuration_batch` control plane; code-index workers are a
+ * separately revisioned ProfileSessions resource.
  * ========================================================================== */
 
 const settingsPayload: Record<string, unknown> = {
@@ -2279,7 +2279,18 @@ const settingsPayload: Record<string, unknown> = {
     legacy_config_read_only: true,
     configuration_snapshot_id: 'user-snap-7',
     configuration_revision_id: 'user-rev-7',
+    code_index_worker_configuration_snapshot_id: 'profile-worker-snap-7',
+    code_index_worker_configuration_revision_id: 'profile-worker-rev-7',
     upload_enabled: false,
+    code_index_workers: { mode: 'automatic' },
+    code_index_worker_status: {
+      configured: { mode: 'automatic' },
+      environment_override_workers: null,
+      effective_workers: 4,
+      available_logical_cpus: 4,
+      memory_safe_workers: 6,
+      limiting_reason: 'automatic_all_cores',
+    },
     watcher_debounce: '2s',
     extraction_timeout_secs: 30,
     installed_agents: ['claude', 'codex', 'cursor'],
@@ -2324,6 +2335,7 @@ const settingsPayload: Record<string, unknown> = {
 
 const settings: Record<string, unknown> = envelope(settingsPayload, 'ready', [
   { kind: 'request_apply', operation: 'configuration_batch' },
+  { kind: 'request_apply', operation: 'profile_code_index_worker_selection' },
   { kind: 'refresh', operation: 'configuration_list' },
 ]);
 
