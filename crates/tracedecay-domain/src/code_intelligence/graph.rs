@@ -896,17 +896,51 @@ pub struct CodeBlock {
 ///
 /// The ID format is `"kind:32hexchars"` where the hex portion is the first 32
 /// characters of the SHA-256 hash of the input components.
+/// Extracted names may be empty for anonymous source constructs; file, kind,
+/// and line keep those identities deterministic and distinct.
 pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32) -> String {
-    debug_assert!(
-        !name.is_empty(),
-        "generate_node_id called with empty name for {file_path}:{line}"
-    );
     let input = format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line);
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
     let hex_str = crate::canonical_text::encode_lowercase_hex(&hash);
     format!("{}:{}", kind.as_str(), &hex_str[..32])
+}
+
+#[cfg(test)]
+mod empty_name_node_id_tests {
+    use super::{NodeKind, generate_node_id};
+
+    #[test]
+    fn empty_name_yields_a_deterministic_id_in_every_profile() {
+        let first = generate_node_id(
+            "integration/fs-routes-test.ts",
+            &NodeKind::Function,
+            "",
+            286,
+        );
+        let second = generate_node_id(
+            "integration/fs-routes-test.ts",
+            &NodeKind::Function,
+            "",
+            286,
+        );
+
+        assert_eq!(first, second, "empty-name ids must be deterministic");
+        assert!(
+            first.starts_with("function:"),
+            "unexpected id shape: {first}"
+        );
+    }
+
+    #[test]
+    fn empty_name_ids_stay_distinct_per_file_kind_and_line() {
+        let base = generate_node_id("a.ts", &NodeKind::Function, "", 286);
+
+        assert_ne!(base, generate_node_id("b.ts", &NodeKind::Function, "", 286));
+        assert_ne!(base, generate_node_id("a.ts", &NodeKind::Class, "", 286));
+        assert_ne!(base, generate_node_id("a.ts", &NodeKind::Function, "", 287));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
