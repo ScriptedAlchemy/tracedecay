@@ -1,44 +1,32 @@
-use std::error::Error;
+use std::fmt;
 
-use thiserror::Error;
-
-pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
-
-#[derive(Debug, Error)]
-pub enum AutomationError {
-    #[error("config error: {message}")]
-    Config { message: String },
-
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("json error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("join error: {0}")]
-    Join(#[from] tokio::task::JoinError),
-
-    #[error("{port} port error: {source}")]
-    Port {
-        port: &'static str,
-        #[source]
-        source: BoxError,
-    },
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationError {
+    message: String,
 }
 
 impl AutomationError {
     pub fn config(message: impl Into<String>) -> Self {
-        Self::Config {
+        Self {
             message: message.into(),
         }
     }
 
-    pub fn port(port: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
-        Self::Port {
-            port,
-            source: Box::new(source),
-        }
+    pub fn into_message(self) -> String {
+        self.message
     }
 }
 
+impl fmt::Display for AutomationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "config error: {}", self.message)
+    }
+}
+
+impl std::error::Error for AutomationError {}
+
 pub type Result<T> = std::result::Result<T, AutomationError>;
+
+pub(crate) fn config_error(message: impl Into<String>) -> AutomationError {
+    AutomationError::config(message)
+}

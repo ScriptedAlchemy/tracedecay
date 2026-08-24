@@ -1,27 +1,33 @@
-//! Behavioral retained-memory evals over the exact retained-memory tools.
+//! Deterministic layer of the behavioral memory-hygiene eval suite.
+//!
+//! Each scenario in `eval/scenarios/*.json` seeds a throwaway fixture project,
+//! replays a scripted tool-call sequence through the real `tracedecay` binary
+//! (the same write/curation paths an agent hits over MCP), then asserts on
+//! end-state with plain SQL against the fixture's resolved project graph DB.
+//! No LLM is involved; the cost-gated real-model layer lives in
+//! `eval/run_real_model.py`.
+//!
+//! Scenario taxonomy adapted from the mnemon harness eval suite
+//! (<https://github.com/mnemon-dev/mnemon>, Apache-2.0).
+//!
+//! Stable scenarios fail when a violation is accepted and leaves a bad end-state.
+//! The harness still understands `pending-sibling` for future branch-split work,
+//! but shipped hygiene contracts should be marked stable.
 
-use std::collections::{BTreeMap, HashSet};
+use crate::common;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay::memory::store::MemoryStore;
+use tracedecay::memory::trust::DEFAULT_TRUST;
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_application::retained_surfaces::{
-    FactCategoryV1, FactProjectionV1, FactSearchHitV1, FactStoreAddCommitV1, FactStoreAddResultV1,
-    FactStoreGetResultV1, FactStoreListResultV1, FactStoreSearchResultV1, FactV1,
-    MemoryStatusResultV1,
-};
-use tracedecay_domain::FactId;
-
-use crate::common;
-
-#[path = "memory_eval/assertions.rs"]
-mod assertions;
-
-use assertions::{Assertion, AssertionOutcome, CompareOp, Phase, should_skip_assertion};
 
 #[derive(Deserialize)]
 struct Scenario {
@@ -53,13 +59,10 @@ struct Setup {
 #[derive(Deserialize)]
 struct SeedFact {
     content: String,
-    category: FactCategoryV1,
-    source_label: String,
+    category: String,
+    source: String,
     trust: f64,
-    #[serde(default)]
-    preload_query: Option<String>,
-    #[serde(default)]
-    preload_searches: usize,
+    retrieval_count: i64,
 }
 
 #[derive(Deserialize)]
@@ -78,7 +81,11 @@ struct Violation {
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 enum Expectation {
+    /// The assertion set must flag the bad end-state (no machinery defense
+    /// exists or should exist for this scenario).
     Detect,
+    /// Either the write path defends (all assertions pass) or the instrument
+    /// detects (some assertion fails after the write went through).
     DefendOrDetect,
 }
 
@@ -86,18 +93,180 @@ enum Expectation {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Step {
     Tool { tool: String, args: Value },
+    Curate { apply: bool },
 }
 
-type FactIndex = BTreeMap<String, Vec<FactId>>;
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum Assertion {
+    Sql {
+        name: String,
+        sql: String,
+        op: CompareOp,
+        value: i64,
+        #[serde(default)]
+        phase: AssertionPhase,
+        #[serde(default)]
+        #[allow(dead_code)]
+        deterministic_only: bool,
+    },
+    CurateDeletesSource {
+        name: String,
+        source: String,
+        expected: bool,
+        #[serde(default)]
+        phase: AssertionPhase,
+    },
+    SearchRank {
+        name: String,
+        query: String,
+        top_fact_source: String,
+        min_rank_gap: usize,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+        #[serde(default)]
+        phase: AssertionPhase,
+    },
+}
+
+fn default_search_limit() -> usize {
+    5
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum CompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+#[derive(Deserialize, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum AssertionPhase {
+    #[default]
+    Both,
+    WellBehavedOnly,
+    ViolationOnly,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    WellBehaved,
+    Violation,
+}
+
+fn should_skip_assertion(phase: Phase, assertion_phase: AssertionPhase) -> bool {
+    matches!(
+        (phase, assertion_phase),
+        (Phase::Violation, AssertionPhase::WellBehavedOnly)
+            | (Phase::WellBehaved, AssertionPhase::ViolationOnly)
+    )
+}
+
+struct AssertionOutcome {
+    name: String,
+    passed: bool,
+    detail: String,
+}
+
+#[derive(Deserialize)]
+struct SearchResultsEnvelope {
+    #[serde(default)]
+    results: Vec<SearchResultRow>,
+    #[serde(default)]
+    facts: Vec<SearchResultRow>,
+}
+
+#[derive(Deserialize)]
+struct SearchResultRow {
+    fact: SearchResultFact,
+    score: f64,
+    #[serde(default)]
+    why: String,
+}
+
+#[derive(Deserialize)]
+struct SearchResultFact {
+    fact_id: i64,
+    source: String,
+    content: String,
+}
+
+fn scenario_path(id: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("eval/scenarios")
+        .join(format!("{id}.json"))
+}
+
+fn load_scenario(id: &str) -> Scenario {
+    let path = scenario_path(id);
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let scenario: Scenario = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()));
+    assert_eq!(scenario.schema_version, 1, "unsupported scenario schema");
+    assert_eq!(scenario.id, id, "scenario id must match its file name");
+    scenario
+}
 
 struct Fixture {
-    /// Declared first so the daemon is terminated before temporary directories
-    /// are removed on platforms that keep profile files open while it lives.
-    _daemon: Option<common::DaemonProcess>,
     _home: TempDir,
     home_path: PathBuf,
     _project: TempDir,
     project_path: PathBuf,
+    _daemon: Option<common::DaemonProcess>,
+}
+
+#[cfg(windows)]
+struct FixtureSnapshot {
+    _dir: TempDir,
+    profile_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl FixtureSnapshot {
+    fn capture(fixture: &mut Fixture) -> Self {
+        fixture.stop_daemon();
+        let dir = TempDir::new().expect("fixture snapshot tempdir");
+        let profile_path = dir.path().join(".tracedecay");
+        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to create fixture snapshot dir {}: {e}",
+                profile_path.display()
+            )
+        });
+        copy_dir_contents(&fixture.home_path.join(".tracedecay"), &profile_path);
+        fixture.start_daemon();
+        Self {
+            _dir: dir,
+            profile_path,
+        }
+    }
+
+    fn restore_into(&self, fixture: &mut Fixture) {
+        fixture.stop_daemon();
+        let profile_path = fixture.home_path.join(".tracedecay");
+        if profile_path.exists() {
+            std::fs::remove_dir_all(&profile_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to remove fixture profile {}: {e}",
+                    profile_path.display()
+                )
+            });
+        }
+        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to recreate fixture profile {}: {e}",
+                profile_path.display()
+            )
+        });
+        copy_dir_contents(&self.profile_path, &profile_path);
+        fixture.start_daemon();
+    }
 }
 
 impl Fixture {
@@ -106,8 +275,47 @@ impl Fixture {
         self._daemon = Some(common::spawn_tracedecay_daemon(&self.home_path));
     }
 
+    fn stop_daemon(&mut self) {
+        #[cfg(windows)]
+        let authority_address = {
+            let authority_path = self.home_path.join(".tracedecay/daemon-authority.json");
+            let record: Value =
+                serde_json::from_slice(&std::fs::read(&authority_path).unwrap_or_else(|e| {
+                    panic!("failed to read {}: {e}", authority_path.display())
+                }))
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", authority_path.display()));
+            record["endpoint"]["address"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "daemon authority at {} has no loopback address",
+                        authority_path.display()
+                    )
+                })
+                .to_owned()
+        };
+        drop(self._daemon.take().expect("fixture daemon is not running"));
+        #[cfg(windows)]
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while std::net::TcpStream::connect(&authority_address).is_ok() {
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture daemon endpoint remained connectable at {authority_address}"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    fn db_path(&self) -> PathBuf {
+        tracedecay::storage::resolve_layout(&self.project_path, &self.home_path.join(".tracedecay"))
+            .expect("resolve fixture storage layout")
+            .graph_db_path
+    }
+
     fn command(&self) -> Command {
-        let mut command = Command::new(crate::common::tracedecay_bin());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
         command
             .current_dir(&self.project_path)
             .env("HOME", &self.home_path)
@@ -128,42 +336,25 @@ impl Fixture {
     }
 }
 
-fn scenario_path(id: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("evals/memory/scenarios")
-        .join(format!("{id}.json"))
-}
-
-fn load_scenario(id: &str) -> Scenario {
-    let path = scenario_path(id);
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    let scenario: Scenario = serde_json::from_str(&raw)
-        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
-    assert_eq!(scenario.schema_version, 1, "unsupported scenario schema");
-    assert_eq!(scenario.id, id, "scenario id must match its file name");
-    scenario
-}
-
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     let mut child = command
         .spawn()
-        .unwrap_or_else(|error| panic!("failed to spawn tracedecay: {error}"));
+        .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
-            .unwrap_or_else(|error| panic!("failed to poll tracedecay: {error}"))
+            .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
         {
             let mut stdout = Vec::new();
-            if let Some(mut output) = child.stdout.take() {
-                std::io::Read::read_to_end(&mut output, &mut stdout)
-                    .unwrap_or_else(|error| panic!("failed to read stdout: {error}"));
+            if let Some(mut out) = child.stdout.take() {
+                std::io::Read::read_to_end(&mut out, &mut stdout)
+                    .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
             }
             let mut stderr = Vec::new();
-            if let Some(mut output) = child.stderr.take() {
-                std::io::Read::read_to_end(&mut output, &mut stderr)
-                    .unwrap_or_else(|error| panic!("failed to read stderr: {error}"));
+            if let Some(mut err) = child.stderr.take() {
+                std::io::Read::read_to_end(&mut err, &mut stderr)
+                    .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
             }
             return Output {
                 status,
@@ -176,6 +367,8 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
             "tracedecay hung after {:?}",
             started.elapsed()
         );
+        // Keep the poll tight: every scenario step pays the tail of this
+        // sleep after the CLI exits, and steps run in sequence.
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -195,201 +388,213 @@ fn run_ok(fixture: &Fixture, args: &[&str]) -> Output {
     output
 }
 
-fn exact_args(mut args: Value) -> Value {
-    let object = args
-        .as_object_mut()
-        .expect("exact fact-store arguments must be an object");
-    object.entry("format").or_insert_with(|| json!("json"));
-    args
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
 }
 
-fn run_exact_value(fixture: &Fixture, tool: &str, args: Value) -> Value {
-    assert!(
-        tool.starts_with("tracedecay_"),
-        "evals must use the exact registered tool name: {tool}"
-    );
-    let args = exact_args(args);
-    let output = run_ok(fixture, &["tool", tool, "--args", &args.to_string()]);
-    serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("{tool} output was not retained-surface JSON: {error}"))
+/// Runs a scalar SQL query while the fixture daemon is stopped. The direct
+/// connection is dropped before the daemon restarts.
+fn query_scalar(fixture: &mut Fixture, sql: &str) -> i64 {
+    fixture.stop_daemon();
+    let db_path = fixture.db_path();
+    let result = runtime().block_on(async move {
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
+        let conn = db.connect().expect("db connect");
+        let mut rows = conn
+            .query(sql, ())
+            .await
+            .unwrap_or_else(|e| panic!("query `{sql}`: {e}"));
+        let row = rows
+            .next()
+            .await
+            .unwrap_or_else(|e| panic!("row for `{sql}`: {e}"))
+            .unwrap_or_else(|| panic!("no rows for `{sql}`"));
+        row.get::<i64>(0)
+            .unwrap_or_else(|e| panic!("scalar for `{sql}`: {e}"))
+    });
+    fixture.start_daemon();
+    result
 }
 
-fn run_exact<T: serde::de::DeserializeOwned>(fixture: &Fixture, tool: &str, args: Value) -> T {
-    let response = run_exact_value(fixture, tool, args);
-    serde_json::from_value(response).unwrap_or_else(|error| {
-        panic!("{tool} output violated its retained result schema: {error}")
-    })
+fn fact_ids_by_source(fixture: &mut Fixture) -> HashMap<String, HashSet<i64>> {
+    fixture.stop_daemon();
+    let db_path = fixture.db_path();
+    let result = runtime().block_on(async move {
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
+        let conn = db.connect().expect("db connect");
+        let mut rows = conn
+            .query("SELECT source, fact_id FROM memory_facts", ())
+            .await
+            .expect("list fact sources");
+        let mut map: HashMap<String, HashSet<i64>> = HashMap::new();
+        while let Some(row) = rows.next().await.expect("source row") {
+            let source = row.get::<String>(0).expect("source column");
+            let fact_id = row.get::<i64>(1).expect("fact_id column");
+            map.entry(source).or_default().insert(fact_id);
+        }
+        map
+    });
+    fixture.start_daemon();
+    result
+}
+
+fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
+    if facts.is_empty() {
+        return;
+    }
+
+    let db_path = fixture.db_path();
+    runtime().block_on(async move {
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
+        let conn = db.connect().expect("db connect");
+        let store = MemoryStore::new(&conn);
+        for fact in facts {
+            let category = fact
+                .category
+                .parse::<MemoryCategory>()
+                .unwrap_or_else(|e| panic!("invalid seed fact category `{}`: {e}", fact.category));
+            let outcome = store
+                .add_fact(
+                    AddFactRequest {
+                        content: fact.content.clone(),
+                        category,
+                        source: Some(fact.source.clone()),
+                        tags: Vec::new(),
+                        entities: Vec::new(),
+                        trust: Some(fact.trust),
+                        metadata: serde_json::json!({}),
+                    },
+                    DEFAULT_TRUST,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("seed setup fact `{}`: {e}", fact.content));
+            assert!(
+                outcome.fact.is_some(),
+                "seed setup fact should be stored: {}",
+                fact.content
+            );
+            conn.execute(
+                "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
+                 WHERE content = ?4",
+                libsql::params![
+                    fact.trust,
+                    fact.retrieval_count,
+                    fact.source.as_str(),
+                    fact.content.as_str()
+                ],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("update seed setup fact `{}`: {e}", fact.content));
+        }
+    });
 }
 
 fn canonical_test_dir(path: &Path) -> PathBuf {
     std::fs::create_dir_all(path)
-        .unwrap_or_else(|error| panic!("failed to create test dir {}: {error}", path.display()));
-    path.canonicalize().unwrap_or_else(|error| {
-        panic!(
-            "failed to canonicalize test dir {}: {error}",
-            path.display()
-        )
-    })
+        .unwrap_or_else(|e| panic!("failed to create test dir {}: {e}", path.display()));
+    path.canonicalize()
+        .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
+}
+
+#[cfg(windows)]
+fn copy_dir_contents(source: &Path, destination: &Path) {
+    for entry in std::fs::read_dir(source)
+        .unwrap_or_else(|e| panic!("failed to read fixture dir {}: {e}", source.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("failed to read fixture entry: {e}"));
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("failed to inspect {}: {e}", source_path.display()));
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to create fixture dir {}: {e}",
+                    destination_path.display()
+                )
+            });
+            copy_dir_contents(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|e| {
+                panic!(
+                    "failed to copy fixture file {} to {}: {e}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
 }
 
 fn initialize_fixture_project(fixture: &Fixture) {
     let profile_root = fixture.home_path.join(".tracedecay");
-    let options = TraceDecayOpenOptions {
+    let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    runtime.block_on(async {
+    runtime().block_on(async {
+        // Pre-create the global DB from the cached empty-schema template so
+        // init and every scenario-step CLI invocation open an existing store
+        // instead of paying full schema creation (slow on Windows).
         common::write_empty_global_db_schema(&profile_root.join("global.db")).await;
-        let tracedecay = TraceDecay::init_with_options(&fixture.project_path, options)
+        let cg = TraceDecay::init_with_options(&fixture.project_path, open_options)
             .await
-            .unwrap_or_else(|error| panic!("initialize fixture project: {error}"));
-        tracedecay
-            .checkpoint()
+            .unwrap_or_else(|e| panic!("initialize fixture project: {e}"));
+        cg.checkpoint()
             .await
-            .unwrap_or_else(|error| panic!("checkpoint fixture project: {error}"));
-        tracedecay.close();
+            .unwrap_or_else(|e| panic!("checkpoint fixture project: {e}"));
+        cg.close();
     });
 }
 
-fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) -> FactIndex {
-    let mut index = FactIndex::new();
-    for seed in facts {
-        let added: FactStoreAddResultV1 = run_exact(
-            fixture,
-            "tracedecay_fact_store_add",
-            json!({
-                "content": seed.content,
-                "category": seed.category,
-                "source_label": seed.source_label,
-                "trust": seed.trust,
-            }),
-        );
-        let result = match added {
-            FactStoreAddResultV1::Committed { result } => result,
-            other => panic!("seed fact was not committed: {} ({other:?})", seed.content),
-        };
-        let fact = match result {
-            FactStoreAddCommitV1::Added { fact, .. }
-            | FactStoreAddCommitV1::NearDuplicate { fact, .. }
-            | FactStoreAddCommitV1::PossibleConflict { fact, .. } => available_fact(fact),
-        };
-        index
-            .entry(seed.source_label.clone())
-            .or_default()
-            .push(fact.fact_id.clone());
-
-        if seed.preload_searches == 0 {
-            continue;
-        }
-        let query = seed.preload_query.as_deref().unwrap_or_else(|| {
-            panic!(
-                "seed source `{}` sets preload_searches without a preload_query",
-                seed.source_label
-            )
-        });
-        for _ in 0..seed.preload_searches {
-            let hits = run_search(fixture, query, 1);
-            assert!(
-                hits.iter().any(|hit| hit.fact.fact_id == fact.fact_id),
-                "preload search `{query}` did not return the requested FactId {}",
-                fact.fact_id
-            );
-        }
-    }
-    index
-}
-
-fn wait_for_memory_ready(fixture: &Fixture, expected_facts: usize) {
-    let expected_facts = u64::try_from(expected_facts)
-        .expect("fixture fact count must fit the canonical status count domain");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut last_count = 0;
-    while Instant::now() < deadline {
-        let status: MemoryStatusResultV1 =
-            run_exact(fixture, "tracedecay_memory_status", json!({}));
-        last_count = status.memory.fact_count;
-        if last_count >= expected_facts {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    panic!(
-        "fixture memory never settled through tracedecay_memory_status ({last_count}/{expected_facts} facts)"
-    );
-}
-
-fn build_fixture(setup: &Setup) -> (Fixture, FactIndex) {
+fn build_fixture(setup: &Setup) -> Fixture {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");
     let home_path = canonical_test_dir(home.path());
     let project_path = canonical_test_dir(project.path());
     let mut fixture = Fixture {
-        _daemon: None,
         _home: home,
         home_path,
         _project: project,
         project_path,
+        _daemon: None,
     };
     let src = fixture.project_path.join("src");
     std::fs::create_dir_all(&src).expect("create src dir");
     std::fs::write(src.join("lib.rs"), "pub fn eval_fixture_marker() {}\n").expect("write lib.rs");
     for (name, contents) in &setup.files {
         std::fs::write(fixture.project_path.join(name), contents)
-            .unwrap_or_else(|error| panic!("write fixture file {name}: {error}"));
+            .unwrap_or_else(|e| panic!("write fixture file {name}: {e}"));
     }
     initialize_fixture_project(&fixture);
+    seed_setup_facts(&fixture, &setup.facts);
     fixture.start_daemon();
-    let index = seed_setup_facts(&fixture, &setup.facts);
-    wait_for_memory_ready(&fixture, setup.facts.len());
-    (fixture, index)
-}
-
-fn resolve_fact_references(value: &mut Value, facts: &FactIndex) {
-    match value {
-        Value::String(reference) => {
-            let Some(source) = reference.strip_prefix("$fact:") else {
-                return;
-            };
-            let ids = facts
-                .get(source)
-                .unwrap_or_else(|| panic!("unknown FactId source reference `{source}`"));
-            let [fact_id] = ids.as_slice() else {
-                panic!("FactId source reference `{source}` is ambiguous");
-            };
-            *value = Value::String(fact_id.as_str().to_owned());
-        }
-        Value::Array(values) => {
-            for entry in values {
-                resolve_fact_references(entry, facts);
-            }
-        }
-        Value::Object(values) => {
-            for entry in values.values_mut() {
-                resolve_fact_references(entry, facts);
-            }
-        }
-        _ => {}
-    }
+    fixture
 }
 
 struct StepResult {
     succeeded: bool,
 }
 
-fn execute_step(fixture: &Fixture, step: &Step, facts: &FactIndex) -> StepResult {
+/// Executes one scripted step; returns whether the underlying write/command
+/// was accepted. A refused step (non-zero exit) is a legal outcome for
+/// violation sequences once the hygiene write path defends against them.
+fn execute_step(fixture: &Fixture, step: &Step, dry_run_report: &mut Option<Value>) -> StepResult {
     match step {
         Step::Tool { tool, args } => {
-            assert!(
-                tool.starts_with("tracedecay_"),
-                "evals must use an exact registered tool name: {tool}"
-            );
-            let mut args = args.clone();
-            resolve_fact_references(&mut args, facts);
-            let args = exact_args(args);
             let mut command = fixture.command();
             command.args(["tool", tool, "--args", &args.to_string()]);
             let output = run_with_timeout(command, Duration::from_secs(120));
@@ -397,10 +602,23 @@ fn execute_step(fixture: &Fixture, step: &Step, facts: &FactIndex) -> StepResult
                 succeeded: output.status.success(),
             }
         }
+        Step::Curate { apply } => {
+            let mut args = vec!["memory", "curate"];
+            if *apply {
+                args.push("--apply");
+            }
+            let output = run_ok(fixture, &args);
+            if !*apply {
+                let report: Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|e| panic!("curate dry-run output was not JSON: {e}"));
+                *dry_run_report = Some(report);
+            }
+            StepResult { succeeded: true }
+        }
     }
 }
 
-fn compare_i64(op: CompareOp, actual: i64, expected: i64) -> bool {
+fn compare(op: CompareOp, actual: i64, expected: i64) -> bool {
     match op {
         CompareOp::Eq => actual == expected,
         CompareOp::Ne => actual != expected,
@@ -409,21 +627,6 @@ fn compare_i64(op: CompareOp, actual: i64, expected: i64) -> bool {
         CompareOp::Lt => actual < expected,
         CompareOp::Lte => actual <= expected,
     }
-}
-
-fn compare_f64(op: CompareOp, actual: f64, expected: f64) -> bool {
-    match op {
-        CompareOp::Eq => actual == expected,
-        CompareOp::Ne => actual != expected,
-        CompareOp::Gt => actual > expected,
-        CompareOp::Gte => actual >= expected,
-        CompareOp::Lt => actual < expected,
-        CompareOp::Lte => actual <= expected,
-    }
-}
-
-fn millionths(value: u32) -> f64 {
-    f64::from(value) / 1_000_000.0
 }
 
 fn op_symbol(op: CompareOp) -> &'static str {
@@ -437,56 +640,76 @@ fn op_symbol(op: CompareOp) -> &'static str {
     }
 }
 
-fn current_facts(fixture: &Fixture) -> Vec<FactV1> {
-    let listed: FactStoreListResultV1 =
-        run_exact(fixture, "tracedecay_fact_store_list", json!({"limit": 200}));
-    listed.facts.into_iter().map(available_fact).collect()
-}
+fn curate_delete_ids(report: &Value) -> HashSet<i64> {
+    let mut ids: HashSet<i64> = report
+        .get("actions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|action| action.get("op").and_then(Value::as_str) == Some("delete"))
+        .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
+        .collect();
 
-fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHitV1> {
-    let searched: FactStoreSearchResultV1 = run_exact(
-        fixture,
-        "tracedecay_fact_store_search",
-        json!({"query": query, "limit": limit}),
-    );
-    searched.hits
-}
-
-fn available_fact(projection: FactProjectionV1) -> FactV1 {
-    match projection {
-        FactProjectionV1::Available { fact } => *fact,
-        FactProjectionV1::Unavailable { status } => {
-            panic!("expected available fact projection, got {status:?}")
+    for key in ["secret_like", "transient", "supersession"] {
+        if let Some(entries) = report
+            .get("hygiene_candidates")
+            .and_then(|hygiene_candidates| hygiene_candidates.get(key))
+            .and_then(Value::as_array)
+        {
+            ids.extend(
+                entries
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.get("recommended_op").and_then(Value::as_str) == Some("delete")
+                            && candidate
+                                .get("review_required")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                    })
+                    .filter_map(|action| action.get("fact_id").and_then(Value::as_i64)),
+            );
         }
+    }
+
+    ids
+}
+
+fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<SearchResultRow> {
+    let args = serde_json::json!({
+        "action": "search",
+        "query": query,
+        "limit": limit,
+        "format": "json",
+    });
+    let output = run_ok(
+        fixture,
+        &["tool", "fact_store", "--args", &args.to_string()],
+    );
+    let response: SearchResultsEnvelope = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("search output was not JSON for `{query}`: {e}"));
+    if response.results.is_empty() {
+        response.facts
+    } else {
+        response.results
     }
 }
 
-fn source_fact_id(facts: &FactIndex, source: &str) -> FactId {
-    let ids = facts
-        .get(source)
-        .unwrap_or_else(|| panic!("missing seeded source `{source}`"));
-    let [fact_id] = ids.as_slice() else {
-        panic!("seeded source `{source}` does not identify one FactId");
-    };
-    fact_id.clone()
-}
-
-fn format_search_results(results: &[FactSearchHitV1]) -> String {
+fn format_search_results(results: &[SearchResultRow]) -> String {
     if results.is_empty() {
-        return "<no results>".to_owned();
+        return "<no results>".to_string();
     }
     results
         .iter()
         .enumerate()
-        .map(|(index, hit)| {
+        .map(|(idx, row)| {
             format!(
-                "#{} source=`{}` fact_id={} score={:.6} content=`{}` why={:?}",
-                index + 1,
-                hit.fact.source_label.as_deref().unwrap_or("<none>"),
-                hit.fact.fact_id,
-                millionths(hit.scores.score_millionths),
-                hit.fact.content,
-                hit.why
+                "#{} source=`{}` fact_id={} score={:.6} content=`{}` why={}",
+                idx + 1,
+                row.fact.source,
+                row.fact.fact_id,
+                row.score,
+                row.fact.content,
+                row.why
             )
         })
         .collect::<Vec<_>>()
@@ -495,159 +718,60 @@ fn format_search_results(results: &[FactSearchHitV1]) -> String {
 
 fn evaluate_assertions(
     scenario: &Scenario,
-    fixture: &Fixture,
+    fixture: &mut Fixture,
     phase: Phase,
-    facts: &FactIndex,
+    seeded_sources: &HashMap<String, HashSet<i64>>,
+    dry_run_report: &Option<Value>,
 ) -> Vec<AssertionOutcome> {
     let mut outcomes = Vec::new();
     for assertion in &scenario.assertions {
         match assertion {
-            Assertion::FactCount {
+            Assertion::Sql {
                 name,
+                sql,
                 op,
                 value,
                 phase: assertion_phase,
+                deterministic_only: _,
             } => {
                 if should_skip_assertion(phase, *assertion_phase) {
                     continue;
                 }
-                let actual = current_facts(fixture).len() as i64;
+                let actual = query_scalar(fixture, sql);
                 outcomes.push(AssertionOutcome {
                     name: name.clone(),
-                    passed: compare_i64(*op, actual, *value),
-                    detail: format!(
-                        "available fact count {actual}; expected {actual} {} {value}",
-                        op_symbol(*op)
-                    ),
+                    passed: compare(*op, actual, *value),
+                    detail: format!("{actual} {} {value} (`{sql}`)", op_symbol(*op)),
                 });
             }
-            Assertion::SourceCount {
+            Assertion::CurateDeletesSource {
                 name,
                 source,
-                op,
-                value,
+                expected,
                 phase: assertion_phase,
             } => {
                 if should_skip_assertion(phase, *assertion_phase) {
                     continue;
                 }
-                let actual = current_facts(fixture)
-                    .iter()
-                    .filter(|fact| fact.source_label.as_deref() == Some(source))
-                    .count() as i64;
+                let Some(report) = dry_run_report else {
+                    if phase == Phase::Violation {
+                        continue;
+                    }
+                    panic!(
+                        "[{}] assertion `{name}` needs a curate dry-run step before it",
+                        scenario.id
+                    );
+                };
+                let delete_ids = curate_delete_ids(report);
+                let source_ids = seeded_sources.get(source).cloned().unwrap_or_default();
+                let any_deleted = delete_ids.intersection(&source_ids).next().is_some();
                 outcomes.push(AssertionOutcome {
                     name: name.clone(),
-                    passed: compare_i64(*op, actual, *value),
+                    passed: any_deleted == *expected,
                     detail: format!(
-                        "source `{source}` has {actual} facts; expected {actual} {} {value}",
-                        op_symbol(*op)
+                        "delete ops touching source `{source}`: {} (expected: {expected})",
+                        any_deleted
                     ),
-                });
-            }
-            Assertion::ContentCount {
-                name,
-                contains,
-                op,
-                value,
-                phase: assertion_phase,
-            } => {
-                if should_skip_assertion(phase, *assertion_phase) {
-                    continue;
-                }
-                let actual = current_facts(fixture)
-                    .iter()
-                    .filter(|fact| fact.content.contains(contains))
-                    .count() as i64;
-                outcomes.push(AssertionOutcome {
-                    name: name.clone(),
-                    passed: compare_i64(*op, actual, *value),
-                    detail: format!("content containing `{contains}` appears {actual} times; expected {actual} {} {value}", op_symbol(*op)),
-                });
-            }
-            Assertion::SourceTrust {
-                name,
-                source,
-                op,
-                value,
-                phase: assertion_phase,
-            } => {
-                if should_skip_assertion(phase, *assertion_phase) {
-                    continue;
-                }
-                let matching = current_facts(fixture)
-                    .into_iter()
-                    .filter(|fact| fact.source_label.as_deref() == Some(source))
-                    .collect::<Vec<_>>();
-                let passed = !matching.is_empty()
-                    && matching.iter().all(|fact| {
-                        compare_f64(*op, millionths(fact.trust_score_millionths), *value)
-                    });
-                let values = matching
-                    .iter()
-                    .map(|fact| format!("{:.6}", millionths(fact.trust_score_millionths)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                outcomes.push(AssertionOutcome {
-                    name: name.clone(),
-                    passed,
-                    detail: format!(
-                        "source `{source}` trust scores [{values}]; expected each {} {value}",
-                        op_symbol(*op)
-                    ),
-                });
-            }
-            Assertion::RetrievalTotal {
-                name,
-                source,
-                op,
-                value,
-                phase: assertion_phase,
-            } => {
-                if should_skip_assertion(phase, *assertion_phase) {
-                    continue;
-                }
-                let actual = current_facts(fixture)
-                    .iter()
-                    .filter(|fact| fact.source_label.as_deref() == Some(source))
-                    .map(|fact| fact.telemetry.retrieval_count)
-                    .sum::<u64>();
-                let actual = i64::try_from(actual)
-                    .expect("retrieval total must fit the eval assertion integer domain");
-                outcomes.push(AssertionOutcome {
-                    name: name.clone(),
-                    passed: compare_i64(*op, actual, *value),
-                    detail: format!(
-                        "source `{source}` retrieval total {actual}; expected {actual} {} {value}",
-                        op_symbol(*op)
-                    ),
-                });
-            }
-            Assertion::FeedbackHistory {
-                name,
-                source,
-                action,
-                op,
-                value,
-                phase: assertion_phase,
-            } => {
-                if should_skip_assertion(phase, *assertion_phase) {
-                    continue;
-                }
-                let fact_id = source_fact_id(facts, source);
-                let result: FactStoreGetResultV1 = run_exact(
-                    fixture,
-                    "tracedecay_fact_store_get",
-                    json!({"fact_id": fact_id}),
-                );
-                let actual = result
-                    .trust_history
-                    .iter()
-                    .filter(|entry| entry.action == *action)
-                    .count() as i64;
-                outcomes.push(AssertionOutcome {
-                    name: name.clone(),
-                    passed: compare_i64(*op, actual, *value),
-                    detail: format!("source `{source}` has {actual} {action:?} feedback events; expected {actual} {} {value}", op_symbol(*op)),
                 });
             }
             Assertion::SearchRank {
@@ -664,64 +788,46 @@ fn evaluate_assertions(
                 let results = run_search(fixture, query, *limit);
                 let expected_rank = results
                     .iter()
-                    .position(|hit| hit.fact.source_label.as_deref() == Some(top_fact_source));
+                    .position(|row| row.fact.source == *top_fact_source);
                 let closest_other_rank = results
                     .iter()
                     .enumerate()
-                    .find(|(_, hit)| hit.fact.source_label.as_deref() != Some(top_fact_source))
-                    .map(|(index, _)| index);
+                    .find(|(_, row)| row.fact.source != *top_fact_source)
+                    .map(|(idx, _)| idx);
                 let rendered = format_search_results(&results);
                 let (passed, detail) = match (expected_rank, closest_other_rank) {
-                    (Some(target), Some(other)) => {
-                        let gap = other as isize - target as isize;
+                    (Some(target_rank), Some(other_rank)) => {
+                        let rank_gap = other_rank as isize - target_rank as isize;
                         (
-                            gap >= *min_rank_gap as isize,
+                            rank_gap >= *min_rank_gap as isize,
                             format!(
-                                "query `{query}` expected `{top_fact_source}` rank={} nearest rival rank={} gap={gap} required>={min_rank_gap}; {rendered}",
-                                target + 1,
-                                other + 1,
+                                "query=`{query}` expected source `{top_fact_source}` rank={} nearest rival rank={} gap={} required>={} results: {rendered}",
+                                target_rank + 1,
+                                other_rank + 1,
+                                rank_gap,
+                                min_rank_gap
                             ),
                         )
                     }
-                    (Some(target), None) => (
+                    (Some(target_rank), None) => (
                         false,
                         format!(
-                            "query `{query}` returned only `{top_fact_source}` at rank {}; cannot prove a rank gap; {rendered}",
-                            target + 1,
+                            "query=`{query}` only returned source `{top_fact_source}` at rank {}; cannot compute rank gap {} without a rival. results: {rendered}",
+                            target_rank + 1,
+                            min_rank_gap
                         ),
                     ),
                     (None, _) => (
                         false,
-                        format!("query `{query}` did not return `{top_fact_source}`; {rendered}"),
+                        format!(
+                            "query=`{query}` never returned source `{top_fact_source}`. results: {rendered}"
+                        ),
                     ),
                 };
                 outcomes.push(AssertionOutcome {
                     name: name.clone(),
                     passed,
                     detail,
-                });
-            }
-            Assertion::SearchSource {
-                name,
-                query,
-                source,
-                limit,
-                phase: assertion_phase,
-            } => {
-                if should_skip_assertion(phase, *assertion_phase) {
-                    continue;
-                }
-                let results = run_search(fixture, query, *limit);
-                let passed = results
-                    .iter()
-                    .any(|hit| hit.fact.source_label.as_deref() == Some(source));
-                outcomes.push(AssertionOutcome {
-                    name: name.clone(),
-                    passed,
-                    detail: format!(
-                        "query `{query}` must return source `{source}`; {}",
-                        format_search_results(&results)
-                    ),
                 });
             }
         }
@@ -732,12 +838,12 @@ fn evaluate_assertions(
 fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
     outcomes
         .iter()
-        .map(|outcome| {
+        .map(|o| {
             format!(
                 "  [{}] {} — {}",
-                if outcome.passed { "pass" } else { "FAIL" },
-                outcome.name,
-                outcome.detail
+                if o.passed { "pass" } else { "FAIL" },
+                o.name,
+                o.detail
             )
         })
         .collect::<Vec<_>>()
@@ -746,48 +852,116 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
 
 fn run_scenario(id: &str) {
     let scenario = load_scenario(id);
+    let well_behaved_steps = &scenario.deterministic.well_behaved;
 
-    let (fixture, facts) = build_fixture(&scenario.setup);
-    for step in &scenario.deterministic.well_behaved {
-        let result = execute_step(&fixture, step, &facts);
-        assert!(
-            result.succeeded,
-            "[{id}] well-behaved step was refused; compliant writes must be accepted"
-        );
+    // Phase A: a well-behaved agent's tool sequence must leave a compliant
+    // end-state. Scenarios with no well-behaved steps can assert their
+    // baseline on the violation fixture before any violation writes.
+    let mut fixture = build_fixture(&scenario.setup);
+    let mut seeded_sources = fact_ids_by_source(&mut fixture);
+    let mut dry_run_report = None;
+    #[cfg(windows)]
+    let baseline_snapshot =
+        if !well_behaved_steps.is_empty() && scenario.deterministic.violation.is_some() {
+            Some(FixtureSnapshot::capture(&mut fixture))
+        } else {
+            None
+        };
+    if !well_behaved_steps.is_empty() {
+        for step in well_behaved_steps {
+            let result = execute_step(&fixture, step, &mut dry_run_report);
+            assert!(
+                result.succeeded,
+                "[{id}] well-behaved step was refused; compliant writes must be accepted"
+            );
+        }
     }
-    let outcomes = evaluate_assertions(&scenario, &fixture, Phase::WellBehaved, &facts);
+    let well_behaved_outcomes = evaluate_assertions(
+        &scenario,
+        &mut fixture,
+        Phase::WellBehaved,
+        &seeded_sources,
+        &dry_run_report,
+    );
     assert!(
-        outcomes.iter().all(|outcome| outcome.passed),
+        well_behaved_outcomes.iter().all(|o| o.passed),
         "[{id}] well-behaved phase failed:\n{}",
-        format_outcomes(&outcomes)
+        format_outcomes(&well_behaved_outcomes)
+    );
+    println!(
+        "[{id}] well-behaved phase:\n{}",
+        format_outcomes(&well_behaved_outcomes)
     );
 
+    // Phase B: a misbehaving sequence must be either defended against by the
+    // write path or detected by the assertion set (instrument self-check).
     let Some(violation) = &scenario.deterministic.violation else {
         return;
     };
-    let (fixture, facts) = build_fixture(&scenario.setup);
+    if !well_behaved_steps.is_empty() {
+        #[cfg(windows)]
+        if let Some(snapshot) = &baseline_snapshot {
+            snapshot.restore_into(&mut fixture);
+        }
+        #[cfg(not(windows))]
+        {
+            fixture = build_fixture(&scenario.setup);
+        }
+        seeded_sources = fact_ids_by_source(&mut fixture);
+    }
+    dry_run_report = None;
     let mut any_step_succeeded = false;
     for step in &violation.steps {
-        let result = execute_step(&fixture, step, &facts);
+        let result = execute_step(&fixture, step, &mut dry_run_report);
         any_step_succeeded |= result.succeeded;
     }
-    let outcomes = evaluate_assertions(&scenario, &fixture, Phase::Violation, &facts);
-    let all_passed = outcomes.iter().all(|outcome| outcome.passed);
+    let outcomes = evaluate_assertions(
+        &scenario,
+        &mut fixture,
+        Phase::Violation,
+        &seeded_sources,
+        &dry_run_report,
+    );
+    let all_passed = outcomes.iter().all(|o| o.passed);
     match violation.expectation {
-        Expectation::Detect => assert!(
-            !all_passed,
-            "[{id}] violation went undetected:\n{}",
-            format_outcomes(&outcomes)
-        ),
-        Expectation::DefendOrDetect => {
-            if all_passed {
-                return;
-            }
+        Expectation::Detect => {
             assert!(
-                any_step_succeeded && scenario.contract == ContractStatus::PendingSibling,
-                "[{id}] accepted a stable-contract violation:\n{}",
+                !all_passed,
+                "[{id}] violation went undetected — the assertion set is blind \
+                 (or unexpected machinery now defends this scenario; if so, move it \
+                 to defend-or-detect):\n{}",
                 format_outcomes(&outcomes)
             );
+            println!(
+                "[{id}] violation phase: DETECTED (instrument works)\n{}",
+                format_outcomes(&outcomes)
+            );
+        }
+        Expectation::DefendOrDetect => {
+            if all_passed {
+                println!(
+                    "[{id}] violation phase: DEFENDED — machinery contract landed\n{}",
+                    format_outcomes(&outcomes)
+                );
+            } else if any_step_succeeded {
+                assert!(
+                    scenario.contract == ContractStatus::PendingSibling,
+                    "[{id}] defense regressed: violation was accepted and left a bad \
+                     end-state on a stable-contract scenario:\n{}",
+                    format_outcomes(&outcomes)
+                );
+                println!(
+                    "[{id}] violation phase: PENDING-SIBLING — instrument detected the \
+                     violation; write-path defense not landed yet\n{}",
+                    format_outcomes(&outcomes)
+                );
+            } else {
+                panic!(
+                    "[{id}] inconsistent: every violation step was refused but the \
+                     end-state is still bad:\n{}",
+                    format_outcomes(&outcomes)
+                );
+            }
         }
     }
 }
@@ -815,6 +989,11 @@ fn eval_memory_supersede_without_dup() {
 #[test]
 fn eval_memory_multiturn_continuity() {
     run_scenario("memory-multiturn-continuity");
+}
+
+#[test]
+fn eval_memory_curation_conservatism() {
+    run_scenario("memory-curation-conservatism");
 }
 
 #[test]
@@ -847,8 +1026,8 @@ fn eval_memory_ranking_feedback_promotes() {
     run_scenario("memory-ranking-feedback-promotes");
 }
 
-/// Every scenario file must have a matching test so an unwired JSON scenario
-/// cannot silently stop exercising the production retained-memory path.
+/// Every scenario file must have a matching `#[test]` above; this guards
+/// against silently-unwired scenarios.
 #[test]
 fn every_scenario_file_is_wired() {
     let wired: HashSet<&str> = [
@@ -857,6 +1036,7 @@ fn every_scenario_file_is_wired() {
         "memory-skip-local",
         "memory-supersede-without-dup",
         "memory-multiturn-continuity",
+        "memory-curation-conservatism",
         "memory-ranking-trust-bias",
         "memory-ranking-supersession",
         "memory-ranking-morphology",
@@ -866,24 +1046,24 @@ fn every_scenario_file_is_wired() {
     ]
     .into_iter()
     .collect();
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/memory/scenarios");
-    let found = std::fs::read_dir(&directory)
-        .expect("read evals/memory/scenarios")
-        .map(|entry| entry.expect("scenario entry").path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .map(|path| {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/scenarios");
+    let mut found = HashSet::new();
+    for entry in std::fs::read_dir(&dir).expect("read eval/scenarios") {
+        let path = entry.expect("scenario entry").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
             let id = path
                 .file_stem()
-                .and_then(|stem| stem.to_str())
+                .and_then(|s| s.to_str())
                 .expect("scenario file stem")
-                .to_owned();
+                .to_string();
+            // Validates the file parses with the harness schema.
             load_scenario(&id);
-            id
-        })
-        .collect::<HashSet<_>>();
+            found.insert(id);
+        }
+    }
+    let found_refs: HashSet<&str> = found.iter().map(String::as_str).collect();
     assert_eq!(
-        found.iter().map(String::as_str).collect::<HashSet<_>>(),
-        wired,
-        "evals/memory/scenarios/*.json and the test list must stay in sync"
+        found_refs, wired,
+        "eval/scenarios/*.json and the #[test] list must stay in sync"
     );
 }

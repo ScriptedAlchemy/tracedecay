@@ -160,33 +160,23 @@ lives" without needing to know the project root.
 
 ### 1.9 First-class CLI on top of the MCP
 
-Every MCP tool is dispatchable from the shell through the single `tracedecay
-tool <name>` entry point. Useful for one-off inspection or shell pipelines
-without spinning up an MCP client:
+Every MCP tool has a parallel CLI subcommand. Useful for one-off inspection
+or shell pipelines without spinning up an MCP client:
 
 ```bash
-tracedecay tool search handle_body
-tracedecay tool body --symbol handle_body
-tracedecay tool find_exact_symbol --name extract_lines   # resolve a node_id
-tracedecay tool impact --node-id <node_id> --max-depth 3
-tracedecay tool callers --node-id <node_id>
-tracedecay tool files --pattern '**/*.rs'
-tracedecay tool affected --args '{"files":["src/cli.rs"]}'
+tracedecay query handle_body
+tracedecay body  handle_body
+tracedecay impact handle_body --max-depth 3
+tracedecay callers extract_lines
+tracedecay files --pattern '**/*.rs'
+tracedecay affected src/cli.rs
 tracedecay bench       # built-in retrieval benchmark
 ```
-
-Graph-traversal tools such as `impact` and `callers` take a `node_id`, not a
-bare symbol name — resolve one with `search` or `find_exact_symbol` first.
-
-There are no per-tool top-level subcommands (`tracedecay query`,
-`tracedecay files`, `tracedecay affected` and friends do not exist); run
-`tracedecay tool` for the list and `tracedecay tool <name> --help` for one
-tool's parameters.
 
 ### 1.10 Reproducible benchmark harness
 
 `tracedecay bench` ships with a default TOML query set
-(`benchmark_data/queries/default.toml`) and emits a colored table or JSON of
+(`benchmarks/queries/default.toml`) and emits a colored table or JSON of
 retrieval-savings ratios for the current project. token-savior's benchmarks
 are external (`Mibayy/tsbench`) and require a synthetic project.
 
@@ -259,12 +249,7 @@ substitutes for batch lookups.
 
 token-savior maintains a project-keyed memory store (`memory_search`,
 `memory_save`) so notes from one project surface in another. tracedecay uses
-project-local holographic fact memory via the exact `tracedecay_fact_store_add`,
-`tracedecay_fact_store_search`, `tracedecay_fact_store_probe`,
-`tracedecay_fact_store_related`, `tracedecay_fact_store_reason`,
-`tracedecay_fact_store_contradict`, `tracedecay_fact_store_get`,
-`tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, and
-`tracedecay_fact_store_list` routes,
+project-local holographic fact memory via `tracedecay_fact_store`,
 `tracedecay_fact_feedback`, and `tracedecay_memory_status`; cross-project memory
 recall remains out of scope.
 
@@ -279,8 +264,8 @@ a long-lived `tracedecay serve --timings` session — the per-query column
 reports the handler's `_meta.duration_us`, stripping JSON-RPC / stdio /
 Python-parse overhead. token-savior runs in-process.
 
-Script: [`benchmark_data/run_benchmarks.py`](../benchmark_data/run_benchmarks.py),
-which writes `comparison-report.md` into its results directory.
+Script: [`benchmarks/run_benchmarks.py`](../benchmarks/run_benchmarks.py).
+Latest report: [`benchmarks/comparison-report.md`](../benchmarks/comparison-report.md).
 
 | Metric | token-savior | tracedecay | Delta |
 |---|---:|---:|---:|
@@ -369,9 +354,10 @@ Our adaptation:
 - **No timeouts, no harness errors.** All 96 tasks completed cleanly in 29
   minutes wall time across one Max OAuth session.
 
-Reproduction harness and patch in
-[`benchmark_data/tsbench/`](../benchmark_data/tsbench/) — see
-[`benchmark_data/tsbench/README.md`](../benchmark_data/tsbench/README.md).
+Reproduction harness, patch, and full per-task summary in
+[`benchmarks/tsbench/`](../benchmarks/tsbench/) — see
+[`benchmarks/tsbench/SUMMARY.md`](../benchmarks/tsbench/SUMMARY.md) and
+[`benchmarks/tsbench/README.md`](../benchmarks/tsbench/README.md).
 
 ---
 

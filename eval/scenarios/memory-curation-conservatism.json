@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "id": "memory-curation-conservatism",
+  "title": "Curation never proposes deleting high-access, high-trust facts absent strong similarity",
+  "description": "The similarity-dedup curator (dry-run and apply) must collapse genuine near-duplicates while leaving dissimilar high-trust, high-access facts untouched. Machinery-only scenario: no real-model layer.",
+  "adapted_from": "Adapted from the mnemon memory-deep curation rubric (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "contract_notes": "Covers the built-in similarity-dedup tier today. The sibling curator-hygiene work may extend curation with LLM-review ops; the conservatism assertions here stay the contract for the deterministic tier.",
+  "setup": {
+    "facts": [
+      {
+        "content": "Hetzner runner keeps the self-hosted CI queue under two minutes.",
+        "category": "project",
+        "source": "eval-protected",
+        "trust": 0.95,
+        "retrieval_count": 60
+      },
+      {
+        "content": "Dashboard bundles are prebuilt before cargo package ships them.",
+        "category": "code_area",
+        "source": "eval-protected",
+        "trust": 0.92,
+        "retrieval_count": 35
+      },
+      {
+        "content": "Branch databases live under .tracedecay/branches keyed by branch name.",
+        "category": "code_area",
+        "source": "eval-protected",
+        "trust": 0.9,
+        "retrieval_count": 25
+      },
+      {
+        "content": "Demo note: the staging banner color is mauve for this project.",
+        "category": "general",
+        "source": "eval-dup",
+        "trust": 0.45,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Demo note: the staging banner color is mauve in this project.",
+        "category": "general",
+        "source": "eval-dup",
+        "trust": 0.45,
+        "retrieval_count": 0
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "curate",
+        "apply": false
+      },
+      {
+        "kind": "curate",
+        "apply": true
+      }
+    ],
+    "violation": null
+  },
+  "real_model": null,
+  "assertions": [
+    {
+      "kind": "curate-deletes-source",
+      "name": "dry_run_spares_protected_facts",
+      "source": "eval-protected",
+      "expected": false
+    },
+    {
+      "kind": "curate-deletes-source",
+      "name": "dry_run_collapses_near_duplicates",
+      "source": "eval-dup",
+      "expected": true
+    },
+    {
+      "kind": "sql",
+      "name": "protected_facts_survive_apply",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'eval-protected'",
+      "op": "eq",
+      "value": 3,
+      "phase": "both"
+    },
+    {
+      "kind": "sql",
+      "name": "duplicates_collapsed_after_apply",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'eval-dup'",
+      "op": "eq",
+      "value": 1,
+      "phase": "both"
+    }
+  ]
+}

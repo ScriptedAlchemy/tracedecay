@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "memory-ranking-supersession",
+  "title": "Superseded facts remain searchable and can still outrank the replacement",
+  "description": "Pins today’s Risk F behavior: add_fact reports possible_conflict, but the stale fact still coexists and remains rankable in normal search results.",
+  "contract": "stable",
+  "contract_notes": "This baseline should stay green until a future supersession-aware ranking change intentionally flips it.",
+  "setup": {
+    "facts": [
+      {
+        "content": "Use npm to install packages",
+        "category": "user_pref",
+        "source": "old-npm",
+        "trust": 0.7,
+        "retrieval_count": 0
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "fact_store",
+        "args": {
+          "action": "add",
+          "content": "Use pnpm instead of npm",
+          "category": "user_pref",
+          "source": "new-pnpm",
+          "trust": 0.7
+        }
+      }
+    ],
+    "violation": null
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "both_versions_coexist_after_conflict_report",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source IN ('old-npm', 'new-pnpm')",
+      "op": "eq",
+      "value": 2
+    },
+    {
+      "kind": "search-rank",
+      "name": "stale_exact_match_can_still_rank_ahead_of_replacement",
+      "query": "npm install packages",
+      "top_fact_source": "old-npm",
+      "min_rank_gap": 1,
+      "limit": 5
+    }
+  ]
+}

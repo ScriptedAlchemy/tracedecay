@@ -1,13 +1,31 @@
-//! JSON-RPC 2.0 protocol types and the line-oriented transport contract.
-//!
-//! This crate owns no I/O, admission, or daemon authority — concrete
-//! transports live with their runtime.
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::single_match)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(clippy::format_push_string)]
 
-#![forbid(unsafe_code)]
+//! JSON-RPC 2.0 contracts for `TraceDecay`.
 
 use serde::{Deserialize, Deserializer, Serialize};
-
-const JSON_RPC_VERSION: &str = "2.0";
 
 fn deserialize_request_id<'de, D>(
     deserializer: D,
@@ -18,6 +36,7 @@ where
     serde_json::Value::deserialize(deserializer).map(Some)
 }
 
+/// A JSON-RPC 2.0 request received from the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     /// Protocol version; must be `"2.0"`.
@@ -30,38 +49,57 @@ pub struct JsonRpcRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub id: Option<serde_json::Value>,
+    /// The RPC method name.
     pub method: String,
+    /// Optional parameters for the method.
     #[serde(default)]
     pub params: Option<serde_json::Value>,
 }
 
+/// A JSON-RPC 2.0 error object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcError {
+    /// Numeric error code.
+    pub code: i32,
+    /// Human-readable error message.
+    pub message: String,
+    /// Optional additional data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// A JSON-RPC 2.0 response sent back to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     /// Protocol version; always `"2.0"`.
     pub jsonrpc: String,
+    /// The request identifier that this response corresponds to.
     pub id: serde_json::Value,
-    /// Present on success; absent on error.
+    /// The result on success; absent on error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
-    /// Present on failure; absent on success.
+    /// The error on failure; absent on success.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 }
 
 impl JsonRpcResponse {
+    /// Creates a successful JSON-RPC response.
     pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
         Self {
-            jsonrpc: JSON_RPC_VERSION.to_owned(),
+            jsonrpc: "2.0".to_string(),
             id,
             result: Some(result),
             error: None,
         }
     }
 
+    /// Creates an error JSON-RPC response.
     pub fn error(id: serde_json::Value, code: ErrorCode, message: String) -> Self {
         Self::error_with_data(id, code, message, None)
     }
 
+    /// Creates an error JSON-RPC response with optional structured data.
     pub fn error_with_data(
         id: serde_json::Value,
         code: ErrorCode,
@@ -69,7 +107,7 @@ impl JsonRpcResponse {
         data: Option<serde_json::Value>,
     ) -> Self {
         Self {
-            jsonrpc: JSON_RPC_VERSION.to_owned(),
+            jsonrpc: "2.0".to_string(),
             id,
             result: None,
             error: Some(JsonRpcError {
@@ -81,32 +119,29 @@ impl JsonRpcResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcError {
-    pub code: i32,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
+/// Standard JSON-RPC 2.0 error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
+    /// Invalid JSON was received.
     ParseError,
+    /// The request is not a valid JSON-RPC request.
     InvalidRequest,
+    /// The requested method does not exist.
     MethodNotFound,
+    /// Invalid method parameters.
     InvalidParams,
-    RequestCancelled,
+    /// Internal server error.
     InternalError,
 }
 
 impl ErrorCode {
+    /// Returns the numeric error code as defined by JSON-RPC 2.0.
     pub fn as_i32(self) -> i32 {
         match self {
             Self::ParseError => -32700,
             Self::InvalidRequest => -32600,
             Self::MethodNotFound => -32601,
             Self::InvalidParams => -32602,
-            Self::RequestCancelled => -32800,
             Self::InternalError => -32603,
         }
     }
@@ -116,45 +151,30 @@ impl ErrorCode {
 // Transport abstraction (zero-cost via monomorphization)
 // ---------------------------------------------------------------------------
 
+/// Async line-oriented transport for JSON-RPC messages.
+///
 /// Implementations are monomorphized at each call site — no dyn dispatch.
 pub trait McpTransport {
-    /// Implementations MUST be cancellation-safe: every server read loop races
-    /// this future against shutdown, cancellation, and handler completion in a
-    /// `tokio::select!`, so a dropped read must not lose bytes it already
-    /// consumed. Buffered implementations satisfy this by keeping the
-    /// partial-frame accumulator in the transport (see
-    /// `host_admission::BoundedLineReader`) rather than in the future.
-    /// Returns `None` on EOF.
+    /// Read the next line from the transport. Returns `None` on EOF.
     fn read_line(
         &mut self,
     ) -> impl std::future::Future<Output = std::io::Result<Option<String>>> + Send;
 
-    /// Write a complete line, including the trailing newline.
+    /// Write a complete line (including trailing newline) to the transport.
     fn write_line(
         &mut self,
         line: &str,
     ) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
 
+    /// Flush any buffered output.
     fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
-
-    /// Wait until a peer fully closes the connection. A read-side EOF is not
-    /// sufficient: one-shot clients legitimately half-close after writing
-    /// their request and still wait for the response. Callers may start this
-    /// wait before EOF while setup work is pending. Transports without a
-    /// native full-close signal leave this future pending.
-    fn peer_fully_closed_after_eof(
-        &self,
-    ) -> impl std::future::Future<Output = ()> + Send + 'static {
-        std::future::pending()
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_parse_jsonrpc_request() {
@@ -214,7 +234,6 @@ mod tests {
         assert_eq!(ErrorCode::InvalidRequest.as_i32(), -32600);
         assert_eq!(ErrorCode::MethodNotFound.as_i32(), -32601);
         assert_eq!(ErrorCode::InvalidParams.as_i32(), -32602);
-        assert_eq!(ErrorCode::RequestCancelled.as_i32(), -32800);
         assert_eq!(ErrorCode::InternalError.as_i32(), -32603);
     }
 

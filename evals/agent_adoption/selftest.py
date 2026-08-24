@@ -464,6 +464,99 @@ def test_hint_signature_drift():
         print("[skip] hints: real source tree absent (published package)")
 
 
+def test_cli_only_harness():
+    run_path = os.path.join(HERE, "run.sh")
+    with open(run_path, errors="replace") as f:
+        source = f.read()
+    check("cli-only harness: condition registered", 'cli-only' in source)
+    check(
+        "cli-only harness: plugin MCP files removed",
+        'cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json' in source,
+    )
+    check(
+        "cli-only harness: empty strict MCP config used",
+        'empty-mcp.json' in source,
+    )
+    check(
+        "model matrix: Claude defaults",
+        'CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"' in source,
+    )
+    check(
+        "model matrix: Codex defaults",
+        'CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"'
+        in source,
+    )
+    check("model matrix: Codex argv is explicit", '-m "$model"' in source)
+    check("model matrix: Sol excluded", "gpt-5.6-sol" not in source.lower())
+    check(
+        "runner: current Claude plugin MCP namespace only",
+        "mcp__plugin_tracedecay_graph__*" in source
+        and "mcp__plugin_tracedecay_tracedecay__*" not in source,
+    )
+    check("runner: agent stdin isolated", '</dev/null' in source)
+    check(
+        "runner: dangerous bypasses removed",
+        "--dangerously-bypass-approvals-and-sandbox" not in source
+        and "--dangerously-skip-permissions" not in source,
+    )
+    check(
+        "runner: Codex sandbox and approvals bounded",
+        "-s workspace-write" in source
+        and "-a never" in source
+        and '--add-dir "$work"' in source,
+    )
+    check(
+        "runner: Codex uses throwaway profile",
+        'CODEX_HOME="$CODEX_EVAL_CONFIG"' in source
+        and '"$TD" install --agent codex' in source
+        and "codex plugin add tracedecay@personal" in source,
+    )
+    check(
+        "runner: live default builds candidate binary",
+        "cargo build --quiet --bin tracedecay" in source
+        and 'TD="$eval_target/debug/tracedecay"' in source
+        and "/fast/cargo-target/tracedecay-agent-adoption-evals" in source,
+    )
+    check(
+        "runner: bare CLI resolves to candidate",
+        'EVAL_PATH="$(dirname "$TD"):$PATH"' in source
+        and 'PATH="$EVAL_PATH"' in source
+        and "Bash(tracedecay tool *)" in source,
+    )
+    check(
+        "runner: auth copies are read-only",
+        "copy_auth_readonly" in source
+        and "chmod 400" in source
+        and "umask 077" in source,
+    )
+    check(
+        "runner: temporary auth copies scrubbed",
+        "scrub_auth_copies" in source and "trap scrub_auth_copies EXIT" in source,
+    )
+    check(
+        "runner: Claude noninteractive permissions bounded",
+        "--permission-mode dontAsk" in source and "--allowedTools" in source,
+    )
+    check(
+        "runner: full Claude uses candidate plugin",
+        'provision_variant "$cond"' in source
+        and '--plugin-dir "$work/plugins/$cond"' in source
+        and '[[ "$cond" == "full" ]] && return 0' not in source,
+    )
+    check(
+        "model matrix: transcript basename parsed",
+        grade.parse_transcript_base(
+            "agent_runtime_storage__codex__gpt-5.6-terra__cli-only"
+        )
+        == (
+            "agent_runtime_storage",
+            "codex",
+            "cli-only",
+            "gpt-5.6-terra",
+        ),
+    )
+
+
 def main() -> int:
     test_lint()
     test_channels()
@@ -472,6 +565,7 @@ def main() -> int:
     test_specialist_agents()
     test_end_to_end()
     test_hint_signature_drift()
+    test_cli_only_harness()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S):")

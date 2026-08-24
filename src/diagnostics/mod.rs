@@ -1,3 +1,4 @@
+// Rust guideline compliant 2025-10-17
 //! Compile/type-check diagnostics, normalised across languages.
 //!
 //! 5.0 ships the Rust driver (`cargo check --message-format=json`) — the
@@ -12,7 +13,7 @@
 
 mod cache;
 mod fingerprint;
-pub(crate) mod lsp;
+pub mod lsp;
 pub mod python;
 pub mod rust;
 pub mod typescript;
@@ -158,16 +159,6 @@ pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
         .map_err(|e| crate::errors::TraceDecayError::Config {
             message: format!("failed to spawn cargo prewarm: {e}"),
         })
-}
-
-/// Which compiler levels become diagnostics. Every driver reports "error" and
-/// "warning"; advisory levels ("note", "help", "failure-note", pyright's
-/// "information") are dropped because they either double-count a diagnostic
-/// that already has its own entry or carry no actionable span.
-///
-/// One home for the policy so the drivers cannot drift apart on it.
-fn is_diagnostic_level(level: &str) -> bool {
-    matches!(level, "error" | "warning")
 }
 
 fn canonicalise_file(file_name: &str, project_root: &Path) -> String {

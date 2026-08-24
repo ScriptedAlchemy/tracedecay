@@ -1,15 +1,7 @@
-//! Pairwise overlap detection between managed skills (Hermes curator
-//! parity). Detection is purely lexical (token Jaccard on normalized titles
-//! and bodies) and deterministic; it never mutates skills.
-//!
-//! This module is the single skill-overlap authority. Validation — at
-//! proposal parse time and again at lifecycle apply time — goes through
-//! [`detected_skill_overlap_pair`], which judges exactly one pair and is
-//! therefore order-independent and stable: whether two skills validate can
-//! never depend on unrelated skills crowding a ranked list. The ranked
-//! [`skill_overlap_candidates`] list is a bounded discovery surface for the
-//! `skill_writer` evidence bundle only, computed pair-by-pair from the same
-//! predicate; it is never a validation authority.
+//! Pairwise overlap detection between managed skills, used by the
+//! `skill_writer` evidence bundle to surface consolidation candidates
+//! (Hermes curator parity). Detection is purely lexical (token Jaccard on
+//! normalized titles and bodies) and deterministic; it never mutates skills.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,60 +33,30 @@ pub struct SkillOverlapCandidate {
     pub reason: String,
 }
 
-/// Order-independent pairwise overlap predicate: the single validation
-/// authority shared by proposal parsing and lifecycle application. The
-/// decision depends only on the two skills — their consolidation eligibility
-/// and the lexical thresholds — never on how a pair ranks against unrelated
-/// skills.
-pub fn detected_skill_overlap_pair(first: &ManagedSkill, second: &ManagedSkill) -> bool {
-    detected_overlap(first, second).is_some()
-}
-
-/// The strongest detected overlap partner for `skill` among `others`, judged
-/// per pair by the same authority as [`detected_skill_overlap_pair`]. Unlike
-/// the ranked discovery list this is never truncated, so a partner cannot be
-/// crowded out by unrelated higher-scoring pairs. Score ties break to the
-/// lexicographically smaller partner id for determinism.
-pub fn detected_skill_overlap_partner<'a, I>(
-    skill: &ManagedSkill,
-    others: I,
-) -> Option<&'a ManagedSkill>
-where
-    I: IntoIterator<Item = &'a ManagedSkill>,
-{
-    let mut best: Option<(f64, &'a ManagedSkill)> = None;
-    for other in others {
-        let Some(candidate) = detected_overlap(skill, other) else {
-            continue;
-        };
-        let replace =
-            best.as_ref().is_none_or(
-                |(score, current)| match candidate.score.partial_cmp(score) {
-                    Some(std::cmp::Ordering::Greater) => true,
-                    Some(std::cmp::Ordering::Equal) => other.metadata.id < current.metadata.id,
-                    _ => false,
-                },
-            );
-        if replace {
-            best = Some((candidate.score, other));
-        }
-    }
-    best.map(|(_, partner)| partner)
-}
-
 /// Computes the top overlapping managed-skill pairs above the lexical
-/// thresholds, pair-by-pair through the same predicate that backs
-/// [`detected_skill_overlap_pair`]. This ranked, truncated view exists to
-/// bound the `skill_writer` evidence bundle; validation must use the pairwise
-/// authority instead.
+/// thresholds. Archived and disabled skills are ignored; pairs where either
+/// skill is pinned are skipped entirely (pinned skills are exempt from
+/// consolidation, matching the Hermes curator).
 pub fn skill_overlap_candidates(
     skills: &[ManagedSkill],
     limit: usize,
 ) -> Vec<SkillOverlapCandidate> {
+    let eligible: Vec<&ManagedSkill> = skills
+        .iter()
+        .filter(|skill| {
+            matches!(
+                skill.metadata.state,
+                ManagedSkillState::Active | ManagedSkillState::PendingApproval
+            )
+        })
+        .collect();
     let mut candidates = Vec::new();
-    for (index, a) in skills.iter().enumerate() {
-        for b in skills.iter().skip(index + 1) {
-            if let Some(candidate) = detected_overlap(a, b) {
+    for (index, a) in eligible.iter().enumerate() {
+        for b in eligible.iter().skip(index + 1) {
+            if a.metadata.pinned || b.metadata.pinned {
+                continue;
+            }
+            if let Some(candidate) = overlap_candidate(a, b) {
                 candidates.push(candidate);
             }
         }
@@ -108,19 +70,6 @@ pub fn skill_overlap_candidates(
     });
     candidates.truncate(limit);
     candidates
-}
-
-/// Consolidation eligibility: archived and disabled skills are out of scope
-/// and pinned skills are exempt, matching the Hermes curator.
-fn overlap_eligible(skill: &ManagedSkill) -> bool {
-    matches!(skill.metadata.state, ManagedSkillState::Active) && !skill.metadata.pinned
-}
-
-fn detected_overlap(a: &ManagedSkill, b: &ManagedSkill) -> Option<SkillOverlapCandidate> {
-    if a.metadata.id == b.metadata.id || !overlap_eligible(a) || !overlap_eligible(b) {
-        return None;
-    }
-    overlap_candidate(a, b)
 }
 
 fn overlap_candidate(a: &ManagedSkill, b: &ManagedSkill) -> Option<SkillOverlapCandidate> {
@@ -204,14 +153,14 @@ mod tests {
             skill(
                 "review-automation-runs",
                 "Review automation runs",
-                "Review automation run ledgers after automatic changes apply.",
-                "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.",
+                "Review automation run ledgers before approving changes.",
+                "Check run ledger counts, rejected proposals, and pending approval state before applying automation changes.",
             ),
             skill(
                 "automation-run-review",
                 "Automation run review",
-                "Review automatically applied automation run outcomes.",
-                "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.",
+                "Review automation run ledgers and approval gates.",
+                "Check run ledger counts, rejected proposals, and approval gates before applying automation changes.",
             ),
         )
     }
@@ -272,68 +221,10 @@ mod tests {
         let c = skill(
             "automation-run-checks",
             "Automation run checks",
-            "Review automation run ledgers after automatic changes apply.",
-            "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.",
+            "Review automation run ledgers before approving changes.",
+            "Check run ledger counts, rejected proposals, and pending approval state before applying automation changes.",
         );
         let candidates = skill_overlap_candidates(&[a, b, c], 1);
         assert_eq!(candidates.len(), 1);
-    }
-
-    #[test]
-    fn pair_authority_is_order_independent() {
-        let (a, b) = overlapping_pair();
-        let unrelated = unrelated_skill();
-
-        assert!(detected_skill_overlap_pair(&a, &b));
-        assert!(detected_skill_overlap_pair(&b, &a));
-        assert!(!detected_skill_overlap_pair(&a, &unrelated));
-        assert!(!detected_skill_overlap_pair(&unrelated, &a));
-        assert!(
-            !detected_skill_overlap_pair(&a, &a),
-            "a skill must never be its own overlap partner"
-        );
-    }
-
-    #[test]
-    fn pair_authority_rejects_pinned_and_inactive_skills() {
-        let (mut a, mut b) = overlapping_pair();
-        a.set_pinned(true);
-        assert!(!detected_skill_overlap_pair(&a, &b));
-        a.set_pinned(false);
-        b.set_state(ManagedSkillState::Archived);
-        assert!(!detected_skill_overlap_pair(&a, &b));
-        b.set_state(ManagedSkillState::Disabled);
-        assert!(!detected_skill_overlap_pair(&a, &b));
-    }
-
-    #[test]
-    fn partner_discovery_prefers_the_strongest_pair() {
-        let (a, twin) = overlapping_pair();
-        let weaker = skill(
-            "automation-outcome-notes",
-            "Automation outcome notes",
-            "Review automation run ledgers after automatic changes apply.",
-            "Check run ledger counts, then escalate repeated regressions to the owning workflow for review.",
-        );
-        let twin_score = detected_overlap(&a, &twin)
-            .expect("premise: the twin must be a detected pair")
-            .score;
-        let weaker_score = detected_overlap(&a, &weaker)
-            .expect("premise: the weaker skill must also be a detected pair")
-            .score;
-        assert!(
-            twin_score > weaker_score,
-            "premise: the twin ({twin_score}) must outscore the weaker pair ({weaker_score})"
-        );
-        let unrelated = unrelated_skill();
-        let skills = [weaker, twin.clone(), unrelated.clone()];
-
-        let partner =
-            detected_skill_overlap_partner(&a, &skills).expect("a detected partner exists");
-        assert_eq!(partner.metadata.id, twin.metadata.id);
-        assert!(
-            detected_skill_overlap_partner(&unrelated, &skills[..2]).is_none(),
-            "a skill without any pairwise overlap has no partner"
-        );
     }
 }

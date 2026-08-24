@@ -3,25 +3,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::{ComplexityMetrics, JULIA_COMPLEXITY, count_complexity};
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 pub struct JuliaExtractor;
-
-struct NodeText {
-    signature: Option<String>,
-    docstring: Option<String>,
-}
-
-impl NodeText {
-    fn new(signature: Option<String>, docstring: Option<String>) -> Self {
-        Self {
-            signature,
-            docstring,
-        }
-    }
-}
 
 struct ExtractionState {
     nodes: Vec<Node>,
@@ -52,18 +38,12 @@ impl ExtractionState {
         }
     }
 
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -75,86 +55,20 @@ impl ExtractionState {
             .unwrap_or("<invalid utf8>")
             .to_string()
     }
-
-    fn push_node(
-        &mut self,
-        kind: NodeKind,
-        name: String,
-        qualified_name: String,
-        node: TsNode<'_>,
-        text: NodeText,
-        metrics: ComplexityMetrics,
-    ) -> String {
-        let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
-        let graph_node = Node {
-            id: id.clone(),
-            kind,
-            name,
-            qualified_name,
-            file_path: self.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line: node.end_position().row as u32,
-            start_column: node.start_position().column as u32,
-            end_column: node.end_position().column as u32,
-            signature: text.signature,
-            docstring: text.docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: metrics.branches,
-            loops: metrics.loops,
-            returns: metrics.returns,
-            max_nesting: metrics.max_nesting,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: metrics.assertions,
-            updated_at: self.timestamp,
-            parent_id: None,
-        };
-        self.nodes.push(graph_node);
-
-        if let Some(parent_id) = self.parent_node_id() {
-            self.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        id
-    }
 }
 
 impl JuliaExtractor {
     pub fn extract_julia(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(t) => t,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -185,17 +99,11 @@ impl JuliaExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        let root = tree.root_node();
+        Self::visit_children(&mut state, root);
 
         state.node_stack.pop();
-
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -240,7 +148,9 @@ impl JuliaExtractor {
         let name = state.node_text(name_node);
         let docstring = Self::extract_docstring(state, node);
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
         let metrics = if node.child_count() > 0 {
             count_complexity(node, &JULIA_COMPLEXITY, &state.source)
@@ -248,13 +158,20 @@ impl JuliaExtractor {
             ComplexityMetrics::default()
         };
 
-        let id = state.push_node(
+        Self::push_node(
+            state,
+            id.clone(),
             NodeKind::Function,
             name.clone(),
             qualified_name,
             node,
-            NodeText::new(sig, docstring),
-            metrics,
+            sig,
+            docstring,
+            metrics.branches,
+            metrics.loops,
+            metrics.returns,
+            metrics.max_nesting,
+            metrics.assertions,
         );
 
         if let Some(body) = node.child_by_field_name("body") {
@@ -268,15 +185,24 @@ impl JuliaExtractor {
         };
         let name = format!("@{}", state.node_text(name_node));
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
-        state.push_node(
+        Self::push_node(
+            state,
+            id,
             NodeKind::Function,
             name,
             qualified_name,
             node,
-            NodeText::new(sig, None),
-            ComplexityMetrics::default(),
+            sig,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
         );
     }
 
@@ -287,22 +213,25 @@ impl JuliaExtractor {
         let name = state.node_text(name_node);
         let docstring = Self::extract_docstring(state, node);
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
-            &state.file_path,
-            &NodeKind::Class,
-            &name,
-            node.start_position().row as u32,
-        );
+        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
 
         state.node_stack.push((name.clone(), id.clone()));
-        state.push_node(
+        Self::push_node(
+            state,
+            id,
             NodeKind::Class,
             name,
             qualified_name,
             node,
-            NodeText::new(sig, docstring),
-            ComplexityMetrics::default(),
+            sig,
+            docstring,
+            0,
+            0,
+            0,
+            0,
+            0,
         );
         state.node_stack.pop();
     }
@@ -313,15 +242,24 @@ impl JuliaExtractor {
         };
         let name = state.node_text(name_node);
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
 
-        state.push_node(
+        Self::push_node(
+            state,
+            id,
             NodeKind::Class,
             name,
             qualified_name,
             node,
-            NodeText::new(sig, None),
-            ComplexityMetrics::default(),
+            sig,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
         );
     }
 
@@ -330,15 +268,24 @@ impl JuliaExtractor {
             return;
         };
         let name = state.node_text(name_node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
 
-        let id = state.push_node(
+        Self::push_node(
+            state,
+            id.clone(),
             NodeKind::Module,
             name.clone(),
             qualified_name,
             node,
-            NodeText::new(None, None),
-            ComplexityMetrics::default(),
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
         );
 
         state.node_stack.push((name, id));
@@ -387,6 +334,59 @@ impl JuliaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_node(
+        state: &mut ExtractionState,
+        id: String,
+        kind: NodeKind,
+        name: String,
+        qualified_name: String,
+        node: TsNode<'_>,
+        signature: Option<String>,
+        docstring: Option<String>,
+        branches: u32,
+        loops: u32,
+        returns: u32,
+        max_nesting: u32,
+        assertions: u32,
+    ) {
+        let graph_node = Node {
+            id: id.clone(),
+            kind,
+            name,
+            qualified_name,
+            file_path: state.file_path.clone(),
+            start_line: node.start_position().row as u32,
+            attrs_start_line: node.start_position().row as u32,
+            end_line: node.end_position().row as u32,
+            start_column: node.start_position().column as u32,
+            end_column: node.end_position().column as u32,
+            signature,
+            docstring,
+            visibility: Visibility::Pub,
+            is_async: false,
+            branches,
+            loops,
+            returns,
+            max_nesting,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions,
+            updated_at: state.timestamp,
+            parent_id: None,
+        };
+        state.nodes.push(graph_node);
+
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id,
+                kind: EdgeKind::Contains,
+                line: Some(node.start_position().row as u32),
             });
         }
     }
@@ -458,15 +458,5 @@ impl crate::LanguageExtractor for JuliaExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_julia(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
     }
 }

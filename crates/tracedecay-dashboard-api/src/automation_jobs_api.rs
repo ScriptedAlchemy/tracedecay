@@ -1,5 +1,5 @@
 //! Dashboard CRUD + run endpoints for user-defined scheduled jobs
-//! (Hermes cron parity). Routes live beside the automation config
+//! (Hermes cron parity, audit R9). Routes live beside the automation config
 //! endpoints:
 //!
 //! - `GET/POST /api/automation/jobs`
@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
@@ -16,17 +15,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail, internal_error};
-use super::{
-    DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1,
-    automation_authority_error_response, exact_automation_authority,
+use super::util::{JsonError, http_detail};
+use crate::automation::backend::CodexAppServerBackend;
+use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
+use crate::automation::jobs::{
+    AutomationJob, JobDelivery, UserJobRunOptions, find_job, job_task_key, load_jobs,
+    run_user_job_with_backend, save_jobs, validate_job, validate_job_id,
 };
-use tracedecay_agent_hosts::automation::jobs::{
-    AutomationJob, JobDelivery, find_job, job_task_key, load_jobs, save_jobs, validate_job,
-    validate_job_id,
-};
-use tracedecay_domain::canonical_text::default_true;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
+use crate::automation::run_ledger::AutomationTrigger;
+use crate::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -86,6 +83,10 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+fn default_true() -> bool {
+    true
+}
+
 pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     let jobs = load_jobs(&state.dashboard_root)
         .await
@@ -116,29 +117,17 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
         extra: BTreeMap::new(),
     };
     validate_job(&job).map_err(|err| bad_request(&err.to_string()))?;
-    let job_for_write = job.clone();
-    let result = super::automation_run_service::execute_dashboard_automation_write(
-        &state,
-        move |state| async move {
-            let mut jobs = load_jobs(&state.dashboard_root)
-                .await
-                .map_err(|err| err.to_string())?;
-            if jobs.iter().any(|existing| existing.id == job_for_write.id) {
-                return Ok(json!({ "conflict": true }));
-            }
-            jobs.push(job_for_write);
-            save_jobs(&state.dashboard_root, &jobs)
-                .await
-                .map_err(|err| err.to_string())?;
-            state.reconcile_automation_scheduler();
-            Ok(json!({ "conflict": false }))
-        },
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    if result["conflict"] == true {
+    let mut jobs = load_jobs(&state.dashboard_root)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    if jobs.iter().any(|existing| existing.id == job.id) {
         return Err(bad_request(&format!("job '{}' already exists", job.id)));
     }
+    jobs.push(job.clone());
+    save_jobs(&state.dashboard_root, &jobs)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(json!({ "job": job })))
 }
 
@@ -157,68 +146,46 @@ pub async fn update(
 ) -> ApiResult {
     let patch = serde_json::from_value::<PatchJobBody>(body)
         .map_err(|err| bad_request(&format!("invalid job patch: {err}")))?;
-    let job_id_for_write = job_id.clone();
-    let result = super::automation_run_service::execute_dashboard_automation_write(
-        &state,
-        move |state| async move {
-            let mut jobs = load_jobs(&state.dashboard_root)
-                .await
-                .map_err(|err| err.to_string())?;
-            let Some(job) = jobs.iter_mut().find(|job| job.id == job_id_for_write) else {
-                return Ok(json!({ "found": false }));
-            };
-            if let Some(name) = patch.name {
-                job.name = name;
-            }
-            if let Some(prompt) = patch.prompt {
-                job.prompt = prompt;
-            }
-            if let Some(schedule) = patch.schedule {
-                job.schedule = schedule;
-            }
-            if let Some(enabled) = patch.enabled {
-                job.enabled = enabled;
-            }
-            if let Some(interval_secs) = patch.interval_secs {
-                job.interval_secs = interval_secs;
-            }
-            if let Some(cooldown_secs) = patch.cooldown_secs {
-                job.cooldown_secs = cooldown_secs;
-            }
-            if let Some(skill_ids) = patch.skill_ids {
-                job.skill_ids = skill_ids;
-            }
-            if let Some(pre_run_command) = patch.pre_run_command {
-                job.pre_run_command = pre_run_command;
-            }
-            if let Some(delivery) = patch.delivery {
-                job.delivery = delivery;
-            }
-            job.updated_at = current_timestamp();
-            if let Err(err) = validate_job(job) {
-                return Ok(json!({
-                    "found": true,
-                    "validation_error": err.to_string(),
-                }));
-            }
-            let updated = job.clone();
-            save_jobs(&state.dashboard_root, &jobs)
-                .await
-                .map_err(|err| err.to_string())?;
-            state.reconcile_automation_scheduler();
-            Ok(json!({ "found": true, "job": updated }))
-        },
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    if result["found"] == false {
-        return Err(not_found(&job_id));
-    }
-    if let Some(message) = result["validation_error"].as_str() {
-        return Err(bad_request(message));
-    }
-    let updated = serde_json::from_value::<AutomationJob>(result["job"].clone())
+    let mut jobs = load_jobs(&state.dashboard_root)
+        .await
         .map_err(|err| internal_error(&err))?;
+    let Some(job) = jobs.iter_mut().find(|job| job.id == job_id) else {
+        return Err(not_found(&job_id));
+    };
+    if let Some(name) = patch.name {
+        job.name = name;
+    }
+    if let Some(prompt) = patch.prompt {
+        job.prompt = prompt;
+    }
+    if let Some(schedule) = patch.schedule {
+        job.schedule = schedule;
+    }
+    if let Some(enabled) = patch.enabled {
+        job.enabled = enabled;
+    }
+    if let Some(interval_secs) = patch.interval_secs {
+        job.interval_secs = interval_secs;
+    }
+    if let Some(cooldown_secs) = patch.cooldown_secs {
+        job.cooldown_secs = cooldown_secs;
+    }
+    if let Some(skill_ids) = patch.skill_ids {
+        job.skill_ids = skill_ids;
+    }
+    if let Some(pre_run_command) = patch.pre_run_command {
+        job.pre_run_command = pre_run_command;
+    }
+    if let Some(delivery) = patch.delivery {
+        job.delivery = delivery;
+    }
+    job.updated_at = current_timestamp();
+    validate_job(job).map_err(|err| bad_request(&err.to_string()))?;
+    let updated = job.clone();
+    save_jobs(&state.dashboard_root, &jobs)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(json!({ "job": updated })))
 }
 
@@ -226,42 +193,27 @@ pub async fn delete(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> ApiResult {
-    let job_id_for_write = job_id.clone();
-    let deleted = super::automation_run_service::execute_dashboard_automation_write(
-        &state,
-        move |state| async move {
-            let mut jobs = load_jobs(&state.dashboard_root)
-                .await
-                .map_err(|err| err.to_string())?;
-            let before = jobs.len();
-            jobs.retain(|job| job.id != job_id_for_write);
-            if jobs.len() == before {
-                return Ok(Value::Bool(false));
-            }
-            save_jobs(&state.dashboard_root, &jobs)
-                .await
-                .map_err(|err| err.to_string())?;
-            state.reconcile_automation_scheduler();
-            Ok(Value::Bool(true))
-        },
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    if deleted != Value::Bool(true) {
+    let mut jobs = load_jobs(&state.dashboard_root)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    let before = jobs.len();
+    jobs.retain(|job| job.id != job_id);
+    if jobs.len() == before {
         return Err(not_found(&job_id));
     }
+    save_jobs(&state.dashboard_root, &jobs)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    state.reconcile_automation_scheduler();
     Ok(Json(json!({ "deleted": job_id })))
 }
 
 pub async fn run(
     State(state): State<DashboardState>,
-    Extension(control): Extension<DashboardHttpRequestControlV1>,
     AxumPath(job_id): AxumPath<String>,
 ) -> std::result::Result<(StatusCode, Json<Value>), JsonError> {
     let job = load_job_or_404(&state, &job_id).await?;
-    let authority = exact_automation_authority(&state)
-        .map_err(automation_authority_error_response)?
-        .clone();
+    let config = load_effective_config(&state).await?;
     let run_id = format!("dashboard_user_job_{}_{}", job.id, micros_now());
     let payload = json!({
         "run_id": run_id,
@@ -269,15 +221,20 @@ pub async fn run(
         "task": job_task_key(&job.id),
         "status": "accepted",
     });
+    let dashboard_root = state.dashboard_root.clone();
     let project_root = state.project_root.clone();
-    let request = DashboardAutomationRunRequestV1::UserJob {
-        job_id: job.id.clone(),
-        run_id: run_id.clone(),
-    };
     tokio::spawn(async move {
-        let job_id = job.id.clone();
-        if let Err(err) = authority.run(&project_root, request, control).await {
-            tracing::warn!(%job_id, error = err.detail(), "dashboard user job failed");
+        let backend = CodexAppServerBackend::from_automation_config(&config);
+        let options = UserJobRunOptions {
+            trigger: AutomationTrigger::Dashboard,
+            run_id: Some(run_id),
+            profile_root: None,
+            project_root: Some(project_root),
+        };
+        if let Err(err) =
+            run_user_job_with_backend(&dashboard_root, &config, &backend, &job, options).await
+        {
+            eprintln!("[tracedecay] dashboard user job '{}' failed: {err}", job.id);
         }
     });
     Ok((StatusCode::ACCEPTED, Json(payload)))
@@ -293,6 +250,16 @@ async fn load_job_or_404(
         Ok(None) => Err(not_found(job_id)),
         Err(err) => Err(internal_error(&err)),
     }
+}
+
+async fn load_effective_config(
+    state: &DashboardState,
+) -> std::result::Result<AutomationConfig, JsonError> {
+    let global = crate::user_config::UserConfig::load().automation;
+    let project = load_project_config(&state.dashboard_root)
+        .await
+        .map_err(|err| internal_error(&err))?;
+    effective_config(&global, project.as_ref()).map_err(|err| internal_error(&err))
 }
 
 fn micros_now() -> u128 {
@@ -333,5 +300,12 @@ fn not_found(job_id: &str) -> JsonError {
     (
         StatusCode::NOT_FOUND,
         Json(http_detail(&format!("automation job '{job_id}' not found"))),
+    )
+}
+
+fn internal_error(err: &impl ToString) -> JsonError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(http_detail(&err.to_string())),
     )
 }

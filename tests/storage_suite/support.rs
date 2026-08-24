@@ -1,6 +1,7 @@
 //! Shared fixtures for the consolidated storage suite.
 //!
-//! Building a schema from scratch is a large fixed cost per test (especially
+//! The template-database cache generalizes the pattern db_query_test used:
+//! building a schema from scratch is a large fixed cost per test (especially
 //! on Windows), so the first test process to need a given fixture builds it
 //! once under the system temp dir and every other test — including tests in
 //! other processes, since nextest runs one process per test — copies the
@@ -12,23 +13,28 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
+/// Serializes tests across suite modules that mutate the process-wide
+/// HOME/USERPROFILE/profile-dir environment variables. Only plain
+/// `cargo test` shares one process between tests; nextest gives every test
+/// its own process, where this lock is uncontended.
+pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// FNV-1a hash of everything that can change a template's contents: the
-/// schema-defining sources, the template name, and any builder-specific
-/// fingerprint supplied by the caller (for templates whose contents also
-/// depend on sources outside `tracedecay-runtime-core`'s `db` module, such as
-/// fixture SQL defined in a test file).
+/// schema-defining sources, the template name, the unsafe-fast env toggle
+/// (it changes journal/synchronous file properties), and any
+/// builder-specific fingerprint supplied by the caller (for templates whose
+/// contents also depend on sources outside src/db, such as fixture SQL
+/// defined in a test file).
 fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
+    let unsafe_fast = std::env::var(tracedecay::db::SQLITE_UNSAFE_FAST_ENV).unwrap_or_default();
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/migrations.rs")
         .iter()
         .chain(include_bytes!(
             "../../crates/tracedecay-runtime-core/src/db/connection.rs"
         ))
-        .chain(include_bytes!(
-            "../../crates/tracedecay-runtime-core/src/db/engine/test_support.rs"
-        ))
-        .chain(include_bytes!("../common/mod.rs"))
         .chain(name.as_bytes())
+        .chain(unsafe_fast.as_bytes())
         .chain(builder_fingerprint)
     {
         hash ^= u64::from(*byte);
@@ -54,8 +60,7 @@ fn template_cache_exists(path: &Path) -> bool {
 /// it first if this machine has no template for the current schema revision.
 ///
 /// `builder_fingerprint` must cover every input to `build` that lives
-/// outside the `tracedecay-runtime-core` `db` module — typically
-/// `include_bytes!` of the defining test file —
+/// outside `src/db` — typically `include_bytes!` of the defining test file —
 /// so that editing the fixture-building code invalidates the cached
 /// template. Pass `&[]` when `build` depends only on the production schema
 /// code that `template_hash` already covers.
@@ -112,26 +117,13 @@ where
 /// `Database::initialize` would produce — without paying schema creation.
 pub async fn seed_latest_graph_db(dest: &Path) {
     let template = ensure_template_db("graph-empty", &[], |path| async move {
-        // Initialise on a throwaway path, then snapshot the committed schema to
-        // `path`. The registered runtime's `checkpoint` follows a bounded WAL
-        // policy that no-ops below its soft threshold, so a freshly-created
-        // schema can still live entirely in the WAL — copying the bare `.db`
-        // file would then capture an empty (v0) database. `VACUUM INTO` writes
-        // a transactionally consistent standalone copy of the closed fixture.
-        let init_path = path.with_file_name("template-init.db");
-        let (db, _) = crate::common::initialize_test_database(&init_path)
+        let (db, _) = crate::common::initialize_test_database(&path)
             .await
             .expect("failed to initialize template database");
+        db.checkpoint()
+            .await
+            .expect("failed to checkpoint template database");
         db.close();
-        let template_source =
-            rusqlite::Connection::open(&init_path).expect("failed to open template database");
-        template_source
-            .execute(
-                "VACUUM INTO ?1",
-                [path.to_str().expect("utf-8 template path")],
-            )
-            .expect("failed to snapshot template database");
-        drop(template_source);
     })
     .await;
     if let Some(parent) = dest.parent() {

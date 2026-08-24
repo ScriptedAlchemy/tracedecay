@@ -13,7 +13,7 @@ use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -52,17 +52,12 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -79,35 +74,23 @@ impl ExtractionState {
 }
 
 impl GwBasicExtractor {
+    /// Extract code graph nodes and edges from a GW-BASIC source file.
+    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
+    /// `source` is the BASIC source code to parse.
     pub fn extract_gwbasic(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
 
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
+        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -137,13 +120,9 @@ impl GwBasicExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let mut selected_lines = Vec::new();
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            if child.kind() == "line" {
-                selected_lines.push((child.start_byte(), child.end_byte()));
-            }
-        });
-        let lines = Self::collect_selected_lines(&state, tree, &selected_lines);
+        // Collect all lines from the AST.
+        let root = tree.root_node();
+        let lines = Self::collect_lines(&state, root);
 
         // First pass: extract DEF FN definitions as Function nodes.
         Self::extract_def_fn(&mut state, &lines);
@@ -159,11 +138,7 @@ impl GwBasicExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -178,22 +153,17 @@ impl GwBasicExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    fn collect_selected_lines<'tree>(
-        state: &ExtractionState,
-        tree: &'tree Tree,
-        selected_lines: &[(usize, usize)],
-    ) -> Vec<BasicLine<'tree>> {
+    /// Collect all lines from the program into a structured list.
+    fn collect_lines<'a>(state: &ExtractionState, root: TsNode<'a>) -> Vec<BasicLine<'a>> {
         let mut lines = Vec::new();
-        let root = tree.root_node();
         let mut cursor = root.walk();
         if cursor.goto_first_child() {
             loop {
                 let node = cursor.node();
-                if node.kind() == "line"
-                    && selected_lines.contains(&(node.start_byte(), node.end_byte()))
-                    && let Some(basic_line) = Self::parse_line(state, node)
-                {
-                    lines.push(basic_line);
+                if node.kind() == "line" {
+                    if let Some(basic_line) = Self::parse_line(state, node) {
+                        lines.push(basic_line);
+                    }
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -439,9 +409,12 @@ impl GwBasicExtractor {
                         body_end += 1;
                         break;
                     }
-                    // An inline RETURN in an IF statement (e.g. `1010 IF ...
-                    // THEN PRINT "ERROR": RETURN`) does not end the subroutine;
-                    // only a standalone return_statement line does.
+                    // Also check for inline RETURN in IF statements
+                    // (e.g. `1010 IF ... THEN PRINT "ERROR": RETURN`)
+                    if Self::line_has_return(lines[body_end].node) {
+                        // Keep going — the inline RETURN doesn't end the subroutine
+                        // unless it's the last statement before the next REM block.
+                    }
                     // Stop at the next REM block (which would be the start of another subroutine).
                     if lines[body_end].statement_kind == "comment" {
                         break;
@@ -528,6 +501,7 @@ impl GwBasicExtractor {
                         });
                     }
 
+                    // Extract GOSUB/GOTO call sites from the body.
                     for line in &lines[body_start..body_end] {
                         Self::extract_calls_from_line(state, line, &fn_id);
                     }
@@ -570,6 +544,26 @@ impl GwBasicExtractor {
         }
     }
 
+    /// Check if a line node contains a `return_statement` anywhere in its AST.
+    fn line_has_return(node: TsNode<'_>) -> bool {
+        if node.kind() == "return_statement" {
+            return true;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if Self::line_has_return(child) {
+                    return true;
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        false
+    }
+
     /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
     fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
         let file_node_id = state
@@ -596,6 +590,7 @@ impl GwBasicExtractor {
         let kind = node.kind();
         match kind {
             "gosub_statement" | "goto_statement" => {
+                // Extract the target line number.
                 if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
@@ -646,15 +641,5 @@ impl crate::LanguageExtractor for GwBasicExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_gwbasic(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
     }
 }

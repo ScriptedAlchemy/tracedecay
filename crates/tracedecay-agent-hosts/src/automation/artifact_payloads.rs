@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 
-mod combined_privacy;
-mod curation;
+use super::apply_policy::record_has_auto_applied_memory_ops;
 use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
@@ -31,7 +30,7 @@ pub(super) struct ArtifactPayloadContext<'a> {
     pub(super) request: &'a AgentTaskRequest,
     pub(super) response: &'a AgentTaskResponse,
     pub(super) record: &'a AutomationRunLedgerRecord,
-    /// Post-activation outcomes of previously applied changes, when a snapshot
+    /// Post-approval outcomes of previously applied changes, when a snapshot
     /// has been recorded for this project.
     pub(super) outcomes: &'a AutomationOutcomesSnapshot,
 }
@@ -43,7 +42,7 @@ pub(super) struct GeneratedEvalPayloads {
     pub(super) replay_results: Vec<Value>,
     pub(super) status: &'static str,
     pub(super) validation_decision: &'static str,
-    /// Evals derived from real post-activation outcomes; tracked separately
+    /// Evals derived from real post-approval outcomes; tracked separately
     /// from the validation-replay definitions so the replay gate semantics
     /// stay unchanged.
     pub(super) outcome_definitions: Vec<Value>,
@@ -64,8 +63,6 @@ pub(super) struct ArtifactRefs {
 }
 
 pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
-    let curation_result = (ctx.task == AgentTaskKind::MemoryCurator)
-        .then(|| curation::memory_curation_trace_summary(ctx.record));
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -81,10 +78,13 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
         "context_keys": ctx.request.context.as_object()
             .map(|object| object.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default(),
-        "curation_result": curation_result,
     })
 }
 
+/// Extracts the `evidence_mode` label from whichever evidence object the task
+/// placed in the request context (e.g. `session_reflection_evidence` or
+/// `skill_writer_evidence`), so traces distinguish session-replay-backed runs
+/// from grep-only runs. Null for tasks without a mode label.
 fn context_evidence_mode(context: &Value) -> Value {
     let modes = context
         .as_object()
@@ -102,20 +102,6 @@ fn context_evidence_mode(context: &Value) -> Value {
     } else {
         Value::Null
     }
-}
-
-fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
-    json!({
-        "status": record.status,
-        "reviewed_count": record.reviewed_count,
-        "accepted_count": record.accepted_count,
-        "rejected_count": record.rejected_count,
-        "skipped_count": record.skipped_count,
-        "proposed_ops_hash": validation_report_hash(record.proposed_ops.as_ref()),
-        "applied_ops_hash": validation_report_hash(record.applied_ops.as_ref()),
-        "rejected_ops_hash": validation_report_hash(record.rejected_ops.as_ref()),
-        "validation_report_hash": validation_report_hash(record.validation_report.as_ref()),
-    })
 }
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
@@ -201,7 +187,16 @@ pub(super) fn generated_evals_payload(
             "status": evals.runner_status,
             "results": evals.replay_results.clone(),
         },
-        "automatic_application": generated_eval_application_effect(ctx.record, evals),
+        "promotion": {
+            "state": match evals.runner_status {
+                "passed" => "validated",
+                "failed" => "blocked_failed_replay",
+                _ if evals.count == 0 => "blocked_no_examples",
+                _ => "candidate",
+            },
+            "requires_human_review": true,
+            "auto_apply": false,
+        },
         "eval_definitions": evals.definitions.clone(),
         "outcome_eval_definitions": evals.outcome_definitions.clone(),
         "result_refs": [{
@@ -231,12 +226,9 @@ pub(super) fn validation_gate_payload(
     gate: &ImprovementGatePayload,
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
-    let automatic_application = automatic_application_effect(ctx.record);
-    let report = if ctx.task == AgentTaskKind::MemoryCurator {
-        curation::memory_curation_trace_summary(ctx.record)
-    } else {
-        ctx.record.validation_report.clone().unwrap_or(Value::Null)
-    };
+    let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
+    let approval_required =
+        automation_record_requires_dashboard_approval(ctx.task, ctx.record, auto_applied);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -247,8 +239,8 @@ pub(super) fn validation_gate_payload(
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
             "reviewed_count": ctx.record.reviewed_count,
-            "report": report,
-            "automatic_application": automatic_application.clone(),
+            "approval_required": approval_required,
+            "report": ctx.record.validation_report,
         },
         "improvement_gate": {
             "decision": gate.decision,
@@ -266,13 +258,14 @@ pub(super) fn validation_gate_payload(
             } else if gate.decision == "ready_for_handoff" {
                 "ready"
             } else {
-                "ready_for_optimizer"
+                "pending_optimizer_review"
             },
             "criteria": {
                 "has_feedback": ctx.record.reviewed_count > 0,
                 "has_generated_evals": evals.count > 0,
                 "validation_report_hash": validation_report_hash(ctx.record.validation_report.as_ref()),
-                "automatic_application": automatic_application,
+                "approval_required": approval_required,
+                "auto_apply_allowed": auto_applied,
             },
             "source_refs": [
                 trace_ref.clone(),
@@ -340,36 +333,9 @@ pub(super) fn codex_handoff_payload(
     evals: &GeneratedEvalPayloads,
     gate: &ImprovementGatePayload,
 ) -> Value {
-    let automatic_application = automatic_application_effect(ctx.record);
-    let response = if ctx.task == AgentTaskKind::MemoryCurator {
-        json!({
-            "model": ctx.response.model,
-            "input_tokens": ctx.response.input_tokens,
-            "output_tokens": ctx.response.output_tokens,
-            "output_hash": ctx.record.output_hash,
-            "curation_result": curation::memory_curation_trace_summary(ctx.record),
-        })
-    } else if ctx.task == AgentTaskKind::SessionReflector {
-        json!({
-            "model": ctx.response.model,
-            "input_tokens": ctx.response.input_tokens,
-            "output_tokens": ctx.response.output_tokens,
-            "output_hash": ctx.record.output_hash,
-            "session_reflection_result": session_reflection_summary(ctx.record),
-        })
-    } else if ctx.task == AgentTaskKind::SkillWriter
-        && ctx.request.task == AgentTaskKind::CombinedReview
-    {
-        combined_privacy::skill_handoff_response(ctx)
-    } else {
-        json!({
-            "model": ctx.response.model,
-            "input_tokens": ctx.response.input_tokens,
-            "output_tokens": ctx.response.output_tokens,
-            "output_text_preview": truncate_chars_for_prompt(&ctx.response.output_text, 4000),
-            "output_json": ctx.response.output_json,
-        })
-    };
+    let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
+    let approval_required =
+        automation_record_requires_dashboard_approval(ctx.task, ctx.record, auto_applied);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -383,26 +349,24 @@ pub(super) fn codex_handoff_payload(
         "evidence_hash": ctx.record.evidence_hash,
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
-        "request": if matches!(ctx.task, AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector)
-            || ctx.request.task == AgentTaskKind::CombinedReview
-        {
-            json!({
-                "evidence_hash": ctx.request.evidence_hash,
-                "context_hash": ctx.record.input_hash,
-            })
-        } else {
-            json!({
-                "evidence_hash": ctx.request.evidence_hash,
-                "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
-                "context_hash": ctx.record.input_hash,
-            })
+        "request": {
+            "evidence_hash": ctx.request.evidence_hash,
+            "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
+            "context_hash": ctx.record.input_hash,
         },
-        "response": response,
+        "response": {
+            "model": ctx.response.model,
+            "input_tokens": ctx.response.input_tokens,
+            "output_tokens": ctx.response.output_tokens,
+            "output_text_preview": truncate_chars_for_prompt(&ctx.response.output_text, 4000),
+            "output_json": ctx.response.output_json,
+        },
         "readiness": {
             "validation_gate_decision": gate.decision,
             "eval_count": evals.count,
             "blockers": gate.blockers.clone(),
-            "automatic_application": automatic_application.clone(),
+            "approval_required": approval_required,
+            "auto_apply_allowed": auto_applied,
         },
         "source_refs": [
             refs.validation_gate.clone(),
@@ -417,7 +381,7 @@ pub(super) fn codex_handoff_payload(
                 "blocked_pending_feedback_or_evals" => "collect_feedback_or_evals",
                 "blocked_pending_eval_run" => "run_generated_evals",
                 "blocked_failed_eval_replay" => "fix_generated_evals",
-                _ => "monitor_applied_outcomes",
+                _ => "codex_review",
             },
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
@@ -431,8 +395,10 @@ pub(super) fn codex_handoff_payload(
             ],
         },
         "validation_requirements": {
+            "must_review_artifact_refs": true,
             "must_run_tests": ctx.policy.handoff_tests(),
-            "automatic_application": true,
+            "must_preserve_approval_gate": !auto_applied,
+            "must_not_auto_apply": !auto_applied,
         },
         "artifact_manifest": {
             "api_list": automation_run_artifacts_api(ctx.run_id),
@@ -456,74 +422,21 @@ pub(super) fn codex_handoff_payload(
             "artifact_kind": AutomationRunArtifactKind::GeneratedEvals.as_str(),
             "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
             "commands": ctx.policy.eval_replay_commands(),
-            "application": automatic_application,
+            "requires_human_review": true,
         },
-        "next_actions": ctx.policy.next_actions(ctx.record),
+        "next_actions": ctx.policy.next_actions(ctx.record.accepted_count),
         "tests_to_run": ctx.policy.handoff_tests(),
     })
 }
 
-fn automatic_application_effect(record: &AutomationRunLedgerRecord) -> Value {
-    let deployment = record
-        .applied_ops
-        .as_ref()
-        .and_then(|operations| operations.get("deployment"))
-        .cloned();
-    let deployment_retry = deployment
-        .as_ref()
-        .and_then(|receipt| receipt.get("retry_required"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let recorded_status = record
-        .validation_report
-        .as_ref()
-        .and_then(|report| report.get("status"))
-        .and_then(Value::as_str);
-    let status = match recorded_status {
-        Some("no_candidate") => "no_candidate",
-        Some("quarantined") => "quarantined",
-        Some("failed_after_partial_effects") => "partial",
-        Some("settled_noop") => "settled_noop",
-        Some("applied") if deployment_retry => "partial",
-        Some("applied") => "applied",
-        _ if deployment_retry || record.error_retryable == Some(true) => "retry",
-        _ if record.error.is_some() => "quarantined",
-        _ if record.accepted_count > 0 && record.applied_ops.is_some() => "applied",
-        _ => "unknown",
-    };
-    json!({
-        "status": status,
-        "accepted_count": record.accepted_count,
-        "rejected_count": record.rejected_count,
-        "retry_required": deployment_retry || record.error_retryable == Some(true),
-        "deployment_receipt": deployment,
-    })
-}
-
-fn generated_eval_application_effect(
+fn automation_record_requires_dashboard_approval(
+    task: AgentTaskKind,
     record: &AutomationRunLedgerRecord,
-    evals: &GeneratedEvalPayloads,
-) -> Value {
-    match evals.runner_status {
-        "passed" => automatic_application_effect(record),
-        "failed" => json!({
-            "status": "quarantined",
-            "reason": "validation_replay_failed",
-            "retry_required": false,
-            "deployment_receipt": Value::Null,
-        }),
-        _ if evals.count == 0 => json!({
-            "status": "no_candidate",
-            "reason": "no_validation_examples",
-            "retry_required": false,
-            "deployment_receipt": Value::Null,
-        }),
-        _ => json!({
-            "status": "retry",
-            "reason": "validation_replay_incomplete",
-            "retry_required": true,
-            "deployment_receipt": Value::Null,
-        }),
+    auto_applied: bool,
+) -> bool {
+    match task {
+        AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector => false,
+        _ => record.accepted_count > 0 && !auto_applied,
     }
 }
 
@@ -534,14 +447,6 @@ mod tests {
     use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;
-    use tracedecay_domain::{
-        DomainError, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
-        ProvenanceId, RunId,
-    };
-    use tracedecay_store::{
-        FactCommitReceipt, ProjectMemoryFactCurationOperationEffectV1,
-        ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1,
-    };
 
     fn payload_fixture() -> (
         AgentTaskRequest,
@@ -561,7 +466,6 @@ mod tests {
             output_text: "{\"skills\":[]}".to_string(),
             output_json: Some(json!({"skills": []})),
             model: None,
-            provider: None,
             input_tokens: None,
             output_tokens: None,
         };
@@ -572,7 +476,6 @@ mod tests {
             task: AgentTaskKind::SkillWriter,
             task_key: Some("skill_writer".to_string()),
             backend: "codex_app_server".to_string(),
-            backend_identity: None,
             host_mode: None,
             prompt_version: None,
             response_schema: None,
@@ -594,27 +497,24 @@ mod tests {
             error: None,
             error_classification: None,
             error_retryable: None,
-            backend_attempt_count: 0,
-            backend_attempts: Vec::new(),
             report_ref: None,
             artifacts: Vec::new(),
             started_at: "0".to_string(),
             completed_at: "0".to_string(),
-            completed_at_micros: Some(0),
         };
         (request, response, record)
     }
 
     fn outcomes_snapshot() -> AutomationOutcomesSnapshot {
         AutomationOutcomesSnapshot {
-            schema_version: 2,
+            schema_version: 1,
             skills: vec![SkillOutcomeRecord {
                 skill_id: "ignored-skill".to_string(),
                 title: Some("Ignored skill".to_string()),
-                activated_at: 1_000,
-                days_since_activation: 30,
-                views_since_activation: 2,
-                uses_since_activation: 0,
+                approved_at: 1_000,
+                days_since_approval: 30,
+                views_since_approval: 2,
+                uses_since_approval: 0,
                 verdict: SkillOutcomeVerdict::Ignored,
             }],
             facts: Vec::new(),
@@ -668,6 +568,8 @@ mod tests {
                 .unwrap(),
             &json!("ignored")
         );
+        // The validation-replay definitions must stay outcome-free so the
+        // replay gate semantics are unchanged.
         assert_eq!(evals.count, 0);
     }
 
@@ -704,179 +606,6 @@ mod tests {
     }
 
     #[test]
-    fn curator_trace_publishes_only_typed_payload_free_effect_detail() {
-        let (request, mut response, mut record) = payload_fixture();
-        record.task = AgentTaskKind::MemoryCurator;
-        record.status = AutomationRunStatus::Succeeded;
-        record.reviewed_count = 2;
-        record.accepted_count = 1;
-        record.rejected_count = 1;
-        let owner = FactOwnerV1::Profile;
-        let operation_id = domain_id::<ProvenanceId>("operation.trace.curator");
-        let fact_id = tracedecay_domain::FactId::derive(
-            &FactIdentityMaterialV1::new(
-                owner.clone(),
-                FactIdentitySourceV1::Application {
-                    operation_id: operation_id.clone(),
-                },
-            )
-            .expect("fact identity material"),
-        )
-        .expect("fact id");
-        let fact_event_id = domain_id::<FactEventId>("event.trace.curator.fact");
-        let provenance_event_id = domain_id::<FactEventId>("event.trace.curator.provenance");
-        let commit = FactCommitReceipt::new(
-            fact_id.clone(),
-            owner.clone(),
-            vec![fact_event_id, provenance_event_id.clone()],
-            provenance_event_id.clone(),
-            None,
-        )
-        .expect("commit receipt");
-        let receipt = ProjectMemoryFactCurationReceiptV1::new(
-            owner.clone(),
-            operation_id.clone(),
-            "a".repeat(64),
-            Some(RunId::new("run-outcomes").expect("run id")),
-            vec![
-                ProjectMemoryFactCurationOperationEffectV1::normalize_tags(
-                    ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone()).expect("owned fact"),
-                    commit,
-                )
-                .expect("normalize effect"),
-            ],
-            vec![ProjectMemoryFactIdV1::new(owner, fact_id.clone()).expect("changed fact")],
-        )
-        .expect("curation receipt");
-        let hostile_secret = "sk-live-do-not-publish";
-        response.output_text = format!("model proposed private content: {hostile_secret}");
-        response.output_json = Some(json!({
-            "ops": [{
-                "op": "add",
-                "content": hostile_secret,
-                "metadata": {"private": hostile_secret},
-            }]
-        }));
-        record.applied_ops = Some(json!([{
-            "op": "curation_batch",
-            "status": "applied",
-            "operation_count": 1,
-            "receipt": receipt,
-            "raw_model_text": hostile_secret,
-        }]));
-        record.rejected_ops = Some(json!([{
-            "fact_id": "fact.beta",
-            "reason": hostile_secret,
-            "evidence": {"content": hostile_secret},
-        }]));
-        record.validation_report = Some(json!({
-            "status": "applied",
-            "raw_model_text": hostile_secret,
-        }));
-        let outcomes = AutomationOutcomesSnapshot::default();
-        let ctx = ArtifactPayloadContext {
-            run_id: "run-outcomes",
-            task: AgentTaskKind::MemoryCurator,
-            task_key: "memory_curator",
-            prompt_version: "memory_curator:v1",
-            policy: artifact_policy(AgentTaskKind::MemoryCurator),
-            request: &request,
-            response: &response,
-            record: &record,
-            outcomes: &outcomes,
-        };
-
-        let payload = traces_payload(&ctx);
-        let result = payload
-            .pointer("/curation_result")
-            .expect("curation result");
-        assert_eq!(result.pointer("/status"), Some(&json!("succeeded")));
-        assert_eq!(result.pointer("/reviewed_count"), Some(&json!(2)));
-        assert_eq!(
-            result.pointer("/operation_receipts/0/operation_id"),
-            Some(&json!(operation_id))
-        );
-        assert_eq!(
-            result.pointer("/operation_receipts/0/effects/0/kind"),
-            Some(&json!("normalize_tags"))
-        );
-        assert_eq!(
-            result.pointer("/operation_receipts/0/effects/0/fact_id"),
-            Some(&json!(fact_id))
-        );
-        assert_eq!(
-            result.pointer("/operation_receipts/0/effects/0/commit/last_event_id"),
-            Some(&json!(provenance_event_id))
-        );
-        assert!(result.pointer("/applied_ops").is_none());
-        assert!(result.pointer("/rejected_ops").is_none());
-        assert!(result.pointer("/validation_report").is_none());
-        assert!(
-            !serde_json::to_string(result)
-                .expect("payload JSON")
-                .contains(hostile_secret)
-        );
-
-        let evals = generated_eval_payloads(&ctx);
-        let gate = improvement_gate_payload(&ctx, &evals);
-        let validation_gate = validation_gate_payload(
-            &ctx,
-            (
-                &json!({"kind": "traces"}),
-                &json!({"kind": "feedback"}),
-                &json!({"kind": "generated_evals"}),
-            ),
-            &evals,
-            &gate,
-        );
-        let validation_report = validation_gate
-            .pointer("/task_validation/report")
-            .expect("redacted validation report");
-        assert_eq!(
-            validation_report.pointer("/operation_receipts/0/operation_id"),
-            Some(&json!(operation_id))
-        );
-        assert!(validation_report.pointer("/raw_model_text").is_none());
-        assert!(validation_report.pointer("/validation_report").is_none());
-        assert!(
-            validation_report
-                .pointer("/validation_report_hash")
-                .is_some()
-        );
-        assert!(
-            !serde_json::to_string(&validation_gate)
-                .expect("validation gate JSON")
-                .contains(hostile_secret)
-        );
-        let refs = ArtifactRefs {
-            trace: json!({"kind": "traces"}),
-            feedback: json!({"kind": "feedback"}),
-            generated_evals: json!({"kind": "generated_evals"}),
-            validation_gate: json!({"kind": "validation_gate"}),
-            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
-        };
-        let handoff = codex_handoff_payload(&ctx, &refs, &evals, &gate);
-        assert!(handoff.pointer("/response/output_text_preview").is_none());
-        assert!(handoff.pointer("/response/output_json").is_none());
-        assert_eq!(
-            handoff.pointer("/response/curation_result/operation_receipts/0/operation_id"),
-            Some(&json!(operation_id))
-        );
-        assert!(
-            !serde_json::to_string(&handoff)
-                .expect("Codex handoff JSON")
-                .contains(hostile_secret)
-        );
-    }
-
-    fn domain_id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).expect("domain id")
-    }
-
-    #[test]
     fn empty_outcomes_snapshot_reports_none_recorded() {
         let (request, response, record) = payload_fixture();
         let outcomes = AutomationOutcomesSnapshot::default();
@@ -901,23 +630,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_handoff_reports_applied_effect_with_deployment_receipt() {
+    fn codex_handoff_reports_auto_applied_records_without_approval_gate() {
         let (request, response, mut record) = payload_fixture();
         record.accepted_count = 1;
         record.reviewed_count = 1;
-        record.applied_ops = Some(json!({
-            "created_skills": [{ "skill_id": "outcome-skill" }],
-            "deployment": {
-                "status": "complete",
-                "exports": [],
-                "materialization_scopes": [],
-                "errors": [],
-                "reason": null,
-                "retry_required": false,
-            },
-        }));
+        record.applied_ops = Some(json!(["proposal-1"]));
         record.validation_report = Some(json!({
-            "status": "applied",
+            "session_fact_apply_policy": {
+                "mutates_store": true,
+            }
         }));
         let outcomes = AutomationOutcomesSnapshot::default();
         let ctx = ArtifactPayloadContext {
@@ -951,62 +672,155 @@ mod tests {
 
         assert_eq!(
             validation_payload
-                .pointer("/task_validation/automatic_application/status")
+                .pointer("/task_validation/approval_required")
                 .unwrap(),
-            &json!("applied")
+            &json!(false)
         );
         assert_eq!(
-            payload
-                .pointer("/readiness/automatic_application/deployment_receipt/status")
-                .unwrap(),
-            &json!("complete")
-        );
-        assert_eq!(
-            payload
-                .pointer("/validation_requirements/automatic_application")
+            validation_payload
+                .pointer("/improvement_gate/criteria/auto_apply_allowed")
                 .unwrap(),
             &json!(true)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload
+                .pointer("/validation_requirements/must_not_auto_apply")
+                .unwrap(),
+            &json!(false)
         );
     }
 
     #[test]
-    fn automatic_application_effect_reports_no_candidate_quarantine_and_partial_retry() {
-        let (_, _, mut no_candidate) = payload_fixture();
-        no_candidate.validation_report = Some(json!({"status": "no_candidate"}));
-        assert_eq!(
-            automatic_application_effect(&no_candidate).pointer("/status"),
-            Some(&json!("no_candidate"))
-        );
-
-        let (_, _, mut settled_noop) = payload_fixture();
-        settled_noop.accepted_count = 2;
-        settled_noop.applied_ops = None;
-        settled_noop.validation_report = Some(json!({"status": "settled_noop"}));
-        assert_eq!(
-            automatic_application_effect(&settled_noop).pointer("/status"),
-            Some(&json!("settled_noop"))
-        );
-
-        let (_, _, mut quarantined) = payload_fixture();
-        quarantined.validation_report = Some(json!({"status": "quarantined"}));
-        assert_eq!(
-            automatic_application_effect(&quarantined).pointer("/status"),
-            Some(&json!("quarantined"))
-        );
-
-        let (_, _, mut partial) = payload_fixture();
-        partial.accepted_count = 1;
-        partial.rejected_count = 1;
-        partial.error_retryable = Some(true);
-        partial.applied_ops = Some(json!({
-            "deployment": {
-                "status": "partial_failure",
-                "retry_required": true,
-            },
+    fn codex_handoff_reports_partial_memory_apply_without_approval_gate() {
+        let (request, response, mut record) = payload_fixture();
+        record.accepted_count = 2;
+        record.reviewed_count = 2;
+        record.applied_ops = Some(json!([
+            { "op": "delete", "fact_id": 102 },
+            { "op": "delete", "fact_id": 102 }
+        ]));
+        record.validation_report = Some(json!({
+            "applied": 1,
+            "results": [
+                { "op": "delete", "fact_id": 102, "status": "deleted" },
+                { "op": "delete", "fact_id": 102, "status": "error" }
+            ],
+            "apply_policy": {
+                "accepted_count": 2,
+                "mutates_store": true,
+            }
         }));
-        partial.validation_report = Some(json!({"status": "failed_after_partial_effects"}));
-        let effect = automatic_application_effect(&partial);
-        assert_eq!(effect.pointer("/status"), Some(&json!("partial")));
-        assert_eq!(effect.pointer("/retry_required"), Some(&json!(true)));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::MemoryCurator,
+            task_key: "memory_curator",
+            prompt_version: "memory_curator:v1",
+            policy: artifact_policy(AgentTaskKind::MemoryCurator),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+        let validation_payload = validation_gate_payload(
+            &ctx,
+            (&refs.trace, &refs.feedback, &refs.generated_evals),
+            &evals,
+            &gate,
+        );
+
+        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(
+            validation_payload
+                .pointer("/task_validation/approval_required")
+                .unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            validation_payload
+                .pointer("/improvement_gate/criteria/auto_apply_allowed")
+                .unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
+            &json!(false)
+        );
+    }
+
+    #[test]
+    fn codex_handoff_does_not_treat_skill_writer_applied_ops_as_memory_auto_apply() {
+        let (request, response, mut record) = payload_fixture();
+        record.accepted_count = 1;
+        record.reviewed_count = 1;
+        record.applied_ops = Some(json!({
+            "created_skills": [],
+            "updated_skills": [],
+            "staged_consolidations": [],
+        }));
+        record.validation_report = Some(json!({
+            "status": "needs_approval",
+            "dry_run": true,
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SkillWriter,
+            task_key: "skill_writer",
+            prompt_version: "skill_writer:v1",
+            policy: artifact_policy(AgentTaskKind::SkillWriter),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+
+        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(
+            payload.pointer("/readiness/approval_required").unwrap(),
+            &json!(true)
+        );
+        assert_eq!(
+            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
+            &json!(false)
+        );
+        assert_eq!(
+            payload
+                .pointer("/validation_requirements/must_not_auto_apply")
+                .unwrap(),
+            &json!(true)
+        );
     }
 }

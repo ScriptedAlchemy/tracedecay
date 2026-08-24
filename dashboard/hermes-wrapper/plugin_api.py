@@ -2,15 +2,13 @@
 
 Mounted at /api/plugins/tracedecay/ by the Hermes dashboard plugin system.
 
-This is a thin host adapter for the canonical implementation: a local
+This is a THIN reverse proxy onto the canonical implementation: a local
 ``tracedecay dashboard`` HTTP server (see the tracedecay repo, ``src/dashboard``).
-It does not ship or reimplement any dashboard UI. The adapter:
+It does not reimplement any data access. The wrapper:
 
 - lazily spawns ``tracedecay dashboard --port 0`` bound to 127.0.0.1 (or uses
   an externally managed server via ``TRACEDECAY_DASHBOARD_URL``),
-- returns the server root from ``/dashboard-url`` so the Hermes entry can mount
-  the one embedded dashboard, and
-- retains compatibility API forwarding: ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
+- forwards ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
   ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
   ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
   ``/savings/*`` -> upstream ``/api/plugins/savings/*``,
@@ -428,13 +426,6 @@ class _DummyRequest:
     url = _URL()
 
 
-@router.get("/dashboard-url")
-def get_dashboard_url() -> JSONResponse:
-    """Return the canonical dashboard root for the Hermes iframe mount."""
-    base = _upstream_base()
-    return JSONResponse({"url": f"{base}/"})
-
-
 @router.get("/capabilities")
 def get_capabilities() -> JSONResponse:
     """Backend feature discovery (proxied from the tracedecay server).
@@ -469,8 +460,8 @@ def get_holographic(path: str, request: Request) -> JSONResponse:
 
     Maps ``/holographic/<path>`` to upstream
     ``GET /api/plugins/holographic/<path>`` (e.g. ``projection``,
-    ``similarity``, ``fact/{id}``, ``oplog``), preserving the query
-    string.
+    ``similarity``, ``fact/{id}``, ``curation/status``, ``curation/activity``),
+    preserving the query string.
     """
     return _proxy("GET", f"/api/plugins/holographic/{path}", request, None)
 
@@ -480,8 +471,9 @@ async def post_holographic(path: str, request: Request) -> JSONResponse:
     """Catch-all POST proxy for the holographic memory API.
 
     Maps ``/holographic/<path>`` to upstream
-    ``POST /api/plugins/holographic/<path>``. Request bodies are forwarded
-    unmodified.
+    ``POST /api/plugins/holographic/<path>`` (e.g. ``curate/apply``),
+    forwarding the JSON request body unmodified.
+    (There is no archive/restore: curation deletes are permanent.)
 
     ``_proxy`` blocks (urllib + possible spawn/ready wait), so it runs on the
     threadpool so a slow apply round-trip does not stall the event loop.

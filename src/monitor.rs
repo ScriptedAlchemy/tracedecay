@@ -11,8 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::display::format_number;
-
 mod cost;
 
 use cost::{CostCache, CostCacheState};
@@ -129,6 +127,7 @@ fn write_entry_inner(
 
     let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
 
+    // Read current write_idx.
     let write_idx = u64::from_le_bytes(
         mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8]
             .try_into()
@@ -137,10 +136,12 @@ fn write_entry_inner(
     let slot = (write_idx as usize) % RING_CAPACITY;
     let off = HEADER_SIZE + slot * ENTRY_SIZE;
 
+    // Write string fields.
     write_str(&mut mmap, off + EOFF_PREFIX, prefix);
     write_str(&mut mmap, off + EOFF_PROJECT, project);
     write_str(&mut mmap, off + EOFF_TOOL, tool_name);
 
+    // Write numeric fields.
     mmap[off + EOFF_DELTA..off + EOFF_DELTA + 8].copy_from_slice(&delta.to_le_bytes());
     mmap[off + EOFF_BEFORE..off + EOFF_BEFORE + 8].copy_from_slice(&before.to_le_bytes());
 
@@ -283,6 +284,7 @@ pub fn run() -> std::io::Result<()> {
         return Ok(());
     };
 
+    // Ensure mmap file exists.
     let mmap_path = dir.join(MMAP_FILENAME);
     if !mmap_path.exists() {
         let f = std::fs::File::create(&mmap_path)?;
@@ -304,15 +306,16 @@ pub fn run() -> std::io::Result<()> {
         };
         for i in 0..populated {
             let slot = (start_slot + i) % RING_CAPACITY;
-            if let Some(e) = reader.entry(slot)
-                && e.delta > 0
-            {
-                push_recent_update(&mut recent_updates, &e.project, &e.tool_name);
-                entries.push(e);
+            if let Some(e) = reader.entry(slot) {
+                if e.delta > 0 {
+                    push_recent_update(&mut recent_updates, &e.project, &e.tool_name);
+                    entries.push(e);
+                }
             }
         }
     }
 
+    // Enter raw mode + alternate screen.
     let mut stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
@@ -325,6 +328,7 @@ pub fn run() -> std::io::Result<()> {
         &mut stdout,
     );
 
+    // Restore terminal.
     execute!(stdout, cursor::Show, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
 
@@ -350,38 +354,39 @@ fn monitor_loop(
 
     loop {
         // Poll for key events (100ms timeout = our refresh rate).
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let event::Event::Key(key) = event::read()?
-        {
-            match key.code {
-                event::KeyCode::Char('c')
-                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                {
-                    break;
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let event::Event::Key(key) = event::read()? {
+                match key.code {
+                    event::KeyCode::Char('c')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        break;
+                    }
+                    event::KeyCode::Char('r')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        entries.clear();
+                        recent_updates.clear();
+                        scroll_offset = 0;
+                    }
+                    event::KeyCode::Up => {
+                        scroll_offset = scroll_offset.saturating_add(1);
+                    }
+                    event::KeyCode::Down => {
+                        scroll_offset = scroll_offset.saturating_sub(1);
+                    }
+                    event::KeyCode::PageUp => {
+                        scroll_offset = scroll_offset.saturating_add(last_log_lines.max(1));
+                    }
+                    event::KeyCode::PageDown => {
+                        scroll_offset = scroll_offset.saturating_sub(last_log_lines.max(1));
+                    }
+                    _ => {}
                 }
-                event::KeyCode::Char('r')
-                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                {
-                    entries.clear();
-                    recent_updates.clear();
-                    scroll_offset = 0;
-                }
-                event::KeyCode::Up => {
-                    scroll_offset = scroll_offset.saturating_add(1);
-                }
-                event::KeyCode::Down => {
-                    scroll_offset = scroll_offset.saturating_sub(1);
-                }
-                event::KeyCode::PageUp => {
-                    scroll_offset = scroll_offset.saturating_add(last_log_lines.max(1));
-                }
-                event::KeyCode::PageDown => {
-                    scroll_offset = scroll_offset.saturating_sub(last_log_lines.max(1));
-                }
-                _ => {}
             }
         }
 
+        // Re-read mmap for new entries.
         let _ = reader.refresh();
         let current_idx = reader.write_idx();
         if current_idx > *last_idx {
@@ -400,6 +405,7 @@ fn monitor_loop(
             cost_cache.begin_refresh();
         }
 
+        // Render.
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
         let h = height as usize;
@@ -418,16 +424,10 @@ fn monitor_loop(
                 "  Spent: ${:.2} today | ${:.2} 7d    Saved: {}",
                 snapshot.today_cost, snapshot.week_cost, saved_str
             ));
-            match (&snapshot.top_model, snapshot.top_model_cost) {
-                (Some(model), Some(cost)) => cost_panel.push(format!(
-                    "  Efficiency: {:.0}%    Top model: {model} (${cost:.2})",
-                    snapshot.efficiency_pct
-                )),
-                _ => cost_panel.push(format!(
-                    "  Efficiency: {:.0}%    Top model: unavailable",
-                    snapshot.efficiency_pct
-                )),
-            }
+            cost_panel.push(format!(
+                "  Efficiency: {:.0}%    Top model: {} (${:.2})",
+                snapshot.efficiency_pct, snapshot.top_model, snapshot.top_model_cost
+            ));
         }
         match &cost_cache.state {
             CostCacheState::Fresh => {}
@@ -507,6 +507,7 @@ fn monitor_loop(
         }
         all_lines.push(("", format!("TOTAL  {}", format_number(grand_total))));
 
+        // Clamp scroll offset to valid range.
         let max_offset = all_lines.len().saturating_sub(log_lines);
         if scroll_offset > max_offset {
             scroll_offset = max_offset;
@@ -588,6 +589,18 @@ fn update_color_for(recent: &[(String, String)], project: &str, tool_name: &str)
         Some(2) => "\x1b[33m",       // yellow: 3rd latest
         _ => "",
     }
+}
+
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 #[cfg(test)]

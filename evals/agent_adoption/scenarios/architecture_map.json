@@ -17,10 +17,11 @@
       "tracedecay_read",
       "tracedecay_grep",
       "tracedecay_dashboard",
-      "tracedecay_module_api",
+      "tracedecay_map_architecture",
       "tracedecay_files"
     ],
     "acceptable": [
+      "tracedecay_module_api",
       "Read"
     ],
     "forbidden_first": [

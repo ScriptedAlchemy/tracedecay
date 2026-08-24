@@ -2,11 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-pub(crate) const USER_MEMORY_DB_FILENAME: &str = "user-memory.db";
+use crate::db::Database;
+use crate::errors::Result;
+
+pub const USER_MEMORY_DB_FILENAME: &str = "user-memory.db";
 
 pub fn user_memory_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_MEMORY_DB_FILENAME)
 }
 
-// The daemon registry owns opening this path because registry/profile
-// lifecycle sits above the runtime kernel.
+pub async fn open_user_memory_db(profile_root: &Path) -> Result<Database> {
+    let path = user_memory_db_path(profile_root);
+    let authority = crate::db::DatabaseAuthority::for_runtime(&path, "open user memory")?;
+    if path.is_file() {
+        return Database::open(&path, &authority).await.map(|(db, _)| db);
+    }
+    Database::initialize(&path, &authority)
+        .await
+        .map(|(db, _)| db)
+}

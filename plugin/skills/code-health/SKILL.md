@@ -10,10 +10,10 @@ and the specific scans the user asked for — don't run every tool by reflex.
 
 ## Quality scorecard
 
-1. **Composite signal → `tracedecay_health` / `tracedecay_health_read`**
-   (`details: true`, optional `path`): the 0–10000 score plus the 5-dimension
-   breakdown (acyclicity, depth, equality, redundancy, modularity) and the
-   `coverage_discipline` penalty. The weak dimensions choose the drill-downs.
+1. **Composite signal → `tracedecay_health`** (`details: true`, optional
+   `path`): the 0–10000 score plus the 5-dimension breakdown (acyclicity,
+   depth, equality, redundancy, modularity) and the `coverage_discipline`
+   penalty. The weak dimensions choose the drill-downs.
 2. **Inequality / god files → `tracedecay_gini`** (`metric`:
    `complexity`|`lines`|`fan_in`|`fan_out`|`members`, `scope`, `path?`).
 3. **Complexity & size offenders:** `tracedecay_complexity`,
@@ -29,10 +29,6 @@ and the specific scans the user asked for — don't run every tool by reflex.
    sites → `tracedecay_unsafe_patterns`**. **Risk-weighted test gaps →
    `tracedecay_test_risk`**. **Changed-files-only pass →
    `tracedecay_simplify_scan`** (`files`).
-6. **Files nothing loads → `tracedecay_unmounted_files`** (`path?`, `limit?`):
-   source files no build root reaches. No compiler, bundler, or test runner
-   ever sees them, yet their symbols inflate every count above — resolve them
-   before trusting a scorecard.
 
 ## Architecture map
 
@@ -46,15 +42,15 @@ and the specific scans the user asked for — don't run every tool by reflex.
 
 ## Session health delta
 
-1. **Before the first edit → `tracedecay_health_delta`** without
-   `before_cursor`: pins the current project health and returns its stable
-   `after_cursor`.
-2. **After the work → `tracedecay_health_delta`** with that cursor as
-   `before_cursor`: returns the exact per-dimension diff. A dropped dimension
-   names the follow-up (redundancy fell → `tracedecay_redundancy`; acyclicity
-   fell → `tracedecay_circular`).
-3. Keep the returned cursor with the task evidence; it is project- and
-   path-scope-bound and does not rely on a mutable session baseline file.
+1. **Before the first edit → `tracedecay_session_start`** (no args):
+   snapshots current health as the baseline
+   (`.tracedecay/session_baseline.json`).
+2. **After the work → `tracedecay_session_end`**: the per-dimension diff —
+   what improved, what degraded — and clears the baseline. A dropped
+   dimension names the follow-up (redundancy fell → `tracedecay_redundancy`;
+   acyclicity fell → `tracedecay_circular`).
+3. Bracket only work where a before/after delta is wanted; a second
+   `session_start` silently overwrites the baseline.
 
 ## Project & index status
 
@@ -64,32 +60,28 @@ and the specific scans the user asked for — don't run every tool by reflex.
 2. **Storage status → `tracedecay_storage_status`** (no args): resolved
    active project store health, graph DB path, writability, branch-fallback
    warnings — instead of probing `.tracedecay` or direct SQLite checks.
-3. **Remote Brain status → `tracedecay_remote_status`** (no args): listener,
-   enrollment, spool, replay coverage, backup verification, and
-   failover/recovery state — the same operational plane Doctor, CLI, and
-   the dashboard read. Direct/non-daemon servers return typed `unavailable`.
-4. **Project registry / cross-project context → `tracedecay_project_list` /
+3. **Project registry / cross-project context → `tracedecay_project_list` /
    `tracedecay_project_search` / `tracedecay_project_context`** when the user
    asks about another project, sibling workspace, cross-repo context, or
    cross-project context gathering. Confirm the target store first, then pass
    `project_id`, `project_path`, or `project_selector` to
    `tracedecay_context`, `tracedecay_search`, or `tracedecay_message_search`
    instead of scanning parent directories.
-5. **Index status → `tracedecay_status`**: node/edge/file counts, DB size,
+4. **Index status → `tracedecay_status`**: node/edge/file counts, DB size,
    active branch + fallback warning, tokens saved.
-6. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
+5. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
    `glob`): query TOML/JSON by dotted key — works even before `tracedecay init`.
-7. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`).
-8. **Server triage → `tracedecay_runtime`** (PID, memory, CPU%, DB sizes) when
+6. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`).
+7. **Server triage → `tracedecay_runtime`** (PID, memory, CPU%, DB sizes) when
    TraceDecay seems to hog CPU or RAM. **Visual → `tracedecay_dashboard`**
    (`action`: `start`|`stop`): hand the URL to the user.
 
 ## Guardrails
 
-- Discovery/analysis tools are read-only and parallel-safe. Use
-  `tracedecay_health_delta` for generation-bound health evidence.
-  `tracedecay_dashboard` starts/stops a local server — use it only when relevant
-  and respect Cursor approval/run-mode.
+- Discovery/analysis tools are read-only and parallel-safe.
+  `tracedecay_session_start`/`session_end` write/remove the baseline file and
+  `tracedecay_dashboard` starts/stops a local server — use them only when
+  relevant and respect Cursor approval/run-mode.
 - `tracedecay_redundancy` is computed lazily and cached; the first call on a
   fresh index can be slow — keep `path`/`max_pairs` tight.
 - For large audits, use scoped read-only subagents by path, weak health

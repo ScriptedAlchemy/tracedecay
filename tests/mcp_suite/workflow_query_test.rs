@@ -1,23 +1,23 @@
 //! End-to-end tests for the workflow-run query surface: `tracedecay_workflows`
-//! lists runs for a thread or git ref, shows one run, and drills into one agent.
-//! Everything is driven through the real `handle_tool_call` dispatch against a
-//! temp `~/.claude` fixture tree plus a seeded `sessions.db`, mirroring
-//! `git_correlation_test.rs`.
-
-#![cfg(feature = "test-transport")]
+//! (list runs for a thread / for a git ref, show one run, drill one agent) and
+//! the `workflow_run` / `workflow_agent` agent-precision filter on
+//! `tracedecay_message_search`. Everything is driven through the real
+//! `handle_tool_call` dispatch against a temp `~/.claude` fixture tree plus a
+//! seeded `sessions.db`, mirroring `git_correlation_test.rs`.
 
 use std::path::Path;
 
 use serde_json::{Value, json};
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::TraceDecay;
-use tracedecay_sessions::runtime::git_correlation::{
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
+use tracedecay::sessions::workflow_ingest::ingest_workflow_runs;
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
 
 use crate::common;
-use crate::support::extract_tool_result_json as extract_json;
 
 // Fixture identity, shared across the on-disk tree and the seeded DB rows.
 const SLUG: &str = "-home-zack-projects-fixture";
@@ -27,6 +27,23 @@ const AGENT_MINE_ID: &str = "a17141dbe5a308242";
 const AGENT_RUN_ID: &str = "aa09ec4d07fccc915";
 const AGENT_MINE_LABEL: &str = "mine:claude-transcripts";
 const AGENT_RUN_LABEL: &str = "run:eval-batch";
+
+/// Absolute path of the `agent-<id>.jsonl` transcript inside the fixture tree.
+/// This is exactly what the ingest sweep records as `transcript_path`, and what
+/// the seeded `session_messages.source_path` must equal for the workflow-scoped
+/// search join to fire.
+fn agent_transcript_path(home: &Path, agent_id: &str) -> String {
+    home.join(".claude")
+        .join("projects")
+        .join(SLUG)
+        .join(SESSION_ID)
+        .join("subagents")
+        .join("workflows")
+        .join(RUN_ID)
+        .join(format!("agent-{agent_id}.jsonl"))
+        .to_string_lossy()
+        .to_string()
+}
 
 /// Materializes a workflow run on disk under `<home>/.claude/projects/...`,
 /// shaped exactly like a real run: a parent transcript recording `cwd` (so the
@@ -168,16 +185,85 @@ fn span(session_id: &str, branch: &str, worktree: &str, ts: i64) -> SpanObservat
     }
 }
 
+/// A session row for the run's parent thread, so a recorded git span attributes
+/// to a session the store knows about (mirrors ClaudeSource's parent session).
+fn parent_session(project_key: &str) -> SessionRecord {
+    SessionRecord {
+        provider: "claude".to_string(),
+        session_id: SESSION_ID.to_string(),
+        project_key: project_key.to_string(),
+        project_path: project_key.to_string(),
+        title: Some("workflow parent thread".to_string()),
+        started_at: Some(1_783_142_254),
+        ended_at: None,
+        transcript_path: Some(format!("{SESSION_ID}.jsonl")),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    }
+}
+
+/// A subagent session row for one workflow agent, so its messages join back to a
+/// session the store knows about (the message-search JOIN requires it) — the
+/// shape ClaudeSource would persist for a sidechain transcript.
+fn agent_session(home: &Path, project_key: &str, agent_id: &str) -> SessionRecord {
+    SessionRecord {
+        provider: "claude".to_string(),
+        session_id: format!("agent-{agent_id}"),
+        project_key: project_key.to_string(),
+        project_path: project_key.to_string(),
+        title: Some(format!("agent {agent_id}")),
+        started_at: Some(1_783_142_260),
+        ended_at: None,
+        transcript_path: Some(agent_transcript_path(home, agent_id)),
+        metadata_json: None,
+        parent_session_id: Some(SESSION_ID.to_string()),
+        is_subagent: true,
+        agent_id: Some(agent_id.to_string()),
+        parent_tool_use_id: None,
+    }
+}
+
+/// A message row standing in for one line of an agent transcript: `session_id`
+/// is the agent's own session id and `source_path` is the agent-`<id>`.jsonl
+/// file — the two keys the workflow-scoped search join matches on.
+fn agent_message(
+    home: &Path,
+    agent_id: &str,
+    message_id: &str,
+    text: &str,
+) -> SessionMessageRecord {
+    let transcript = agent_transcript_path(home, agent_id);
+    SessionMessageRecord {
+        provider: "claude".to_string(),
+        message_id: message_id.to_string(),
+        session_id: format!("agent-{agent_id}"),
+        role: "assistant".to_string(),
+        timestamp: Some(1_783_142_260),
+        ordinal: 1,
+        text: text.to_string(),
+        kind: Some("message".to_string()),
+        model: Some("claude-fable-5".to_string()),
+        tool_names: None,
+        source_path: Some(transcript),
+        source_offset: Some(0),
+        metadata_json: None,
+    }
+}
+
+fn extract_json(result: &tracedecay::mcp::ToolResult) -> Value {
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("tool result should carry text content: {}", result.value));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result should be JSON: {e}\n{text}"))
+}
+
 /// Renders a tool call as markdown (no `format:"json"` override) so tests can
 /// assert on the summary-first markdown surface.
-async fn call_md(
-    cg: &TraceDecay,
-    runtime: &HostAdmissionTestRuntimeV1,
-    tool: &str,
-    args: Value,
-) -> String {
-    let result = runtime
-        .call_mcp_tool_for_test(cg, tool, args, None, None)
+async fn call_md(cg: &TraceDecay, tool: &str, args: Value) -> String {
+    let result = tracedecay::mcp::handle_tool_call(cg, tool, args, None, None)
         .await
         .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     result.value["content"][0]["text"]
@@ -186,67 +272,33 @@ async fn call_md(
         .to_string()
 }
 
-async fn call(
-    cg: &TraceDecay,
-    runtime: &HostAdmissionTestRuntimeV1,
-    tool: &str,
-    mut args: Value,
-) -> Value {
+async fn call(cg: &TraceDecay, tool: &str, mut args: Value) -> Value {
     if let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
-    let result = runtime
-        .call_mcp_tool_for_test(cg, tool, args, None, None)
+    let result = tracedecay::mcp::handle_tool_call(cg, tool, args, None, None)
         .await
         .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     extract_json(&result)
 }
 
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
-    let (_env, project_root) = common::IsolatedEnv::acquire().await;
-    let cg = TraceDecay::init(&project_root)
-        .await
-        .unwrap_or_else(|error| panic!("init project: {error}"));
-    // Reuse the runtime retained by init. A second HostAdmissionTestRuntimeV1
-    // daemon scope on the same profile overlaps the init-held authority.
-    let runtime = cg
-        .test_runtime_for_test()
-        .expect("init retains registered project session runtime");
-    runtime
-        .drop_project_workflow_schema_for_test()
-        .await
-        .unwrap_or_else(|error| panic!("drop workflow schema: {error}"));
-
-    for args in [
-        json!({"session_id": SESSION_ID}),
-        json!({"run_id": RUN_ID}),
-        json!({"branch": "main"}),
-    ] {
-        let payload = call(&cg, &runtime, "tracedecay_workflows", args).await;
-        assert_eq!(payload["status"], "unavailable");
-        assert_eq!(
-            payload["error"]["reason"], "workflow_index_not_built",
-            "a missing workflow schema must take precedence over empty or missing results"
-        );
-        assert_eq!(payload["error"]["retryable"], true);
-        assert!(
-            payload.get("count").is_none(),
-            "an unavailable index must not claim a zero count"
-        );
-        assert!(
-            payload.get("runs").is_none(),
-            "an unavailable index must not claim an empty run list"
-        );
-    }
+fn search_session_ids(payload: &Value) -> Vec<String> {
+    payload["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search results should be an array: {payload}"))
+        .iter()
+        .map(|hit| {
+            hit["session"]["session_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
 }
 
 /// Ingests the on-disk fixture and drives the three `tracedecay_workflows`
 /// modes plus the git-scope list end to end.
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
     let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
@@ -262,23 +314,20 @@ async fn workflows_query_surface_end_to_end() {
     // so the ingest sweep attributes the run to this project.
     write_workflow_fixture(&home, cg.project_root());
 
-    // Reuse the runtime retained by init (same overlap reason as the missing-
-    // schema workflow query above).
-    let runtime = cg
-        .test_runtime_for_test()
-        .expect("init retains registered project session runtime");
-
-    let stats = runtime
-        .ingest_workflows_for_test(cg.project_root())
+    let db_path = cg.store_layout().sessions_db_path.clone();
+    let db = GlobalDb::open_at(&db_path)
         .await
-        .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
+        .unwrap_or_else(|| panic!("open sessions.db"));
+
+    // The public ingest entrypoint reads $HOME (isolated to the tempdir), so it
+    // sweeps our fixture tree.
+    let stats = ingest_workflow_runs(&db, cg.project_root()).await;
     assert_eq!(stats.runs_ingested, 1, "one run ingested: {stats:?}");
     assert_eq!(stats.agents_ingested, 2, "two agents ingested: {stats:?}");
 
     // (a) session mode: list runs spawned by the parent thread.
     let by_session = call(
         &cg,
-        &runtime,
         "tracedecay_workflows",
         json!({ "session_id": SESSION_ID }),
     )
@@ -290,13 +339,7 @@ async fn workflows_query_surface_end_to_end() {
     assert_eq!(by_session["runs"][0]["agent_count"], 2);
 
     // (b) run mode: one run shows its phases + the two-agent roster + summary.
-    let by_run = call(
-        &cg,
-        &runtime,
-        "tracedecay_workflows",
-        json!({ "run_id": RUN_ID }),
-    )
-    .await;
+    let by_run = call(&cg, "tracedecay_workflows", json!({ "run_id": RUN_ID })).await;
     assert_eq!(by_run["mode"], "run", "{by_run}");
     assert_eq!(by_run["found"], true, "{by_run}");
     assert_eq!(by_run["agent_count"], 2, "{by_run}");
@@ -326,13 +369,7 @@ async fn workflows_query_surface_end_to_end() {
 
     // Markdown for the run detail is summary-first (phases + agents headings,
     // no leaked JSON object).
-    let run_md = call_md(
-        &cg,
-        &runtime,
-        "tracedecay_workflows",
-        json!({ "run_id": RUN_ID }),
-    )
-    .await;
+    let run_md = call_md(&cg, "tracedecay_workflows", json!({ "run_id": RUN_ID })).await;
     assert!(run_md.contains("Workflow Run"), "{run_md}");
     assert!(run_md.contains("Phases"), "{run_md}");
     assert!(run_md.contains("Agents"), "{run_md}");
@@ -342,7 +379,6 @@ async fn workflows_query_surface_end_to_end() {
     // mine agent had a real transcript, so ingest recorded its transcript_path.
     let drill = call(
         &cg,
-        &runtime,
         "tracedecay_workflows",
         json!({ "run_id": RUN_ID, "agent_label": AGENT_MINE_LABEL }),
     )
@@ -363,17 +399,15 @@ async fn workflows_query_surface_end_to_end() {
     // (d) git-scope mode: after a span places the parent thread on a branch,
     // the run surfaces via the parent-session span join.
     let worktree = project_key.clone();
-    runtime
-        .record_project_span_for_test(
-            &span(SESSION_ID, "feat/evals", &worktree, 1_783_142_254),
-            DEFAULT_SPAN_MERGE_GAP_SECS,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("record span: {e}"));
+    db.git_record_span_observation(
+        &span(SESSION_ID, "feat/evals", &worktree, 1_783_142_254),
+        DEFAULT_SPAN_MERGE_GAP_SECS,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("record span: {e}"));
 
     let by_branch = call(
         &cg,
-        &runtime,
         "tracedecay_workflows",
         json!({ "branch": "feat/evals" }),
     )
@@ -385,13 +419,223 @@ async fn workflows_query_surface_end_to_end() {
     // A branch nothing ran on returns no runs.
     let by_absent = call(
         &cg,
-        &runtime,
         "tracedecay_workflows",
         json!({ "branch": "feat/absent" }),
     )
     .await;
     assert_eq!(by_absent["count"], 0, "{by_absent}");
 
-    drop(runtime);
+    drop(db);
+    cg.close();
+}
+
+/// Drives the `workflow_run` / `workflow_agent` agent-precision filter on
+/// `tracedecay_message_search`.
+#[tokio::test]
+async fn message_search_workflow_scope_narrows_to_run_agents() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
+    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let home = env.home().to_path_buf();
+
+    let cg = TraceDecay::init(&project_root)
+        .await
+        .unwrap_or_else(|e| panic!("init project: {e}"));
+    let project_key = cg.project_root().to_string_lossy().to_string();
+
+    write_workflow_fixture(&home, cg.project_root());
+
+    let db_path = cg.store_layout().sessions_db_path.clone();
+    let db = GlobalDb::open_at(&db_path)
+        .await
+        .unwrap_or_else(|| panic!("open sessions.db"));
+
+    // Index the run + agents (sets each agent's transcript_path).
+    let stats = ingest_workflow_runs(&db, cg.project_root()).await;
+    assert_eq!(stats.runs_ingested, 1, "{stats:?}");
+
+    // Seed the parent thread + the two agent subagent sessions, then two agent
+    // messages whose source_path equals the agents' transcript files, plus an
+    // unrelated session whose message shares the query term but belongs to no
+    // workflow agent. Sessions come first: the message-search JOIN drops a
+    // message whose (provider, session_id) has no session row.
+    assert!(db.upsert_session(&parent_session(&project_key)).await);
+    assert!(
+        db.upsert_session(&agent_session(&home, &project_key, AGENT_MINE_ID))
+            .await
+    );
+    assert!(
+        db.upsert_session(&agent_session(&home, &project_key, AGENT_RUN_ID))
+            .await
+    );
+    assert!(
+        db.upsert_session(&SessionRecord {
+            session_id: "unrelated-thread".to_string(),
+            ..parent_session(&project_key)
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&agent_message(
+            &home,
+            AGENT_MINE_ID,
+            "mine-m1",
+            "sifted transcripts into eval scenarios harvest",
+        ))
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&agent_message(
+            &home,
+            AGENT_RUN_ID,
+            "run-m1",
+            "executed the eval scenarios batch harvest",
+        ))
+        .await
+    );
+    // Off-run noise: same term, different session, not an agent of the run.
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            session_id: "unrelated-thread".to_string(),
+            message_id: "noise-m1".to_string(),
+            source_path: Some("/somewhere/unrelated.jsonl".to_string()),
+            ..agent_message(
+                &home,
+                AGENT_MINE_ID,
+                "noise-m1",
+                "harvest happening elsewhere"
+            )
+        })
+        .await
+    );
+
+    // workflow_run scopes to BOTH agents of the run, excluding the off-run noise.
+    let by_run = call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "harvest",
+            "provider": "claude",
+            "catch_up": false,
+            "workflow_run": RUN_ID,
+        }),
+    )
+    .await;
+    assert_eq!(by_run["workflow_filter_applied"], true, "{by_run}");
+    assert_eq!(by_run["workflow_run"], RUN_ID, "{by_run}");
+    assert_eq!(
+        by_run["workflow_run_parent_session"], SESSION_ID,
+        "{by_run}"
+    );
+    let run_sessions = search_session_ids(&by_run);
+    assert!(
+        run_sessions.contains(&format!("agent-{AGENT_MINE_ID}")),
+        "{by_run}"
+    );
+    assert!(
+        run_sessions.contains(&format!("agent-{AGENT_RUN_ID}")),
+        "{by_run}"
+    );
+    assert!(
+        !run_sessions.contains(&"unrelated-thread".to_string()),
+        "off-run message leaked: {by_run}"
+    );
+
+    // workflow_agent narrows to just the one agent.
+    let by_agent = call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "harvest",
+            "provider": "claude",
+            "catch_up": false,
+            "workflow_run": RUN_ID,
+            "workflow_agent": AGENT_MINE_LABEL,
+        }),
+    )
+    .await;
+    assert_eq!(by_agent["workflow_agent"], AGENT_MINE_LABEL, "{by_agent}");
+    let agent_sessions = search_session_ids(&by_agent);
+    assert_eq!(
+        agent_sessions,
+        vec![format!("agent-{AGENT_MINE_ID}")],
+        "{by_agent}"
+    );
+
+    // Markdown surface names the scoped run + agent, no leaked JSON object.
+    let md = call_md(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "harvest",
+            "provider": "claude",
+            "catch_up": false,
+            "workflow_run": RUN_ID,
+            "workflow_agent": AGENT_MINE_LABEL,
+        }),
+    )
+    .await;
+    assert!(md.contains("workflow filter"), "{md}");
+    assert!(md.contains(RUN_ID), "{md}");
+    assert!(md.contains(AGENT_MINE_LABEL), "{md}");
+    assert!(!md.contains("\"workflow_run\""), "{md}");
+
+    drop(db);
+    cg.close();
+}
+
+/// A workflow-scoped search against a store that predates the workflow-index
+/// schema returns empty rather than erroring on a missing table.
+#[tokio::test]
+async fn message_search_workflow_scope_empty_without_workflow_tables() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
+    let (_env, project_root) = common::IsolatedEnv::acquire().await;
+
+    let cg = TraceDecay::init(&project_root)
+        .await
+        .unwrap_or_else(|e| panic!("init project: {e}"));
+    let project_key = cg.project_root().to_string_lossy().to_string();
+
+    let db_path = cg.store_layout().sessions_db_path.clone();
+    let db = GlobalDb::open_at(&db_path)
+        .await
+        .unwrap_or_else(|| panic!("open sessions.db"));
+
+    // Seed a plain message but NEVER create the workflow-index tables.
+    assert!(db.upsert_session(&parent_session(&project_key)).await);
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            session_id: SESSION_ID.to_string(),
+            message_id: "m1".to_string(),
+            source_path: Some(format!("{SESSION_ID}.jsonl")),
+            ..agent_message(project_root.as_path(), AGENT_MINE_ID, "m1", "harvest text")
+        })
+        .await
+    );
+
+    // Sanity: the same query matches without the workflow filter.
+    let unscoped = call(
+        &cg,
+        "tracedecay_message_search",
+        json!({ "query": "harvest", "provider": "claude", "catch_up": false }),
+    )
+    .await;
+    assert!(unscoped["count"].as_i64().unwrap_or(0) >= 1, "{unscoped}");
+
+    // With the workflow filter, a store lacking workflow_agents yields nothing.
+    let scoped = call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "harvest",
+            "provider": "claude",
+            "catch_up": false,
+            "workflow_run": RUN_ID,
+        }),
+    )
+    .await;
+    assert_eq!(scoped["workflow_filter_applied"], true, "{scoped}");
+    assert_eq!(scoped["count"], 0, "{scoped}");
+
+    drop(db);
     cg.close();
 }

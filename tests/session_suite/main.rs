@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Consolidated session/LCM sqlite test suite.
 //!
 //! Windows CI links every integration-test binary separately, and link time
@@ -9,9 +10,6 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod anchor_resolution;
-mod anchor_tombstone_expiry;
-mod fact_anchor_authority;
 mod git_backfill;
 mod global_db;
 mod lcm_compression;
@@ -19,18 +17,7 @@ mod lcm_dag;
 mod lcm_payload;
 mod lcm_query;
 mod lcm_raw;
-mod lcm_summary_lineage_review;
+mod lcm_schema;
 mod message_search_eval_test;
-mod observation_application;
-mod observation_projection;
-mod observation_store;
-mod observation_workflow_projection;
-mod temporal_application;
-mod temporal_benchmark;
-#[cfg(unix)]
-mod temporal_benchmark_runner;
-mod temporal_derived_evidence;
-mod temporal_projection;
-mod temporal_refresh;
-mod temporal_refresh_application;
-mod transcript_store;
+mod structured_backfill;
+mod transcript_backfill;

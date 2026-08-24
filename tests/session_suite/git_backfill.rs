@@ -1,5 +1,5 @@
-//! Integration coverage for historical session↔git convergence
-//! (`tracedecay sessions git-sync`).
+//! Integration coverage for the historical session↔git correlation backfill
+//! (`tracedecay sessions git-backfill`).
 //!
 //! Seeds a `sessions.db` with two sessions — one spanning a mid-session branch
 //! switch — against a real git repo carrying commits on both branches, runs
@@ -14,14 +14,12 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_domain::ProjectId;
-use tracedecay_sessions::runtime::git_correlation::{
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::git_correlation::{
     BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
-    SessionsForQuery, normalize_worktree,
+    SessionsForQuery, normalize_worktree, run_backfill,
 };
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
 use crate::common;
 
@@ -167,63 +165,36 @@ impl GitReflogSource for FakeGit {
     }
 }
 
-async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, String) {
+async fn open_seeded_db(repo: &Path) -> (TempDir, GlobalDb, String) {
     let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("db tmpdir: {e}"));
-    let db = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join(".tracedecay"),
-        repo,
-        ProjectId::new("project.git-backfill").unwrap(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
-    assert!(
-        db.database_path(HostAdmissionScope::Project).is_some(),
-        "registered project sessions database should be mounted"
-    );
+    let db_path = tmp.path().join("sessions.db");
+    let db = GlobalDb::open_at(&db_path)
+        .await
+        .unwrap_or_else(|| panic!("open sessions.db"));
     let project = repo.to_string_lossy().to_string();
 
     // s_switch spans the whole run: main → feature → main.
     assert!(
-        db.upsert_session_for_test(
-            HostAdmissionScope::Project,
-            &session("s_switch", &project, T_BASE, T_BASE + 900),
-        )
-        .await
-        .unwrap()
+        db.upsert_session(&session("s_switch", &project, T_BASE, T_BASE + 900))
+            .await
     );
     assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_switch", "m1", T_BASE + 50),
-        )
-        .await
-        .unwrap()
+        db.upsert_session_message(&message("s_switch", "m1", T_BASE + 50))
+            .await
     );
     assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_switch", "m2", T_BASE + 850),
-        )
-        .await
-        .unwrap()
+        db.upsert_session_message(&message("s_switch", "m2", T_BASE + 850))
+            .await
     );
 
     // s_main only overlaps the first main stretch.
     assert!(
-        db.upsert_session_for_test(
-            HostAdmissionScope::Project,
-            &session("s_main", &project, T_BASE + 60, T_BASE + 250),
-        )
-        .await
-        .unwrap()
+        db.upsert_session(&session("s_main", &project, T_BASE + 60, T_BASE + 250))
+            .await
     );
     assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_main", "m3", T_BASE + 200),
-        )
-        .await
-        .unwrap()
+        db.upsert_session_message(&message("s_main", "m3", T_BASE + 200))
+            .await
     );
 
     (tmp, db, project)
@@ -250,8 +221,7 @@ async fn backfill_attributes_branch_switch_and_commits() {
         ..Default::default()
     };
 
-    let stats = db
-        .run_git_backfill_for_test(&[], &git, &opts)
+    let stats = run_backfill(&db, &[], &git, &opts)
         .await
         .unwrap_or_else(|e| panic!("backfill: {e}"));
     assert_eq!(stats.sessions_scanned, 2);
@@ -264,15 +234,12 @@ async fn backfill_attributes_branch_switch_and_commits() {
 
     // s_switch touched both branches; s_main only main.
     let feature_hits = db
-        .git_sessions_for_for_test(
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Branch("feature".to_string()),
-                since: None,
-                until: None,
-                limit: 20,
-            },
-            CommitRelationFilter::Observed,
-        )
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("feature".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
         .await
         .unwrap();
     let feature_ids: Vec<&str> = feature_hits.iter().map(|h| h.session_id.as_str()).collect();
@@ -284,15 +251,12 @@ async fn backfill_attributes_branch_switch_and_commits() {
     assert_eq!(feature_hits[0].worktree.as_deref(), Some(worktree.as_str()));
 
     let main_hits = db
-        .git_sessions_for_for_test(
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Branch("main".to_string()),
-                since: None,
-                until: None,
-                limit: 20,
-            },
-            CommitRelationFilter::Observed,
-        )
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
         .await
         .unwrap();
     let mut main_ids: Vec<String> = main_hits.iter().map(|h| h.session_id.clone()).collect();
@@ -305,7 +269,7 @@ async fn backfill_attributes_branch_switch_and_commits() {
         .find(|sha| !main_shas.contains(sha))
         .expect("feature-only commit");
     let commit_hits = db
-        .git_sessions_for_for_test(
+        .git_sessions_for_with_relation(
             &SessionsForQuery {
                 git_ref: GitRefFilter::Commit(feature_sha.clone()),
                 since: None,
@@ -346,42 +310,33 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
     };
 
     // Dry run writes nothing: no spans, so sessions_for is empty afterward.
-    let dry = db
-        .run_git_backfill_for_test(
-            &[],
-            &git,
-            &BackfillOptions {
-                dry_run: true,
-                ..opts.clone()
-            },
-        )
-        .await
-        .unwrap();
+    let dry = run_backfill(
+        &db,
+        &[],
+        &git,
+        &BackfillOptions {
+            dry_run: true,
+            ..opts.clone()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(dry.sessions_scanned, 2);
     let after_dry = db
-        .git_sessions_for_for_test(
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Branch("main".to_string()),
-                since: None,
-                until: None,
-                limit: 20,
-            },
-            CommitRelationFilter::Observed,
-        )
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
         .await
         .unwrap();
     assert!(after_dry.is_empty(), "dry-run must not write spans");
 
     // First real run writes; second run writes nothing new.
-    let first = db
-        .run_git_backfill_for_test(&[], &git, &opts)
-        .await
-        .unwrap();
+    let first = run_backfill(&db, &[], &git, &opts).await.unwrap();
     assert!(first.commits_attributed >= 1);
-    let second = db
-        .run_git_backfill_for_test(&[], &git, &opts)
-        .await
-        .unwrap();
+    let second = run_backfill(&db, &[], &git, &opts).await.unwrap();
     assert_eq!(
         second.commits_attributed, 0,
         "re-run must not re-attribute commits (INSERT OR IGNORE)"
@@ -389,15 +344,12 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
 
     // Span rows also converge: the main-branch session set is unchanged.
     let hits = db
-        .git_sessions_for_for_test(
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Branch("main".to_string()),
-                since: None,
-                until: None,
-                limit: 20,
-            },
-            CommitRelationFilter::Observed,
-        )
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
         .await
         .unwrap();
     let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
@@ -428,17 +380,14 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 
     // No pass has run yet, so no watermark is recorded.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
         None
     );
 
     // First pass drains both seeded sessions and writes their spans.
-    let first = db
-        .run_incremental_git_backfill_for_test(&git, 50)
-        .await
-        .unwrap();
+    let first = db.git_run_incremental_backfill(&git, 50).await.unwrap();
     assert_eq!(first.sessions_scanned, 2);
     assert!(
         first.spans_written >= 2,
@@ -448,31 +397,25 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
     // The watermark advances to the newest session activity: s_switch's last
     // message at T_BASE + 850.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
         Some(T_BASE + 850)
     );
 
     // A second pass finds nothing newer than the watermark: no rescans.
-    let second = db
-        .run_incremental_git_backfill_for_test(&git, 50)
-        .await
-        .unwrap();
+    let second = db.git_run_incremental_backfill(&git, 50).await.unwrap();
     assert_eq!(second.sessions_scanned, 0);
     assert_eq!(second.spans_written, 0);
 
     // The spans written by the first pass are intact and queryable.
     let hits = db
-        .git_sessions_for_for_test(
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Branch("main".to_string()),
-                since: None,
-                until: None,
-                limit: 20,
-            },
-            CommitRelationFilter::Observed,
-        )
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
         .await
         .unwrap();
     let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
@@ -488,49 +431,37 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
 
     // A cap of one session per pass drains oldest-first. s_main's activity
     // (last message T_BASE + 200) precedes s_switch's (T_BASE + 850).
-    let pass1 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
+    let pass1 = db.git_run_incremental_backfill(&git, 1).await.unwrap();
     assert_eq!(pass1.sessions_scanned, 1);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
         Some(T_BASE + 200),
         "oldest session processed first"
     );
 
-    let pass2 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
+    let pass2 = db.git_run_incremental_backfill(&git, 1).await.unwrap();
     assert_eq!(pass2.sessions_scanned, 1);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
         Some(T_BASE + 850)
     );
 
     // History fully drained: the next pass has nothing to do.
-    let pass3 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
+    let pass3 = db.git_run_incremental_backfill(&git, 1).await.unwrap();
     assert_eq!(pass3.sessions_scanned, 0);
 
     // Both sessions ended up attributed to main across the two passes.
     let hits = db
-        .git_sessions_for_for_test(
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Branch("main".to_string()),
-                since: None,
-                until: None,
-                limit: 20,
-            },
-            CommitRelationFilter::Observed,
-        )
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
         .await
         .unwrap();
     let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
@@ -542,32 +473,19 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
 async fn backfill_skips_non_worktree_sessions() {
     let (_base, repo, _main, _feature) = build_repo();
     let tmp = tempfile::tempdir().unwrap();
-    let db = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join(".tracedecay"),
-        &repo,
-        ProjectId::new("project.git-backfill-non-worktree").unwrap(),
-    )
-    .await
-    .unwrap();
+    let db_path = tmp.path().join("sessions.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
 
     // A session whose project_path is not a git repo.
     let not_repo = tmp.path().join("plain-dir").to_string_lossy().to_string();
     std::fs::create_dir_all(&not_repo).unwrap();
     assert!(
-        db.upsert_session_for_test(
-            HostAdmissionScope::Project,
-            &session("s_orphan", &not_repo, T_BASE, T_BASE + 100),
-        )
-        .await
-        .unwrap()
+        db.upsert_session(&session("s_orphan", &not_repo, T_BASE, T_BASE + 100))
+            .await
     );
     assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_orphan", "m1", T_BASE + 50),
-        )
-        .await
-        .unwrap()
+        db.upsert_session_message(&message("s_orphan", "m1", T_BASE + 50))
+            .await
     );
 
     let git = FakeGit {
@@ -575,17 +493,17 @@ async fn backfill_skips_non_worktree_sessions() {
         current: Some("main".to_string()),
         real_repo: repo.clone(),
     };
-    let stats = db
-        .run_git_backfill_for_test(
-            &[],
-            &git,
-            &BackfillOptions {
-                since: T_BASE - 1,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    let stats = run_backfill(
+        &db,
+        &[],
+        &git,
+        &BackfillOptions {
+            since: T_BASE - 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_scanned, 1);
     assert_eq!(stats.skipped_not_worktree, 1);
     assert_eq!(stats.spans_written, 0);

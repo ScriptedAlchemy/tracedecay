@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "memory-ranking-trust-bias",
+  "title": "Current trust gate prefers a less relevant higher-trust fact",
+  "description": "Pins today’s Risk C behavior: the multiplicative trust gate can bury a more relevant low-trust fact even when it matches the full query.",
+  "contract": "stable",
+  "contract_notes": "This is an intentional baseline for M1. It documents the current shipped behavior so future fusion tuning (M2) can flip the expectation deliberately.",
+  "setup": {
+    "facts": [
+      {
+        "content": "Database backup runbook uses pg_dump nightly",
+        "category": "project",
+        "source": "on-topic-low",
+        "trust": 0.3,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Acme primary database runs on Postgres",
+        "category": "project",
+        "source": "off-topic-high",
+        "trust": 0.9,
+        "retrieval_count": 0
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [],
+    "violation": null
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "trust_bias_fixture_loaded",
+      "sql": "SELECT COUNT(*) FROM memory_facts",
+      "op": "eq",
+      "value": 2
+    },
+    {
+      "kind": "search-rank",
+      "name": "current_trust_gate_prefers_off_topic_higher_trust",
+      "query": "database backup",
+      "top_fact_source": "off-topic-high",
+      "min_rank_gap": 1,
+      "limit": 5
+    }
+  ]
+}

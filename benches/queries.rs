@@ -1,9 +1,10 @@
+#![allow(clippy::collapsible_if)]
 //! Static (per-repo) query catalog used by the criterion bench.
 //!
-//! Queries are constructed once after the production composition publishes a
-//! code-index generation. The `QueryContext` is sampled through mounted MCP
-//! reads, so top-ranked symbols, qualified names, and file prefixes all come
-//! from the same admitted, generation-pinned graph used by the timed calls.
+//! Queries are constructed once after the repo is indexed: the `QueryContext`
+//! is sampled from real graph state (top-ranked nodes, real qualified names,
+//! file directory prefixes) so calls like `tracedecay_callers` receive valid
+//! `node_id`s.
 //!
 //! Write queries (`str_replace`, `multi_str_replace`, `insert_at`,
 //! `ast_grep_rewrite`) declare a `scratch_path` + `init_content`: the bench
@@ -12,13 +13,10 @@
 //! `git stash --include-untracked` at the end of the run reverts all
 //! scratch-file churn.
 
-use std::fmt::Write as _;
-use std::path::Path;
-
 use serde_json::{Value, json};
 
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::JsonRpcResponse;
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::types::NodeKind;
 
 /// Distinguishes read-only queries from queries that mutate a scratch file.
 #[derive(Clone)]
@@ -100,36 +98,27 @@ impl QueryContext {
     }
 }
 
-pub async fn build_context(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project_root: &Path,
-) -> Result<QueryContext, String> {
+pub async fn build_context(cg: &TraceDecay) -> QueryContext {
+    let all = cg.get_all_nodes().await.unwrap_or_default();
+
     let mut function_ids = Vec::new();
     let mut struct_ids = Vec::new();
+    let mut function_qnames = Vec::new();
     let mut any_ids = Vec::new();
 
-    for kind in ["function", "method", "struct", "class", "module"] {
-        let payload = call_json_tool(
-            harness,
-            project_root,
-            "tracedecay_largest",
-            json!({ "node_kind": kind, "limit": 64, "format": "json" }),
-        )
-        .await?;
-        let ranking = payload
-            .get("ranking")
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("tracedecay_largest returned no ranking for kind '{kind}'"))?;
-        for symbol in ranking {
-            let Some(id) = symbol.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            push_unique(&mut any_ids, id);
-            match kind {
-                "function" | "method" => push_unique(&mut function_ids, id),
-                "struct" | "class" => push_unique(&mut struct_ids, id),
-                _ => {}
+    for n in &all {
+        any_ids.push(n.id.clone());
+        match n.kind {
+            NodeKind::Function | NodeKind::Method => {
+                function_ids.push(n.id.clone());
+                if !n.qualified_name.is_empty() && function_qnames.len() < 64 {
+                    function_qnames.push(n.qualified_name.clone());
+                }
             }
+            NodeKind::Struct | NodeKind::Class => {
+                struct_ids.push(n.id.clone());
+            }
+            _ => {}
         }
     }
 
@@ -137,108 +126,24 @@ pub async fn build_context(
     struct_ids.truncate(64);
     any_ids.truncate(64);
 
-    let mut function_qnames = Vec::new();
-    for id in &function_ids {
-        let payload = call_json_tool(
-            harness,
-            project_root,
-            "tracedecay_node",
-            json!({ "node_id": id, "format": "json" }),
-        )
-        .await?;
-        if let Some(qualified_name) = payload.get("qualified_name").and_then(Value::as_str)
-            && !qualified_name.is_empty()
-        {
-            push_unique(&mut function_qnames, qualified_name);
-        }
-    }
-
-    let file_payload = call_json_tool(
-        harness,
-        project_root,
-        "tracedecay_files",
-        json!({ "layout": "flat", "format": "json" }),
-    )
-    .await?;
-    let files = file_payload
-        .get("files")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "tracedecay_files returned no files array".to_owned())?;
+    let files = cg.get_all_files().await.unwrap_or_default();
 
     // Collect first-segment directory prefixes from the sample files (so
     // `path_prefix` queries are valid for *this* repo regardless of layout).
     let mut dir_prefixes: Vec<String> = files
         .iter()
-        .filter_map(|file| file.get("path").and_then(Value::as_str))
-        .filter_map(|path| {
-            path.split_once('/')
-                .map(|(directory, _)| directory.to_owned())
-        })
+        .filter_map(|f| f.path.split('/').next().map(str::to_string))
         .collect();
     dir_prefixes.sort();
     dir_prefixes.dedup();
     dir_prefixes.truncate(5);
 
-    require_samples("functions or methods", &function_ids)?;
-    require_samples("structs or classes", &struct_ids)?;
-    require_samples("graph symbols", &any_ids)?;
-    require_samples("qualified function names", &function_qnames)?;
-    require_samples("indexed directory prefixes", &dir_prefixes)?;
-
-    Ok(QueryContext {
+    QueryContext {
         function_ids,
         struct_ids,
         any_ids,
         function_qnames,
         dir_prefixes,
-    })
-}
-
-async fn call_json_tool(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project_root: &Path,
-    tool_name: &str,
-    arguments: Value,
-) -> Result<Value, String> {
-    let response = harness
-        .call_tool(project_root, tool_name, arguments)
-        .await
-        .map_err(|error| format!("{tool_name} transport failed: {error}"))?;
-    json_tool_payload(tool_name, &response)
-}
-
-fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Value, String> {
-    if let Some(error) = &response.error {
-        return Err(format!("{tool_name} JSON-RPC failed: {error:?}"));
-    }
-    let result = response
-        .result
-        .as_ref()
-        .ok_or_else(|| format!("{tool_name} returned no JSON-RPC result"))?;
-    if result.get("isError").and_then(Value::as_bool) == Some(true) {
-        return Err(format!("{tool_name} returned a tool error: {result}"));
-    }
-    let text = result
-        .pointer("/content/0/text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{tool_name} returned no text payload"))?;
-    serde_json::from_str(text)
-        .map_err(|error| format!("{tool_name} returned non-JSON output: {error}; text={text}"))
-}
-
-fn push_unique(values: &mut Vec<String>, value: &str) {
-    if !values.iter().any(|existing| existing == value) {
-        values.push(value.to_owned());
-    }
-}
-
-fn require_samples(label: &str, values: &[String]) -> Result<(), String> {
-    if values.is_empty() {
-        Err(format!(
-            "production graph sampling returned no {label}; refusing to benchmark not-found paths"
-        ))
-    } else {
-        Ok(())
     }
 }
 
@@ -273,7 +178,13 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         "How is logging configured?",
         "How are tests organized?",
     ];
-    let kinds_for_largest = ["function", "method", "struct", "class", "module"];
+    let kinds_for_largest = [
+        json!(["function"]),
+        json!(["method"]),
+        json!(["struct"]),
+        json!(["class"]),
+        json!(["module"]),
+    ];
     let file_globs = ["**/*.rs", "**/*.c", "**/*.py", "**/*.js", "**/*.ts"];
     let rank_kinds = ["calls", "uses", "contains", "type_of", "implements"];
 
@@ -329,7 +240,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_node",
-                json!({ "node_id": QueryContext::pick(&ctx.any_ids, i) }),
+                json!({ "id": QueryContext::pick(&ctx.any_ids, i) }),
             )
         }),
     });
@@ -351,7 +262,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_signature",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i) }),
+                json!({ "id": QueryContext::pick(&ctx.function_ids, i) }),
             )
         }),
     });
@@ -373,7 +284,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_body",
-                json!({ "symbol": QueryContext::pick(&ctx.function_qnames, i) }),
+                json!({ "id": QueryContext::pick(&ctx.function_ids, i) }),
             )
         }),
     });
@@ -430,7 +341,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_kind",
                 "tracedecay_largest",
-                json!({ "node_kind": kinds_for_largest[i], "limit": 20 }),
+                json!({ "kinds": kinds_for_largest[i].clone(), "limit": 20 }),
             )
         }),
     });
@@ -474,7 +385,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_derives",
-                json!({ "node_id": QueryContext::pick(&ctx.struct_ids, i) }),
+                json!({ "id": QueryContext::pick(&ctx.struct_ids, i) }),
             )
         }),
     });
@@ -496,7 +407,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_kind",
                 "tracedecay_rank",
-                json!({ "edge_kind": rank_kinds[i], "limit": 20 }),
+                json!({ "kind": rank_kinds[i], "limit": 20 }),
             )
         }),
     });
@@ -559,7 +470,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             let mut content = String::new();
             let mut replacements = Vec::with_capacity(n);
             for k in 0..n {
-                let _ = write!(content, "MARK_{k}\nfiller line {k}\n");
+                content.push_str(&format!("MARK_{k}\nfiller line {k}\n"));
                 replacements.push([format!("MARK_{k}"), format!("DONE_{k}")]);
             }
             Query::write(

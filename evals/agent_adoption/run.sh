@@ -78,11 +78,7 @@ elif [[ "$live" == "1" ]]; then
   else
     eval_target="$repo_root/target"
   fi
-  (
-    cd "$repo_root"
-    CARGO_TARGET_DIR="$eval_target" \
-      cargo build --quiet --package tracedecay-cli --bin tracedecay
-  )
+  ( cd "$repo_root" && CARGO_TARGET_DIR="$eval_target" cargo build --quiet --bin tracedecay )
   TD="$eval_target/debug/tracedecay"
 elif [[ -x "$repo_root/target/debug/tracedecay" ]]; then
   TD="$repo_root/target/debug/tracedecay"

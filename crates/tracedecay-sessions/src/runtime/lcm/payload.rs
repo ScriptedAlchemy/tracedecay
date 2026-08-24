@@ -1,68 +1,107 @@
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 
-pub use crate::lcm::contracts::validate_payload_ref;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_runtime_core::tracedecay::current_timestamp;
+use libsql::{Connection, params};
 
-use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, util};
+use crate::SessionMessageRecord;
+use crate::current_timestamp;
 
-mod delete_recovery;
-mod filesystem_authority;
-mod rollback;
+use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, raw, util};
 
-pub(crate) use delete_recovery::ReferencedClosureCache;
-#[cfg(test)]
-pub use delete_recovery::delete_external_payload;
-pub use delete_recovery::{
-    CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
-    remove_committed_payload_file,
-};
-pub use delete_recovery::{DeleteOpts, DeleteOutcome};
-#[cfg(test)]
-pub use delete_recovery::{reconcile_committed_payload_drain, remove_committed_payload_file_with};
-pub use filesystem_authority::VerifiedPayloadAuthority;
-use filesystem_authority::{
-    PayloadFileWrite, prepare_payload_dir, read_verified_payload_text, write_private_file,
-};
-pub use filesystem_authority::{ensure_contained, existing_payload_dir, existing_payload_dir_opt};
-pub use rollback::PayloadFileRollback;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteOpts {
+    pub rewrite_placeholders: bool,
+    pub remove_file: bool,
+    pub verify_hash: bool,
+}
 
-pub async fn delete_external_payload_in_transaction(
-    conn: &(impl Executor + ?Sized),
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::delete_external_payload_in_transaction(conn, storage_root, payload_ref, opts)
+impl Default for DeleteOpts {
+    fn default() -> Self {
+        Self {
+            rewrite_placeholders: true,
+            remove_file: true,
+            verify_hash: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    pub metadata_row_existed: bool,
+    pub file_existed: bool,
+    pub file_removed: bool,
+    pub placeholders_rewritten: usize,
+    pub bytes_freed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PayloadFileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o40_0000;
+
+pub struct LcmStore<'db> {
+    conn: &'db Connection,
+    storage_root: PathBuf,
+}
+
+impl<'db> LcmStore<'db> {
+    pub fn new(conn: &'db Connection, storage_root: PathBuf) -> Self {
+        Self { conn, storage_root }
+    }
+
+    pub async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
+        raw::upsert_raw_message_with_payload(self.conn, &self.storage_root, message)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn lcm_expand_payload(
+        &self,
+        provider: &str,
+        session_id: &str,
+        payload_ref: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LcmPayloadExpansion, LcmError> {
+        expand_payload(
+            self.conn,
+            &self.storage_root,
+            provider,
+            session_id,
+            payload_ref,
+            offset,
+            limit,
+        )
         .await
-}
-
-/// Prepares one member of a caller-owned deletion batch while sharing its
-/// exact reference closure. The caller deletes GC marks only for successful
-/// preparations, in one bounded statement after the batch.
-pub(crate) async fn prepare_external_payload_delete_in_transaction_with_cache(
-    conn: &(impl Executor + ?Sized),
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-    referenced: &mut ReferencedClosureCache,
-) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::prepare_external_payload_delete_in_transaction_with_cache(
-        conn,
-        storage_root,
-        payload_ref,
-        opts,
-        referenced,
-    )
-    .await
-}
-
-pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    filesystem_authority::canonical_storage_root(storage_root)
+    }
 }
 
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
+}
+
+pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
+    if payload_ref.is_empty()
+        || payload_ref == "."
+        || payload_ref == ".."
+        || payload_ref.contains('/')
+        || payload_ref.contains('\\')
+    {
+        return Err(LcmError::InvalidPayloadRef);
+    }
+
+    let mut components = Path::new(payload_ref).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(payload_ref),
+        _ => Err(LcmError::InvalidPayloadRef),
+    }
 }
 
 pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
@@ -97,31 +136,18 @@ pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
 }
 
 fn is_external_payload_placeholder(value: &str) -> bool {
-    gc::is_known_payload_placeholder_prefix(value)
+    let lower = value.to_ascii_lowercase();
+    [
+        "[externalized payload:",
+        "[gc'd externalized payload:",
+        "[externalized lcm ingest payload:",
+        "[externalized tool output:",
+        "[gc'd externalized tool output:",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
-pub struct ExternalPayloadWrite<'a> {
-    pub provider: &'a str,
-    pub session_id: &'a str,
-    pub message_id: &'a str,
-    pub kind: &'a str,
-    pub content: &'a str,
-    pub metadata_json: Option<String>,
-}
-
-pub fn write_external_payload_tracked(
-    storage_root: &Path,
-    write: ExternalPayloadWrite<'_>,
-    rollback: &mut PayloadFileRollback,
-) -> Result<LcmPayloadRef, LcmError> {
-    let (payload, file_write) = write_external_payload_inner(storage_root, write)?;
-    if file_write.created {
-        rollback.record_created(file_write.authority);
-    }
-    Ok(payload)
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
 pub fn write_external_payload(
     storage_root: &Path,
     provider: &str,
@@ -131,32 +157,6 @@ pub fn write_external_payload(
     content: &str,
     metadata_json: Option<String>,
 ) -> Result<LcmPayloadRef, LcmError> {
-    write_external_payload_inner(
-        storage_root,
-        ExternalPayloadWrite {
-            provider,
-            session_id,
-            message_id,
-            kind,
-            content,
-            metadata_json,
-        },
-    )
-    .map(|(payload, _file_write)| payload)
-}
-
-fn write_external_payload_inner(
-    storage_root: &Path,
-    write: ExternalPayloadWrite<'_>,
-) -> Result<(LcmPayloadRef, PayloadFileWrite), LcmError> {
-    let ExternalPayloadWrite {
-        provider,
-        session_id,
-        message_id,
-        kind,
-        content,
-        metadata_json,
-    } = write;
     let content_hash = util::sha256_hex(content.as_bytes());
     let owner_hash = util::sha256_hex(
         format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes(),
@@ -167,27 +167,46 @@ fn write_external_payload_inner(
     let dir = prepare_payload_dir(storage_root)?;
     let path = dir.join(&payload_ref);
     ensure_contained(&dir, &path)?;
-    let file_write = write_private_file(&path, content.as_bytes())?;
+    write_private_file(&path, content.as_bytes())?;
 
-    Ok((
-        LcmPayloadRef {
-            payload_ref,
-            provider: provider.to_string(),
-            session_id: session_id.to_string(),
-            message_id: message_id.to_string(),
-            kind: kind.to_string(),
-            content_hash,
-            byte_count: content.len() as u64,
-            char_count: content.chars().count() as u64,
-            created_at: current_timestamp(),
-            metadata_json,
-        },
-        file_write,
-    ))
+    Ok(LcmPayloadRef {
+        payload_ref,
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        message_id: message_id.to_string(),
+        kind: kind.to_string(),
+        content_hash,
+        byte_count: content.len() as u64,
+        char_count: content.chars().count() as u64,
+        created_at: current_timestamp(),
+        metadata_json,
+    })
+}
+
+/// Moves externalized payload ownership from one session id to another inside
+/// the caller's transaction. Mirrors hermes-lcm `reassign_externalized_payloads`
+/// (payload files are keyed by ref, so only the DB ownership row moves).
+pub async fn reassign_session_payloads(
+    conn: &Connection,
+    provider: &str,
+    old_session_id: &str,
+    new_session_id: &str,
+) -> Result<u64, LcmError> {
+    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
+        return Ok(0);
+    }
+    conn.execute(
+        "UPDATE lcm_external_payloads
+         SET session_id = ?3
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, old_session_id, new_session_id],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))
 }
 
 pub async fn upsert_payload_metadata(
-    conn: &(impl Executor + ?Sized),
+    conn: &Connection,
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
     conn.execute(
@@ -196,7 +215,16 @@ pub async fn upsert_payload_metadata(
             byte_count, char_count, created_at, metadata_json
          )
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(payload_ref) DO NOTHING",
+         ON CONFLICT(payload_ref) DO UPDATE SET
+            provider = excluded.provider,
+            session_id = excluded.session_id,
+            message_id = excluded.message_id,
+            kind = excluded.kind,
+            content_hash = excluded.content_hash,
+            byte_count = excluded.byte_count,
+            char_count = excluded.char_count,
+            created_at = excluded.created_at,
+            metadata_json = excluded.metadata_json",
         params![
             payload.payload_ref.as_str(),
             payload.provider.as_str(),
@@ -207,40 +235,15 @@ pub async fn upsert_payload_metadata(
             payload.byte_count as i64,
             payload.char_count as i64,
             payload.created_at,
-            payload.metadata_json.as_deref(),
+            util::opt_text(payload.metadata_json.as_deref()),
         ],
     )
     .await?;
-    let mut rows = conn
-        .query(
-            "SELECT provider, session_id, message_id, kind, content_hash,
-                    byte_count, char_count, created_at, metadata_json
-             FROM lcm_external_payloads WHERE payload_ref = ?1",
-            params![payload.payload_ref.as_str()],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("payload manifest replay row disappeared".to_string()))?;
-    let matches = row.get::<String>(0)? == payload.provider
-        && row.get::<String>(1)? == payload.session_id
-        && row.get::<String>(2)? == payload.message_id
-        && row.get::<String>(3)? == payload.kind
-        && row.get::<String>(4)? == payload.content_hash
-        && row.get::<i64>(5)? == payload.byte_count as i64
-        && row.get::<i64>(6)? == payload.char_count as i64
-        && row.get::<Option<String>>(8)? == payload.metadata_json;
-    if !matches {
-        return Err(LcmError::ImmutablePayloadConflict {
-            payload_ref: payload.payload_ref.clone(),
-        });
-    }
     Ok(())
 }
 
-pub async fn expand_payload(
-    conn: &(impl QueryExecutor + ?Sized),
+async fn expand_payload(
+    conn: &Connection,
     storage_root: &Path,
     provider: &str,
     session_id: &str,
@@ -256,24 +259,20 @@ pub async fn expand_payload(
         }
         Err(err) => return Err(err),
     };
-    let payload = validate_expand_payload_owner(conn, provider, session_id, payload).await?;
-    if payload.kind == "quarantined_assistant_output" {
-        return Err(LcmError::PayloadLocked);
+    if payload.provider != provider || payload.session_id != session_id {
+        return Err(LcmError::PayloadNotOwnedBySession);
     }
+    ensure_current_raw_payload_ref(conn, &payload).await?;
 
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let (content, _authority) = read_verified_payload_text(
-        &path,
-        &payload.content_hash,
-        payload.byte_count,
-        payload.char_count,
-    )?
-    .ok_or(LcmError::PayloadMissing)?;
+    let content = read_payload_file(&path)?;
+    if util::sha256_hex(content.as_bytes()) != payload.content_hash {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
 
-    let total_char_count =
-        usize::try_from(payload.char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let total_char_count = content.chars().count();
     let start = offset.min(total_char_count);
     let slice = content.chars().skip(start).take(limit).collect::<String>();
     let char_count = slice.chars().count();
@@ -291,81 +290,351 @@ pub async fn expand_payload(
     })
 }
 
-pub fn read_verified_payload_content(
-    storage_root: &Path,
-    payload_ref: &str,
-    content_hash: &str,
-    byte_count: usize,
-    char_count: usize,
-) -> Result<String, LcmError> {
-    read_verified_payload_content_with_checkpoint(
-        storage_root,
-        payload_ref,
-        content_hash,
-        byte_count,
-        char_count,
-        &mut || Ok(()),
-    )
-}
-
-pub fn read_verified_payload_content_with_checkpoint(
-    storage_root: &Path,
-    payload_ref: &str,
-    content_hash: &str,
-    byte_count: usize,
-    char_count: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
-) -> Result<String, LcmError> {
-    checkpoint()?;
-    validate_payload_ref(payload_ref)?;
-    let dir = existing_payload_dir(storage_root)?;
-    let path = dir.join(payload_ref);
-    ensure_contained(&dir, &path)?;
-    let byte_count = u64::try_from(byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
-    let char_count = u64::try_from(char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
-    let (content, _authority) = filesystem_authority::read_verified_payload_text_with_checkpoint(
-        &path,
-        content_hash,
-        byte_count,
-        char_count,
-        checkpoint,
-    )?
-    .ok_or(LcmError::PayloadMissing)?;
-    checkpoint()?;
-    Ok(content)
-}
-
-async fn validate_expand_payload_owner(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    payload: LcmPayloadRef,
-) -> Result<LcmPayloadRef, LcmError> {
-    if payload.provider != provider || payload.session_id != session_id {
-        return Err(LcmError::PayloadNotOwnedBySession);
+async fn tombstoned_raw_ref_exists(conn: &Connection, payload_ref: &str) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT content, snippet_text, index_text, metadata_json
+             FROM lcm_raw_messages
+             WHERE content LIKE ?1 OR snippet_text LIKE ?1 OR index_text LIKE ?1 OR metadata_json LIKE ?1",
+            params![format!("%{payload_ref}%")],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        for index in 0..4 {
+            let value: Option<String> = row.get(index).unwrap_or(None);
+            if value
+                .as_deref()
+                .is_some_and(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
+            {
+                return Ok(true);
+            }
+        }
     }
-    ensure_current_raw_payload_ref(conn, &payload).await?;
-    Ok(payload)
+    Ok(false)
 }
 
-async fn tombstoned_raw_ref_exists(
-    conn: &(impl QueryExecutor + ?Sized),
+pub async fn delete_external_payload(
+    conn: &Connection,
+    storage_root: &Path,
     payload_ref: &str,
+    opts: &DeleteOpts,
+) -> Result<DeleteOutcome, LcmError> {
+    validate_payload_ref(payload_ref)?;
+    // The DB-side cleanup below must still run for a store whose payload
+    // directory is gone — the file simply counts as already removed.
+    let dir = existing_payload_dir_opt(storage_root)?;
+    let path = match dir.as_deref() {
+        Some(dir) => {
+            let path = dir.join(payload_ref);
+            ensure_contained(dir, &path)?;
+            Some(path)
+        }
+        None => None,
+    };
+
+    let metadata = match load_payload_metadata(conn, payload_ref).await {
+        Ok(payload) => Some(payload),
+        Err(LcmError::PayloadNotFound) => None,
+        Err(err) => return Err(err),
+    };
+    let (file_existed, file_identity) = match path.as_deref() {
+        Some(path) => inspect_payload_file_for_delete(path)?,
+        None => (false, None),
+    };
+
+    if opts.verify_hash && file_existed {
+        if let (Some(metadata), Some(path)) = (metadata.as_ref(), path.as_deref()) {
+            let (content, identity) =
+                read_payload_file_for_verify(path)?.ok_or(LcmError::PayloadMissing)?;
+            if Some(identity) != file_identity
+                || util::sha256_hex(&content) != metadata.content_hash
+            {
+                return Err(LcmError::PayloadIntegrityMismatch);
+            }
+        }
+    }
+
+    let metadata_row_existed = metadata.is_some();
+    let expected_bytes = metadata.as_ref().map_or(0, |payload| payload.byte_count);
+    let mut placeholders_rewritten = 0usize;
+
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    let tx_result: Result<(), LcmError> = async {
+        let tombstone_missing_payload =
+            opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
+        if let Some(metadata) = metadata.as_ref() {
+            if gc::referenced_payload_refs(conn, &metadata.provider, None)
+                .await?
+                .contains(payload_ref)
+                && !tombstone_missing_payload
+            {
+                return Err(LcmError::StillReferenced);
+            }
+        }
+        conn.execute(
+            "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",
+            params![payload_ref],
+        )
+        .await?;
+        conn.execute(
+            "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
+            params![payload_ref],
+        )
+        .await?;
+        if opts.rewrite_placeholders {
+            placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
+        }
+        Ok(())
+    }
+    .await;
+    match tx_result {
+        Ok(()) => conn.execute("COMMIT", ()).await.map(|_| ())?,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+    }
+
+    let file_removed = match (dir.as_deref(), opts.remove_file && file_existed) {
+        (Some(dir), true) => {
+            safe_remove_payload_file_checked(dir, payload_ref, file_identity.as_ref())?
+        }
+        _ => false,
+    };
+
+    Ok(DeleteOutcome {
+        metadata_row_existed,
+        file_existed,
+        file_removed,
+        placeholders_rewritten,
+        bytes_freed: if file_removed { expected_bytes } else { 0 },
+    })
+}
+
+async fn tombstone_residual_placeholders(
+    conn: &Connection,
+    payload_ref: &str,
+) -> Result<usize, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
+             FROM lcm_raw_messages
+             WHERE payload_ref = ?1 OR content LIKE ?2 OR snippet_text LIKE ?2 OR index_text LIKE ?2 OR metadata_json LIKE ?2",
+            params![payload_ref, format!("%{payload_ref}%")],
+        )
+        .await?;
+    let mut updates = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let storage_kind: String = row.get(1)?;
+        let raw_payload_ref: Option<String> = row.get(2).unwrap_or(None);
+        let mut changed = 0usize;
+        let content: Option<String> = row.get(3).unwrap_or(None);
+        let snippet_text: String = row.get(4)?;
+        let index_text: String = row.get(5)?;
+        let metadata_json: Option<String> = row.get(6).unwrap_or(None);
+        let new_content = content.map(|text| {
+            let tombstoned = gc::tombstone_placeholder_in_text(&text, payload_ref);
+            if tombstoned != text {
+                changed += 1;
+            }
+            tombstoned
+        });
+        let new_snippet = gc::tombstone_placeholder_in_text(&snippet_text, payload_ref);
+        if new_snippet != snippet_text {
+            changed += 1;
+        }
+        let new_index = gc::tombstone_placeholder_in_text(&index_text, payload_ref);
+        if new_index != index_text {
+            changed += 1;
+        }
+        let new_metadata = metadata_json.map(|text| {
+            let tombstoned = gc::tombstone_placeholder_in_text(&text, payload_ref);
+            if tombstoned != text {
+                changed += 1;
+            }
+            tombstoned
+        });
+        let clear_raw_ref = storage_kind == "external"
+            && raw_payload_ref
+                .as_deref()
+                .is_some_and(|value| value == payload_ref);
+        if clear_raw_ref {
+            changed += 1;
+        }
+        if changed > 0 {
+            updates.push((
+                store_id,
+                clear_raw_ref,
+                new_content,
+                new_snippet,
+                new_index,
+                new_metadata,
+                changed,
+            ));
+        }
+    }
+
+    let mut changed_total = 0usize;
+    for (store_id, clear_raw_ref, content, snippet_text, index_text, metadata_json, changed) in
+        updates
+    {
+        if clear_raw_ref {
+            conn.execute(
+                "UPDATE lcm_raw_messages
+                 SET storage_kind = 'inline', payload_ref = NULL, content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
+                 WHERE store_id = ?1",
+                params![store_id, util::opt_text(content.as_deref()), snippet_text, index_text, util::opt_text(metadata_json.as_deref())],
+            )
+            .await?;
+        } else {
+            conn.execute(
+                "UPDATE lcm_raw_messages
+                 SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
+                 WHERE store_id = ?1",
+                params![
+                    store_id,
+                    util::opt_text(content.as_deref()),
+                    snippet_text,
+                    index_text,
+                    util::opt_text(metadata_json.as_deref())
+                ],
+            )
+            .await?;
+        }
+        changed_total += changed;
+    }
+    Ok(changed_total)
+}
+
+pub fn safe_remove_payload_file(dir: &Path, payload_ref: &str) -> Result<bool, LcmError> {
+    safe_remove_payload_file_checked(dir, payload_ref, None)
+}
+
+fn safe_remove_payload_file_checked(
+    dir: &Path,
+    payload_ref: &str,
+    expected_identity: Option<&PayloadFileIdentity>,
 ) -> Result<bool, LcmError> {
-    gc::any_placeholder_text_row(
-        conn,
-        gc::PlaceholderScanScope::Unscoped,
-        &gc::gc_prefix_ref_like_patterns(payload_ref),
-        |row| {
-            row.texts()
-                .any(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
-        },
-    )
-    .await
+    validate_payload_ref(payload_ref)?;
+    let path = dir.join(payload_ref);
+    ensure_contained(dir, &path)?;
+    let Some((file, _opened, _lstat, identity)) = open_verified_payload_file(&path)? else {
+        return Ok(false);
+    };
+    if let Some(expected_identity) = expected_identity {
+        same_payload_file_identity(&identity, expected_identity)?;
+    }
+    drop(file);
+    ensure_contained(dir, &path)?;
+    fs::remove_file(&path).map_err(|err| LcmError::Io(err.to_string()))?;
+    Ok(true)
+}
+
+fn inspect_payload_file_for_delete(
+    path: &Path,
+) -> Result<(bool, Option<PayloadFileIdentity>), LcmError> {
+    Ok(match open_verified_payload_file(path)? {
+        Some((_file, _opened, _lstat, identity)) => (true, Some(identity)),
+        None => (false, None),
+    })
+}
+
+fn read_payload_file_for_verify(
+    path: &Path,
+) -> Result<Option<(Vec<u8>, PayloadFileIdentity)>, LcmError> {
+    let Some((mut file, _opened, _lstat, identity)) = open_verified_payload_file(path)? else {
+        return Ok(None);
+    };
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    Ok(Some((content, identity)))
+}
+
+fn open_verified_payload_file(
+    path: &Path,
+) -> Result<Option<(fs::File, fs::Metadata, fs::Metadata, PayloadFileIdentity)>, LcmError> {
+    let file = match private_file_options().read(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            if fs::symlink_metadata(path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+            {
+                return Err(LcmError::InvalidPayloadRef);
+            }
+            return Err(LcmError::Io(err.to_string()));
+        }
+    };
+    let opened = file
+        .metadata()
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    if !opened.is_file() {
+        return Err(LcmError::InvalidPayloadRef);
+    }
+    let lstat = fs::symlink_metadata(path).map_err(|err| LcmError::Io(err.to_string()))?;
+    if lstat.file_type().is_symlink() || !lstat.is_file() {
+        return Err(LcmError::InvalidPayloadRef);
+    }
+    same_file_identity(&opened, &lstat)?;
+    let identity = payload_file_identity(&opened);
+    Ok(Some((file, opened, lstat, identity)))
+}
+
+#[cfg(unix)]
+fn same_file_identity(opened: &fs::Metadata, lstat: &fs::Metadata) -> Result<(), LcmError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if opened.dev() == lstat.dev() && opened.ino() == lstat.ino() {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
+}
+
+#[cfg(unix)]
+fn payload_file_identity(metadata: &fs::Metadata) -> PayloadFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    PayloadFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+fn same_payload_file_identity(
+    actual: &PayloadFileIdentity,
+    expected: &PayloadFileIdentity,
+) -> Result<(), LcmError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_opened: &fs::Metadata, _lstat: &fs::Metadata) -> Result<(), LcmError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn payload_file_identity(_metadata: &fs::Metadata) -> PayloadFileIdentity {
+    PayloadFileIdentity {}
+}
+
+#[cfg(not(unix))]
+fn same_payload_file_identity(
+    _actual: &PayloadFileIdentity,
+    _expected: &PayloadFileIdentity,
+) -> Result<(), LcmError> {
+    Ok(())
 }
 
 async fn ensure_current_raw_payload_ref(
-    conn: &(impl QueryExecutor + ?Sized),
+    conn: &Connection,
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
     let mut rows = conn
@@ -424,7 +693,7 @@ async fn ensure_current_raw_payload_ref(
 }
 
 pub async fn load_payload_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
+    conn: &Connection,
     payload_ref: &str,
 ) -> Result<LcmPayloadRef, LcmError> {
     let mut rows = conn
@@ -453,10 +722,165 @@ pub async fn load_payload_metadata(
     })
 }
 
-#[cfg(test)]
-#[path = "payload/rollback_tests.rs"]
-mod rollback_tests;
+fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    let root = canonical_storage_root(storage_root)?;
+    let dir = root.join("lcm-payloads");
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) => ensure_actual_private_dir(&dir, &metadata)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
+            set_private_dir_permissions(&dir)?;
+        }
+        Err(err) => return Err(LcmError::Io(err.to_string())),
+    }
+    ensure_payload_dir_under_root(&root, &dir)?;
+    Ok(dir)
+}
 
-#[cfg(test)]
-#[path = "payload/tombstone_probe_tests.rs"]
-mod tombstone_probe_tests;
+pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    existing_payload_dir_opt(storage_root)?.ok_or_else(|| {
+        LcmError::Io(format!(
+            "payload directory missing under {}",
+            storage_root.display()
+        ))
+    })
+}
+
+/// Like `existing_payload_dir`, but a payload directory that was never
+/// created (it is made lazily on first externalization) or has been removed
+/// reports as `None` instead of an I/O error. Invalid configurations —
+/// symlinked dir, wrong file type, dir escaping the storage root — still
+/// error.
+pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
+    let root = canonical_storage_root(storage_root)?;
+    let dir = root.join("lcm-payloads");
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(LcmError::Io(err.to_string())),
+    };
+    ensure_actual_private_dir(&dir, &metadata)?;
+    ensure_payload_dir_under_root(&root, &dir)?;
+    Ok(Some(dir))
+}
+
+pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    let metadata =
+        fs::symlink_metadata(storage_root).map_err(|err| LcmError::Io(err.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LcmError::InvalidPayloadRef);
+    }
+    storage_root
+        .canonicalize()
+        .map_err(|err| LcmError::Io(err.to_string()))
+}
+
+fn ensure_actual_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<(), LcmError> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LcmError::InvalidPayloadRef);
+    }
+    set_private_dir_permissions(dir)?;
+    Ok(())
+}
+
+fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError> {
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    if canonical_dir.parent() == Some(root) {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
+}
+
+pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
+    let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
+    if parent == root {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
+}
+
+fn write_private_file(path: &Path, content: &[u8]) -> Result<(), LcmError> {
+    let mut file = match private_file_options()
+        .create_new(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return ensure_existing_payload_matches(path, content);
+        }
+        Err(err) => return Err(LcmError::Io(err.to_string())),
+    };
+    file.write_all(content)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    file.sync_all()
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    Ok(())
+}
+
+fn ensure_existing_payload_matches(path: &Path, content: &[u8]) -> Result<(), LcmError> {
+    let mut file = private_file_options()
+        .read(true)
+        .open(path)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    let mut existing = Vec::new();
+    file.read_to_end(&mut existing)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    if existing == content {
+        Ok(())
+    } else {
+        Err(LcmError::PayloadIntegrityMismatch)
+    }
+}
+
+fn read_payload_file(path: &Path) -> Result<String, LcmError> {
+    let mut file = private_file_options()
+        .read(true)
+        .open(path)
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                LcmError::PayloadMissing
+            } else {
+                LcmError::Io(err.to_string())
+            }
+        })?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    Ok(content)
+}
+
+#[cfg(unix)]
+fn private_file_options() -> fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options.mode(0o600);
+    #[cfg(target_os = "linux")]
+    options.custom_flags(O_NOFOLLOW);
+    options
+}
+
+#[cfg(not(unix))]
+fn private_file_options() -> fs::OpenOptions {
+    fs::OpenOptions::new()
+}
+
+fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|err| LcmError::Io(err.to_string()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}

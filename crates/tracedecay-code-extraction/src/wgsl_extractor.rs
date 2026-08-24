@@ -8,7 +8,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::{C_COMPLEXITY, count_complexity};
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -44,18 +44,12 @@ impl ExtractionState {
         }
     }
 
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -71,32 +65,16 @@ impl ExtractionState {
 
 impl WgslExtractor {
     pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -127,16 +105,11 @@ impl WgslExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        let root = tree.root_node();
+        Self::visit_children(&mut state, root);
 
         state.node_stack.pop();
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -150,6 +123,18 @@ impl WgslExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
+    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::visit_node(state, cursor.node());
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_decl" => Self::visit_function_decl(state, node),
@@ -160,6 +145,10 @@ impl WgslExtractor {
             _ => {}
         }
     }
+
+    // -------------------------------------------------------
+    // function_decl
+    // -------------------------------------------------------
 
     fn visit_function_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         let Some(header) = find_direct_child_by_kind(node, "function_header") else {
@@ -259,6 +248,10 @@ impl WgslExtractor {
         attrs
     }
 
+    // -------------------------------------------------------
+    // struct_decl
+    // -------------------------------------------------------
+
     fn visit_struct_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "ident")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
@@ -306,6 +299,7 @@ impl WgslExtractor {
             });
         }
 
+        // Visit struct members.
         if let Some(body) = find_direct_child_by_kind(node, "struct_body_decl") {
             state.node_stack.push((name, id));
             Self::visit_struct_members(state, body);
@@ -379,6 +373,10 @@ impl WgslExtractor {
         }
     }
 
+    // -------------------------------------------------------
+    // Global variables and constants
+    // -------------------------------------------------------
+
     fn visit_global_variable(state: &mut ExtractionState, node: TsNode<'_>) {
         // global_variable_decl: attribute* variable_decl ("=" expression)?
         // variable_decl: "var" variable_qualifier? variable_ident_decl
@@ -451,6 +449,10 @@ impl WgslExtractor {
         }
     }
 
+    // -------------------------------------------------------
+    // Type aliases
+    // -------------------------------------------------------
+
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         // type_alias_decl: "type" ident "=" type_decl
         let name = find_direct_child_by_kind(node, "ident")
@@ -501,6 +503,10 @@ impl WgslExtractor {
         }
     }
 
+    // -------------------------------------------------------
+    // Call site extraction
+    // -------------------------------------------------------
+
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -508,18 +514,18 @@ impl WgslExtractor {
                 let child = cursor.node();
                 // WGSL: func_call_statement is a statement-level call.
                 // The callee name is the first named child (the callable ident).
-                if child.kind() == "func_call_statement"
-                    && let Some(callee) = child.named_child(0)
-                {
-                    let callee_name = state.node_text(callee);
-                    state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: fn_node_id.to_string(),
-                        reference_name: callee_name,
-                        reference_kind: EdgeKind::Calls,
-                        line: child.start_position().row as u32,
-                        column: child.start_position().column as u32,
-                        file_path: state.file_path.clone(),
-                    });
+                if child.kind() == "func_call_statement" {
+                    if let Some(callee) = child.named_child(0) {
+                        let callee_name = state.node_text(callee);
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: fn_node_id.to_string(),
+                            reference_name: callee_name,
+                            reference_kind: EdgeKind::Calls,
+                            line: child.start_position().row as u32,
+                            column: child.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                        });
+                    }
                 }
                 Self::extract_call_sites(state, child, fn_node_id);
                 if !cursor.goto_next_sibling() {
@@ -528,6 +534,10 @@ impl WgslExtractor {
             }
         }
     }
+
+    // -------------------------------------------------------
+    // Utility helpers
+    // -------------------------------------------------------
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
@@ -551,15 +561,5 @@ impl crate::LanguageExtractor for WgslExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         WgslExtractor::extract_source(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        WgslExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

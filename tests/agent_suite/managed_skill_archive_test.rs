@@ -1,7 +1,8 @@
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, SkillInstallTarget, apply_managed_skill_archive, create_managed_skill,
-    load_managed_skill, managed_skill_dir, set_managed_skill_pinned,
+    ManagedSupportFile, SkillInstallTarget, approve_managed_skill, archive_managed_skill,
+    create_managed_skill_draft, discard_pending_managed_skill_update, load_managed_skill,
+    managed_skill_dir, set_managed_skill_pinned, stage_managed_skill_archive,
 };
 
 fn draft() -> ManagedSkillDraft {
@@ -28,14 +29,19 @@ fn draft() -> ManagedSkillDraft {
 }
 
 #[tokio::test]
-async fn automatic_managed_skill_archive_activates_the_archived_revision_immediately() {
+async fn staged_managed_skill_archive_keeps_content_until_approval() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
+    create_managed_skill_draft(&profile_root, draft())
+        .await
+        .unwrap();
+    let active = approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
     let base_checksum = active.metadata.checksum.clone();
     let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
 
-    let archived = apply_managed_skill_archive(
+    let staged = stage_managed_skill_archive(
         &profile_root,
         "repo-hygiene",
         &base_checksum,
@@ -43,12 +49,26 @@ async fn automatic_managed_skill_archive_activates_the_archived_revision_immedia
     )
     .await
     .unwrap();
-    assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
+    assert_eq!(staged.metadata.state, ManagedSkillState::PendingApproval);
+
+    let with_pending = load_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    assert_eq!(with_pending.metadata.state, ManagedSkillState::Active);
+    assert_eq!(with_pending.metadata.checksum, base_checksum);
+    let pending = with_pending.pending_update.as_ref().unwrap();
+    assert_eq!(pending.resulting_state, Some(ManagedSkillState::Archived));
     assert_eq!(
-        archived.metadata.archived_reason.as_deref(),
+        pending.staged_reason.as_deref(),
         Some("overlaps with newer guidance")
     );
-    assert_eq!(archived.body_markdown, active.body_markdown);
+
+    let approved = approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    assert_eq!(approved.metadata.state, ManagedSkillState::Archived);
+    assert_eq!(approved.body_markdown, active.body_markdown);
+    assert!(approved.pending_update.is_none());
     assert!(skill_dir.join("SKILL.md").is_file());
     assert!(skill_dir.join("references/checklist.md").is_file());
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
@@ -59,13 +79,48 @@ async fn automatic_managed_skill_archive_activates_the_archived_revision_immedia
 }
 
 #[tokio::test]
-async fn automatic_managed_skill_archive_rejects_pinned_stale_and_archived_revisions() {
+async fn staged_managed_skill_archive_can_be_discarded() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
+    create_managed_skill_draft(&profile_root, draft())
+        .await
+        .unwrap();
+    let active = approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    stage_managed_skill_archive(
+        &profile_root,
+        "repo-hygiene",
+        &active.metadata.checksum,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let discarded = discard_pending_managed_skill_update(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    assert!(discarded.pending_update.is_none());
+    let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
+    assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
+}
+
+#[tokio::test]
+async fn staged_managed_skill_archive_rejects_pinned_stale_and_duplicates() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    create_managed_skill_draft(&profile_root, draft())
+        .await
+        .unwrap();
+    let active = approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
     let base_checksum = active.metadata.checksum.clone();
 
-    let err = apply_managed_skill_archive(&profile_root, "repo-hygiene", "sha256:stale", None)
+    let err = stage_managed_skill_archive(&profile_root, "repo-hygiene", "sha256:stale", None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("is stale"));
@@ -73,21 +128,32 @@ async fn automatic_managed_skill_archive_rejects_pinned_stale_and_archived_revis
     set_managed_skill_pinned(&profile_root, "repo-hygiene", true)
         .await
         .unwrap();
-    let err = apply_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
+    let err = stage_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
         .await
         .unwrap_err();
     assert!(
         err.to_string()
-            .contains("pinned and exempt from automatic archive")
+            .contains("pinned and exempt from staged archive")
     );
 
     set_managed_skill_pinned(&profile_root, "repo-hygiene", false)
         .await
         .unwrap();
-    let archived = apply_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
+    stage_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
         .await
         .unwrap();
-    let err = apply_managed_skill_archive(
+    let err = stage_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("already has a pending update"));
+
+    discard_pending_managed_skill_update(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    let archived = archive_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    let err = stage_managed_skill_archive(
         &profile_root,
         "repo-hygiene",
         &archived.metadata.checksum,

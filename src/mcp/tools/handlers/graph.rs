@@ -4,151 +4,34 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::future::Future;
-use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::{
-    CalleeV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextModeV1, ContextResultV1,
-    ContextSearchMatchV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1,
-    ImpactSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeSurfaceRequestV1,
-    RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1,
-    RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1, SimilarSurfaceRequestV1,
-    SimilarSymbolV1,
-};
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 
-use crate::context::CONTEXT_SEEN_NODE_IDS_LABEL;
+use crate::context::{
+    CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
+    CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,
+    CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
+    CONTEXT_TEST_COVERAGE_HEADING, format_context_as_markdown,
+};
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::types::{FactSearchResult, SearchFactsRequest};
+use crate::path_tree::format_compact_path_list;
+use crate::text::utf8_prefix_at_or_before;
 use crate::tracedecay::TraceDecay;
-use crate::types::{EdgeKind, NodeKind};
+use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, Visibility};
+
+const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
+const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
+const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
+const CONTEXT_LANE_TRUNCATED_NOTE: &str =
+    "\n... lane truncated; retrieve the full response handle for omitted details.\n";
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
-    self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, require_node_id,
-    take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
+    effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
 };
-
-mod context_support;
-mod primitive_surface;
-mod search_evidence;
-mod verified;
-
-#[cfg(test)]
-use context_support::context_memory_section;
-use context_support::{
-    ContextMemoryOutcome, context_markdown_lane_preview, context_memory_analytics_value,
-    context_memory_options, context_memory_outcome, context_memory_read_control,
-    insert_context_memory_section,
-};
-use primitive_surface::{
-    node_not_found as node_not_found_result, search_coverage as primitive_search_coverage,
-    semantic_search_mode as primitive_semantic_search_mode,
-    symbol_location as primitive_symbol_location,
-};
-use search_evidence::{
-    SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
-};
-
-use verified::{
-    GRAPH_RELATION_READ_LIMIT, append_verified_plan_context, canonical_relation_kind,
-    canonical_relation_kind_name, cost_to_expand_verified, graph_name_matches, graph_occurrence_id,
-    graph_symbol_corrupt, graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths,
-    graph_symbols_in_scope, line_for_byte_offset, nodes_addressed_by_args,
-    required_graph_file_path, required_graph_metadata, single_graph_adjacency_batch,
-    traverse_verified_neighbors, verified_context_markdown, verified_neighbor_value,
-    verified_trait_dispatch_targets,
-};
-
-fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSearchModeV1> {
-    match args.get("semantic_mode").and_then(Value::as_str) {
-        None | Some("fallback_allowed") => {
-            Ok(crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed)
-        }
-        Some("strict_semantic") => Ok(crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic),
-        Some(_) => Err(TraceDecayError::Config {
-            message: "semantic_mode must be one of fallback_allowed, strict_semantic".to_owned(),
-        }),
-    }
-}
-
-async fn execute_code_index_search(
-    executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    request: crate::mcp::server::CodeIndexSearchRequestV1,
-) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
-    match executor {
-        Some(executor) => executor(request).await,
-        None => crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-            crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                code_generation: None,
-                reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                    reason: "code_index_unavailable",
-                },
-                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                    "code_index_unavailable",
-                ),
-            },
-        ),
-    }
-}
-
-fn semantic_status_value(
-    mode: crate::mcp::server::CodeIndexSearchModeV1,
-    status: &crate::mcp::server::CodeIndexSemanticStatusV1,
-) -> Value {
-    let mode = match mode {
-        crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed => "fallback_allowed",
-        crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic => "strict_semantic",
-    };
-    match status {
-        crate::mcp::server::CodeIndexSemanticStatusV1::Complete => json!({
-            "status": "complete",
-            "mode": mode,
-        }),
-        crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable { reason } => json!({
-            "status": "unavailable",
-            "mode": mode,
-            "reason": reason,
-        }),
-    }
-}
-
-/// Renders the per-lane recall marker so a caller can tell a full-recall
-/// answer from one produced while a lane was down. Emitted on every search
-/// response, including the successful ones, because "no matches" and "the
-/// matching lane was not running" are otherwise indistinguishable.
-fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> Value {
-    fn lane(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> Value {
-        match status {
-            crate::mcp::server::CodeIndexLaneStatusV1::Complete => json!("complete"),
-            crate::mcp::server::CodeIndexLaneStatusV1::Stale { generation } => json!({
-                "status": "stale",
-                "generation": generation,
-            }),
-            crate::mcp::server::CodeIndexLaneStatusV1::Partial { generation } => json!({
-                "status": "partial",
-                "generation": generation,
-            }),
-            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
-                "status": "unavailable",
-                "reason": reason,
-            }),
-        }
-    }
-
-    json!({
-        "exact": lane(&coverage.exact),
-        "lexical": lane(&coverage.lexical),
-        "graph": lane(&coverage.graph),
-        "semantic": lane(&coverage.semantic),
-        "recall": if coverage.is_degraded() { "partial" } else { "full" },
-    })
-}
 
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
@@ -164,17 +47,13 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
-    support::rendered_tool_result(Some(cg.project_root()), args, value, touched_files, md)
-}
-
-/// [`rendered_tool_result`] with the default [`render::generic_md`] body.
-fn generic_tool_result(
-    cg: &TraceDecay,
-    args: &Value,
-    value: &Value,
-    touched_files: Vec<String>,
-) -> ToolResult {
-    support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
+    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
+    let public_value = internal_analytics
+        .as_ref()
+        .and_then(|_| public_value_without_internal_context_memory_analytics(value));
+    let value = public_value.as_ref().unwrap_or(value);
+    let text = render::finalize(Some(cg.project_root()), args, value, md);
+    text_tool_result_with_analytics(&text, touched_files, internal_analytics)
 }
 
 fn rendered_context_tool_result(
@@ -195,7 +74,24 @@ fn rendered_context_tool_result(
             preview_markdown.unwrap_or(&full_markdown),
         )
     };
-    let result = text_tool_result(&text, touched_files);
+    text_tool_result_with_analytics(&text, touched_files, internal_analytics)
+}
+
+fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
+    let mut value = value.clone();
+    take_internal_context_memory_analytics(&mut value).map(|_| value)
+}
+
+fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
+    value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
+}
+
+fn text_tool_result_with_analytics(
+    text: &str,
+    touched_files: Vec<String>,
+    internal_analytics: Option<Value>,
+) -> ToolResult {
+    let result = text_tool_result(text, touched_files);
     if let Some(internal_analytics) = internal_analytics {
         result.with_internal_analytics(internal_analytics)
     } else {
@@ -203,22 +99,21 @@ fn rendered_context_tool_result(
     }
 }
 
-pub(super) async fn handle_search<F>(
+fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
+    ToolResult::new(
+        json!({
+            "content": [{ "type": "text", "text": text }]
+        }),
+        touched_files,
+    )
+}
+
+/// Handles `tracedecay_search` tool calls.
+pub(super) async fn handle_search(
     cg: &TraceDecay,
-    graph: F,
     args: Value,
     scope_prefix: Option<&str>,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    ignored_dependency_admission: Option<
-        &dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
-    >,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<ToolResult>
-where
-    F: Future<Output = Result<crate::tracedecay::queries::graph::VerifiedGraphQuery>>,
-{
+) -> Result<ToolResult> {
     let query =
         args.get("query")
             .and_then(|v| v.as_str())
@@ -226,192 +121,91 @@ where
                 message: "missing required parameter: query".to_string(),
             })?;
 
-    let semantic_mode = semantic_search_mode(&args)?;
-    let lazy_indexing_requested = dependency_hints::lazy_indexing_requested(&args);
-    let cursor = support::retrieval_cursor(&args)?;
-    let include_graph_node_ids = render::wants_json(&args);
     let limit = args
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .map_or(10, |v| v.min(500) as usize);
-    // A scope prefix cannot be applied as a post-filter here the way the
-    // sibling handlers do it: the retrieval pipeline returns anchor-keyed
-    // candidates that carry no file path. Refusing to search at all would make
-    // the tool return nothing for the whole session (any serve launched from a
-    // subdirectory sets a scope), so run the search and report below that the
-    // scope was not honored rather than silently implying it was.
-    let search = execute_code_index_search(
-        search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: query.to_owned(),
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit,
-            cursor,
-            mode: semantic_mode,
-            authority: search_authority.cloned(),
-            deadline: deadline.clone(),
-            cancellation: cancellation.clone(),
-        },
-    );
-    let (outcome, graph) =
-        race_primary_search_with_graph(search, graph, lazy_indexing_requested).await;
-    match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let graph = bind_verified_graph_to_search(graph, &complete.code_generation);
-            let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
-                let graph = graph?;
-                dependency_hints::admit_verified_ignored_dependency(
-                    ignored_dependency_admission,
-                    &graph,
-                    query,
-                    scope_prefix,
-                    deadline.as_ref(),
-                    cancellation.as_ref(),
-                )
-                .await?;
-                Ok(graph)
-            } else {
-                graph
-            };
-            let mut results = Vec::with_capacity(complete.ordered_candidates.len());
-            let mut graph_evidence = SearchGraphEvidence::new(graph.as_ref());
-            // The generation-bound display metadata names each result's
-            // declaring file; that set is the raw-read counterfactual the
-            // savings accounting charges this response against.
-            let touched_files = unique_file_paths(
-                complete
-                    .ordered_candidates
-                    .iter()
-                    .filter_map(|ranked| {
-                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
-                    })
-                    .map(|display| display.path.as_str()),
-            );
-            for ranked in &complete.ordered_candidates {
-                let mut result = json!(ranked);
-                if let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) {
-                    result["display"] = json!({
-                        "name": display.name,
-                        "qualified_name": display.qualified_name,
-                        "kind": display.kind,
-                        "path": display.path,
-                    });
-                    if include_graph_node_ids {
-                        graph_evidence.enrich_node_id(&mut result, display);
-                    }
-                }
-                results.push(result);
-            }
-            let result_count = results.len();
-            let mut output = json!({
-                "results": results,
-                "code_generation": complete.code_generation,
-                "query_fallback_digest": &complete.query_fallback.digest,
-                "semantic": semantic_status_value(semantic_mode, &complete.semantic),
-                "next_cursor": complete.next_cursor
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?,
-                "coverage": coverage_value(&complete.coverage),
-            });
-            if let Some(scope) = scope_prefix {
-                output["scope_prefix"] = json!(scope);
-                output["scope_prefix_applied"] = json!(false);
-            }
-            if let Some(unavailable) = graph_evidence.unavailable() {
-                output["verified_graph_evidence"] = unavailable.clone();
-            }
-            if dependency_hints::should_check_external_import_hint(result_count, limit)
-                && let Some(hint) = graph_evidence
-                    .external_import_hint(
-                        query,
-                        limit,
-                        scope_prefix,
-                        deadline.as_ref(),
-                        cancellation.as_ref(),
-                    )
-                    .await
-            {
-                output["external_import_hint"] = hint;
-            }
-            let output = output;
-            Ok(rendered_tool_result(
-                cg,
-                &args,
-                &output,
-                touched_files,
-                || render_search_md(&output),
-            ))
-        }
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
-            let reason = unavailable.reason.as_str();
-            let output = json!({
-                "results": [],
-                "code_generation": unavailable.code_generation,
-                "query_fallback_digest": Value::Null,
-                "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
-                "status": "unavailable",
-                "reason": reason,
-                "coverage": coverage_value(&unavailable.coverage),
-            });
-            let failure = format!("code-index search unavailable: {reason}");
-            let mut result =
-                rendered_tool_result(cg, &args, &output, Vec::new(), || render_search_md(&output))
-                    .with_failure_message(failure);
-            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic {
-                result = result.with_semantic_error(true);
-            }
-            Ok(result)
-        }
-    }
-}
 
-/// Warns, in the human-facing body, that a result list is short because a lane
-/// was missing. A degraded page is otherwise indistinguishable from a thorough
-/// one, which is exactly how a partial answer gets trusted as a complete one.
-fn append_coverage_md(md: &mut Md, value: &Value) {
-    let Some(coverage) = value.get("coverage") else {
-        return;
-    };
-    if coverage.get("recall").and_then(Value::as_str) != Some("partial") {
-        return;
-    }
-    let mut notes = Vec::new();
-    for lane in ["exact", "lexical", "graph", "semantic"] {
-        let status = coverage.get(lane);
-        match status
-            .and_then(|status| status.get("status"))
-            .and_then(Value::as_str)
-        {
-            Some("stale") => {
-                let generation = status
-                    .and_then(|status| status.get("generation"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("previous");
-                notes.push(format!("{lane}: stale (generation `{generation}`)"));
-            }
-            Some("unavailable") => {
-                let reason = status
-                    .and_then(|status| status.get("reason"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("unavailable");
-                notes.push(format!("{lane}: unavailable ({reason})"));
-            }
-            _ => {}
+    let results = cg.search(query, limit).await?;
+    let mut results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
+    let mut lazy_indexed_files = Vec::new();
+    if dependency_hints::lazy_indexing_requested(&args)
+        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
+    {
+        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
+            query,
+            limit,
+            scope_prefix,
+        )
+        .await?;
+        if !lazy_indexed_files.is_empty() {
+            results = filter_by_scope(cg.search(query, limit).await?, scope_prefix, |r| {
+                &r.node.file_path
+            });
         }
     }
-    if notes.is_empty() {
-        return;
-    }
-    md.blank()
-        .heading(3, "Coverage")
-        .line("Partial recall — some retrieval lanes did not answer:");
-    for note in notes {
-        md.bullet(&note);
-    }
+    let coverage_hint = cg.index_coverage_hint(results.len());
+    let lazy_match_visible = results
+        .iter()
+        .any(|result| lazy_indexed_files.contains(&result.node.file_path));
+    let ignored_dependency_hint = if !lazy_match_visible
+        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
+    {
+        dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
+    } else {
+        None
+    };
+
+    let touched_files = unique_file_paths(
+        results
+            .iter()
+            .map(|r| r.node.file_path.as_str())
+            .chain(lazy_indexed_files.iter().map(String::as_str)),
+    );
+
+    let items: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.node.id,
+                "name": r.node.name,
+                "kind": r.node.kind.as_str(),
+                "file": r.node.file_path,
+                "line": user_line(r.node.start_line),
+                "signature": r.node.signature,
+                "score": r.score,
+            })
+        })
+        .collect();
+
+    let output_value = if coverage_hint.is_some() || ignored_dependency_hint.is_some() {
+        let mut value = json!({ "results": items });
+        if !lazy_indexed_files.is_empty() {
+            value["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
+        }
+        if let Some(hint) = coverage_hint {
+            value["index_coverage_hint"] = json!(hint);
+        }
+        if let Some(hint) = ignored_dependency_hint {
+            value["ignored_dependency_hint"] = hint;
+        }
+        value
+    } else if !lazy_indexed_files.is_empty() {
+        json!({
+            "results": items,
+            "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
+        })
+    } else {
+        json!(items)
+    };
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output_value,
+        touched_files,
+        || render_search_md(&output_value),
+    ))
 }
 
 fn render_search_md(value: &Value) -> String {
@@ -425,33 +219,6 @@ fn render_search_md(value: &Value) -> String {
     match items {
         Some(items) if !items.is_empty() => {
             for it in items {
-                if let Some(candidate) = it.get("candidate") {
-                    let anchor = render::field_str(candidate, "anchor_id");
-                    let exact_class = render::field_str(candidate, "exact_class");
-                    let utility = candidate
-                        .get("utility_micros")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    let ordinal = it
-                        .get("final_ordinal")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    if let Some(display) = it.get("display") {
-                        let name = render::field_str(display, "name");
-                        let kind = render::field_str(display, "kind");
-                        md.bullet(&format!(
-                            "**{name}** ({kind}, {exact_class}) — rank {} · utility {utility}",
-                            ordinal.saturating_add(1)
-                        ));
-                        md.line(&format!("  `{anchor}`"));
-                    } else {
-                        md.bullet(&format!(
-                            "**{anchor}** ({exact_class}) — rank {} · utility {utility}",
-                            ordinal.saturating_add(1)
-                        ));
-                    }
-                    continue;
-                }
                 let name = render::field_str(it, "name");
                 let kind = render::field_str(it, "kind");
                 let file = render::field_str(it, "file");
@@ -473,20 +240,6 @@ fn render_search_md(value: &Value) -> String {
             md.empty_note("No matching symbols.");
         }
     }
-    if let Some(reason) = value.get("reason").and_then(Value::as_str) {
-        md.blank()
-            .heading(3, "Availability")
-            .line(&format!("Search unavailable: {reason}."));
-    }
-    append_coverage_md(&mut md, value);
-    if let Some(semantic) = value.get("semantic")
-        && semantic.get("status").and_then(Value::as_str) == Some("unavailable")
-        && let Some(reason) = semantic.get("reason").and_then(Value::as_str)
-    {
-        md.blank()
-            .heading(3, "Semantic")
-            .line(&format!("Semantic lane unavailable: {reason}."));
-    }
     if let Some(msg) = value
         .get("index_coverage_hint")
         .and_then(|h| h.get("message"))
@@ -494,341 +247,89 @@ fn render_search_md(value: &Value) -> String {
     {
         md.blank().heading(3, "Index Coverage Hint").line(msg);
     }
-    dependency_hints::append_external_import_hint_md(&mut md, value);
-    search_evidence::append_verified_graph_evidence_md(&mut md, value);
+    dependency_hints::append_ignored_dependency_hint_md(&mut md, value);
     md.render()
 }
 
-#[derive(Default)]
-struct ContextGraphProjection {
-    selected: Vec<CodeGraphSymbolSummaryV1>,
-    related: Vec<CodeGraphSymbolSummaryV1>,
-    code_blocks: Vec<ContextCodeBlockV1>,
-    touched_files: Vec<String>,
-}
-
-fn context_search_matches(
-    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
-    scope_prefix: Option<&str>,
-) -> Vec<ContextSearchMatchV1> {
-    complete
-        .ordered_candidates
-        .iter()
-        .filter_map(|ranked| {
-            let display = complete
-                .display_by_anchor
-                .get(&ranked.candidate.anchor_id)?;
-            if scope_prefix.is_some_and(|prefix| !display.path.starts_with(prefix)) {
-                return None;
-            }
-            let exact_class = match ranked.candidate.exact_class {
-                ExactClass::ExactMessage => "exact_message",
-                ExactClass::ExactLiteralPhrase => "exact_literal_phrase",
-                ExactClass::Approximate => "approximate",
-            };
-            Some(ContextSearchMatchV1 {
-                anchor_id: ranked.candidate.anchor_id.as_str().to_owned(),
-                name: display.name.clone(),
-                qualified_name: display.qualified_name.clone(),
-                kind: display.kind.clone(),
-                file: display.path.clone(),
-                exact_class: exact_class.to_owned(),
-                rank: ranked.final_ordinal.saturating_add(1),
-                utility_micros: ranked.candidate.utility_micros,
-            })
-        })
-        .collect()
-}
-
-fn context_graph_projection(
+/// Handles `tracedecay_context` tool calls.
+pub(super) async fn handle_context(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
-    scope_prefix: Option<&str>,
-    max_nodes: usize,
-    include_code: bool,
-    max_code_blocks: usize,
-) -> Result<ContextGraphProjection> {
-    let mut selected = Vec::new();
-    for ranked in &complete.ordered_candidates {
-        let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
-            continue;
-        };
-        if scope_prefix.is_some_and(|prefix| !display.path.starts_with(prefix)) {
-            continue;
-        }
-        let candidates =
-            graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-        for candidate in candidates {
-            if required_graph_file_path(&candidate)? == display.path.as_str()
-                && !selected.iter().any(|existing: &CodeGraphSymbolSummaryV1| {
-                    existing.occurrence == candidate.occurrence
-                })
-            {
-                selected.push(candidate);
-                break;
-            }
-        }
-    }
-    let seeds = selected
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
-    let mut related = Vec::new();
-    if !seeds.is_empty() {
-        for batches in [
-            graph.callers(&seeds, &[], GRAPH_RELATION_READ_LIMIT)?,
-            graph.callees(&seeds, &[], GRAPH_RELATION_READ_LIMIT)?,
-        ] {
-            for edge in batches.into_iter().flatten() {
-                if !seeds.contains(&edge.neighbor.occurrence)
-                    && !related.iter().any(|existing: &CodeGraphSymbolSummaryV1| {
-                        existing.occurrence == edge.neighbor.occurrence
-                    })
-                {
-                    related.push(edge.neighbor);
-                }
-            }
-        }
-    }
-    related.truncate(max_nodes);
-
-    let mut all_symbols = selected.clone();
-    all_symbols.extend(related.iter().cloned());
-    let touched_files = graph_symbol_paths(&all_symbols)?;
-    let mut code_blocks = Vec::new();
-    if include_code {
-        for symbol in selected.iter().take(max_code_blocks) {
-            let metadata = required_graph_metadata(symbol)?;
-            let file_path = required_graph_file_path(symbol)?;
-            let source = crate::sync::read_source_file(&cg.project_root().join(file_path))?;
-            code_blocks.push(ContextCodeBlockV1 {
-                node_id: symbol.occurrence.as_str().to_owned(),
-                file: file_path.to_owned(),
-                start_line: user_line(metadata.start_line),
-                end_line: user_line(graph_symbol_end_line(metadata)?),
-                code: super::info::extract_lines(
-                    &source,
-                    metadata.start_line,
-                    graph_symbol_end_line(metadata)?,
-                ),
-            });
-        }
-    }
-    Ok(ContextGraphProjection {
-        selected,
-        related,
-        code_blocks,
-        touched_files,
-    })
-}
-
-fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMatchV1]) {
-    if matches.is_empty() {
-        return;
-    }
-    output.push_str("\n### Available Code Search Matches\n");
-    for search_match in matches {
-        let _ = writeln!(
-            output,
-            "- **{}** ({}) — `{}` · rank {} · utility {}",
-            search_match.name,
-            search_match.kind,
-            search_match.file,
-            search_match.rank,
-            search_match.utility_micros,
-        );
-    }
-}
-
-fn append_context_semantic_pending(output: &mut String, value: &Value) {
-    let semantic = &value["coverage"]["semantic"];
-    let reason = semantic.get("reason").and_then(Value::as_str);
-    if semantic.get("status").and_then(Value::as_str) == Some("unavailable")
-        && matches!(
-            reason,
-            Some("semantic_generation_warming" | "generation_rebuilding")
-        )
-    {
-        output.push_str("\n### Semantic\nSemantic results pending while the generation warms; available fallback and memory results are shown above.\n");
-    }
-}
-
-pub(super) async fn handle_context<F>(
-    cg: &TraceDecay,
-    graph: F,
     args: Value,
     scope_prefix: Option<&str>,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<ToolResult>
-where
-    F: Future<Output = Result<crate::tracedecay::queries::graph::VerifiedGraphQuery>>,
-{
-    let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
-    let task = request.task.as_str();
-    let mode = request.mode.unwrap_or(ContextModeV1::Explore);
-    let max_nodes = request
-        .max_nodes
-        .map_or(20, |value| value.clamp(1, 200) as usize);
-    let include_code = request.include_code.unwrap_or(false);
-    let max_code_blocks = request
-        .max_code_blocks
-        .map_or(5, |value| value.clamp(1, 20) as usize);
-    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
+) -> Result<ToolResult> {
+    let task =
+        args.get("task")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: task".to_string(),
+            })?;
+
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("explore");
+    let options = build_context_options(&args, scope_prefix);
+
+    let context = cg.build_context(task, &options).await?;
     let memory_options = context_memory_options(&args);
-    let memory_read_control =
-        context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    // Search, graph enrichment, and memory are independent. Search is the
-    // primary code lane: once it answers, a still-pending graph must not hold
-    // lexical/exact results or memory hostage.
-    let search = execute_code_index_search(
-        search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: task.to_owned(),
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit: max_nodes,
-            cursor: None,
-            mode: semantic_mode,
-            authority: search_authority.cloned(),
-            deadline,
-            cancellation,
-        },
-    );
-    let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
-    let search_and_graph = race_primary_search_with_graph(search, graph, false);
-    let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
-    let strict_semantic_unavailable = semantic_mode
-        == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic
-        && matches!(
-            &outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_)
-        );
-    let (complete, code_generation, coverage, search_matches) = match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let search_matches = context_search_matches(&complete, scope_prefix);
-            let code_generation = Some(complete.code_generation.clone());
-            let coverage = primitive_search_coverage(&complete.coverage);
-            (Some(complete), code_generation, coverage, search_matches)
+    let (memory_matches, memory_matches_error) = if memory_options.include_memory {
+        match context_memory_matches(cg, task, &memory_options).await {
+            Ok(matches) => (matches, None),
+            Err(err) => (Vec::new(), Some(err.to_string())),
         }
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
-            None,
-            unavailable.code_generation,
-            primitive_search_coverage(&unavailable.coverage),
-            Vec::new(),
-        ),
+    } else {
+        (Vec::new(), None)
     };
-    let graph = match complete.as_ref() {
-        Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
-        None => graph,
-    };
-    let (graph, projection, verified_graph_evidence) = match (graph, complete.as_ref()) {
-        (Ok(graph), Some(complete)) => match context_graph_projection(
-            cg,
-            &graph,
-            complete,
-            scope_prefix,
-            max_nodes,
-            include_code,
-            max_code_blocks,
-        ) {
-            Ok(projection) => (Some(graph), projection, None),
-            Err(error) => (
-                None,
-                ContextGraphProjection::default(),
-                Some(dependency_hints::unavailable_evidence(&error)),
+    let touched_files = unique_file_paths(
+        context
+            .subgraph
+            .nodes
+            .iter()
+            .map(|n| n.file_path.as_str())
+            .chain(
+                context
+                    .related_files
+                    .iter()
+                    .map(std::string::String::as_str),
             ),
-        },
-        (Ok(graph), None) => (Some(graph), ContextGraphProjection::default(), None),
-        (Err(error), _) => (
-            None,
-            ContextGraphProjection::default(),
-            Some(dependency_hints::unavailable_evidence(&error)),
-        ),
-    };
-    let ContextMemoryOutcome {
-        hits: memory_matches,
-        graph_coverage: memory_graph_coverage,
-        error: memory_matches_error,
-    } = memory_outcome;
-    let seeds = projection
-        .selected
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
-    let symbol_values = projection
-        .selected
-        .iter()
-        .map(primitive_symbol_location)
-        .collect::<Result<Vec<_>>>()?;
-    let related_values = projection
-        .related
-        .iter()
-        .map(primitive_symbol_location)
-        .collect::<Result<Vec<_>>>()?;
-    let symbol_render_values = symbol_values
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let related_render_values = related_values
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let code_render_values = projection
-        .code_blocks
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut output = verified_context_markdown(
-        task,
-        &symbol_render_values,
-        &related_render_values,
-        &code_render_values,
-    )?;
-    if symbol_values.is_empty() {
-        append_context_search_matches(&mut output, &search_matches);
-    }
+    );
+    let mut output = format_context_as_markdown(&context);
     insert_context_memory_section(
         &mut output,
         &memory_matches,
         memory_matches_error.as_deref(),
     );
-    if mode == ContextModeV1::Plan
-        && let Some(graph) = graph.as_ref()
-    {
-        append_verified_plan_context(graph, &projection.selected, &mut output)?;
+    if let Some(hint) = cg.index_coverage_hint(context.subgraph.nodes.len()) {
+        let _ = writeln!(
+            output,
+            "\n{}\n{}\nSkipped trees seen: {}\nTo opt in, run: `{}`\n",
+            CONTEXT_INDEX_COVERAGE_HINT_HEADING,
+            hint.message,
+            hint.skipped_dirs.join(", "),
+            hint.suggested_command,
+        );
     }
 
-    if !seeds.is_empty() {
+    // Plan mode: append extension points, test coverage, and dependency info
+    if mode == "plan" {
+        append_plan_context(cg, &context, &mut output).await?;
+    }
+
+    if !context.seen_node_ids.is_empty() {
         let _ = write!(
             output,
             "\n{} {}\n",
             CONTEXT_SEEN_NODE_IDS_LABEL,
-            serde_json::to_string(&seeds)?
+            serde_json::to_string(&context.seen_node_ids).unwrap_or_default()
         );
     }
 
-    let result = ContextResultV1 {
-        task: request.task,
-        mode,
-        code_generation,
-        search_matches: search_matches.clone(),
-        symbols: symbol_values,
-        related_symbols: related_values,
-        code: projection.code_blocks,
-        coverage,
-        memory_matches: memory_matches.clone(),
-        memory_graph_coverage,
-        memory_matches_error: memory_matches_error.clone(),
-        verified_graph_evidence,
-    };
-    let mut value = serde_json::to_value(result)?;
+    let mut value = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
     if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "memory_matches".to_string(),
+            serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
+        );
         object.insert(
             CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
             json!({
@@ -839,38 +340,331 @@ where
                 ),
             }),
         );
+        if let Some(err) = memory_matches_error {
+            object.insert("memory_matches_error".to_string(), json!(err));
+        }
     }
-    append_context_semantic_pending(&mut output, &value);
-    let mut degradation = Md::new();
-    append_coverage_md(&mut degradation, &value);
-    search_evidence::append_verified_graph_evidence_md(&mut degradation, &value);
-    let degradation = degradation.render();
-    if !degradation.is_empty() {
-        output.push('\n');
-        output.push_str(&degradation);
-    }
-    let touched_files = unique_file_paths(
-        projection.touched_files.iter().map(String::as_str).chain(
-            search_matches
-                .iter()
-                .map(|search_match| search_match.file.as_str()),
-        ),
-    );
     let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
-    let result =
-        rendered_context_tool_result(cg, &args, value, touched_files, output, preview.as_deref());
-    if strict_semantic_unavailable {
-        Ok(result.with_semantic_error(true))
+    Ok(rendered_context_tool_result(
+        cg,
+        &args,
+        value,
+        touched_files,
+        output,
+        preview.as_deref(),
+    ))
+}
+
+fn context_markdown_lane_preview(markdown: &str) -> String {
+    let mut preview = String::with_capacity(markdown.len().min(24_000));
+    let mut lane = String::new();
+    let mut lane_key = String::new();
+    let mut in_fence = false;
+
+    for line in markdown.split_inclusive('\n') {
+        if !in_fence {
+            if let Some(key) = context_lane_key(line) {
+                push_context_lane_preview(&mut preview, &lane_key, &lane);
+                lane.clear();
+                lane_key = key.to_string();
+            }
+        }
+        lane.push_str(line);
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+    }
+    push_context_lane_preview(&mut preview, &lane_key, &lane);
+    preview
+}
+
+fn context_lane_key(line: &str) -> Option<&str> {
+    if line.starts_with("### ") || line.starts_with(CONTEXT_SEEN_NODE_IDS_LABEL) {
+        Some(line.trim_end())
     } else {
-        Ok(result)
+        None
     }
 }
 
-pub(super) async fn handle_callers(
+fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
+    if lane.is_empty() {
+        return;
+    }
+    let budget = context_lane_budget(lane_key);
+    if lane.len() <= budget {
+        preview.push_str(lane);
+        return;
+    }
+    let prefix = utf8_prefix_at_or_before(lane, budget);
+    preview.push_str(prefix);
+    if render::has_open_markdown_fence(prefix) {
+        preview.push_str("\n```\n");
+    }
+    preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
+}
+
+fn context_lane_budget(lane_key: &str) -> usize {
+    if lane_key.starts_with(CONTEXT_SEEN_NODE_IDS_LABEL) {
+        usize::MAX
+    } else if lane_key.starts_with(CONTEXT_CODE_HEADING) {
+        8_500
+    } else if lane_key.starts_with(CONTEXT_RELATED_SYMBOLS_HEADING) {
+        3_500
+    } else if lane_key.starts_with(CONTEXT_ENTRY_POINTS_HEADING)
+        || lane_key.starts_with(CONTEXT_TEST_COVERAGE_HEADING)
+    {
+        3_000
+    } else if lane_key.starts_with(CONTEXT_MEMORY_MATCHES_HEADING) {
+        2_500
+    } else if lane_key.starts_with(CONTEXT_EXTENSION_POINTS_HEADING) {
+        1_500
+    } else if lane_key.starts_with(CONTEXT_INDEX_COVERAGE_HINT_HEADING) {
+        1_000
+    } else {
+        2_000
+    }
+}
+
+fn insert_context_memory_section(
+    output: &mut String,
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) {
+    let Some(section) = context_memory_section(memory_matches, memory_matches_error) else {
+        return;
+    };
+    if let Some(idx) = output.find(&format!("\n{CONTEXT_ENTRY_POINTS_HEADING}")) {
+        output.insert_str(idx, &section);
+    } else {
+        output.push_str(&section);
+    }
+}
+
+fn context_memory_section(
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) -> Option<String> {
+    let mut section = String::new();
+    if !memory_matches.is_empty() {
+        section.push('\n');
+        section.push_str(CONTEXT_MEMORY_MATCHES_HEADING);
+        section.push('\n');
+        for hit in memory_matches {
+            let fact = &hit.fact;
+            let _ = writeln!(
+                section,
+                "- fact_id={} category={} trust={:.2} score={:.3}: {}",
+                fact.fact_id,
+                fact.category,
+                fact.trust_score,
+                hit.score,
+                compact_memory_content(&fact.content)
+            );
+        }
+        section.push('\n');
+        section.push_str(CONTEXT_MEMORY_FEEDBACK_HINT);
+        section.push('\n');
+        return Some(section);
+    }
+    if let Some(err) = memory_matches_error {
+        let _ = writeln!(
+            section,
+            "\n{CONTEXT_MEMORY_MATCHES_HEADING}\nUnavailable: {err}"
+        );
+        return Some(section);
+    }
+    None
+}
+
+fn compact_memory_content(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+struct ContextMemoryOptions {
+    include_memory: bool,
+    limit: usize,
+    min_trust: f64,
+}
+
+fn context_memory_options(args: &Value) -> ContextMemoryOptions {
+    let include_memory = args
+        .get("include_memory")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let limit = args
+        .get("memory_limit")
+        .and_then(Value::as_u64)
+        .map_or(CONTEXT_MEMORY_MATCH_LIMIT, |value| value as usize)
+        .clamp(1, CONTEXT_MEMORY_MATCH_LIMIT_MAX);
+    let min_trust = args
+        .get("memory_min_trust")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    ContextMemoryOptions {
+        include_memory,
+        limit,
+        min_trust,
+    }
+}
+
+fn context_memory_analytics_value(
+    options: &ContextMemoryOptions,
+    memory_matches: &[FactSearchResult],
+    memory_matches_error: Option<&str>,
+) -> Value {
+    let fact_ids: Vec<Value> = memory_matches
+        .iter()
+        .map(|hit| Value::from(hit.fact.fact_id))
+        .collect();
+    json!({
+        "include_memory": options.include_memory,
+        "limit": options.limit,
+        "min_trust": options.min_trust,
+        "match_count": fact_ids.len(),
+        "fact_ids": fact_ids,
+        "error": memory_matches_error,
+    })
+}
+
+async fn context_memory_matches(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
+    task: &str,
+    options: &ContextMemoryOptions,
+) -> Result<Vec<FactSearchResult>> {
+    cg.search_facts_untracked(SearchFactsRequest {
+        query: task.to_string(),
+        category: None,
+        limit: Some(options.limit),
+        min_trust: Some(options.min_trust),
+        include_why: false,
+    })
+    .await
+}
+
+fn build_context_options(args: &Value, scope_prefix: Option<&str>) -> BuildContextOptions {
+    let max_nodes = args
+        .get("max_nodes")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(20, |v| v.min(100) as usize);
+
+    let max_per_file = args
+        .get("max_per_file")
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as usize)
+        .or(Some((max_nodes / 3).max(3)));
+
+    BuildContextOptions {
+        max_nodes,
+        max_code_blocks: args
+            .get("max_code_blocks")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(5, |v| v.min(20) as usize),
+        include_code: args
+            .get("include_code")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        extra_keywords: string_array_values(args, "keywords"),
+        exclude_node_ids: string_array_values(args, "exclude_node_ids")
+            .into_iter()
+            .collect(),
+        merge_adjacent: args
+            .get("merge_adjacent")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        max_per_file,
+        path_prefix: effective_path(args, scope_prefix).map(String::from),
+        ..Default::default()
+    }
+}
+
+async fn append_plan_context(
+    cg: &TraceDecay,
+    context: &TaskContext,
+    output: &mut String,
+) -> Result<()> {
+    output.push_str("\n### Extension Points\n");
+    let mut found_extension = false;
+    for node in &context.subgraph.nodes {
+        if matches!(node.kind, NodeKind::Trait | NodeKind::Interface)
+            && node.visibility == Visibility::Pub
+        {
+            let implementors = cg.get_callers(&node.id, 1).await?;
+            let impl_count = implementors
+                .iter()
+                .filter(|(_, e)| matches!(e.kind, EdgeKind::Implements))
+                .count();
+            let _ = writeln!(
+                output,
+                "- **{}** ({}) - {}:{} ({} implementors)",
+                node.name,
+                node.kind.as_str(),
+                node.file_path,
+                user_line(node.start_line),
+                impl_count,
+            );
+            found_extension = true;
+        }
+    }
+    if !found_extension {
+        output.push_str("_No public traits/interfaces found in context._\n");
+    }
+
+    append_plan_test_coverage(cg, context, output).await
+}
+
+async fn append_plan_test_coverage(
+    cg: &TraceDecay,
+    context: &TaskContext,
+    output: &mut String,
+) -> Result<()> {
+    let file_paths: Vec<String> = context
+        .subgraph
+        .nodes
+        .iter()
+        .map(|n| n.file_path.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if file_paths.is_empty() {
+        return Ok(());
+    }
+
+    output.push_str("\n### Test Coverage\n");
+    let mut test_files: HashSet<String> = HashSet::new();
+    for file in &file_paths {
+        let nodes = cg.get_nodes_by_file(file).await?;
+        for node in &nodes {
+            let callers = cg.get_callers(&node.id, 2).await?;
+            let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
+            let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
+            for (caller, _) in &callers {
+                if crate::tracedecay::is_test_file(&caller.file_path)
+                    || test_annotated.contains(&caller.id)
+                {
+                    test_files.insert(caller.file_path.clone());
+                }
+            }
+        }
+    }
+    if test_files.is_empty() {
+        output.push_str("_No test files found covering these modules._\n");
+    } else {
+        let mut sorted: Vec<_> = test_files.into_iter().collect();
+        sorted.sort();
+        output.push_str(&compact_path_list_markdown(&sorted));
+        output.push('\n');
+    }
+
+    Ok(())
+}
+
+fn compact_path_list_markdown(paths: &[String]) -> String {
+    format_compact_path_list(paths.iter().map(String::as_str), "- ", "")
+}
+
+/// Handles `tracedecay_callers` tool calls.
+pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
 
     let max_depth = args
@@ -878,28 +672,36 @@ pub(super) async fn handle_callers(
         .and_then(serde_json::Value::as_u64)
         .map_or(3, |v| v.min(10) as usize);
 
-    let occurrence = graph_occurrence_id(node_id)?;
-    let results = traverse_verified_neighbors(
-        graph,
-        occurrence,
-        &[RelationEdgeKindV1::Calls],
-        true,
-        max_depth,
-    )?;
-    let summaries = results
+    let results = cg.get_callers(node_id, max_depth).await?;
+
+    let touched_files = unique_file_paths(results.iter().map(|(n, _)| n.file_path.as_str()));
+
+    let items: Vec<Value> = results
         .iter()
-        .map(|result| result.symbol.clone())
-        .collect::<Vec<_>>();
-    let touched_files = graph_symbol_paths(&summaries)?;
-    let items = results
-        .iter()
-        .map(verified_neighbor_value)
-        .collect::<Result<Vec<_>>>()?;
+        .map(|(node, edge)| {
+            json!({
+                "node_id": node.id,
+                "name": node.name,
+                "kind": node.kind.as_str(),
+                "file": node.file_path,
+                "line": user_line(node.start_line),
+                "edge_kind": edge.kind.as_str(),
+            })
+        })
+        .collect();
 
     let value = json!(items);
-    Ok(generic_tool_result(cg, &args, &value, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
+        touched_files,
+        || render::generic_md(&value),
+    ))
 }
 
+/// Handles `tracedecay_callees` tool calls.
+///
 /// Beyond the direct `Calls` edges, this handler also surfaces *trait
 /// dispatch targets*: when a callee is a method whose enclosing scope is a
 /// trait, the concrete impl methods reachable through that trait are added
@@ -908,91 +710,83 @@ pub(super) async fn handle_callers(
 /// they statically called.
 ///
 /// Dispatch resolution skipped when `resolve_dispatch=false` is passed.
-pub(super) async fn handle_callees(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
-    let request: CalleesSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_callees")?;
-    let max_depth = request.max_depth.map_or(3, |value| value.min(10) as usize);
-    let resolve_dispatch = request.resolve_dispatch.unwrap_or(true);
+pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let node_id = require_node_id(&args)?;
 
-    let occurrence = graph_occurrence_id(&request.node_id)?;
-    let results = traverse_verified_neighbors(
-        graph,
-        occurrence,
-        &[RelationEdgeKindV1::Calls],
-        false,
-        max_depth,
-    )?;
-    let mut seen = results
-        .iter()
-        .map(|result| result.symbol.occurrence.clone())
-        .collect::<HashSet<_>>();
+    let max_depth = args
+        .get("max_depth")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(3, |v| v.min(10) as usize);
 
-    let mut items = results
+    let resolve_dispatch = args
+        .get("resolve_dispatch")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+
+    let results = cg.get_callees(node_id, max_depth).await?;
+    let mut seen: HashSet<String> = results.iter().map(|(n, _)| n.id.clone()).collect();
+
+    let mut items: Vec<Value> = results
         .iter()
-        .map(|result| {
-            let metadata = required_graph_metadata(&result.symbol)?;
-            Ok(CalleeV1 {
-                node_id: result.symbol.occurrence.as_str().to_owned(),
-                name: metadata.simple_name.clone(),
-                kind: metadata.kind.clone(),
-                file: required_graph_file_path(&result.symbol)?.to_owned(),
-                line: user_line(metadata.start_line),
-                edge_kind: canonical_relation_kind_name(result.edge_kind).to_owned(),
-                dispatch_via_trait: false,
-                depth: Some(u32::try_from(result.depth).map_err(|_| {
-                    graph_symbol_corrupt("callee traversal depth exceeds u32".to_owned())
-                })?),
-                dispatch_from: None,
+        .map(|(node, edge)| {
+            json!({
+                "node_id": node.id,
+                "name": node.name,
+                "kind": node.kind.as_str(),
+                "file": node.file_path,
+                "line": user_line(node.start_line),
+                "edge_kind": edge.kind.as_str(),
+                "dispatch_via_trait": false,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
     if resolve_dispatch {
-        for callee in &results {
-            for impl_method in verified_trait_dispatch_targets(graph, &callee.symbol)? {
-                if !seen.insert(impl_method.occurrence.clone()) {
+        for (callee, _) in &results {
+            let impls = cg.get_trait_dispatch_targets(callee).await?;
+            for impl_method in impls {
+                if !seen.insert(impl_method.id.clone()) {
                     continue;
                 }
-                let metadata = required_graph_metadata(&impl_method)?;
-                items.push(CalleeV1 {
-                    node_id: impl_method.occurrence.as_str().to_owned(),
-                    name: metadata.simple_name.clone(),
-                    kind: metadata.kind.clone(),
-                    file: required_graph_file_path(&impl_method)?.to_owned(),
-                    line: user_line(metadata.start_line),
-                    edge_kind: "calls".to_owned(),
-                    dispatch_via_trait: true,
-                    depth: None,
-                    dispatch_from: Some(callee.symbol.occurrence.as_str().to_owned()),
-                });
+                items.push(json!({
+                    "node_id": impl_method.id,
+                    "name": impl_method.name,
+                    "kind": impl_method.kind.as_str(),
+                    "file": impl_method.file_path,
+                    "line": user_line(impl_method.start_line),
+                    "edge_kind": "calls",
+                    "dispatch_via_trait": true,
+                    "dispatch_from": callee.id.clone(),
+                }));
             }
         }
     }
 
-    let touched_files = unique_file_paths(items.iter().map(|item| item.file.as_str()));
+    let touched_files = unique_file_paths(
+        items
+            .iter()
+            .filter_map(|v| v.get("file").and_then(Value::as_str)),
+    );
 
-    let value = serde_json::to_value(items)?;
-    Ok(generic_tool_result(cg, &args, &value, touched_files))
+    let value = json!(items);
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
+        touched_files,
+        || render::generic_md(&value),
+    ))
 }
 
-/// Bare-name lookup against `idx_nodes_name` — no BM25 scoring, no fuzzy
-/// match, no qualified-name suffix walk. Returns every node whose `name`
-/// column equals the query exactly. Useful when you already know the symbol
-/// and want the apples-to-apples cost of an index hit instead of
-/// `tracedecay_search`'s ranked query.
+/// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
+/// `idx_nodes_name` — no BM25 scoring, no fuzzy match, no qualified-name
+/// suffix walk. Returns every node whose `name` column equals the query
+/// exactly. Useful when you already know the symbol and want the apples-to-
+/// apples cost of an index hit instead of `tracedecay_search`'s ranked query.
 pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-    ignored_dependency_admission: Option<
-        &dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
-    >,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let name =
         args.get("name")
@@ -1005,251 +799,356 @@ pub(super) async fn handle_find_exact_symbol(
         .and_then(serde_json::Value::as_u64)
         .map_or(20, |v| v.min(200) as usize);
 
-    let mut nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
-    nodes = graph_symbols_in_scope(nodes, scope_prefix)?;
+    let mut nodes = cg.get_nodes_by_name(name).await?;
+    nodes = filter_by_scope(nodes, scope_prefix, |n| &n.file_path);
+    let mut lazy_indexed_files = Vec::new();
     if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
-        dependency_hints::admit_verified_ignored_dependency(
-            ignored_dependency_admission,
-            graph,
+        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+            cg,
             name,
+            limit,
             scope_prefix,
-            deadline,
-            cancellation,
         )
         .await?;
+        if !lazy_indexed_files.is_empty() {
+            nodes = filter_by_scope(cg.get_nodes_by_name(name).await?, scope_prefix, |n| {
+                &n.file_path
+            });
+        }
     }
     if nodes.len() > limit {
         nodes.truncate(limit);
     }
 
-    let touched_files = graph_symbol_paths(&nodes)?;
-    let items = nodes
+    let touched_files = unique_file_paths(
+        nodes
+            .iter()
+            .map(|n| n.file_path.as_str())
+            .chain(lazy_indexed_files.iter().map(String::as_str)),
+    );
+
+    let items: Vec<Value> = nodes
         .iter()
-        .map(|node| {
-            let metadata = required_graph_metadata(node)?;
-            let file_path = required_graph_file_path(node)?;
-            Ok(json!({
-                "id": node.occurrence.as_str(),
-                "name": metadata.simple_name,
-                "qualified_name": metadata.qualified_name,
-                "kind": metadata.kind,
-                "file": file_path,
-                "line": user_line(metadata.start_line),
-                "signature": metadata.signature,
-            }))
+        .map(|n| {
+            json!({
+                "id": n.id,
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind.as_str(),
+                "file": n.file_path,
+                "line": user_line(n.start_line),
+                "signature": n.signature,
+            })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
     let body = json!({
         "name": name,
         "count": items.len(),
         "matches": items,
+        "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
-    Ok(generic_tool_result(cg, &args, &body, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &body,
+        touched_files,
+        || render::generic_md(&body),
+    ))
 }
 
-pub(super) async fn handle_impact(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
-    let request: ImpactSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_impact")?;
-    let max_depth = request.max_depth.map_or(3, |value| value.min(10));
+/// Handles `tracedecay_call_chain` tool calls. Finds the shortest directed
+/// call path from `from_id` to `to_id` along outgoing `Calls` edges.
+pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let from_id = args
+        .get("from_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "missing required parameter: from_id".to_string(),
+        })?;
+    let to_id =
+        args.get("to_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: to_id".to_string(),
+            })?;
+    let max_depth = args
+        .get("max_depth")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(8, |v| v.clamp(1, 20) as usize);
 
-    let occurrence = graph_occurrence_id(&request.node_id)?;
-    let impact = graph.impact(
-        std::slice::from_ref(&occurrence),
-        &[],
-        max_depth,
-        50_000,
-        GRAPH_RELATION_READ_LIMIT,
-    )?;
-    let summaries = impact
-        .impacted
+    let path = cg.get_call_chain(from_id, to_id, max_depth).await?;
+    let (touched_files, body) = if let Some(steps) = path {
+        let files = unique_file_paths(steps.iter().map(|(n, _)| n.file_path.as_str()));
+        let items: Vec<Value> = steps
+            .iter()
+            .map(|(n, edge)| {
+                json!({
+                    "id": n.id,
+                    "name": n.name,
+                    "kind": n.kind.as_str(),
+                    "file": n.file_path,
+                    "line": user_line(n.start_line),
+                    "edge_kind": edge.as_ref().map(|e| e.kind.as_str()),
+                })
+            })
+            .collect();
+        (
+            files,
+            json!({
+                "found": true,
+                "length": items.len(),
+                "steps": items,
+            }),
+        )
+    } else {
+        (
+            Vec::new(),
+            json!({
+                "found": false,
+                "length": 0,
+                "steps": [],
+                "message": format!("no directed call chain from {from_id} to {to_id} within {max_depth} hops"),
+            }),
+        )
+    };
+
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &body,
+        touched_files,
+        || render::generic_md(&body),
+    ))
+}
+
+/// Handles `tracedecay_file_dependents` tool calls.
+pub(super) async fn handle_file_dependents(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let file =
+        args.get("file")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: file".to_string(),
+            })?;
+
+    let dependents = cg.get_file_dependents(file).await?;
+    let touched_files = dependents.clone();
+    let body = json!({
+        "file": file,
+        "count": dependents.len(),
+        "dependents": dependents,
+    });
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &body,
+        touched_files,
+        || render::generic_md(&body),
+    ))
+}
+
+/// Handles `tracedecay_impact` tool calls.
+pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let node_id = require_node_id(&args)?;
+
+    let max_depth = args
+        .get("max_depth")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(3, |v| v.min(10) as usize);
+
+    let subgraph = cg.get_impact_radius(node_id, max_depth).await?;
+
+    let touched_files = unique_file_paths(subgraph.nodes.iter().map(|n| n.file_path.as_str()));
+
+    let nodes: Vec<Value> = subgraph
+        .nodes
         .iter()
-        .map(|item| item.summary.clone())
-        .collect::<Vec<_>>();
-    let touched_files = graph_symbol_paths(&summaries)?;
-    let nodes = impact
-        .impacted
-        .iter()
-        .map(|item| {
-            let metadata = required_graph_metadata(&item.summary)?;
-            Ok(ImpactNodeV1 {
-                id: item.summary.occurrence.as_str().to_owned(),
-                name: metadata.simple_name.clone(),
-                kind: metadata.kind.clone(),
-                file: required_graph_file_path(&item.summary)?.to_owned(),
-                line: user_line(metadata.start_line),
-                depth: item.depth,
+        .map(|n| {
+            json!({
+                "id": n.id,
+                "name": n.name,
+                "kind": n.kind.as_str(),
+                "file": n.file_path,
+                "line": user_line(n.start_line),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
-    let output = serde_json::to_value(ImpactResultV1 {
-        node_count: nodes.len(),
-        complete: impact.complete,
-        unavailable_fields: vec!["edge_count".to_owned()],
-        nodes,
-    })?;
+    let output = json!({
+        "node_count": subgraph.nodes.len(),
+        "edge_count": subgraph.edges.len(),
+        "nodes": nodes,
+    });
 
-    Ok(generic_tool_result(cg, &args, &output, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output,
+        touched_files,
+        || render::generic_md(&output),
+    ))
 }
 
-pub(super) async fn handle_node(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
-    let request: NodeSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_node")?;
-    let occurrence = graph_occurrence_id(&request.node_id)?;
-    let node = graph.symbol_summary(&occurrence)?;
+/// Handles `tracedecay_node` tool calls.
+pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let node_id = require_node_id(&args)?;
+
+    let node = cg.get_node(node_id).await?;
 
     match node {
         Some(n) => {
-            let metadata = required_graph_metadata(&n)?;
-            let file_path = required_graph_file_path(&n)?;
-            let touched_files = vec![file_path.to_owned()];
-            let file_size_bytes = std::fs::metadata(cg.project_root().join(file_path))?.len();
-            let end_line = graph_symbol_end_line(metadata)?;
-            let cyclomatic_complexity = metadata.branches.checked_add(1).ok_or_else(|| {
-                graph_symbol_corrupt(format!(
-                    "verified graph symbol '{}' branch count overflows complexity",
-                    n.occurrence.as_str()
-                ))
-            })?;
-            let line_count = end_line - metadata.start_line + 1;
-            let output = serde_json::to_value(NodeDetailsV1 {
-                id: n.occurrence.as_str().to_owned(),
-                name: metadata.simple_name.clone(),
-                kind: metadata.kind.clone(),
-                qualified_name: metadata.qualified_name.clone(),
-                file: file_path.to_owned(),
-                start_line: user_line(metadata.start_line),
-                end_line: user_line(end_line),
-                signature: metadata.signature.clone(),
-                visibility: metadata.visibility.clone(),
-                branches: metadata.branches,
-                loops: metadata.loops,
-                max_nesting: metadata.max_nesting,
-                cyclomatic_complexity,
-                cost_to_expand: NodeExpansionCostV1 {
-                    body: u64::from(line_count) * 20,
-                    full_file: file_size_bytes / 4,
-                },
-                unavailable_fields: [
-                    "assertions",
-                    "attrs_start_line",
-                    "derives",
-                    "docstring",
-                    "is_async",
-                    "returns",
-                    "unchecked_calls",
-                    "unsafe_blocks",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            })?;
-            Ok(generic_tool_result(cg, &args, &output, touched_files))
+            let touched_files = vec![n.file_path.clone()];
+            let file_size_bytes = cg.get_file_size_bytes(&n.file_path).await;
+            // For type-kind nodes, also surface the `#[derive(...)]` macros
+            // attached. Costs one extra edge query per node lookup; skipped
+            // for non-type kinds where derives never apply.
+            let derives: Vec<Value> = if matches!(
+                n.kind,
+                NodeKind::Struct
+                    | NodeKind::Enum
+                    | NodeKind::Union
+                    | NodeKind::CaseClass
+                    | NodeKind::DataClass
+                    | NodeKind::Record
+                    | NodeKind::PascalRecord
+            ) {
+                cg.get_derives_for_node(&n.id)
+                    .await?
+                    .into_iter()
+                    .map(|name| {
+                        let look = crate::derive_table::enrich(&name);
+                        json!({
+                            "derive": look.derive_name,
+                            "trait": look.known.as_ref().map(|k| k.trait_path),
+                            "methods": look.known.as_ref().map(|k| k.methods.to_vec()),
+                            "well_known": look.known.is_some(),
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let output = json!({
+                "id": n.id,
+                "name": n.name,
+                "kind": n.kind.as_str(),
+                "qualified_name": n.qualified_name,
+                "file": n.file_path,
+                "start_line": user_line(n.start_line),
+                "end_line": user_line(n.end_line),
+                "signature": n.signature,
+                "docstring": n.docstring,
+                "visibility": n.visibility.as_str(),
+                "is_async": n.is_async,
+                "branches": n.branches,
+                "loops": n.loops,
+                "returns": n.returns,
+                "max_nesting": n.max_nesting,
+                "unsafe_blocks": n.unsafe_blocks,
+                "unchecked_calls": n.unchecked_calls,
+                "assertions": n.assertions,
+                "cyclomatic_complexity": n.branches + 1,
+                "cost_to_expand": cost_to_expand(&n, file_size_bytes),
+                "derives": derives,
+            });
+            Ok(rendered_tool_result(
+                cg,
+                &args,
+                &output,
+                touched_files,
+                || render::generic_md(&output),
+            ))
         }
-        None => node_not_found_result(&request.node_id),
+        None => Ok(text_tool_result(
+            &format!("Node not found: {node_id}"),
+            vec![],
+        )),
     }
 }
 
-pub(super) async fn handle_similar(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<ToolResult> {
-    let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
-    let limit = request.limit.map_or(10, |value| value.min(100) as usize);
-    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
+/// Handles `tracedecay_similar` tool calls.
+pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    debug_assert!(
+        args.is_object(),
+        "handle_similar expects an object argument"
+    );
+    let symbol =
+        args.get("symbol")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: symbol".to_string(),
+            })?;
 
-    let outcome = execute_code_index_search(
-        search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: request.symbol,
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit,
-            cursor: None,
-            mode: semantic_mode,
-            authority: search_authority.cloned(),
-            deadline,
-            cancellation,
-        },
-    )
-    .await;
-    let complete = match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => complete,
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_) => {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-similarity-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained code-index search lanes are unavailable".to_owned(),
-            });
-        }
-    };
-    let mut results = Vec::new();
-    for ranked in &complete.ordered_candidates {
-        let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
-            continue;
-        };
-        let candidates =
-            graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-        let mut matched = None;
-        for node in candidates {
-            if required_graph_file_path(&node)? == display.path.as_str() {
-                matched = Some(node);
-                break;
-            }
-        }
-        if let Some(node) = matched {
-            results.push((node, ranked.candidate.utility_micros));
-        }
+    let limit = args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(10, |v| v.min(100) as usize);
+
+    // Use FTS search first
+    let mut results = cg.search(symbol, limit).await?;
+
+    // If FTS didn't return enough, supplement with substring matching
+    if results.len() < limit {
+        let all_nodes = cg.get_all_nodes().await?;
+        let lower_symbol = symbol.to_ascii_lowercase();
+        let existing_ids: HashSet<String> = results.iter().map(|r| r.node.id.clone()).collect();
+
+        let mut substring_matches: Vec<crate::types::SearchResult> = all_nodes
+            .into_iter()
+            .filter(|n| {
+                !existing_ids.contains(&n.id)
+                    && (n.name.to_ascii_lowercase().contains(&lower_symbol)
+                        || n.qualified_name
+                            .to_ascii_lowercase()
+                            .contains(&lower_symbol))
+            })
+            .map(|n| crate::types::SearchResult {
+                node: n,
+                score: 0.5,
+            })
+            .collect();
+
+        substring_matches.truncate(limit.saturating_sub(results.len()));
+        results.extend(substring_matches);
     }
-    let result_nodes = results
+
+    let touched_files = unique_file_paths(results.iter().map(|r| r.node.file_path.as_str()));
+
+    let items: Vec<Value> = results
         .iter()
-        .map(|(node, _)| node.clone())
-        .collect::<Vec<_>>();
-    let touched_files = graph_symbol_paths(&result_nodes)?;
-    let items = results
-        .iter()
-        .map(|(node, utility_micros)| {
-            let metadata = required_graph_metadata(node)?;
-            Ok(SimilarSymbolV1 {
-                id: node.occurrence.as_str().to_owned(),
-                name: metadata.simple_name.clone(),
-                kind: metadata.kind.clone(),
-                file: required_graph_file_path(node)?.to_owned(),
-                line: user_line(metadata.start_line),
-                signature: metadata.signature.clone(),
-                utility_micros: *utility_micros,
+        .map(|r| {
+            json!({
+                "id": r.node.id,
+                "name": r.node.name,
+                "kind": r.node.kind.as_str(),
+                "file": r.node.file_path,
+                "line": user_line(r.node.start_line),
+                "signature": r.node.signature,
+                "score": r.score,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
-    let value = serde_json::to_value(items)?;
-    Ok(generic_tool_result(cg, &args, &value, touched_files))
+    let value = json!(items);
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
+        touched_files,
+        || render::generic_md(&value),
+    ))
 }
 
 /// Reads a file's lines (0-based) for snippet extraction, memoizing by path so
 /// a file with many references is read once. `None` when the file cannot be
 /// read (e.g. deleted since indexing).
 fn cached_file_lines<'a>(
-    project_root: &Path,
+    cg: &TraceDecay,
     cache: &'a mut HashMap<String, Option<Vec<String>>>,
     file_path: &str,
 ) -> Option<&'a [String]> {
     if !cache.contains_key(file_path) {
-        let abs = project_root.join(file_path);
+        let abs = cg.project_root().join(file_path);
         let lines = std::fs::read_to_string(&abs)
             .ok()
             .map(|source| source.lines().map(str::to_string).collect::<Vec<_>>());
@@ -1263,7 +1162,7 @@ fn cached_file_lines<'a>(
 
 /// Trims and length-caps a source line for use as a preview snippet.
 fn snippet_text(line: &str) -> String {
-    crate::text::utf8_prefix_at_or_before(line.trim(), 160).to_string()
+    utf8_prefix_at_or_before(line.trim(), 160).to_string()
 }
 
 /// Picks a current-text snippet near `approx_line` (0-based; edge line bases are
@@ -1313,193 +1212,124 @@ fn count_identifier_occurrences(haystack: &str, name: &str) -> usize {
     count
 }
 
-/// Graph-derived inputs for one rename-preview reference site, extracted
-/// before the blocking file walk so the worker needs no graph access.
-struct RenameReferenceSiteInput {
-    from_node_id: String,
-    from_name: String,
-    from_kind: String,
-    edge_kind: String,
-    file: String,
-    evidence_start_byte: u64,
-}
+/// Handles `tracedecay_rename_preview` tool calls. READ-ONLY: reports what a
+/// rename of the given symbol WOULD touch — the declaration site and every graph
+/// reference site (incoming edges; outgoing edges reference other symbols and so
+/// are excluded), each with a current-text snippet, plus a per-file count of
+/// literal name occurrences that are NOT backed by a graph edge ("text-only
+/// matches — review manually"). Nothing is rewritten.
+pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let node_id = require_node_id(&args)?;
+    let new_name = args.get("new_name").and_then(Value::as_str);
 
-/// READ-ONLY: reports what a rename of the given symbol WOULD touch — the
-/// declaration site and every graph reference site (incoming edges; outgoing
-/// edges reference other symbols and so are excluded), each with a
-/// current-text snippet, plus a per-file count of literal name occurrences
-/// that are NOT backed by a graph edge ("text-only matches — review
-/// manually"). Nothing is rewritten.
-pub(super) async fn handle_rename_preview(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
-    let request: RenamePreviewPrimitiveRequestV1 =
-        decode_primitive_request(&args, "tracedecay_rename_preview")?;
+    let Some(node) = cg.get_node(node_id).await? else {
+        return Ok(text_tool_result(
+            &format!("Node not found: {node_id}"),
+            vec![],
+        ));
+    };
+    let symbol_name = node.name.clone();
 
-    let occurrence = graph_occurrence_id(&request.node_id)?;
+    let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
     // Graph occurrences per file (declaration + reference sites) — subtracted
     // from the literal textual count to isolate the text-only matches.
     let mut graph_counts: HashMap<String, usize> = HashMap::new();
-    let mut touched: Vec<String> = Vec::new();
-    // Graph phase: extract owned declaration fields and per-reference-site
-    // inputs so the blocking file walk below needs no graph value at all.
-    let (mut declaration, declaration_line, symbol_name, reference_inputs) = {
-        let Some(node) = graph.symbol_summary(&occurrence)? else {
-            return node_not_found_result(&request.node_id);
-        };
-        let node_metadata = required_graph_metadata(&node)?;
-        let node_file = required_graph_file_path(&node)?;
-        let symbol_name = node_metadata.simple_name.clone();
+    let mut touched: Vec<String> = vec![node.file_path.clone()];
 
-        touched.push(node_file.to_owned());
-        *graph_counts.entry(node_file.to_owned()).or_default() += 1;
-        let declaration = RenamePreviewNodeV1 {
-            id: node.occurrence.as_str().to_owned(),
-            name: node_metadata.simple_name.clone(),
-            qualified_name: node_metadata.qualified_name.clone(),
-            kind: node_metadata.kind.clone(),
-            file: node_file.to_owned(),
-            line: user_line(node_metadata.start_line),
-            snippet: None,
-        };
+    *graph_counts.entry(node.file_path.clone()).or_default() += 1;
+    let decl_snippet = cached_file_lines(cg, &mut lines_cache, &node.file_path).and_then(|lines| {
+        lines
+            .get(node.start_line as usize)
+            .map(|line| snippet_text(line))
+    });
+    let declaration = json!({
+        "id": node.id,
+        "name": node.name,
+        "kind": node.kind.as_str(),
+        "file": node.file_path,
+        "line": user_line(node.start_line),
+        "snippet": decl_snippet,
+    });
 
-        // Reference sites: incoming edges are the callers/users that name this
-        // symbol. NOTE: call-edge coverage improves as the resolver improves;
-        // the text-only counts below catch what the graph currently misses.
-        let incoming = single_graph_adjacency_batch(graph.callers(
-            std::slice::from_ref(&node.occurrence),
-            &[],
-            2_000_000,
-        )?)?;
-        let mut reference_inputs = Vec::<RenameReferenceSiteInput>::with_capacity(incoming.len());
-        for edge in incoming {
-            let source_node = edge.neighbor;
-            let source_metadata = required_graph_metadata(&source_node)?;
-            let source_file = required_graph_file_path(&source_node)?;
-            touched.push(source_file.to_owned());
-            *graph_counts.entry(source_file.to_owned()).or_default() += 1;
-            reference_inputs.push(RenameReferenceSiteInput {
-                from_node_id: source_node.occurrence.as_str().to_owned(),
-                from_name: source_metadata.simple_name.clone(),
-                from_kind: source_metadata.kind.clone(),
-                edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
-                file: source_file.to_owned(),
-                evidence_start_byte: edge.edge.evidence_span.start_byte,
-            });
+    // Reference sites: incoming edges are the callers/users that name this
+    // symbol. NOTE: call-edge coverage improves as the resolver improves; the
+    // text-only counts below catch what the graph currently misses.
+    let incoming = cg.get_incoming_edges(node_id).await?;
+    let mut references: Vec<Value> = Vec::new();
+    for edge in &incoming {
+        if let Some(source_node) = cg.get_node(&edge.source).await? {
+            touched.push(source_node.file_path.clone());
+            *graph_counts
+                .entry(source_node.file_path.clone())
+                .or_default() += 1;
+            let snippet = cached_file_lines(cg, &mut lines_cache, &source_node.file_path)
+                .and_then(|lines| reference_line_snippet(lines, edge.line, &symbol_name));
+            references.push(json!({
+                "from_node_id": source_node.id,
+                "from_name": source_node.name,
+                "from_kind": source_node.kind.as_str(),
+                "edge_kind": edge.kind.as_str(),
+                "file": source_node.file_path,
+                "line": edge.line,
+                "snippet": snippet,
+            }));
         }
-        (
-            declaration,
-            node_metadata.start_line,
-            symbol_name,
-            reference_inputs,
-        )
-    };
+    }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
-    // File-walk phase: every referenced source file is read from disk, so it
-    // runs on a blocking worker like the sibling analysis scans instead of
-    // holding the async dispatch thread through the reads.
-    let project_root = cg.project_root().to_path_buf();
-    let declaration_file = declaration.file.clone();
-    let walk_symbol_name = symbol_name.clone();
-    let walk_graph_counts = graph_counts;
-    let walk_touched_files = touched_files.clone();
-    let (decl_snippet, references, text_only_matches) = tokio::task::spawn_blocking(
-        move || -> Result<(
-            Option<String>,
-            Vec<RenamePreviewReferenceV1>,
-            Vec<RenamePreviewTextOnlyMatchV1>,
-        )> {
-            let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
-            let decl_snippet =
-                cached_file_lines(&project_root, &mut lines_cache, &declaration_file).and_then(
-                    |lines| {
-                        lines
-                            .get(declaration_line as usize)
-                            .map(|line| snippet_text(line))
-                    },
-                );
+    // Text-only matches per touched file: literal identifier occurrences of the
+    // name minus the graph occurrences already accounted for. These are the
+    // comments/strings/dynamic-dispatch/unresolved sites a graph-only rename
+    // would miss — the scan is bounded to files that already appear in the
+    // preview, so occurrences in wholly unrelated files are not counted.
+    let mut text_only_matches: Vec<Value> = Vec::new();
+    for file in &touched_files {
+        let total = cached_file_lines(cg, &mut lines_cache, file)
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| count_identifier_occurrences(line, &symbol_name))
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        let graph = graph_counts.get(file).copied().unwrap_or(0);
+        let text_only = total.saturating_sub(graph);
+        if text_only > 0 {
+            text_only_matches.push(json!({
+                "file": file,
+                "text_only_count": text_only,
+                "note": "text-only matches — review manually",
+            }));
+        }
+    }
 
-            let mut references =
-                Vec::<RenamePreviewReferenceV1>::with_capacity(reference_inputs.len());
-            for input in reference_inputs {
-                let source = crate::sync::read_source_file(&project_root.join(&input.file))?;
-                let line = line_for_byte_offset(&source, input.evidence_start_byte)?;
-                let snippet = cached_file_lines(&project_root, &mut lines_cache, &input.file)
-                    .and_then(|lines| reference_line_snippet(lines, Some(line), &walk_symbol_name));
-                references.push(RenamePreviewReferenceV1 {
-                    from_node_id: input.from_node_id,
-                    from_name: input.from_name,
-                    from_kind: input.from_kind,
-                    edge_kind: input.edge_kind,
-                    file: input.file,
-                    line: user_line(line),
-                    snippet,
-                });
-            }
+    let output = json!({
+        "read_only": true,
+        "note": "Preview only — no files are edited. 'references' are graph reference \
+                 sites (the declaration is reported separately in 'node'); \
+                 'text_only_matches' are literal name occurrences NOT backed by a graph \
+                 edge (comments, strings, dynamic dispatch, unresolved refs) and must be \
+                 reviewed by hand. Graph call-edge coverage improves as the resolver does.",
+        "symbol": symbol_name,
+        "new_name": new_name,
+        "node": declaration,
+        "reference_count": references.len(),
+        "references": references,
+        "text_only_matches": text_only_matches,
+    });
 
-            // Text-only matches per touched file: literal identifier occurrences
-            // of the name minus the graph occurrences already accounted for.
-            // These are the comments/strings/dynamic-dispatch/unresolved sites a
-            // graph-only rename would miss — the scan is bounded to files that
-            // already appear in the preview, so occurrences in wholly unrelated
-            // files are not counted.
-            let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
-            for file in &walk_touched_files {
-                let total =
-                    cached_file_lines(&project_root, &mut lines_cache, file).map_or(0, |lines| {
-                        lines
-                            .iter()
-                            .map(|line| count_identifier_occurrences(line, &walk_symbol_name))
-                            .sum::<usize>()
-                    });
-                let graph = walk_graph_counts.get(file).copied().unwrap_or(0);
-                let text_only = total.saturating_sub(graph);
-                if text_only > 0 {
-                    text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
-                        file: file.clone(),
-                        text_only_count: text_only,
-                        note: "text-only matches — review manually".to_owned(),
-                    });
-                }
-            }
-            Ok((decl_snippet, references, text_only_matches))
-        },
-    )
-    .await
-    .map_err(|join_error| TraceDecayError::Config {
-        message: format!("rename preview file scan task failed: {join_error}"),
-    })??;
-    declaration.snippet = decl_snippet;
-
-    let output = serde_json::to_value(RenamePreviewPrimitiveResultV1 {
-        read_only: true,
-        note: "Preview only — nothing is edited. 'references' are graph reference sites \
-               (the declaration is reported separately in 'node'); 'text_only_matches' are \
-               literal name occurrences NOT backed by a graph edge (comments, strings, \
-               dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
-               call-edge coverage improves as the resolver does."
-            .to_owned(),
-        symbol: symbol_name,
-        new_name: request.new_name,
-        node: declaration,
-        reference_count: references.len(),
-        references,
-        text_only_matches,
-    })?;
-
-    Ok(generic_tool_result(cg, &args, &output, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output,
+        touched_files,
+        || render::generic_md(&output),
+    ))
 }
 
-/// Bulk caller lookup over many IDs.
-pub(super) async fn handle_callers_for(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
+/// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
+pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_ids: Vec<String> = args
         .get("node_ids")
         .and_then(|v| v.as_array())
@@ -1518,11 +1348,11 @@ pub(super) async fn handle_callers_for(
 
     // Default to "calls" but allow any kind (or empty string for all kinds).
     let kind_arg = args.get("kind").and_then(|v| v.as_str()).unwrap_or("calls");
-    let kinds: Vec<RelationEdgeKindV1> = if kind_arg.is_empty() {
+    let kinds: Vec<EdgeKind> = if kind_arg.is_empty() {
         Vec::new()
     } else {
         match EdgeKind::from_str(kind_arg) {
-            Some(k) => vec![canonical_relation_kind(k)?],
+            Some(k) => vec![k],
             None => {
                 return Err(TraceDecayError::Config {
                     message: format!("unknown edge kind: {kind_arg}"),
@@ -1536,33 +1366,18 @@ pub(super) async fn handle_callers_for(
         .and_then(serde_json::Value::as_u64)
         .map_or(1000usize, |v| v.min(10_000) as usize);
 
-    let occurrences = node_ids
-        .iter()
-        .map(|node_id| graph_occurrence_id(node_id))
-        .collect::<Result<Vec<_>>>()?;
-    let batches = graph.callers(&occurrences, &kinds, 2_000_000)?;
-    if batches.len() != node_ids.len() {
-        return Err(graph_symbol_corrupt(format!(
-            "verified graph returned {} caller batches for {} symbols",
-            batches.len(),
-            node_ids.len()
-        )));
-    }
+    let edges = cg.get_incoming_edges_bulk(&node_ids, &kinds).await?;
 
+    // Group source IDs by target. Cap each list at max_per_item.
+    let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
     let mut truncated = false;
-    let mut by_target = HashMap::new();
-    for (target, callers) in node_ids.iter().zip(batches) {
-        if callers.len() > max_per_item {
+    for edge in edges {
+        let entry = by_target.entry(edge.target).or_default();
+        if entry.len() < max_per_item {
+            entry.push(edge.source);
+        } else {
             truncated = true;
         }
-        by_target.insert(
-            target,
-            callers
-                .into_iter()
-                .take(max_per_item)
-                .map(|edge| edge.neighbor.occurrence.as_str().to_owned())
-                .collect::<Vec<_>>(),
-        );
     }
 
     // Ensure every requested ID appears in the response, even if no callers.
@@ -1576,15 +1391,13 @@ pub(super) async fn handle_callers_for(
         "truncated": truncated,
         "max_per_item": max_per_item,
     });
-    Ok(generic_tool_result(cg, &args, &output, vec![]))
+    Ok(rendered_tool_result(cg, &args, &output, vec![], || {
+        render::generic_md(&output)
+    }))
 }
 
-/// Cross-run node lookup by name.
-pub(super) async fn handle_by_qualified_name(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
+/// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
+pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let qname = args
         .get("qualified_name")
         .and_then(|v| v.as_str())
@@ -1592,63 +1405,100 @@ pub(super) async fn handle_by_qualified_name(
             message: "missing required parameter: qualified_name".to_string(),
         })?;
 
-    let nodes = graph.resolve_qualified_name(qname, None, 1_000)?;
-    let touched_files = graph_symbol_paths(&nodes)?;
-    let items = nodes
+    let nodes = cg.get_nodes_by_qualified_name(qname).await?;
+    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
+
+    let items: Vec<Value> = nodes
         .iter()
-        .map(graph_symbol_location_value)
-        .collect::<Result<Vec<_>>>()?;
+        .map(|n| {
+            json!({
+                "node_id": n.id,
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind.as_str(),
+                "file": n.file_path,
+                "start_line": user_line(n.start_line),
+                "attrs_start_line": user_line(n.attrs_start_line),
+                "end_line": user_line(n.end_line),
+            })
+        })
+        .collect();
 
     let value = json!(items);
-    Ok(generic_tool_result(cg, &args, &value, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
+        touched_files,
+        || render::generic_md(&value),
+    ))
 }
 
-/// Signature-only lookup (no body) by qualified name or node ID. Returns
-/// the public-API surface of a symbol so callers can avoid reading the
-/// source file just to inspect the signature.
-pub(super) async fn handle_signature(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
-    let nodes = nodes_addressed_by_args(graph, &args)?;
-    let touched_files = graph_symbol_paths(&nodes)?;
+/// Handles `tracedecay_signature` — signature-only lookup (no body) by
+/// qualified name or node ID. Returns the public-API surface of a symbol so
+/// callers can avoid reading the source file just to inspect the signature.
+pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let qname = args.get("qualified_name").and_then(|v| v.as_str());
+    let node_id = args
+        .get("node_id")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_str());
+
+    if qname.is_none() && node_id.is_none() {
+        return Err(TraceDecayError::Config {
+            message: "missing required parameter: qualified_name or node_id".to_string(),
+        });
+    }
+
+    let nodes = if let Some(id) = node_id {
+        match cg.get_node(id).await? {
+            Some(n) => vec![n],
+            None => vec![],
+        }
+    } else if let Some(q) = qname {
+        cg.get_nodes_by_qualified_name(q).await?
+    } else {
+        vec![]
+    };
+
+    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
 
     let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
     for n in &nodes {
-        let metadata = required_graph_metadata(n)?;
-        let file_path = required_graph_file_path(n)?;
-        let file_size_bytes = std::fs::metadata(cg.project_root().join(file_path))?.len();
-        let end_line = graph_symbol_end_line(metadata)?;
+        let file_size_bytes = cg.get_file_size_bytes(&n.file_path).await;
         items.push(json!({
-            "node_id": n.occurrence.as_str(),
-            "name": metadata.simple_name,
-            "qualified_name": metadata.qualified_name,
-            "kind": metadata.kind,
-            "visibility": metadata.visibility,
-            "signature": metadata.signature,
-            "file": file_path,
-            "start_line": user_line(metadata.start_line),
-            "end_line": user_line(end_line),
-            "cost_to_expand": cost_to_expand_verified(metadata, file_size_bytes)?,
-            "unavailable_fields": ["attrs_start_line", "docstring", "is_async"],
+            "node_id": n.id,
+            "name": n.name,
+            "qualified_name": n.qualified_name,
+            "kind": n.kind.as_str(),
+            "visibility": n.visibility.as_str(),
+            "is_async": n.is_async,
+            "signature": n.signature,
+            "docstring": n.docstring,
+            "file": n.file_path,
+            "start_line": user_line(n.start_line),
+            "attrs_start_line": user_line(n.attrs_start_line),
+            "end_line": user_line(n.end_line),
+            "cost_to_expand": cost_to_expand(n, file_size_bytes),
         }));
     }
 
     let value = json!(items);
-    Ok(generic_tool_result(cg, &args, &value, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
+        touched_files,
+        || render::generic_md(&value),
+    ))
 }
 
-/// Index of `impl Trait for Type` blocks.
+/// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
 ///
 /// Both `trait` and `type` arguments are optional. With neither, every impl
 /// in the graph is returned (capped by `limit`). Surfaces trait-dispatch
 /// information that is otherwise hidden behind raw `Implements` edges.
-pub(super) async fn handle_impls(
-    cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
+pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let trait_filter = args.get("trait").and_then(|v| v.as_str());
     let type_filter = args.get("type").and_then(|v| v.as_str());
     let limit = args
@@ -1656,117 +1506,137 @@ pub(super) async fn handle_impls(
         .and_then(serde_json::Value::as_u64)
         .map_or(100, |v| v.min(1000) as usize);
 
-    let mut after = None;
-    let mut results = Vec::new();
-    let mut examined = 0usize;
-    let mut generation_complete = false;
-    while results.len() <= limit {
-        if examined >= 500_000 {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-graph-budget-exhausted".to_owned(),
-                retryable: false,
-                detail: "impl census exceeded 500000 verified symbols".to_owned(),
-            });
-        }
-        let page = graph.symbols_page(after.as_ref(), 1_024)?;
-        examined = examined.saturating_add(page.symbols.len());
-        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-        for impl_node in page.symbols {
-            let metadata = required_graph_metadata(&impl_node)?;
-            if metadata.kind != NodeKind::Impl.as_str()
-                || type_filter.is_some_and(|query| !graph_name_matches(metadata, query))
-            {
-                continue;
-            }
-            let traits = single_graph_adjacency_batch(graph.callees(
-                std::slice::from_ref(&impl_node.occurrence),
-                &[RelationEdgeKindV1::Implements],
-                GRAPH_RELATION_READ_LIMIT,
-            )?)?;
-            let trait_node = traits.into_iter().next().map(|edge| edge.neighbor);
-            if trait_filter.is_some_and(|query| {
-                trait_node
-                    .as_ref()
-                    .and_then(|node| node.metadata.as_ref())
-                    .is_none_or(|metadata| !graph_name_matches(metadata, query))
-            }) {
-                continue;
-            }
-            results.push((impl_node, trait_node));
-            if results.len() > limit {
-                break;
-            }
-        }
-        if !page.has_more {
-            generation_complete = true;
-            break;
-        }
-    }
-    let truncated = !generation_complete || results.len() > limit;
+    let mut results = cg.get_impls(trait_filter, type_filter).await?;
+    let truncated = results.len() > limit;
     results.truncate(limit);
 
-    let result_paths = results
-        .iter()
-        .map(|(impl_node, _)| required_graph_file_path(impl_node))
-        .collect::<Result<Vec<_>>>()?;
-    let touched_files = unique_file_paths(result_paths.into_iter());
+    let touched_files = unique_file_paths(
+        results
+            .iter()
+            .map(|(impl_node, _)| impl_node.file_path.as_str()),
+    );
 
-    let items = results
+    let items: Vec<Value> = results
         .iter()
         .map(|(impl_node, trait_node)| {
-            let metadata = required_graph_metadata(impl_node)?;
-            let file_path = required_graph_file_path(impl_node)?;
-            let trait_metadata = trait_node
-                .as_ref()
-                .map(required_graph_metadata)
-                .transpose()?;
-            Ok(json!({
-                "impl_id": impl_node.occurrence.as_str(),
-                "type": metadata.simple_name,
-                "qualified_name": metadata.qualified_name,
-                "trait": trait_metadata.map(|value| value.simple_name.as_str()),
-                "trait_qualified_name": trait_metadata.map(|value| value.qualified_name.as_str()),
-                "trait_id": trait_node.as_ref().map(|value| value.occurrence.as_str()),
-                "file": file_path,
-                "start_line": user_line(metadata.start_line),
-                "end_line": user_line(graph_symbol_end_line(metadata)?),
-                "signature": metadata.signature,
-            }))
+            json!({
+                "impl_id": impl_node.id,
+                "type": impl_node.name,
+                "qualified_name": impl_node.qualified_name,
+                "trait": trait_node.as_ref().map(|t| t.name.clone()),
+                "trait_qualified_name": trait_node.as_ref().map(|t| t.qualified_name.clone()),
+                "trait_id": trait_node.as_ref().map(|t| t.id.clone()),
+                "file": impl_node.file_path,
+                "start_line": user_line(impl_node.start_line),
+                "end_line": user_line(impl_node.end_line),
+                "signature": impl_node.signature,
+            })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
     let output = json!({
         "count": items.len(),
         "truncated": truncated,
         "impls": items,
     });
-    Ok(generic_tool_result(cg, &args, &output, touched_files))
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &output,
+        touched_files,
+        || render::generic_md(&output),
+    ))
 }
 
-/// Derive annotations are not published in the
-/// verified code graph generation, so a matched symbol reports a typed
-/// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
-pub(super) async fn handle_derives(
-    _cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
-) -> Result<ToolResult> {
-    let nodes = nodes_addressed_by_args(graph, &args)?;
-    if nodes.is_empty() {
-        return Ok(text_tool_result("No matching symbol found.", Vec::new()));
+/// Handles `tracedecay_derives` — lists `#[derive(...)]` macros on a type
+/// and the trait + method names each one synthesizes (per the static
+/// `derive_table`). Accepts either `node_id` or `qualified_name`.
+pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let qname = args.get("qualified_name").and_then(|v| v.as_str());
+    let node_id = args
+        .get("node_id")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_str());
+    if qname.is_none() && node_id.is_none() {
+        return Err(TraceDecayError::Config {
+            message: "missing required parameter: qualified_name or node_id".to_string(),
+        });
     }
-    Err(TraceDecayError::ProjectRoute {
-        reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
-        retryable: false,
-        detail: "derive annotations are not published in the verified code graph generation"
-            .to_owned(),
+
+    let nodes = if let Some(id) = node_id {
+        match cg.get_node(id).await? {
+            Some(n) => vec![n],
+            None => vec![],
+        }
+    } else if let Some(q) = qname {
+        cg.get_nodes_by_qualified_name(q).await?
+    } else {
+        vec![]
+    };
+
+    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
+
+    let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
+    for n in &nodes {
+        let derive_names = cg.get_derives_for_node(&n.id).await?;
+        let derives: Vec<Value> = derive_names
+            .iter()
+            .map(|name| {
+                let look = crate::derive_table::enrich(name);
+                json!({
+                    "derive": look.derive_name,
+                    "trait": look.known.as_ref().map(|k| k.trait_path),
+                    "methods": look.known.as_ref().map(|k| k.methods.to_vec()),
+                    "source": look.known.as_ref().map(|k| k.source),
+                    "well_known": look.known.is_some(),
+                })
+            })
+            .collect();
+        items.push(json!({
+            "node_id": n.id,
+            "name": n.name,
+            "kind": n.kind.as_str(),
+            "qualified_name": n.qualified_name,
+            "file": n.file_path,
+            "start_line": user_line(n.start_line),
+            "derives": derives,
+        }));
+    }
+
+    let value = json!(items);
+    Ok(rendered_tool_result(
+        cg,
+        &args,
+        &value,
+        touched_files,
+        || render::generic_md(&value),
+    ))
+}
+
+/// Approximate token cost of expanding a node's body and its full file.
+///
+/// `body` uses ~20 tokens/line (≈80 chars/line at 4 chars/token), tuned for
+/// Rust source — denser languages like Haskell or Python will be over-estimated
+/// by ~2-3x and ultra-terse declarations (one-line `use`, single-line `pub fn`)
+/// resolve to the single-line floor of 20 tokens. Good enough to decide whether
+/// to set `include_code=true`; not a reliable absolute count.
+/// `full_file` uses `size_bytes / 4` from the indexed `files.size`.
+fn cost_to_expand(node: &Node, file_size_bytes: u64) -> Value {
+    let line_count = node
+        .end_line
+        .saturating_sub(node.start_line)
+        .saturating_add(1);
+    let body_tokens = u64::from(line_count) * 20;
+    let full_file_tokens = file_size_bytes / 4;
+    json!({
+        "body": body_tokens,
+        "full_file": full_file_tokens,
     })
 }
 
-/// Trait / method implementor lookup.
+/// Handles `tracedecay_implementations` — trait / method implementor lookup.
 pub(super) async fn handle_implementations(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1775,7 +1645,7 @@ pub(super) async fn handle_implementations(
 
     if trait_name.is_none() && method_name.is_none() {
         return Err(TraceDecayError::Config {
-            message: "missing required parameter: 'trait' or 'method'".to_string(),
+            message: "tracedecay_implementations requires either 'trait' or 'method'".to_string(),
         });
     }
     if trait_name.is_some() && method_name.is_some() {
@@ -1795,16 +1665,17 @@ pub(super) async fn handle_implementations(
     let mut touched: Vec<String> = Vec::new();
 
     if let Some(name) = trait_name {
-        let candidates = graph.resolve_simple_name(name, None, 50)?;
-        let trait_nodes: Vec<_> = candidates
-            .into_iter()
-            .filter(|node| {
-                node.metadata.as_ref().is_some_and(|metadata| {
-                    matches!(
-                        NodeKind::from_str(&metadata.kind),
-                        Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-                    )
-                })
+        let candidates = cg
+            .db()
+            .search_nodes_by_exact_name(&[name.to_string()], 50)
+            .await?;
+        let trait_nodes: Vec<&crate::types::Node> = candidates
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType
+                )
             })
             .collect();
         if trait_nodes.is_empty() {
@@ -1815,30 +1686,28 @@ pub(super) async fn handle_implementations(
         }
 
         for trait_node in trait_nodes {
-            let trait_metadata = required_graph_metadata(&trait_node)?;
-            let implementors = single_graph_adjacency_batch(graph.callers(
-                std::slice::from_ref(&trait_node.occurrence),
-                &[RelationEdgeKindV1::Implements],
-                GRAPH_RELATION_READ_LIMIT,
-            )?)?;
-            for implementor in implementors {
-                let impl_node = implementor.neighbor;
-                let impl_metadata = required_graph_metadata(&impl_node)?;
-                let impl_file = required_graph_file_path(&impl_node)?;
-                if scope_prefix.is_some_and(|prefix| !impl_file.starts_with(prefix)) {
+            let implementors = cg
+                .db()
+                .get_incoming_edges(&trait_node.id, &[EdgeKind::Implements])
+                .await?;
+            for edge in implementors {
+                let Some(impl_node) = cg.db().get_node_by_id(&edge.source).await? else {
+                    continue;
+                };
+                if scope_prefix.is_some_and(|p| !impl_node.file_path.starts_with(p)) {
                     continue;
                 }
-                let methods = collect_method_bodies(graph, &impl_node, &project_root)?;
-                if !touched.iter().any(|path| path == impl_file) {
-                    touched.push(impl_file.to_owned());
+                let methods = collect_method_bodies(cg, &impl_node, &project_root).await?;
+                if !touched.contains(&impl_node.file_path) {
+                    touched.push(impl_node.file_path.clone());
                 }
                 entries.push(json!({
-                    "type": impl_metadata.simple_name,
-                    "qualified_name": impl_metadata.qualified_name,
-                    "kind": impl_metadata.kind,
-                    "file": impl_file,
-                    "line": user_line(impl_metadata.start_line),
-                    "trait": trait_metadata.qualified_name,
+                    "type": impl_node.name,
+                    "qualified_name": impl_node.qualified_name,
+                    "kind": impl_node.kind.as_str(),
+                    "file": impl_node.file_path,
+                    "line": user_line(impl_node.start_line),
+                    "trait": trait_node.qualified_name,
                     "methods": methods,
                 }));
                 if entries.len() >= limit {
@@ -1850,24 +1719,16 @@ pub(super) async fn handle_implementations(
             }
         }
     } else if let Some(name) = method_name {
-        let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
-        let mut method_nodes = Vec::new();
-        for node in nodes {
-            let metadata = required_graph_metadata(&node)?;
-            if !matches!(
-                NodeKind::from_str(&metadata.kind),
-                Some(NodeKind::Function | NodeKind::Method)
-            ) {
-                continue;
-            }
-            let file_path = required_graph_file_path(&node)?;
-            if scope_prefix.is_none_or(|prefix| file_path.starts_with(prefix)) {
-                method_nodes.push(node);
-                if method_nodes.len() == limit {
-                    break;
-                }
-            }
-        }
+        let nodes = cg
+            .db()
+            .search_nodes_by_exact_name(&[name.to_string()], limit * 4)
+            .await?;
+        let method_nodes: Vec<&crate::types::Node> = nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+            .filter(|n| scope_prefix.is_none_or(|p| n.file_path.starts_with(p)))
+            .take(limit)
+            .collect();
         if method_nodes.is_empty() {
             return Ok(text_tool_result(
                 &format!("No function or method named '{name}' found."),
@@ -1875,23 +1736,22 @@ pub(super) async fn handle_implementations(
             ));
         }
         for n in method_nodes {
-            let metadata = required_graph_metadata(&n)?;
-            let file_path = required_graph_file_path(&n)?;
-            let abs_path = project_root.join(file_path);
-            let source = crate::sync::read_source_file(&abs_path)?;
-            let end_line = graph_symbol_end_line(metadata)?;
-            let body = super::info::extract_lines(&source, metadata.start_line, end_line);
-            if !touched.iter().any(|path| path == file_path) {
-                touched.push(file_path.to_owned());
+            let abs_path = project_root.join(&n.file_path);
+            let body = match crate::sync::read_source_file(&abs_path) {
+                Ok(source) => super::info::extract_lines(&source, n.start_line, n.end_line),
+                Err(_) => String::from("<file unreadable>"),
+            };
+            if !touched.contains(&n.file_path) {
+                touched.push(n.file_path.clone());
             }
             entries.push(json!({
-                "name": metadata.simple_name,
-                "qualified_name": metadata.qualified_name,
-                "kind": metadata.kind,
-                "file": file_path,
-                "line": user_line(metadata.start_line),
-                "end_line": user_line(end_line),
-                "signature": metadata.signature,
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind.as_str(),
+                "file": n.file_path,
+                "line": user_line(n.start_line),
+                "end_line": user_line(n.end_line),
+                "signature": n.signature,
                 "body": body,
             }));
         }
@@ -1901,48 +1761,32 @@ pub(super) async fn handle_implementations(
         "match_count": entries.len(),
         "implementations": entries,
     });
-    Ok(generic_tool_result(cg, &args, &payload, touched))
+    Ok(rendered_tool_result(cg, &args, &payload, touched, || {
+        render::generic_md(&payload)
+    }))
 }
 
-fn collect_method_bodies(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    impl_node: &CodeGraphSymbolSummaryV1,
+async fn collect_method_bodies(
+    cg: &TraceDecay,
+    impl_node: &crate::types::Node,
     project_root: &std::path::Path,
 ) -> Result<Vec<Value>> {
-    let children = single_graph_adjacency_batch(graph.callees(
-        std::slice::from_ref(&impl_node.occurrence),
-        &[RelationEdgeKindV1::Contains],
-        GRAPH_RELATION_READ_LIMIT,
-    )?)?;
-    let mut methods = Vec::new();
+    let children = cg.db().get_children_of(&impl_node.id).await?;
+    let mut out: Vec<Value> = Vec::new();
     for child in children {
-        let child = child.neighbor;
-        let metadata = required_graph_metadata(&child)?;
-        if !matches!(
-            NodeKind::from_str(&metadata.kind),
-            Some(NodeKind::Method | NodeKind::Function)
-        ) {
+        if !matches!(child.kind, NodeKind::Method | NodeKind::Function) {
             continue;
         }
-        let file_path = required_graph_file_path(&child)?.to_owned();
-        methods.push((file_path, metadata.start_line, child));
-    }
-    methods.sort_by(|left, right| {
-        (&left.0, left.1, &left.2.occurrence).cmp(&(&right.0, right.1, &right.2.occurrence))
-    });
-
-    let mut out: Vec<Value> = Vec::new();
-    for (file_path, _, child) in methods {
-        let metadata = required_graph_metadata(&child)?;
-        let abs_path = project_root.join(&file_path);
-        let source = crate::sync::read_source_file(&abs_path)?;
-        let end_line = graph_symbol_end_line(metadata)?;
-        let body = super::info::extract_lines(&source, metadata.start_line, end_line);
+        let abs_path = project_root.join(&child.file_path);
+        let body = match crate::sync::read_source_file(&abs_path) {
+            Ok(source) => super::info::extract_lines(&source, child.start_line, child.end_line),
+            Err(_) => String::from("<file unreadable>"),
+        };
         out.push(json!({
-            "name": metadata.simple_name,
-            "kind": metadata.kind,
-            "line": user_line(metadata.start_line),
-            "signature": metadata.signature,
+            "name": child.name,
+            "kind": child.kind.as_str(),
+            "line": user_line(child.start_line),
+            "signature": child.signature,
             "body": body,
         }));
     }
@@ -1952,209 +1796,7 @@ fn collect_method_bodies(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_application::memory::FactSearchHitV1;
-
-    fn context_memory_hit(content: String) -> FactSearchHitV1 {
-        serde_json::from_value(json!({
-            "fact": {
-                "owner": {"kind": "profile"},
-                "fact_id": "fact.0000000000000000000000000000000000000000000000000000000000000000.1111111111111111111111111111111111111111111111111111111111111111",
-                "content": content,
-                "category": "project",
-                "tags": [],
-                "entities": [],
-                "trust_score_millionths": 900_000,
-                "source": {"kind": "application", "operation_id": "operation.context-memory"},
-                "source_label": "context-test",
-                "active_assertion_id": "assertion.context-memory",
-                "last_event_id": "event.context-memory",
-                "projected_as_of": 1,
-                "telemetry": {
-                    "retrieval_count": 0,
-                    "access_count": 0,
-                    "helpful_count": 0,
-                    "unhelpful_count": 0,
-                    "created_at": 1,
-                    "updated_at": 1,
-                    "last_retrieved_at": null,
-                    "last_recalled_at": null,
-                    "last_feedback_at": null
-                },
-                "metadata": {}
-            },
-            "scores": {
-                "score_millionths": 500_000,
-                "fts_score_millionths": 250_000,
-                "jaccard_score_millionths": 250_000,
-                "holographic_score_millionths": 0,
-                "trust_score_millionths": 900_000
-            },
-            "why": null
-        }))
-        .expect("canonical context memory hit")
-    }
-
-    /// A warm response must render exactly as it did before coverage existed:
-    /// every lane complete, no coverage section, no added lines.
-    #[test]
-    fn warm_coverage_leaves_the_rendered_body_unchanged() {
-        let coverage = coverage_value(&crate::mcp::server::CodeIndexSearchCoverageV1::warm());
-        assert_eq!(coverage["recall"], json!("full"));
-        assert_eq!(coverage["exact"], json!("complete"));
-
-        let without = json!({
-            "results": [{
-                "candidate": {
-                    "anchor_id": "code-symbol:symbol.v1",
-                    "exact_class": "exact_message",
-                    "utility_micros": 4_000_000
-                },
-                "final_ordinal": 0,
-            }],
-            "code_generation": "generation.warm",
-        });
-        let mut with = without.clone();
-        with["coverage"] = coverage;
-
-        assert_eq!(
-            render_search_md(&with),
-            render_search_md(&without),
-            "warm coverage must be additive metadata, never rendered output"
-        );
-    }
-
-    #[test]
-    fn a_rebuilding_generation_remains_typed_unavailable() {
-        let unavailable = crate::mcp::server::CodeIndexSearchUnavailableV1 {
-            code_generation: None,
-            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            },
-            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            ),
-        };
-
-        assert!(!unavailable.coverage.any_servable());
-        assert_eq!(
-            unavailable.coverage.exact,
-            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable {
-                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn installed_search_executor_owns_fallback_allowed_dispatch() {
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed = std::sync::Arc::clone(&calls);
-        let executor: crate::mcp::server::CodeIndexSearchExecutor = std::sync::Arc::new(
-            move |request| {
-                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                assert_eq!(
-                    request.mode,
-                    crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
-                );
-                assert_eq!(request.query, "fixture");
-                Box::pin(async {
-                    crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some("generation.fixture".to_owned()),
-                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "calibration_unavailable",
-                            },
-                            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
-                                "calibration_unavailable",
-                            ),
-                        },
-                    )
-                })
-            },
-        );
-        let outcome = execute_code_index_search(
-            Some(&executor),
-            crate::mcp::server::CodeIndexSearchRequestV1 {
-                project_root: std::path::PathBuf::from("/fixture"),
-                query: "fixture".to_owned(),
-                source_revision: None,
-                source_tree: None,
-                source_reference: None,
-                limit: 10,
-                cursor: None,
-                mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
-                authority: None,
-                deadline: None,
-                cancellation: None,
-            },
-        )
-        .await;
-        assert!(matches!(
-            outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                    reason:
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    ..
-                }
-            )
-        ));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn missing_search_executor_is_typed_capability_unavailable() {
-        let outcome = execute_code_index_search(
-            None,
-            crate::mcp::server::CodeIndexSearchRequestV1 {
-                project_root: std::path::PathBuf::from("/fixture"),
-                query: "fixture".to_owned(),
-                source_revision: None,
-                source_tree: None,
-                source_reference: None,
-                limit: 10,
-                cursor: None,
-                mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,
-                authority: None,
-                deadline: None,
-                cancellation: None,
-            },
-        )
-        .await;
-        assert!(matches!(
-            outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                    reason:
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-                    ..
-                }
-            )
-        ));
-    }
-
-    #[test]
-    fn search_markdown_prefers_hydrated_symbol_identity_over_opaque_anchor() {
-        let rendered = render_search_md(&json!({
-            "results": [{
-                "candidate": {
-                    "anchor_id": "code-symbol:symbol.v1.sha256:opaque",
-                    "exact_class": "exact_message",
-                    "utility_micros": 4_000_000
-                },
-                "final_ordinal": 0,
-                "display": {
-                    "name": "main",
-                    "qualified_name": "main",
-                    "kind": "function"
-                }
-            }]
-        }));
-
-        assert!(rendered.contains("**main** (function, exact_message)"));
-        assert!(rendered.contains("`code-symbol:symbol.v1.sha256:opaque`"));
-    }
+    use crate::memory::types::{FactRecord, FactSearchResult, MemoryCategory};
 
     #[test]
     fn context_markdown_lane_preview_keeps_all_lanes_visible() {
@@ -2215,7 +1857,33 @@ mod tests {
     #[test]
     fn context_memory_section_keeps_full_content_for_retrieval_handle() {
         let content = format!("{}tail-marker", "long memory body ".repeat(100));
-        let hit = context_memory_hit(content.clone());
+        let hit = FactSearchResult {
+            fact: FactRecord {
+                fact_id: 7,
+                content: content.clone(),
+                category: MemoryCategory::Project,
+                trust_score: 0.9,
+                source: Some("test".to_string()),
+                entities: vec![],
+                tags: vec![],
+                metadata: serde_json::Value::Null,
+                created_at: 0,
+                updated_at: 0,
+                access_count: 0,
+                last_retrieved_at: None,
+                retrieval_count: 0,
+                helpful_count: 0,
+                unhelpful_count: 0,
+                last_feedback_at: None,
+                last_recalled_at: None,
+            },
+            score: 0.5,
+            fts_score: 0.25,
+            jaccard_score: 0.25,
+            holographic_score: 0.0,
+            trust_score: 0.9,
+            why: None,
+        };
 
         let Some(section) = context_memory_section(&[hit], None) else {
             panic!("memory hit should render");
@@ -2229,7 +1897,33 @@ mod tests {
 
     #[test]
     fn context_memory_section_compacts_multiline_content() {
-        let hit = context_memory_hit("first line\n# heading\n- item".to_owned());
+        let hit = FactSearchResult {
+            fact: FactRecord {
+                fact_id: 7,
+                content: "first line\n# heading\n- item".to_string(),
+                category: MemoryCategory::Project,
+                trust_score: 0.9,
+                source: Some("test".to_string()),
+                entities: vec![],
+                tags: vec![],
+                metadata: serde_json::Value::Null,
+                created_at: 0,
+                updated_at: 0,
+                access_count: 0,
+                last_retrieved_at: None,
+                retrieval_count: 0,
+                helpful_count: 0,
+                unhelpful_count: 0,
+                last_feedback_at: None,
+                last_recalled_at: None,
+            },
+            score: 0.5,
+            fts_score: 0.25,
+            jaccard_score: 0.25,
+            holographic_score: 0.0,
+            trust_score: 0.9,
+            why: None,
+        };
 
         let Some(section) = context_memory_section(&[hit], None) else {
             panic!("memory hit should render");

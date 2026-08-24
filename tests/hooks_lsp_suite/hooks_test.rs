@@ -1,15 +1,20 @@
-use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, lock_global_db_env, lock_recovering_poison};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::storage::{pin_fixture_repository_identity, resolve_layout_for_current_profile};
-use tracedecay_agent_hosts::hooks::{
-    HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
-    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
-    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
-    codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, cursor_staleness_hint, evaluate_codex_subagent_start,
-    evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
+use tracedecay::hooks::{
+    CursorShellSyncPlan, HookWorkspaceStatus, build_cursor_session_context,
+    claude_session_context_for_event, codex_additional_context_json, codex_apply_patch_rel_paths,
+    codex_project_root_from_event, codex_subagent_start_log_line,
+    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
+    cursor_branch_switch_target, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_shell_command_targets_project, cursor_shell_sync_plan,
+    cursor_shell_sync_plan_with_current_branch, cursor_should_run_sync, cursor_staleness_hint,
+    evaluate_codex_subagent_start, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
+    evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
     kiro_post_tool_use_rel_paths, record_codex_subagent_start,
+};
+use tracedecay::storage::{
+    EnrollmentMarker, StorageMode, resolve_layout_for_current_profile, write_enrollment_marker,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -43,7 +48,24 @@ fn analytics_contains(events: &[serde_json::Value], event: &str, category: Optio
 }
 
 fn enroll_profile_project(project_root: &Path, project_id: &str) {
-    pin_fixture_repository_identity(project_root, project_id).unwrap();
+    write_enrollment_marker(
+        project_root,
+        &EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+}
+
+fn hook_profile_env(project_root: &Path, profile_root: &Path) -> [EnvVarGuard; 4] {
+    let home = project_root.join("home");
+    [
+        EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile_root.join("global.db")),
+        EnvVarGuard::set("HOME", &home),
+        EnvVarGuard::set("USERPROFILE", &home),
+    ]
 }
 
 #[test]
@@ -288,6 +310,371 @@ fn test_cursor_subagent_start_allows_tracedecay_plugin_agents() {
 }
 
 #[test]
+fn test_cursor_post_tool_use_hints_for_grep_search() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Grep",
+        "tool_input": {
+            "pattern": "cursor_prompt_hint",
+            "path": "src"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("Grep should get a tracedecay hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_grep")
+    );
+    assert!(v.get("hookSpecificOutput").is_none());
+    assert!(v.get("permission").is_none());
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_shell_rg() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "rg cursor_prompt_hint src"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("rg shell command should get a hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_captured_compiler_output() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "cargo check --workspace"
+        },
+        "tool_output": "{\"exitCode\":101,\"stdout\":\"\",\"stderr\":\"error[E0308]: mismatched types\\n --> src/lib.rs:42:5\"}",
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input)
+        .expect("captured compiler output should get a diagnostics hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_diagnostics")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_behavioral_failure_output_stays_silent() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "cargo test hooks::tool_hints"
+        },
+        "tool_output": "{\"exitCode\":101,\"stdout\":\"test result: FAILED. 3 passed; 1 failed\",\"stderr\":\"error: test failed, to rerun pass --lib\"}",
+        "session_id": "cursor-test"
+    }"#;
+
+    assert!(evaluate_cursor_post_tool_use(input).is_none());
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_semantic_search() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "SemanticSearch",
+        "tool_input": {
+            "query": "how does authentication work?"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("semantic search should get a hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_context")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_single_file_read() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+            "file_path": "src/hooks.rs"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("Read should get a soft hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let context = v["additional_context"].as_str().unwrap_or_default();
+    assert!(context.contains("tracedecay_outline"));
+    assert!(context.contains("tracedecay_body"));
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_target_file_read() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "read_file",
+        "tool_input": {
+            "target_file": "src/hooks/cursor.rs"
+        },
+        "session_id": "cursor-test-target-file"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input).expect("read_file should get a soft hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_outline")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_hints_for_list_dir() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "list_dir",
+        "tool_input": {
+            "relative_workspace_path": "src/hooks"
+        },
+        "session_id": "cursor-test-list-dir"
+    }"#;
+
+    let output =
+        evaluate_cursor_post_tool_use(input).expect("list_dir should get a file lookup hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_files")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_dedupes_hints_per_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env_lock = lock_global_db_env();
+    let project_root = dir.path().canonicalize().unwrap();
+    let profile_root = project_root.join("profile");
+    let _env_guards = hook_profile_env(&project_root, &profile_root);
+    enroll_profile_project(&project_root, "proj_hooks_dedupe");
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+    std::fs::write(&layout.graph_db_path, "").unwrap();
+    let root = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
+    let grep_event = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "Grep",
+            "tool_input": {{ "pattern": "foo" }},
+            "session_id": "session-a",
+            "workspace_roots": [{root}]
+        }}"#
+    );
+
+    let first = tracedecay::hooks::cursor_post_tool_use_decision(&grep_event);
+    assert!(first.is_some(), "first hint in a session must be emitted");
+    assert!(
+        tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_none(),
+        "an identical hint must be deduped within the session"
+    );
+
+    // A different category in the same session still gets one hint.
+    let read_event = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "Read",
+            "tool_input": {{ "file_path": "src/lib.rs" }},
+            "session_id": "session-a",
+            "workspace_roots": [{root}]
+        }}"#
+    );
+    assert!(
+        tracedecay::hooks::cursor_post_tool_use_decision(&read_event).is_some(),
+        "a different hint category must still be emitted once"
+    );
+
+    // A new session starts fresh.
+    let other_session = grep_event.replace("session-a", "session-b");
+    assert!(
+        tracedecay::hooks::cursor_post_tool_use_decision(&other_session).is_some(),
+        "a new session must get the hint again"
+    );
+
+    assert!(
+        layout.data_root.join("tool_hints_seen.json").exists(),
+        "dedupe state must be persisted under the profile project shard"
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_records_hint_analytics_for_emitted_duplicate_and_missing_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env_lock = lock_global_db_env();
+    let project_root = dir.path().canonicalize().unwrap();
+    let profile_root = project_root.join("profile");
+    let _env_guards = hook_profile_env(&project_root, &profile_root);
+    enroll_profile_project(&project_root, "proj_hooks_analytics");
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+    std::fs::write(&layout.graph_db_path, "").unwrap();
+    let root = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
+    let grep_event = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "Grep",
+            "tool_input": {{ "pattern": "foo" }},
+            "session_id": "session-a",
+            "workspace_roots": [{root}]
+        }}"#
+    );
+
+    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_some());
+    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_none());
+
+    let missing_session_event = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "Read",
+            "tool_input": {{ "file_path": "src/lib.rs" }},
+            "workspace_roots": [{root}]
+        }}"#
+    );
+    let output = tracedecay::hooks::cursor_post_tool_use_decision(&missing_session_event)
+        .expect("missing session id should still emit a useful hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
+    assert!(v.get("hookSpecificOutput").is_none());
+    assert!(v.get("permission").is_none());
+
+    let events = read_hook_analytics_events(&layout.data_root);
+    assert!(analytics_contains(
+        &events,
+        "hint_candidate",
+        Some("search")
+    ));
+    assert!(analytics_contains(&events, "hint_emitted", Some("search")));
+    assert!(analytics_contains(
+        &events,
+        "suppressed_duplicate",
+        Some("search")
+    ));
+    assert!(analytics_contains(
+        &events,
+        "missing_session",
+        Some("file_read")
+    ));
+}
+
+#[test]
+fn test_cursor_post_tool_use_decision_silent_without_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = serde_json::to_string(dir.path().to_str().unwrap()).unwrap();
+    let event = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "Grep",
+            "tool_input": {{ "pattern": "foo" }},
+            "session_id": "session-a",
+            "workspace_roots": [{root}]
+        }}"#
+    );
+    assert!(
+        tracedecay::hooks::cursor_post_tool_use_decision(&event).is_none(),
+        "hints must not fire in workspaces without a tracedecay index"
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_records_uninitialized_suppression() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env_lock = lock_global_db_env();
+    let project_root = dir.path().canonicalize().unwrap();
+    let profile_root = project_root.join("profile");
+    let _env_guards = hook_profile_env(&project_root, &profile_root);
+    std::fs::write(
+        project_root.join("Cargo.toml"),
+        "[package]\nname = \"uninitialized\"\n",
+    )
+    .unwrap();
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+    let root = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
+    let event = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "Grep",
+            "tool_input": {{ "pattern": "foo" }},
+            "session_id": "session-a",
+            "workspace_roots": [{root}]
+        }}"#
+    );
+
+    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&event).is_none());
+
+    let events = read_hook_analytics_events(&layout.data_root);
+    assert!(analytics_contains(
+        &events,
+        "hint_candidate",
+        Some("search")
+    ));
+    assert!(analytics_contains(
+        &events,
+        "suppressed_uninitialized",
+        Some("search")
+    ));
+}
+
+#[test]
+fn test_cursor_post_tool_use_ignores_unrelated_tools() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "src/hooks.rs"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    assert!(evaluate_cursor_post_tool_use(input).is_none());
+}
+
+#[test]
 fn test_cursor_project_root_uses_workspace_roots() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
@@ -357,6 +744,82 @@ fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
 }
 
 #[test]
+fn test_is_git_state_changing_command_detects_branch_switches() {
+    for command in [
+        "git checkout main",
+        "git switch -c feature/x",
+        "git pull --rebase",
+        "git merge origin/main",
+        "git rebase main",
+        "git reset --hard HEAD~1",
+        "git cherry-pick abc123",
+        "git stash pop",
+        "git stash apply stash@{0}",
+        "  GIT  checkout main  ",
+    ] {
+        assert!(
+            is_git_state_changing_command(command),
+            "{command} should be treated as a git state-changing command"
+        );
+    }
+}
+
+#[test]
+fn test_is_git_state_changing_command_ignores_read_only_and_non_git() {
+    for command in [
+        "git status",
+        "git log --oneline",
+        "git diff",
+        "git commit -m wip",
+        "git add .",
+        "git stash list",
+        "ls -la",
+        "cargo test",
+        "echo git checkout",
+    ] {
+        assert!(
+            !is_git_state_changing_command(command),
+            "{command} should NOT trigger a sync"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_after_file_edit_rel_paths_targets_edited_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let edited = root.join("src/lib.rs");
+    let input = format!(
+        r#"{{
+            "hook_event_name": "afterFileEdit",
+            "file_path": {},
+            "edits": [{{ "old_string": "a", "new_string": "b" }}]
+        }}"#,
+        serde_json::to_string(edited.to_str().unwrap()).unwrap()
+    );
+
+    let rels = tracedecay::hooks::cursor_after_file_edit_rel_paths(&input, &root);
+    assert_eq!(rels, vec!["src/lib.rs".to_string()]);
+}
+
+#[test]
+fn test_cursor_after_file_edit_rel_paths_skips_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = r#"{
+        "hook_event_name": "afterFileEdit",
+        "file_path": "/etc/passwd"
+    }"#;
+
+    let rels = tracedecay::hooks::cursor_after_file_edit_rel_paths(input, &root);
+    assert!(
+        rels.is_empty(),
+        "paths outside the project root must be ignored, got {rels:?}"
+    );
+}
+
+#[test]
 fn test_kiro_post_tool_use_rel_paths_targets_written_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
@@ -419,9 +882,8 @@ fn test_build_cursor_session_context_uninitialized_suggests_init() {
 fn test_build_cursor_session_context_initialized_includes_freshness() {
     let context = build_cursor_session_context(true, Some("last indexed 2m ago"), None);
     assert!(
-        context.len() <= tracedecay_agent_hosts::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
-        "cursor initialized context should stay within its {} char budget, got {} chars: {context}",
-        tracedecay_agent_hosts::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
+        context.len() <= 1_300,
+        "cursor initialized context should stay compact, got {} chars: {context}",
         context.len()
     );
     assert!(context.contains("last indexed 2m ago"));
@@ -430,6 +892,9 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
         "initialized workspaces should not be told to run init: {context}"
     );
     assert!(context.contains("TraceDecay project hint:"));
+    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
+    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("ToolSearch"));
     assert!(context.contains("tracedecay_find_exact_symbol"));
     assert!(context.contains("tracedecay_test_map"));
@@ -437,14 +902,10 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
 
 #[test]
 fn test_build_codex_session_context_carries_compact_steering() {
-    let context = tracedecay_agent_hosts::hooks::build_codex_session_context(
-        true,
-        Some("last indexed 2m ago"),
-    );
+    let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
     assert!(
-        context.len() <= tracedecay_agent_hosts::hooks::CODEX_SESSION_CONTEXT_BUDGET,
-        "codex initialized context should stay within its {} char budget, got {} chars: {context}",
-        tracedecay_agent_hosts::hooks::CODEX_SESSION_CONTEXT_BUDGET,
+        context.len() <= 2_600,
+        "codex initialized context should stay compact, got {} chars: {context}",
         context.len()
     );
     assert!(context.contains("TraceDecay project hint:"));
@@ -452,20 +913,77 @@ fn test_build_codex_session_context_carries_compact_steering() {
     assert!(context.contains("ToolSearch"));
     assert!(context.contains("tracedecay_find_exact_symbol"));
     assert!(context.contains("tracedecay_test_map"));
+    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
+    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
     assert!(context.contains("tracedecay_fact_store"));
     assert!(context.contains("before asking the user to repeat"));
-    let uninit = tracedecay_agent_hosts::hooks::build_codex_session_context(false, None);
+    let uninit = tracedecay::hooks::build_codex_session_context(false, None);
     assert!(uninit.contains("tracedecay init"));
     assert!(uninit.contains("tracedecay_project_search"));
     assert!(uninit.contains("tracedecay_message_search"));
 }
 
+#[tokio::test]
+async fn test_claude_session_context_injects_compact_bootstrap_when_initialized() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    let event = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "cwd": dir.path().to_str().unwrap(),
+    })
+    .to_string();
+
+    let context = claude_session_context_for_event(&event).await;
+    assert!(
+        context.len() <= 1_400,
+        "claude initialized context should stay compact, got {} chars: {context}",
+        context.len()
+    );
+    assert!(
+        context.contains("tracedecay index status: "),
+        "initialized Claude context keeps the index status line: {context}"
+    );
+    assert!(
+        context.contains("TraceDecay project hint:"),
+        "initialized Claude context must inject compact graph steering: {context}"
+    );
+    assert!(context.contains("tracedecay_find_exact_symbol"));
+    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
+    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
+    assert!(!context.contains("Grep is faster for this"));
+    // The additionalContext channel wraps it as SessionStart context.
+    let json = codex_additional_context_json("SessionStart", &context);
+    assert!(json.contains("TraceDecay project hint:"));
+}
+
+#[tokio::test]
+async fn test_claude_session_context_omits_bootstrap_for_unindexed_project() {
+    // A project-like workspace without an index gets the init nudge, not the
+    // full contract.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let event = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "cwd": dir.path().to_str().unwrap(),
+    })
+    .to_string();
+
+    let context = claude_session_context_for_event(&event).await;
+    assert!(context.contains("tracedecay init"));
+    assert!(
+        !context.contains("<EXTREMELY_IMPORTANT>"),
+        "unindexed workspaces should not inject the full contract: {context}"
+    );
+}
+
 #[test]
 fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
-    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
+    let context = tracedecay::hooks::build_codex_session_context_for_workspace(
         HookWorkspaceStatus::UnindexedProject,
         None,
     );
@@ -479,7 +997,7 @@ fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
 
 #[test]
 fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance() {
-    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
+    let context = tracedecay::hooks::build_codex_session_context_for_workspace(
         HookWorkspaceStatus::Generic,
         None,
     );
@@ -682,6 +1200,150 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
     assert!(v["env"].get("TRACEDECAY_PROJECT_ROOT").is_none());
 }
 
+#[test]
+fn test_cursor_branch_switch_target_extracts_branch() {
+    assert_eq!(
+        cursor_branch_switch_target("git checkout main"),
+        Some("main".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git switch develop"),
+        Some("develop".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git checkout -b feature/x"),
+        Some("feature/x".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git switch -c feature/y"),
+        Some("feature/y".to_string())
+    );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_routes_worktree_add_to_worktree_branch_add() {
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add ../wt feature/z"),
+        CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: "feature/z".to_string(),
+            worktree_path: "../wt".to_string(),
+        }
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add -b newbranch ../wt"),
+        CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: "newbranch".to_string(),
+            worktree_path: "../wt".to_string(),
+        }
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add -b feature/new ../wt main"),
+        CursorShellSyncPlan::WorktreeBranchAdd {
+            branch: "feature/new".to_string(),
+            worktree_path: "../wt".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_ignores_branchless_and_detached_worktree_adds() {
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add ../wt"),
+        CursorShellSyncPlan::Noop
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add --detach ../wt main"),
+        CursorShellSyncPlan::Noop
+    );
+}
+
+#[test]
+fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
+    assert_eq!(
+        cursor_branch_switch_target("git checkout -- src/main.rs"),
+        None
+    );
+    assert_eq!(cursor_branch_switch_target("git checkout ."), None);
+    assert_eq!(cursor_branch_switch_target("git checkout README.md"), None);
+    assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
+    assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
+    assert_eq!(cursor_branch_switch_target("git status"), None);
+    assert_eq!(cursor_branch_switch_target("echo git checkout main"), None);
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_routes_branch_switch_to_branch_add() {
+    assert_eq!(
+        cursor_shell_sync_plan("git checkout main"),
+        CursorShellSyncPlan::BranchAdd("main".to_string())
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git switch -c feature/x"),
+        CursorShellSyncPlan::BranchAdd("feature/x".to_string())
+    );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_routes_same_branch_changes_to_incremental_sync() {
+    for command in [
+        "git pull --rebase",
+        "git merge origin/main",
+        "git rebase main",
+        "git reset --hard HEAD~1",
+        "git cherry-pick abc123",
+        "git stash pop",
+    ] {
+        assert_eq!(
+            cursor_shell_sync_plan(command),
+            CursorShellSyncPlan::IncrementalSync,
+            "{command} should route to an incremental sync"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_uses_current_branch_for_implicit_git_changes() {
+    assert_eq!(
+        cursor_shell_sync_plan_with_current_branch("git pull --rebase", Some("feature/x")),
+        CursorShellSyncPlan::CurrentBranchSync("feature/x".to_string())
+    );
+    assert_eq!(
+        cursor_shell_sync_plan_with_current_branch("git pull --rebase", None),
+        CursorShellSyncPlan::IncrementalSync
+    );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_noop_for_read_only_and_non_git() {
+    for command in ["git status", "git log", "ls -la", "cargo build"] {
+        assert_eq!(
+            cursor_shell_sync_plan(command),
+            CursorShellSyncPlan::Noop,
+            "{command} should be a no-op"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_shell_command_targets_project_respects_explicit_git_workdir() {
+    let workspace = tempfile::tempdir().unwrap();
+    let project = workspace.path().join("project");
+    let other = workspace.path().join("other");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+
+    assert!(!cursor_shell_command_targets_project(
+        &format!("git -C {} pull", other.display()),
+        &project,
+        &project,
+    ));
+    assert!(cursor_shell_command_targets_project(
+        &format!("git --work-tree={} pull", project.display()),
+        &project,
+        &project,
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Codex hook handlers
 // ---------------------------------------------------------------------------
@@ -689,11 +1351,6 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
 #[test]
 fn test_codex_additional_context_json_uses_codex_schema() {
     let json = codex_additional_context_json("SessionStart", "hello context");
-    assert_eq!(
-        json,
-        additional_context_json("SessionStart", "hello context"),
-        "the shipped Codex compatibility API must delegate byte-exactly to the canonical formatter"
-    );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["hookEventName"].as_str(),

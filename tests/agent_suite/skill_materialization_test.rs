@@ -1,21 +1,21 @@
 //! Host-loadable managed-skill materialization: activation writes real
 //! `SKILL.md` files into `.claude`/`.codex` skills dirs (project + global),
-//! deactivation removes them, user edits fork-protect the file, and reconciles
-//! are idempotent. Mirrors the install/update lifecycle test patterns in
-//! `skill_targets_test.rs`.
+//! deactivation removes them, user edits fork-protect the file, reconciles are
+//! idempotent, and `doctor` reports drift. Mirrors the install/update lifecycle
+//! test patterns in `skill_targets_test.rs`.
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, create_managed_skill, default_managed_skill_targets,
+    ManagedSupportFile, create_managed_skill_draft, default_managed_skill_targets,
     set_managed_skill_state,
 };
-use tracedecay_agent_hosts::automation::skill_frontmatter::parse_skill_frontmatter;
-use tracedecay_agent_hosts::automation::skill_materialization::{
-    MaterializationHost, MaterializationScope, MaterializeAction, RemoveAction, detect_scopes,
-    materialize_skill, reconcile_detected_scopes, reconcile_scope, remove_materialized_skill,
-    resolve_project_root,
+use tracedecay::automation::skill_frontmatter::parse_skill_frontmatter;
+use tracedecay::automation::skill_materialization::{
+    MaterializationHost, MaterializationScope, MaterializeAction, RemoveAction, SkillDrift,
+    detect_scopes, doctor_detected_scopes, doctor_scope, materialize_skill,
+    reconcile_detected_scopes, reconcile_scope, remove_materialized_skill, resolve_project_root,
 };
 
 /// Stable installation id for the local test profile; distinct from `INSTALL_B`
@@ -61,9 +61,14 @@ fn draft(id: &str) -> ManagedSkillDraft {
     }
 }
 
-/// Creates an automatically active skill in `profile_root`.
+/// Drafts a skill in `profile_root` and flips it to `Active`.
 async fn activate_skill(profile_root: &Path, id: &str) {
-    create_managed_skill(profile_root, draft(id)).await.unwrap();
+    create_managed_skill_draft(profile_root, draft(id))
+        .await
+        .unwrap();
+    set_managed_skill_state(profile_root, id, ManagedSkillState::Active)
+        .await
+        .unwrap();
 }
 
 fn skill_md(scope: &MaterializationScope, slug: &str) -> PathBuf {
@@ -238,7 +243,7 @@ async fn body_update_re_materializes_the_file() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
-    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -268,7 +273,7 @@ async fn metadata_update_re_materializes_the_file() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -297,7 +302,7 @@ async fn support_update_removes_only_stale_owned_files() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -334,7 +339,7 @@ async fn user_edited_support_file_is_fork_protected() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -362,7 +367,7 @@ async fn deactivation_removes_only_owned_artifacts() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -398,7 +403,7 @@ async fn package_symlink_is_rejected_before_materialization() {
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
     std::fs::create_dir_all(scope.skills_dir()).unwrap();
     symlink(&external, scope.skills_dir().join("code-slop-cleanup")).unwrap();
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -428,7 +433,7 @@ async fn nested_support_symlink_is_rejected_before_write() {
     let dir = scope.skills_dir().join("code-slop-cleanup");
     std::fs::create_dir_all(&dir).unwrap();
     symlink(&external, dir.join("references")).unwrap();
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -454,7 +459,7 @@ async fn nested_support_symlink_is_rejected_before_remove() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -480,7 +485,47 @@ async fn nested_support_symlink_is_rejected_before_remove() {
 }
 
 #[tokio::test]
-async fn fork_protection_leaves_user_edited_file_untouched() {
+async fn interrupted_manifest_commit_recovers_on_retry() {
+    let (_temp, root) = canonical_tempdir();
+    let home = root.join("home");
+    let profile_root = home.join(".tracedecay");
+    install_fake_hosts(&home);
+
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let scope = MaterializationScope::global(MaterializationHost::Claude, home);
+    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
+        &profile_root,
+        "code-slop-cleanup",
+    )
+    .await
+    .unwrap();
+    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    skill.body_markdown = "# Cleanup v2\n\nRecover this update.".to_string();
+    skill.support_files[0].bytes = b"updated checklist\n".to_vec();
+
+    let dir = scope.skills_dir().join("code-slop-cleanup");
+    let manifest = dir.join(".tracedecay-materialization.json");
+    let blocked_staging = PathBuf::from(format!("{}.new", manifest.display()));
+    std::fs::create_dir(&blocked_staging).unwrap();
+    assert!(materialize_skill(&scope, &skill, INSTALL).is_err());
+    std::fs::remove_dir(blocked_staging).unwrap();
+
+    let retried = materialize_skill(&scope, &skill, INSTALL).unwrap();
+
+    assert_ne!(retried.action, MaterializeAction::SkippedForked);
+    assert!(
+        std::fs::read_to_string(dir.join("SKILL.md"))
+            .unwrap()
+            .contains("Recover this update.")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("references/checklist.md")).unwrap(),
+        "updated checklist\n"
+    );
+}
+
+#[tokio::test]
+async fn fork_protection_leaves_user_edited_file_and_doctor_flags_it() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
@@ -488,7 +533,7 @@ async fn fork_protection_leaves_user_edited_file_untouched() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -509,6 +554,15 @@ async fn fork_protection_leaves_user_edited_file_untouched() {
     assert_eq!(action.action, MaterializeAction::SkippedForked);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
 
+    // Doctor flags the fork.
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
+    assert!(
+        drift.iter().any(
+            |d| matches!(d, SkillDrift::Forked { skill_id, .. } if skill_id == "code-slop-cleanup")
+        ),
+        "expected Forked drift, got {drift:?}"
+    );
+
     // A deactivate reconcile must also refuse to delete the fork.
     let removed = remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap();
     assert_eq!(removed, RemoveAction::SkippedForked);
@@ -516,7 +570,7 @@ async fn fork_protection_leaves_user_edited_file_untouched() {
 }
 
 #[tokio::test]
-async fn foreign_file_is_never_touched() {
+async fn foreign_file_is_never_touched_and_doctor_reports_conflict() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
@@ -530,7 +584,7 @@ async fn foreign_file_is_never_touched() {
     std::fs::write(dir.join("SKILL.md"), foreign).unwrap();
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
-    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -548,6 +602,54 @@ async fn foreign_file_is_never_touched() {
     assert_eq!(
         remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap(),
         RemoveAction::SkippedForeign
+    );
+
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
+    assert!(
+        drift
+            .iter()
+            .any(|d| matches!(d, SkillDrift::Conflict { .. })),
+        "expected Conflict drift, got {drift:?}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_reports_missing_and_orphan_drift() {
+    let (_temp, root) = canonical_tempdir();
+    let home = root.join("home");
+    let profile_root = home.join(".tracedecay");
+    install_fake_hosts(&home);
+
+    // Active skill, nothing materialized yet -> Missing.
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let scopes = doctor_detected_scopes(&profile_root, &home, &home).unwrap();
+    let claude = scopes
+        .iter()
+        .find(|(scope, _)| scope.host == MaterializationHost::Claude)
+        .map(|(_, drift)| drift)
+        .unwrap();
+    assert!(
+        claude
+            .iter()
+            .any(|d| matches!(d, SkillDrift::Missing { .. })),
+        "expected Missing drift, got {claude:?}"
+    );
+
+    // Materialize, then deactivate WITHOUT reconciling -> Orphan on disk.
+    let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
+    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+        &profile_root,
+        "code-slop-cleanup",
+    )
+    .await
+    .unwrap();
+    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let orphan_drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        orphan_drift.iter().any(
+            |d| matches!(d, SkillDrift::Orphan { skill_id, .. } if skill_id == "code-slop-cleanup")
+        ),
+        "expected Orphan drift, got {orphan_drift:?}"
     );
 }
 
@@ -611,17 +713,17 @@ async fn reconcile_scope_removes_only_managed_orphans() {
 // Adversarial-review findings on #362/#366 (skill-materialization hardening).
 // ---------------------------------------------------------------------------
 
-use tracedecay_agent_hosts::automation::managed_skills::ManagedSkill;
+use tracedecay::automation::managed_skills::ManagedSkill;
 
 async fn load_skill(profile_root: &Path, id: &str) -> ManagedSkill {
-    tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(profile_root, id)
+    tracedecay::automation::managed_skills::load_managed_skill(profile_root, id)
         .await
         .unwrap()
 }
 
 /// #1 A pristine materialized file whose manifest sidecar is lost (fresh clone,
-/// gitignored dotfile, dotfile-sync) must be re-derived from disk rather than
-/// frozen as `SkippedForked`.
+/// gitignored dotfile, dotfile-sync) must be re-derived from disk — not frozen
+/// as `SkippedForked` and mislabeled by doctor.
 #[tokio::test]
 async fn lost_manifest_pristine_file_is_rederived_not_forked() {
     let (_temp, root) = canonical_tempdir();
@@ -648,7 +750,14 @@ async fn lost_manifest_pristine_file_is_rederived_not_forked() {
     assert_ne!(again.action, MaterializeAction::SkippedForked);
     assert!(manifest.is_file(), "manifest should be re-derived");
 
-    // It stays removable after re-derivation.
+    // Doctor must NOT report the pristine file as a user fork.
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
+    assert!(
+        !drift.iter().any(|d| matches!(d, SkillDrift::Forked { .. })),
+        "pristine file wrongly flagged as forked: {drift:?}"
+    );
+
+    // And it stays removable (no doctor-nag / update-refuses loop).
     std::fs::remove_file(&manifest).unwrap();
     assert_eq!(
         remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap(),
@@ -695,6 +804,13 @@ async fn project_scope_filters_out_global_skills() {
         !project.join(".claude/skills/code-slop-cleanup").exists(),
         "no project package dir should be created for a global skill"
     );
+    // Doctor must not report Missing project drift for a global skill.
+    let scopes = doctor_detected_scopes(&profile_root, &home, &project).unwrap();
+    for (scope, drift) in &scopes {
+        if scope.describe().ends_with("/project") {
+            assert!(drift.is_empty(), "unexpected project drift: {drift:?}");
+        }
+    }
 }
 
 /// #4 Project-scope orphan cleanup must never delete a committed package another
@@ -720,7 +836,7 @@ async fn project_scope_protects_another_installations_committed_package() {
     assert!(committed.is_file());
 
     // Installation B (skill not in its profile) must NOT delete A's committed
-    // file.
+    // file — it is reported, never auto-removed.
     assert_eq!(
         remove_materialized_skill(&project_scope, "code-slop-cleanup", INSTALL_B).unwrap(),
         RemoveAction::SkippedForeign
@@ -742,10 +858,56 @@ async fn project_scope_protects_another_installations_committed_package() {
     );
 }
 
-/// #4b A project package whose manifest has no `materialized_by` field has an
-/// unknown author and must not be removed by another installation.
+/// #4b A committed project package another installation authored (provenance
+/// clean, just a different `materialized_by`) must be reported as
+/// `ForeignOrphan`, never `Orphan` — doctor must not prescribe an `update`
+/// remove that the remove path refuses to perform. Predicate agreement is
+/// checked against `remove_materialized_skill`.
 #[tokio::test]
-async fn project_scope_legacy_manifestless_package_is_not_removed() {
+async fn doctor_reports_foreign_installation_package_as_foreign_orphan() {
+    let (_temp, root) = canonical_tempdir();
+    let project = root.join("project");
+    let profile_root = root.join("profile");
+    install_fake_hosts(&project);
+
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let skill = load_skill(&profile_root, "code-slop-cleanup").await;
+
+    // Installation B authored (and "committed") the package into the checkout.
+    let scope = MaterializationScope::project(MaterializationHost::Claude, project);
+    materialize_skill(&scope, &skill, INSTALL_B).unwrap();
+
+    // Installation A runs doctor with the skill inactive: foreign orphan, not
+    // a plain orphan (which would nag to run `tracedecay update`).
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert_eq!(
+        drift
+            .iter()
+            .filter(|d| matches!(
+                d,
+                SkillDrift::ForeignOrphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+            ))
+            .count(),
+        1,
+        "expected exactly one ForeignOrphan, got {drift:?}"
+    );
+    assert!(
+        !drift.iter().any(|d| matches!(d, SkillDrift::Orphan { .. })),
+        "foreign package must never be a plain Orphan: {drift:?}"
+    );
+
+    // Predicate agreement: the remove path also refuses this package.
+    assert_eq!(
+        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap(),
+        RemoveAction::SkippedForeign
+    );
+}
+
+/// #4c A legacy manifest with no `materialized_by` field (pre-provenance shape),
+/// or no manifest at all, has an unknown author; doctor must treat it as a
+/// `ForeignOrphan` because the remove path also refuses to delete it.
+#[tokio::test]
+async fn doctor_reports_legacy_manifestless_author_as_foreign_orphan() {
     let (_temp, root) = canonical_tempdir();
     let project = root.join("project");
     let profile_root = root.join("profile");
@@ -766,15 +928,55 @@ async fn project_scope_legacy_manifestless_package_is_not_removed() {
     json.as_object_mut().unwrap().remove("materialized_by");
     std::fs::write(&manifest, serde_json::to_string_pretty(&json).unwrap()).unwrap();
 
-    assert_eq!(
-        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL_B).unwrap(),
-        RemoveAction::SkippedForeign
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        drift.iter().any(|d| matches!(
+            d,
+            SkillDrift::ForeignOrphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+        )),
+        "legacy manifest-less author must be ForeignOrphan, got {drift:?}"
     );
 
+    // Removing the manifest entirely (lost sidecar) is also unknown-author.
     std::fs::remove_file(&manifest).unwrap();
-    assert_eq!(
-        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL_B).unwrap(),
-        RemoveAction::SkippedForeign
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        drift.iter().any(|d| matches!(
+            d,
+            SkillDrift::ForeignOrphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+        )),
+        "missing manifest must be ForeignOrphan, got {drift:?}"
+    );
+}
+
+/// #4d A package this installation authored, now inactive, remains a plain
+/// `Orphan` — `tracedecay update` correctly removes self-authored packages.
+#[tokio::test]
+async fn doctor_reports_own_inactive_skill_as_plain_orphan() {
+    let (_temp, root) = canonical_tempdir();
+    let project = root.join("project");
+    let profile_root = root.join("profile");
+    install_fake_hosts(&project);
+
+    activate_skill(&profile_root, "code-slop-cleanup").await;
+    let skill = load_skill(&profile_root, "code-slop-cleanup").await;
+
+    let scope = MaterializationScope::project(MaterializationHost::Claude, project);
+    materialize_skill(&scope, &skill, INSTALL).unwrap();
+
+    let drift = doctor_scope(&scope, &[], INSTALL);
+    assert!(
+        drift.iter().any(|d| matches!(
+            d,
+            SkillDrift::Orphan { skill_id, .. } if skill_id == "code-slop-cleanup"
+        )),
+        "self-authored inactive package must stay a plain Orphan, got {drift:?}"
+    );
+    assert!(
+        !drift
+            .iter()
+            .any(|d| matches!(d, SkillDrift::ForeignOrphan { .. })),
+        "self-authored package must never be ForeignOrphan: {drift:?}"
     );
 }
 
@@ -808,6 +1010,11 @@ async fn concurrent_materialize_does_not_wedge_forked() {
     // Final state is a clean, unchanged, fork-free package.
     let final_pass = materialize_skill(&scope, &skill, INSTALL).unwrap();
     assert_eq!(final_pass.action, MaterializeAction::Unchanged);
+    let drift = doctor_scope(&scope, std::slice::from_ref(&skill), INSTALL);
+    assert!(
+        drift.is_empty(),
+        "unexpected drift after concurrency: {drift:?}"
+    );
 }
 
 /// #6 A symlinked scope root (stow/chezmoi dotfiles) must be followed, not
@@ -840,7 +1047,51 @@ async fn symlinked_scope_root_materializes_through_link() {
     );
 }
 
-/// #7 (reconcile) One poisoned package must not block materialization of the
+/// #7/#8 (doctor) One package whose internal check errors must not suppress
+/// drift reporting for the rest of the scope.
+#[cfg(unix)]
+#[tokio::test]
+async fn doctor_reports_other_drift_when_one_package_errors() {
+    use std::os::unix::fs::symlink;
+
+    let (_temp, root) = canonical_tempdir();
+    let home = root.join("home");
+    let external = root.join("external");
+    let profile_root = home.join(".tracedecay");
+    install_fake_hosts(&home);
+    std::fs::create_dir_all(&external).unwrap();
+
+    activate_skill(&profile_root, "good-skill").await;
+    activate_skill(&profile_root, "broken-skill").await;
+    let good = load_skill(&profile_root, "good-skill").await;
+    let broken = load_skill(&profile_root, "broken-skill").await;
+
+    let scope = MaterializationScope::global(MaterializationHost::Claude, home);
+    materialize_skill(&scope, &broken, INSTALL).unwrap();
+
+    // Replace broken's support dir with a symlink so its check errors.
+    let dir = scope.skills_dir().join("broken-skill");
+    std::fs::remove_file(dir.join("references/checklist.md")).unwrap();
+    std::fs::remove_dir(dir.join("references")).unwrap();
+    symlink(&external, dir.join("references")).unwrap();
+
+    // good-skill is active but not materialized -> Missing; broken errors.
+    let drift = doctor_scope(&scope, &[good, broken], INSTALL);
+    assert!(
+        drift
+            .iter()
+            .any(|d| matches!(d, SkillDrift::Missing { skill_id, .. } if skill_id == "good-skill")),
+        "healthy Missing drift suppressed by a broken package: {drift:?}"
+    );
+    assert!(
+        drift
+            .iter()
+            .any(|d| matches!(d, SkillDrift::Warning { .. })),
+        "broken package should surface as a Warning: {drift:?}"
+    );
+}
+
+/// #8 (reconcile) One poisoned package must not block materialization of the
 /// rest of the scope; its failure is recorded, not fatal.
 #[cfg(unix)]
 #[tokio::test]
@@ -876,10 +1127,11 @@ async fn reconcile_continues_past_one_poisoned_package() {
     assert!(scope.skills_dir().join("good-skill/SKILL.md").is_file());
 }
 
-/// #8 Distinct ids that normalize to the same host slug are disambiguated so
-/// each materializes to its own directory.
+/// #9 Distinct ids that normalize to the same host slug are disambiguated (each
+/// materializes to its own dir) and doctor warns instead of silently dropping
+/// the second one.
 #[tokio::test]
-async fn colliding_host_slugs_are_disambiguated() {
+async fn colliding_host_slugs_are_disambiguated_and_warned() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
@@ -892,7 +1144,7 @@ async fn colliding_host_slugs_are_disambiguated() {
     let b = load_skill(&profile_root, "team_sync").await;
 
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let report = reconcile_scope(&scope, &[a, b], INSTALL).unwrap();
+    let report = reconcile_scope(&scope, &[a.clone(), b.clone()], INSTALL).unwrap();
 
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
     assert_eq!(report.materialized.len(), 2);
@@ -911,4 +1163,12 @@ async fn colliding_host_slugs_are_disambiguated() {
         .filter(|e| e.path().join("SKILL.md").is_file())
         .collect();
     assert_eq!(managed.len(), 2, "both colliding skills must materialize");
+
+    // Doctor warns about the collision for both.
+    let drift = doctor_scope(&scope, &[a, b], INSTALL);
+    let warnings = drift
+        .iter()
+        .filter(|d| matches!(d, SkillDrift::Warning { .. }))
+        .count();
+    assert!(warnings >= 2, "expected collision warnings, got {drift:?}");
 }

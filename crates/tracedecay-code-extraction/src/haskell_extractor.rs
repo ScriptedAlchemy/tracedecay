@@ -2,7 +2,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -43,81 +43,20 @@ impl ExtractionState {
             .unwrap_or("<invalid utf8>")
             .to_string()
     }
-
-    fn emit(
-        &mut self,
-        kind: NodeKind,
-        name: String,
-        qualified_name: String,
-        node: TsNode<'_>,
-        signature: Option<String>,
-        docstring: Option<String>,
-    ) {
-        let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
-        let graph_node = Node {
-            id: id.clone(),
-            kind,
-            name,
-            qualified_name,
-            file_path: self.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line: node.end_position().row as u32,
-            start_column: node.start_position().column as u32,
-            end_column: node.end_position().column as u32,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: self.timestamp,
-            parent_id: None,
-        };
-        self.nodes.push(graph_node);
-        self.edges.push(Edge {
-            source: self.file_node_id.clone(),
-            target: id,
-            kind: EdgeKind::Contains,
-            line: Some(start_line),
-        });
-    }
 }
 
 impl HaskellExtractor {
     pub fn extract_haskell(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(t) => t,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -146,15 +85,10 @@ impl HaskellExtractor {
         };
         state.nodes.push(file_node);
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        let root = tree.root_node();
+        Self::visit_children(&mut state, root);
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -198,9 +132,20 @@ impl HaskellExtractor {
         let Some(name) = name else { return };
 
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
-        state.emit(NodeKind::Function, name, qualified_name, node, sig, None);
+        Self::emit(
+            state,
+            id,
+            NodeKind::Function,
+            name,
+            qualified_name,
+            node,
+            sig,
+            None,
+        );
     }
 
     fn visit_bind(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -209,9 +154,20 @@ impl HaskellExtractor {
         let Some(name) = name else { return };
 
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
-        state.emit(NodeKind::Function, name, qualified_name, node, sig, None);
+        Self::emit(
+            state,
+            id,
+            NodeKind::Function,
+            name,
+            qualified_name,
+            node,
+            sig,
+            None,
+        );
     }
 
     fn visit_data_type(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -221,9 +177,20 @@ impl HaskellExtractor {
         let Some(name) = name else { return };
 
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
 
-        state.emit(NodeKind::Class, name, qualified_name, node, sig, None);
+        Self::emit(
+            state,
+            id,
+            NodeKind::Class,
+            name,
+            qualified_name,
+            node,
+            sig,
+            None,
+        );
     }
 
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -232,9 +199,20 @@ impl HaskellExtractor {
         let Some(name) = name else { return };
 
         let sig = Self::first_line(state, node);
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
 
-        state.emit(NodeKind::Class, name, qualified_name, node, sig, None);
+        Self::emit(
+            state,
+            id,
+            NodeKind::Class,
+            name,
+            qualified_name,
+            node,
+            sig,
+            None,
+        );
     }
 
     fn visit_instance(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -250,9 +228,13 @@ impl HaskellExtractor {
             return;
         }
 
+        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::instance {}", state.file_path, name);
+        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
 
-        state.emit(
+        Self::emit(
+            state,
+            id,
             NodeKind::Class,
             name,
             qualified_name,
@@ -353,6 +335,51 @@ impl HaskellExtractor {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        state: &mut ExtractionState,
+        id: String,
+        kind: NodeKind,
+        name: String,
+        qualified_name: String,
+        node: TsNode<'_>,
+        signature: Option<String>,
+        docstring: Option<String>,
+    ) {
+        let graph_node = Node {
+            id: id.clone(),
+            kind,
+            name,
+            qualified_name,
+            file_path: state.file_path.clone(),
+            start_line: node.start_position().row as u32,
+            attrs_start_line: node.start_position().row as u32,
+            end_line: node.end_position().row as u32,
+            start_column: node.start_position().column as u32,
+            end_column: node.end_position().column as u32,
+            signature,
+            docstring,
+            visibility: Visibility::Pub,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            updated_at: state.timestamp,
+            parent_id: None,
+        };
+        state.nodes.push(graph_node);
+        state.edges.push(Edge {
+            source: state.file_node_id.clone(),
+            target: id,
+            kind: EdgeKind::Contains,
+            line: Some(node.start_position().row as u32),
+        });
+    }
+
     fn first_line(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         let text = state.node_text(node);
         text.lines().next().map(|l| l.trim().to_string())
@@ -380,15 +407,5 @@ impl crate::LanguageExtractor for HaskellExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_haskell(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
     }
 }

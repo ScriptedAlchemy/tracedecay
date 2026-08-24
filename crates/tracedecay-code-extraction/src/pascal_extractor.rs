@@ -11,7 +11,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 use crate::common::docstring_from_preceding_comments;
 use crate::complexity::{PASCAL_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -59,17 +59,12 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -86,35 +81,23 @@ impl ExtractionState {
 }
 
 impl PascalExtractor {
+    /// Extract code graph nodes and edges from a Pascal source file.
+    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
+    /// `source` is the Pascal source code to parse.
     pub fn extract_pascal(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
 
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
+        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -144,17 +127,13 @@ impl PascalExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        // Walk the AST.
+        let root = tree.root_node();
+        Self::visit_children(&mut state, root);
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -169,6 +148,7 @@ impl PascalExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
+    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -182,6 +162,7 @@ impl PascalExtractor {
         }
     }
 
+    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "program" => Self::visit_program(state, node),
@@ -193,7 +174,10 @@ impl PascalExtractor {
             "declConsts" => Self::visit_const_section(state, node),
             "declVars" => Self::visit_var_section(state, node),
             "defProc" => Self::visit_def_proc(state, node),
-            _ => Self::visit_children(state, node),
+            _ => {
+                // Recurse into children for unmatched nodes.
+                Self::visit_children(state, node);
+            }
         }
     }
 
@@ -239,6 +223,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from File.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -248,6 +233,7 @@ impl PascalExtractor {
             });
         }
 
+        // Push program onto stack and visit children.
         state.node_stack.push((name, id));
         Self::visit_children(state, node);
         state.node_stack.pop();
@@ -290,6 +276,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from File.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -299,6 +286,7 @@ impl PascalExtractor {
             });
         }
 
+        // Push unit onto stack and visit children.
         state.node_stack.push((name, id));
         Self::visit_children(state, node);
         state.node_stack.pop();
@@ -372,6 +360,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -381,6 +370,7 @@ impl PascalExtractor {
             });
         }
 
+        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: name,
@@ -413,7 +403,9 @@ impl PascalExtractor {
         let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
+        // Look for the type body: declClass, declIntf, or plain type.
         if let Some(class_node) = find_direct_child_by_kind(node, "declClass") {
+            // Check if it's a record or class.
             if find_direct_child_by_kind(class_node, "kRecord").is_some() {
                 Self::visit_record_type(state, &name, class_node, node);
             } else {
@@ -447,7 +439,9 @@ impl PascalExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Class, name, start_line);
 
+        // Build signature: "TMyClass = class(TObject)"
         let mut sig = format!("{name} = class");
+        // Check for parent class.
         if let Some(parent_ref) = find_direct_child_by_kind(class_node, "typeref") {
             let parent_name = state.node_text(parent_ref);
             sig = format!("{name} = class({parent_name})");
@@ -480,6 +474,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -489,6 +484,7 @@ impl PascalExtractor {
             });
         }
 
+        // Extract parent class as Extends reference.
         if let Some(parent_ref) = find_direct_child_by_kind(class_node, "typeref") {
             let parent_name = state.node_text(parent_ref);
             state.unresolved_refs.push(UnresolvedRef {
@@ -501,6 +497,7 @@ impl PascalExtractor {
             });
         }
 
+        // Visit class body: fields, methods, properties, visibility sections.
         state.class_depth += 1;
         let saved_visibility = state.current_visibility.clone();
         // Default visibility inside a class is Pub (for undeclared section).
@@ -559,6 +556,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -568,6 +566,7 @@ impl PascalExtractor {
             });
         }
 
+        // Visit record fields.
         state.node_stack.push((name.to_string(), id));
         Self::visit_record_body(state, class_node);
         state.node_stack.pop();
@@ -620,6 +619,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -629,6 +629,7 @@ impl PascalExtractor {
             });
         }
 
+        // Visit interface methods.
         state.node_stack.push((name.to_string(), id));
         Self::visit_interface_body(state, intf_node);
         state.node_stack.pop();
@@ -677,6 +678,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -741,6 +743,7 @@ impl PascalExtractor {
 
     /// Visit a visibility section (public, private, protected) and update `current_visibility`.
     fn visit_visibility_section(state: &mut ExtractionState, node: TsNode<'_>) {
+        // First child should be the visibility keyword.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -800,6 +803,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -812,6 +816,7 @@ impl PascalExtractor {
 
     /// Extract a method declaration inside a class.
     fn visit_class_method_decl(state: &mut ExtractionState, node: TsNode<'_>) {
+        // Determine the kind from the keyword child.
         let (_kind_str, node_kind) = Self::determine_proc_kind(node);
         let name = Self::find_proc_name(state, node);
         let text = state.node_text(node);
@@ -850,6 +855,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -900,6 +906,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent (interface).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -949,6 +956,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1020,6 +1028,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1091,6 +1100,7 @@ impl PascalExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1172,6 +1182,7 @@ impl PascalExtractor {
             };
             state.nodes.push(graph_node);
 
+            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -1193,11 +1204,16 @@ impl PascalExtractor {
                 });
             }
 
+            // Extract call sites from the block.
             if let Some(block_node) = block {
                 Self::extract_call_sites(state, block_node, &id);
             }
         }
     }
+
+    // ----------------------------
+    // Helper extraction methods
+    // ----------------------------
 
     /// Find the module name from a program or unit node.
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
@@ -1233,6 +1249,7 @@ impl PascalExtractor {
         if let Some(dot_node) = find_direct_child_by_kind(node, "genericDot") {
             return state.node_text(dot_node);
         }
+        // Otherwise look for a simple identifier.
         find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
     }
@@ -1284,6 +1301,7 @@ impl PascalExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
+                        // Recurse into the call expression for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "statement" => {
@@ -1292,26 +1310,27 @@ impl PascalExtractor {
                         // In tree-sitter-pascal, a bare procedure call appears as
                         // statement > identifier > ;
                         let first_child = child.named_child(0);
-                        if let Some(fc) = first_child
-                            && fc.kind() == "identifier"
-                        {
-                            // Check there's no exprCall - just a bare identifier.
-                            let has_call = find_direct_child_by_kind(child, "exprCall").is_some();
-                            if !has_call {
-                                let callee_name = state.node_text(fc);
-                                // Skip some keywords that aren't calls.
-                                if !matches!(
-                                    callee_name.as_str(),
-                                    "inherited" | "break" | "continue" | "exit"
-                                ) {
-                                    state.unresolved_refs.push(UnresolvedRef {
-                                        from_node_id: fn_node_id.to_string(),
-                                        reference_name: callee_name,
-                                        reference_kind: EdgeKind::Calls,
-                                        line: fc.start_position().row as u32,
-                                        column: fc.start_position().column as u32,
-                                        file_path: state.file_path.clone(),
-                                    });
+                        if let Some(fc) = first_child {
+                            if fc.kind() == "identifier" {
+                                // Check there's no exprCall - just a bare identifier.
+                                let has_call =
+                                    find_direct_child_by_kind(child, "exprCall").is_some();
+                                if !has_call {
+                                    let callee_name = state.node_text(fc);
+                                    // Skip some keywords that aren't calls.
+                                    if !matches!(
+                                        callee_name.as_str(),
+                                        "inherited" | "break" | "continue" | "exit"
+                                    ) {
+                                        state.unresolved_refs.push(UnresolvedRef {
+                                            from_node_id: fn_node_id.to_string(),
+                                            reference_name: callee_name,
+                                            reference_kind: EdgeKind::Calls,
+                                            line: fc.start_position().row as u32,
+                                            column: fc.start_position().column as u32,
+                                            file_path: state.file_path.clone(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1337,11 +1356,14 @@ impl PascalExtractor {
     fn clean_comment(comment: &str) -> String {
         let trimmed = comment.trim();
         if let Some(stripped) = trimmed.strip_prefix("//") {
+            // Line comment.
             stripped.strip_prefix(' ').unwrap_or(stripped).to_string()
         } else if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            // Brace comment { ... }.
             let inner = &trimmed[1..trimmed.len() - 1];
             inner.trim().to_string()
         } else if trimmed.starts_with("(*") && trimmed.ends_with("*)") {
+            // Old-style comment (* ... *).
             let inner = &trimmed[2..trimmed.len() - 2];
             inner
                 .lines()
@@ -1378,15 +1400,5 @@ impl crate::LanguageExtractor for PascalExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         PascalExtractor::extract_pascal(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        PascalExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

@@ -50,19 +50,11 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
 | Trait/interface/class type-hierarchy question (implementors, extenders, inheritance) | `tracedecay_type_hierarchy` — skill: `tracedecay:exploring-code` |
 | About to run `gh pr diff` / read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline, no gh needed) — `tracedecay:reviewing-changes` |
-| Need a saved document's combined post-edit diagnostics | `tracedecay_feedback_advisory_cycle`; consume its canonical diagnostics, impact, affected-test result, and daemon-minted read handle |
-| Need Context Scout status or recent bounded suggestions | `tracedecay_context_scout_status` / `tracedecay_context_scout_capability` / `tracedecay_context_scout_explain` / `tracedecay_context_scout_budget` / `tracedecay_context_scout_recent` |
-| Need to control an authenticated Context Scout generation | `tracedecay_context_scout_pause` / `tracedecay_context_scout_resume` require the exact configuration revision; `tracedecay_context_scout_cancel` / `tracedecay_context_scout_claim` / `tracedecay_context_scout_delivery` / `tracedecay_context_scout_feedback` require the daemon-returned exact address and typed work, claim, or receipt |
-| Need effective configuration or provenance | `tracedecay_configuration_list` / `tracedecay_configuration_get` / `tracedecay_configuration_explain` / `tracedecay_configuration_audit` / `tracedecay_configuration_observed_state` |
-| Need to mutate configuration | `tracedecay_configuration_batch`, `tracedecay_configuration_set`, or `tracedecay_configuration_unset`; protected and rollback changes require their exact `*_preview` then `*_apply` pair |
 | About to write a new helper, rename, or mass-edit | `tracedecay:editing-safely` |
 | Looking for duplicate code, similar function bodies, repeated helper logic, or consolidation targets | `tracedecay_redundancy` first for body/functionality matches; `tracedecay_similar` only for near-duplicate names — `tracedecay:code-health` / `tracedecay:editing-safely` |
 | Build/type errors present, or about to run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
 | About to write MEMORY.md/CLAUDE.md notes, or asked about a past decision | `tracedecay:project-memory` (`fact_store`) |
 | Need raw past-session transcripts or compaction recovery | `tracedecay:managing-session-context` |
-| Creating or running a Work task/attempt/placement | `tracedecay:managing-work` |
-| Registering or running a Workflow definition | `tracedecay:managing-workflows` |
-| Querying several registered roots as one frozen scope | `tracedecay_multi_root_scope_set_read` / `tracedecay_multi_root_scope_set_compare_and_swap` then `tracedecay_multi_root_execute` |
 | Architecture, tech debt, index/project status | `tracedecay:code-health` |
 | An MCP call just failed | `tracedecay:using-the-cli` — never abandon over transport |
 
@@ -96,11 +88,3 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 4. A result includes a `tracedecay_metrics:` line → report the savings.
 5. A durable decision, preference, correction, or pitfall surfaced → store it
    via `tracedecay:project-memory` without being asked.
-
-Configuration mutation is never inferred from a read request. Use
-`tracedecay_configuration_protected_preview` before
-`tracedecay_configuration_protected_apply`, and
-`tracedecay_configuration_rollback_preview` before
-`tracedecay_configuration_rollback_apply`. Credential material crosses only
-`tracedecay_configuration_write_credential`; never place it in ordinary
-configuration values, logs, or chat output.

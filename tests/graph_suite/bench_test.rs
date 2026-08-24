@@ -3,17 +3,14 @@ use tracedecay::bench::{BenchOptions, OutputFormat, run_bench};
 use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]
-async fn bench_fails_closed_until_admitted_graph_authority_is_mounted() {
+async fn bench_runs_and_returns_report() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("a.rs"),
         "pub fn hello() {}\npub fn world() {}\n",
     )
     .unwrap();
-    let cg =
-        TraceDecay::init_with_options(tmp.path(), crate::fixture_profile::open_options(tmp.path()))
-            .await
-            .unwrap();
+    let cg = TraceDecay::init(tmp.path()).await.unwrap();
 
     let queries_path = tmp.path().join("q.toml");
     std::fs::write(
@@ -27,7 +24,7 @@ task = "what does world do"
     )
     .unwrap();
 
-    let error = run_bench(
+    let report = run_bench(
         &cg,
         &queries_path,
         BenchOptions {
@@ -36,18 +33,15 @@ task = "what does world do"
         },
     )
     .await
-    .expect_err("bench must not bypass admitted graph authority");
+    .expect("bench run");
 
-    match error {
-        tracedecay::errors::TraceDecayError::ProjectRoute {
-            reason_code,
-            retryable,
-            detail,
-        } => {
-            assert_eq!(reason_code, "verified-code-context-benchmark-unavailable");
-            assert!(!retryable);
-            assert!(detail.contains("admitted code-graph authority"));
-        }
-        other => panic!("unexpected error: {other}"),
+    assert_eq!(report.results.len(), 2);
+    assert_eq!(report.aggregate.queries, 2);
+    for r in &report.results {
+        assert!(
+            r.baseline_tokens > 0,
+            "baseline must be > 0 for query: {}",
+            r.task
+        );
     }
 }

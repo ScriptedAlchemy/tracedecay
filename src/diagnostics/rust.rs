@@ -1,3 +1,4 @@
+// Rust guideline compliant 2025-10-17
 //! `cargo check --message-format=json` driver.
 //!
 //! Each `compiler-message` line in the JSON stream produces zero or more
@@ -19,7 +20,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
+use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file};
 use crate::errors::{Result, TraceDecayError};
 
 /// Driver for Rust projects. Probes for `Cargo.toml` at the project root.
@@ -116,16 +117,18 @@ impl Driver for CargoDriver {
 ///
 /// `pub(crate)` so the MCP handler can probe whether it is cold (never built)
 /// and decide whether to prewarm rather than block for minutes.
-/// This names a build cache, not a store, so it takes the path-local id rather
-/// than the repository-collapsed one. Linked worktrees of a repository share a
-/// project id but check out different sources; giving them one cargo target
-/// directory would mix their artifacts and serialize them on cargo's directory
-/// lock.
 pub(crate) fn target_dir_for(project_root: &Path) -> PathBuf {
     std::env::temp_dir()
         .join("tracedecay-target")
-        .join(crate::storage::path_local_profile_project_id(project_root))
+        .join(crate::storage::default_profile_project_id(project_root))
         .join("diagnostics")
+}
+
+/// Cargo emits messages of many levels — "warning" and "error" produce
+/// diagnostics; "note", "help", "failure-note" are advisory and would
+/// double-count if we surfaced them.
+fn is_diagnostic_level(level: &str) -> bool {
+    matches!(level, "error" | "warning")
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,57 +195,15 @@ mod tests {
 
     #[test]
     fn target_dir_is_outside_project_tree() {
-        let project = Path::new("/tmp/proj");
-        let target = target_dir_for(project);
-        assert!(target.starts_with(std::env::temp_dir().join("tracedecay-target")));
-        assert!(target.ends_with("diagnostics"));
-        assert!(!target.starts_with(project));
-    }
-
-    #[test]
-    fn linked_worktrees_of_one_repository_get_separate_target_dirs() {
-        fn git(dir: &Path, args: &[&str]) {
-            let status = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("run git");
-            assert!(status.success(), "git {args:?} failed");
-        }
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let primary = temp.path().join("primary");
-        std::fs::create_dir_all(&primary).expect("create primary");
-        git(&primary, &["init", "--initial-branch=main"]);
-        git(&primary, &["config", "user.email", "test@example.com"]);
-        git(&primary, &["config", "user.name", "test"]);
-        std::fs::write(primary.join("file.txt"), "x").expect("seed file");
-        git(&primary, &["add", "file.txt"]);
-        git(&primary, &["commit", "-m", "seed"]);
-
-        let worktree = temp.path().join("linked");
-        git(
-            &primary,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "linked",
-                worktree.to_str().expect("utf-8 path"),
-            ],
-        );
-
-        // The two checkouts deliberately share one store identity...
+        let p = target_dir_for(Path::new("/tmp/proj"));
         assert_eq!(
-            crate::storage::default_profile_project_id(&primary),
-            crate::storage::default_profile_project_id(&worktree),
+            p,
+            std::env::temp_dir()
+                .join("tracedecay-target")
+                .join(crate::storage::default_profile_project_id(Path::new(
+                    "/tmp/proj"
+                )))
+                .join("diagnostics")
         );
-        // ...but they hold different sources, so they must not share a cargo
-        // target directory and contend for its lock.
-        assert_ne!(target_dir_for(&primary), target_dir_for(&worktree));
     }
 }

@@ -1,7 +1,9 @@
+// Rust guideline compliant 2025-10-17
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
+use crate::db::Database;
 use crate::types::*;
 
 /// Names that are too common to resolve across files reliably.
@@ -162,7 +164,9 @@ fn path_proximity(a: &str, b: &str) -> i64 {
 ///
 /// Caches are built once at construction time by loading all nodes from the
 /// database and indexing them by `name` and `qualified_name`.
-pub struct ReferenceResolver {
+pub struct ReferenceResolver<'a> {
+    #[allow(dead_code)]
+    db: &'a Database,
     /// Nodes grouped by their short name.
     name_cache: HashMap<String, Vec<Node>>,
     /// Nodes grouped by their qualified name.
@@ -178,9 +182,9 @@ pub struct ReferenceResolver {
     import_index: HashMap<String, HashSet<String>>,
 }
 
-impl ReferenceResolver {
+impl<'a> ReferenceResolver<'a> {
     /// Creates a resolver from pre-loaded nodes.
-    pub fn from_nodes(all_nodes: &[Node]) -> Self {
+    pub fn from_nodes(db: &'a Database, all_nodes: &[Node]) -> Self {
         let mut name_cache: HashMap<String, Vec<Node>> = HashMap::new();
         let mut qualified_name_cache: HashMap<String, Vec<Node>> = HashMap::new();
         let mut suffix_cache: HashMap<String, Vec<String>> = HashMap::new();
@@ -216,6 +220,7 @@ impl ReferenceResolver {
             }
         }
 
+        // Deduplicate suffix entries
         for entries in suffix_cache.values_mut() {
             entries.sort_unstable();
             entries.dedup();
@@ -239,6 +244,8 @@ impl ReferenceResolver {
         let mut import_index: HashMap<String, HashSet<String>> = HashMap::new();
         for node in all_nodes {
             if node.kind == NodeKind::Use {
+                // The name field contains the full use path.
+                // Extract the imported name (last segment after ::).
                 let imported = node.name.rsplit("::").next().unwrap_or(&node.name);
                 if imported != "*" {
                     import_index
@@ -250,6 +257,7 @@ impl ReferenceResolver {
         }
 
         Self {
+            db,
             name_cache,
             qualified_name_cache,
             suffix_cache,
@@ -284,7 +292,7 @@ impl ReferenceResolver {
                 || name.starts_with("rayon::")
                 || name.starts_with("clap::")
                 || name.starts_with("glob::")
-                || name.starts_with("rusqlite::")
+                || name.starts_with("libsql::")
                 || name.starts_with("sha2::")
                 || name.starts_with("tree_sitter::")
                 || name.starts_with("serde_json::")
@@ -411,34 +419,36 @@ impl ReferenceResolver {
     /// Strategy 1: try matching the reference name against qualified names.
     fn try_qualified_match(&self, uref: &UnresolvedRef) -> Option<ResolvedRef> {
         // Direct lookup first
-        if let Some(candidates) = self.qualified_name_cache.get(&uref.reference_name)
-            && let Some(node) = candidates
+        if let Some(candidates) = self.qualified_name_cache.get(&uref.reference_name) {
+            if let Some(node) = candidates
                 .iter()
                 .find(|n| kind_compatible(uref.reference_kind, &n.kind))
-        {
-            return Some(ResolvedRef {
-                original: uref.clone(),
-                target_node_id: node.id.clone(),
-                confidence: 0.95,
-                resolved_by: "qualified-match".to_string(),
-            });
+            {
+                return Some(ResolvedRef {
+                    original: uref.clone(),
+                    target_node_id: node.id.clone(),
+                    confidence: 0.95,
+                    resolved_by: "qualified-match".to_string(),
+                });
+            }
         }
 
         // Suffix match via pre-built suffix index — O(1) lookup instead of
         // scanning the entire qualified_name_cache.
         if let Some(full_names) = self.suffix_cache.get(&uref.reference_name) {
             for full_name in full_names {
-                if let Some(candidates) = self.qualified_name_cache.get(full_name)
-                    && let Some(node) = candidates
+                if let Some(candidates) = self.qualified_name_cache.get(full_name) {
+                    if let Some(node) = candidates
                         .iter()
                         .find(|n| kind_compatible(uref.reference_kind, &n.kind))
-                {
-                    return Some(ResolvedRef {
-                        original: uref.clone(),
-                        target_node_id: node.id.clone(),
-                        confidence: 0.95,
-                        resolved_by: "qualified-match".to_string(),
-                    });
+                    {
+                        return Some(ResolvedRef {
+                            original: uref.clone(),
+                            target_node_id: node.id.clone(),
+                            confidence: 0.95,
+                            resolved_by: "qualified-match".to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -513,6 +523,7 @@ impl ReferenceResolver {
             });
         }
 
+        // Multiple candidates -- score them and pick the best.
         let best = Self::find_best_match(uref, candidates, &self.import_index)?;
 
         Some(ResolvedRef {
@@ -660,10 +671,10 @@ impl ReferenceResolver {
             }
 
             // Import match bonus: caller explicitly imports a name that matches
-            if let Some(imports) = import_index.get(&uref.file_path)
-                && imports.contains(&node.name)
-            {
-                score += 30;
+            if let Some(imports) = import_index.get(&uref.file_path) {
+                if imports.contains(&node.name) {
+                    score += 30;
+                }
             }
 
             if score > best_score {

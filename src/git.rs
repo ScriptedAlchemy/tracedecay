@@ -1,7 +1,4 @@
-//! Root shim for the kernel `git` module.
-//!
-//! The implementation moved to `tracedecay_runtime_core::git` in the one-shot
-//! crate split. This glob keeps every historical `crate::git::…` path resolving
-//! from the root crate.
+//! Compatibility facade for low-level git process helpers.
 
-pub use tracedecay_runtime_core::git::*;
+pub(crate) use tracedecay_runtime_core::git::git_capture;
+pub use tracedecay_runtime_core::git::git_program;

@@ -1,4 +1,5 @@
-//! AST-level functional duplicate detection.
+// Rust guideline compliant 2026-05-25
+//! AST-level functional duplicate detection (issue #83).
 //!
 //! Computes four kinds of fingerprint per function/method body:
 //!
@@ -25,9 +26,9 @@
 //! which matches user expectations.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tree_sitter::{Node, Parser, Tree};
 
 /// Length of an n-gram shingle, in tokens.
@@ -72,6 +73,33 @@ pub struct RedundancyMatchScore {
     pub generic_helper_downranked: bool,
 }
 
+impl Fingerprint {
+    /// Render the shingles vector as a comma-separated lowercase hex
+    /// string (suitable for storage in a TEXT column).
+    pub fn shingles_to_string(&self) -> String {
+        let mut s = String::with_capacity(self.shingles.len() * 9);
+        for (i, h) in self.shingles.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            // Use std fmt; not perf-critical, called once per persist.
+            let _ = write!(s, "{h:08x}");
+        }
+        s
+    }
+
+    /// Parse a comma-separated lowercase hex string back into a shingles
+    /// vector. Best-effort: unparseable entries are skipped.
+    pub fn shingles_from_string(s: &str) -> Vec<u32> {
+        if s.is_empty() {
+            return Vec::new();
+        }
+        s.split(',')
+            .filter_map(|hex| u32::from_str_radix(hex, 16).ok())
+            .collect()
+    }
+}
+
 /// Compute every fingerprint signal for a single function body.
 ///
 /// `full_source` is the entire file contents (tree-sitter needs context
@@ -101,6 +129,46 @@ pub fn parse_file(source: &str, language: &tree_sitter::Language) -> Option<Tree
     let mut parser = Parser::new();
     parser.set_language(language).ok()?;
     parser.parse(source, None)
+}
+
+/// Locate a child node within `tree` that overlaps the given 0-indexed
+/// line range. Used to map a `Node` row (with its `start_line` /
+/// `end_line`) back to a tree-sitter node after re-parsing.
+pub fn find_node_at_lines<'tree>(
+    tree: &'tree Tree,
+    start_line_zero_indexed: u32,
+    end_line_zero_indexed: u32,
+) -> Option<Node<'tree>> {
+    let root = tree.root_node();
+    let mut best: Option<Node<'tree>> = None;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let ns = node.start_position().row as u32;
+        let ne = node.end_position().row as u32;
+        if ns <= start_line_zero_indexed && ne >= end_line_zero_indexed {
+            // Prefer the deepest enclosing match (most specific).
+            if let Some(b) = best {
+                let b_span = b.end_position().row - b.start_position().row;
+                let n_span = ne - ns;
+                if n_span < u32::try_from(b_span).unwrap_or(u32::MAX) {
+                    best = Some(node);
+                }
+            } else {
+                best = Some(node);
+            }
+            // Continue descending only into matching children.
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    stack.push(cursor.node());
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 // ---------------------------------------------------------------------------
@@ -199,10 +267,10 @@ fn hash_call_sequence(root: Node<'_>, source: &[u8]) -> String {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
-        if is_call_kind(kind)
-            && let Some(name) = leftmost_callable_name(node, source)
-        {
-            calls.push(name);
+        if is_call_kind(kind) {
+            if let Some(name) = leftmost_callable_name(node, source) {
+                calls.push(name);
+            }
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -260,10 +328,10 @@ fn leftmost_callable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
                 loop {
                     let ic = inner.node();
                     let ik = ic.kind();
-                    if ik.contains("identifier")
-                        && let Ok(t) = ic.utf8_text(source)
-                    {
-                        last_id = Some(t.to_string());
+                    if ik.contains("identifier") {
+                        if let Ok(t) = ic.utf8_text(source) {
+                            last_id = Some(t.to_string());
+                        }
                     }
                     if !inner.goto_next_sibling() {
                         break;
@@ -315,12 +383,15 @@ fn compute_shingles(tokens: &[&str]) -> Vec<u32> {
     out
 }
 
-/// Size of the intersection of two sorted, dedup'd shingle sets.
-///
-/// Both body-similarity limbs — Jaccard and the body-vector cosine — are pure
-/// functions of this one count plus the two set sizes, so the pairwise scan
-/// pays the two-pointer merge once per pair instead of once per limb.
-fn shingle_intersection(a: &[u32], b: &[u32]) -> usize {
+/// Jaccard similarity over two sorted/dedup'd shingle sets. Returns 1.0
+/// for two empty sets (vacuous match — they're both "no content").
+pub fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
     // Two pointer merge over sorted sequences.
     let (mut i, mut j) = (0usize, 0usize);
     let mut inter = 0usize;
@@ -335,60 +406,51 @@ fn shingle_intersection(a: &[u32], b: &[u32]) -> usize {
             std::cmp::Ordering::Greater => j += 1,
         }
     }
-    inter
-}
-
-/// Jaccard similarity from a precomputed intersection count. Returns 1.0
-/// for two empty sets (vacuous match — they're both "no content").
-fn jaccard_from_intersection(a_len: usize, b_len: usize, intersection: usize) -> f64 {
-    if a_len == 0 && b_len == 0 {
-        return 1.0;
-    }
-    if a_len == 0 || b_len == 0 {
-        return 0.0;
-    }
-    let union = a_len + b_len - intersection;
+    let union = a.len() + b.len() - inter;
     if union == 0 {
         return 1.0;
     }
-    intersection as f64 / union as f64
+    inter as f64 / union as f64
 }
 
-/// Cosine similarity from a precomputed intersection count.
+/// Cosine similarity over sorted/dedup'd shingle vectors.
 ///
 /// This is the cheap vector-style body similarity signal used by the
 /// redundancy tool for candidate discovery and ranking. Unlike Jaccard, it is
 /// less harsh when two larger bodies share a strong core but differ in a few
 /// surrounding shingles.
-fn cosine_from_intersection(a_len: usize, b_len: usize, intersection: usize) -> f64 {
-    if a_len == 0 || b_len == 0 {
+pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
+    if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    intersection as f64 / ((a_len as f64).sqrt() * (b_len as f64).sqrt())
-}
-
-/// Jaccard similarity over two sorted/dedup'd shingle sets. Returns 1.0
-/// for two empty sets (vacuous match — they're both "no content").
-pub(crate) fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
-    jaccard_from_intersection(a.len(), b.len(), shingle_intersection(a, b))
-}
-
-/// Cosine similarity over sorted/dedup'd shingle vectors. Production callers
-/// score a pair through [`redundancy_match_score`], which shares one shingle
-/// merge across both similarity limbs; this stays as the limb's direct
-/// property test surface.
-#[cfg(test)]
-pub(crate) fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
-    cosine_from_intersection(a.len(), b.len(), shingle_intersection(a, b))
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut dot = 0usize;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => {
+                dot += 1;
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    dot as f64 / ((a.len() as f64).sqrt() * (b.len() as f64).sqrt())
 }
 
 // ---------------------------------------------------------------------------
 // Composite similarity + severity
 // ---------------------------------------------------------------------------
 
-/// Blend the four signals into a single \[0,1\] similarity score, taking the
-/// shingle Jaccard already computed so a caller scoring a pair pays the merge
-/// cost once.
+/// Blend the four signals into a single \[0,1\] similarity score.
+pub fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
+    composite_similarity_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
+}
+
+/// [`composite_similarity`] with the shingle Jaccard already computed, so a
+/// caller scoring a pair pays the merge cost once.
 fn composite_similarity_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> f64 {
     let ast = if a.ast_hash == b.ast_hash { 1.0 } else { 0.0 };
     let cfg = if a.cfg_hash == b.cfg_hash { 1.0 } else { 0.0 };
@@ -425,14 +487,14 @@ fn overlap_kind_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> 
 /// Minimum score for a non-AST match to be bucketed `likely`. Shared with the
 /// `naming` -> `body_vector` relabel in [`redundancy_match_score`] so a pair
 /// can never carry the `body_vector` kind with a `naming_only` severity.
-pub(crate) const LIKELY_SEVERITY_FLOOR: f64 = 0.55;
+pub const LIKELY_SEVERITY_FLOOR: f64 = 0.55;
 
 /// Severity bucket for a `(score, overlap_kind)` pair.
 ///
 /// `definite` requires AST isomorphism — anything less can still be a
 /// false positive. `likely` covers control-flow or algorithmic matches
 /// with high shingle overlap. `naming_only` is the long tail.
-pub(crate) fn severity_bucket(score: f64, kind: &str) -> &'static str {
+pub fn severity_bucket(score: f64, kind: &str) -> &'static str {
     if kind == "ast_isomorphic" && score >= 0.80 {
         "definite"
     } else if kind == "naming" {
@@ -468,15 +530,9 @@ pub fn redundancy_match_score(
         return None;
     }
 
-    // One shingle merge feeds both body-similarity limbs. Jaccard and the
-    // body-vector cosine differ only in their denominator, so computing the
-    // intersection twice was the single hottest redundant operation in the
-    // pairwise scan; the arithmetic below is the same, in the same order.
-    let intersection = shingle_intersection(&a.shingles, &b.shingles);
-    let shingle_jaccard =
-        jaccard_from_intersection(a.shingles.len(), b.shingles.len(), intersection);
+    let shingle_jaccard = jaccard_similarity(&a.shingles, &b.shingles);
     let similarity = composite_similarity_with_jaccard(a, b, shingle_jaccard);
-    let vector_cosine = cosine_from_intersection(a.shingles.len(), b.shingles.len(), intersection);
+    let vector_cosine = vector_cosine_similarity(&a.shingles, &b.shingles);
     if similarity < threshold
         && vector_cosine < threshold
         && !same_name_rescue(a_name, b_name, vector_cosine, include_naming)
@@ -581,7 +637,11 @@ fn is_generic_helper_name(name: &str) -> bool {
 fn short_hex(bytes: &[u8]) -> String {
     // 16 hex chars = 64 bits of entropy — enough to make a collision
     // between two functions in the same repo astronomically unlikely.
-    encode_lowercase_hex(&bytes[..bytes.len().min(8)])
+    let mut s = String::with_capacity(16);
+    for b in bytes.iter().take(8) {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Round a score to 4 decimal places for stable JSON/markdown output.
@@ -596,8 +656,88 @@ fn short_sha256(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Pairwise scan bucketing
+// Pairwise redundancy scan
 // ---------------------------------------------------------------------------
+
+/// One scored redundant pair: the [`RedundancyMatchScore`] verdict plus
+/// borrows of the two graph nodes and their fingerprints. Orientation is
+/// canonicalized by [`redundant_pair`] so the same logical pair always
+/// presents the same `a`/`b` sides regardless of input order.
+pub struct RedundantPair<'a> {
+    pub score: RedundancyMatchScore,
+    pub node_a: &'a crate::types::Node,
+    pub node_b: &'a crate::types::Node,
+    pub fp_a: &'a Fingerprint,
+    pub fp_b: &'a Fingerprint,
+}
+
+/// Scan a set of `(node, fingerprint)` candidates for redundant pairs.
+///
+/// Candidates are sorted by `body_tokens` (ties broken on node id so the
+/// enumeration order never depends on DB row order), then each is compared
+/// only against the following candidates whose token count falls inside its
+/// ±25 % [`body_token_window`] — a linear window over the sorted slice that
+/// keeps the pairwise comparison sub-quadratic. Surviving pairs are ranked by
+/// `ranking_score` (a total order: ties fall through similarity, cosine, then
+/// names and node ids) and truncated to `max_pairs`.
+pub fn find_redundant_pairs<'a>(
+    mut scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+    threshold: f64,
+    include_naming: bool,
+    max_pairs: usize,
+) -> Vec<RedundantPair<'a>> {
+    // Sort by body_tokens so the size-window check is a linear scan; break
+    // ties on node id so candidate enumeration never depends on DB row order.
+    scoped.sort_by(|(na, fa), (nb, fb)| {
+        fa.body_tokens
+            .cmp(&fb.body_tokens)
+            .then_with(|| na.id.cmp(&nb.id))
+    });
+
+    let mut found = Vec::new();
+    for (i, (node_a, fp_a)) in scoped.iter().enumerate() {
+        let (lo, hi) = body_token_window(fp_a.body_tokens);
+        for (node_b, fp_b) in scoped.iter().skip(i + 1) {
+            if fp_b.body_tokens > hi {
+                break; // sorted, no need to scan further
+            }
+            if fp_b.body_tokens < lo {
+                continue;
+            }
+            if let Some(pair) =
+                redundant_pair(node_a, fp_a, node_b, fp_b, threshold, include_naming)
+            {
+                found.push(pair);
+            }
+        }
+    }
+
+    found.sort_by(|a: &RedundantPair<'_>, b: &RedundantPair<'_>| {
+        b.score
+            .ranking_score
+            .partial_cmp(&a.score.ranking_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.score
+                    .similarity
+                    .partial_cmp(&a.score.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.score
+                    .vector_cosine
+                    .partial_cmp(&a.score.vector_cosine)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.node_a.name.cmp(&b.node_a.name))
+            .then_with(|| a.node_b.name.cmp(&b.node_b.name))
+            .then_with(|| a.node_a.id.cmp(&b.node_a.id))
+            .then_with(|| a.node_b.id.cmp(&b.node_b.id))
+    });
+    found.truncate(max_pairs);
+
+    found
+}
 
 /// The ±25 % `body_tokens` window used to bucket candidates before scoring.
 /// Returns the inclusive `(low, high)` token bounds for a body of the given
@@ -607,6 +747,92 @@ pub fn body_token_window(body_tokens: usize) -> (usize, usize) {
         (body_tokens as f64 * 0.75).floor() as usize,
         (body_tokens as f64 * 1.25).ceil() as usize,
     )
+}
+
+/// Score one candidate pair, returning a canonically-oriented
+/// [`RedundantPair`] or `None` when [`redundancy_match_score`] rejects it.
+///
+/// Orientation is fixed by `(file_path, start_line, id)` so the same logical
+/// pair always presents the same `a`/`b` sides regardless of input order
+/// (scoring is symmetric).
+pub fn redundant_pair<'a>(
+    node_a: &'a crate::types::Node,
+    fp_a: &'a Fingerprint,
+    node_b: &'a crate::types::Node,
+    fp_b: &'a Fingerprint,
+    threshold: f64,
+    include_naming: bool,
+) -> Option<RedundantPair<'a>> {
+    let score = redundancy_match_score(
+        &node_a.name,
+        fp_a,
+        &node_b.name,
+        fp_b,
+        threshold,
+        include_naming,
+    )?;
+    // Canonicalize orientation so the same logical pair always presents the
+    // same a/b sides regardless of DB row order (scoring is symmetric).
+    let a_key = (&node_a.file_path, node_a.start_line, &node_a.id);
+    let b_key = (&node_b.file_path, node_b.start_line, &node_b.id);
+    let (node_a, fp_a, node_b, fp_b) = if a_key <= b_key {
+        (node_a, fp_a, node_b, fp_b)
+    } else {
+        (node_b, fp_b, node_a, fp_a)
+    };
+    Some(RedundantPair {
+        score,
+        node_a,
+        node_b,
+        fp_a,
+        fp_b,
+    })
+}
+
+/// Connected components over the returned pairs — the shared source of truth
+/// for both the JSON `groups` array and the markdown Groups section, so the
+/// two views cannot drift on membership.
+pub fn connected_node_groups<'a>(
+    pairs: &'a [RedundantPair<'a>],
+) -> Vec<Vec<&'a crate::types::Node>> {
+    let mut groups: Vec<Vec<&'a crate::types::Node>> = Vec::new();
+    for pair in pairs {
+        let mut matching_groups = Vec::new();
+        for (idx, group) in groups.iter().enumerate() {
+            if group
+                .iter()
+                .any(|node| node.id == pair.node_a.id || node.id == pair.node_b.id)
+            {
+                matching_groups.push(idx);
+            }
+        }
+
+        let nodes = [pair.node_a, pair.node_b];
+        if matching_groups.is_empty() {
+            groups.push(Vec::from(nodes));
+            continue;
+        }
+
+        let first = matching_groups[0];
+        for node in nodes {
+            push_unique_node(&mut groups[first], node);
+        }
+        for idx in matching_groups.into_iter().skip(1).rev() {
+            let merged = groups.remove(idx);
+            for node in merged {
+                push_unique_node(&mut groups[first], node);
+            }
+        }
+    }
+
+    groups
+}
+
+fn push_unique_node<'a>(nodes: &mut Vec<&'a crate::types::Node>, node: &'a crate::types::Node) {
+    if nodes.iter().any(|existing| existing.id == node.id) {
+        return;
+    }
+    nodes.push(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -658,8 +884,7 @@ mod tests {
         );
         // AST + CFG + call-seq all match; shingles diverge because token
         // names changed. Score lower-bound: 0.40+0.25+0.20 = 0.85.
-        let score =
-            composite_similarity_with_jaccard(&a, &b, jaccard_similarity(&a.shingles, &b.shingles));
+        let score = composite_similarity(&a, &b);
         assert!(score >= 0.85, "expected >= 0.85, got {score}");
         assert_eq!(overlap_kind(&a, &b), "ast_isomorphic");
         assert_eq!(severity_bucket(score, "ast_isomorphic"), "definite");
@@ -854,7 +1079,7 @@ mod tests {
     #[test]
     fn redundancy_eval_fixture_scores_real_cases() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/redundancy_eval_labeled.json"
+            "../tests/fixtures/redundancy_eval_labeled.json"
         ))
         .expect("valid redundancy eval fixture");
         let threshold = fixture["threshold"].as_f64().expect("threshold");
@@ -1024,6 +1249,22 @@ mod tests {
         } else {
             sum / positives.len() as f64
         }
+    }
+
+    #[test]
+    fn shingles_roundtrip_through_string_format() {
+        let original: Vec<u32> = vec![1, 2, 0xdead_beef, 0xffff_ffff];
+        let fp = Fingerprint {
+            ast_hash: "x".into(),
+            cfg_hash: "x".into(),
+            call_seq_hash: "x".into(),
+            shingles: original.clone(),
+            body_tokens: 0,
+            source_hash: "x".into(),
+        };
+        let s = fp.shingles_to_string();
+        let parsed = Fingerprint::shingles_from_string(&s);
+        assert_eq!(parsed, original);
     }
 
     #[test]

@@ -6,12 +6,10 @@
 
 pub(crate) mod hook_events;
 pub(crate) mod project_route;
-pub mod response_handles;
-pub(crate) mod scope;
 /// MCP server implementation.
+pub mod response_handles;
 pub mod server;
 mod tool_analytics;
-pub(crate) mod tool_call_deadline;
 
 /// Tool definitions and dispatch.
 pub mod tools;

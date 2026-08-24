@@ -1,14 +1,4 @@
 //! Provider-neutral assistant usage taxonomy.
-//!
-//! `skill_usage` classifies stored analytics rows through [`infer_usage_events`],
-//! `runner::evidence` scores tool families through [`underused_tool_family_signals`],
-//! and `skill_writer` reports [`ToolFamilySignal`]. The module names no other
-//! subsystem — it is pure classification over `serde_json` values.
-//!
-//! Root wiring: `src/analytics.rs` is
-//! `pub use tracedecay_agent_hosts::analytics::*;`, keeping every
-//! `crate::analytics::…` path resolving for the hook and MCP readers that stay
-//! in the root crate.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -80,9 +70,12 @@ impl UsageCategory {
 }
 
 pub fn normalize_tool_name(raw: &str) -> String {
-    crate::tool_name::strip_tool_prefix(raw.trim())
-        .to_ascii_lowercase()
-        .replace('-', "_")
+    let trimmed = raw.trim();
+    let without_mcp = trimmed
+        .strip_prefix("mcp__tracedecay__")
+        .or_else(|| trimmed.strip_prefix("mcp_tracedecay_"))
+        .unwrap_or(trimmed);
+    without_mcp.to_ascii_lowercase().replace('-', "_")
 }
 
 pub fn is_skill_view_tool(raw: &str) -> bool {
@@ -94,8 +87,7 @@ pub fn is_skill_view_tool(raw: &str) -> bool {
 
 fn categorize_normalized_tool(normalized: &str, command_hint: Option<&str>) -> UsageCategory {
     if normalized.starts_with("tracedecay_memory")
-        || normalized.starts_with("tracedecay_fact_store_")
-        || normalized == "tracedecay_fact_feedback"
+        || normalized == "tracedecay_fact_store"
         || normalized == "tracedecay_memory_status"
     {
         return UsageCategory::Memory;
@@ -186,22 +178,13 @@ pub fn underused_tool_family_signals<'a>(
 
     for observation in observations {
         let text = observation.text.unwrap_or_default();
-        let command_hint = observation
-            .metadata_json
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .as_ref()
-            .and_then(command_from_metadata);
-        let relevance_text = command_hint
-            .as_deref()
-            .map(|command| format!("{command}\n{text}"));
-        let text_with_command = relevance_text.as_deref().unwrap_or(text);
         for event in infer_usage_events(
             observation.tool_names,
             observation.metadata_json,
             Some(text),
         ) {
             if event.kind == UsageKind::Tool {
-                record_tool_family(&mut families, &event.name, text_with_command);
+                record_tool_family(&mut families, &event.name, text);
             }
         }
     }
@@ -396,14 +379,16 @@ fn collect_skill_view_metadata(value: &Value, out: &mut Vec<String>) {
             }
         }
         Value::Object(map) => {
-            if let Some(function) = map.get("function").and_then(Value::as_object)
-                && function
+            if let Some(function) = map.get("function").and_then(Value::as_object) {
+                if function
                     .get("name")
                     .and_then(Value::as_str)
                     .is_some_and(is_skill_view_tool)
-                && let Some(arguments) = function.get("arguments")
-            {
-                collect_skill_view_arguments(arguments, out);
+                {
+                    if let Some(arguments) = function.get("arguments") {
+                        collect_skill_view_arguments(arguments, out);
+                    }
+                }
             }
             for value in map.values() {
                 collect_skill_view_metadata(value, out);
@@ -420,9 +405,10 @@ fn collect_skill_view_arguments(value: &Value, out: &mut Vec<String>) {
                 .get("id")
                 .or_else(|| map.get("name"))
                 .and_then(Value::as_str)
-                && let Some(skill) = normalize_skill_name(name)
             {
-                out.push(skill);
+                if let Some(skill) = normalize_skill_name(name) {
+                    out.push(skill);
+                }
             }
         }
         Value::String(raw) => {
@@ -649,22 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_exact_fact_memory_operations_as_memory() {
-        let events = infer_usage_events(
-            Some("tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_fact_feedback"),
-            None,
-            None,
-        );
-        for name in [
-            "tracedecay_fact_store_search",
-            "tracedecay_fact_store_add",
-            "tracedecay_fact_feedback",
-        ] {
-            assert_usage_event(&events, UsageKind::Tool, name, UsageCategory::Memory);
-        }
-    }
-
-    #[test]
     fn tracedecay_grep_counts_as_code_search_usage() {
         let families = underused_tool_family_signals([ToolUsageObservation {
             tool_names: Some("rg,mcp__tracedecay__tracedecay_grep"),
@@ -768,7 +738,7 @@ mod tests {
             None,
             Some(r#"{"source":"codex_rollout"}"#),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/codex_skill_prose.txt"
+                "../tests/fixtures/analytics/codex_skill_prose.txt"
             )),
         );
         assert_usage_event(
@@ -791,7 +761,7 @@ mod tests {
             Some("ReadFile"),
             Some(r#"{"raw_type":null,"source":"cursor_transcript"}"#),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/cursor_skill_read_text.json"
+                "../tests/fixtures/analytics/cursor_skill_read_text.json"
             )),
         );
         assert_usage_event(
@@ -819,10 +789,10 @@ mod tests {
         let events = infer_usage_events(
             Some("skill_view"),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/hermes_skill_view_metadata.json"
+                "../tests/fixtures/analytics/hermes_skill_view_metadata.json"
             )),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/hermes_skill_view_text.json"
+                "../tests/fixtures/analytics/hermes_skill_view_text.json"
             )),
         );
         assert_usage_event(&events, UsageKind::Tool, "skill_view", UsageCategory::Other);

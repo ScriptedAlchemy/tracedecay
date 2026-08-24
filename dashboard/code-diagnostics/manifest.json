@@ -1,0 +1,9 @@
+{
+  "name": "code-diagnostics",
+  "label": "Code Diagnostics",
+  "description": "LSP-backed compiler and type diagnostics.",
+  "icon": "Bug",
+  "version": "0.1.0",
+  "entry": "dist/index.js",
+  "css": "dist/style.css"
+}

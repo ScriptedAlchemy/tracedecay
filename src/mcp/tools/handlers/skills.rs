@@ -5,24 +5,22 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::mcp::tools::ToolResult;
-use crate::tracedecay::TraceDecay;
-use tracedecay_agent_hosts::automation::hermes_skill_bridge::{
+use crate::automation::hermes_skill_bridge::{
     HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
 };
-use tracedecay_agent_hosts::automation::managed_skills::{
+use crate::automation::managed_skills::{
     ManagedSkill, ManagedSkillState, list_managed_skills, load_managed_skill,
 };
-use tracedecay_agent_hosts::automation::run_ledger::{find_run_record, read_run_artifact_payload};
-use tracedecay_agent_hosts::automation::skill_usage::{
+use crate::automation::run_ledger::{find_run_record, read_run_artifact_payload};
+use crate::automation::skill_usage::{
     SkillUsageAction, analytics_import_key_for_request, ingest_project_analytics_events,
     record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
     summarize_skill_usage, summarize_skill_usage_for,
 };
+use crate::errors::{Result, TraceDecayError};
+use crate::mcp::tools::ToolResult;
+use crate::tracedecay::TraceDecay;
 
 use super::super::renderers;
 use super::support::{tool_json, tool_json_with_md};
@@ -51,6 +49,7 @@ fn parse_state(args: &Value) -> Result<Option<ManagedSkillState>> {
         return Ok(None);
     };
     match state {
+        "pending_approval" => Ok(Some(ManagedSkillState::PendingApproval)),
         "active" => Ok(Some(ManagedSkillState::Active)),
         "disabled" => Ok(Some(ManagedSkillState::Disabled)),
         "archived" => Ok(Some(ManagedSkillState::Archived)),
@@ -87,13 +86,9 @@ fn json_by_skill<T: Serialize>(
         .collect()
 }
 
-pub(super) async fn handle_skill_list(
-    cg: &TraceDecay,
-    args: Value,
-    analytics_db: Option<&RegisteredGlobalDb>,
-) -> Result<ToolResult> {
+pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let profile_root = crate::storage::default_profile_root()?;
-    sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
+    sync_project_skill_analytics(cg, &profile_root).await?;
     let state = parse_state(&args)?;
     let include_body = optional_bool(&args, "include_body", false);
     let mut skills = list_managed_skills(&profile_root).await?;
@@ -148,13 +143,9 @@ pub(super) async fn handle_skill_list(
     ))
 }
 
-pub(super) async fn handle_skill_view(
-    cg: &TraceDecay,
-    args: Value,
-    analytics_db: Option<&RegisteredGlobalDb>,
-) -> Result<ToolResult> {
+pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let profile_root = crate::storage::default_profile_root()?;
-    sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
+    sync_project_skill_analytics(cg, &profile_root).await?;
     let include_support_files = optional_bool(&args, "include_support_files", true);
     let mut skill = load_managed_skill(&profile_root, required_str(&args, "id")?).await?;
     let targets = skill
@@ -177,9 +168,7 @@ pub(super) async fn handle_skill_view(
                 .get("__mcp_request_id")
                 .and_then(Value::as_str)
                 .map(|request_id| analytics_import_key_for_request(
-                    &crate::global_db::RegisteredGlobalDb::canonical_project_key(
-                        cg.project_root(),
-                    ),
+                    &crate::global_db::GlobalDb::canonical_project_key(cg.project_root()),
                     "mcp",
                     request_id,
                     &skill.metadata.id,
@@ -254,15 +243,12 @@ pub(super) async fn handle_automation_run_artifact_view(
     ))
 }
 
-async fn sync_project_skill_analytics(
-    cg: &TraceDecay,
-    profile_root: &Path,
-    analytics_db: Option<&RegisteredGlobalDb>,
-) -> Result<()> {
+async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> Result<()> {
+    let global_db = crate::global_db::GlobalDb::open().await;
     ingest_project_analytics_events(
         profile_root,
         cg.project_root(),
-        analytics_db.map(|database| database as &dyn AutomationSessionStore),
+        global_db.as_ref(),
         SKILL_ANALYTICS_IMPORT_LIMIT,
     )
     .await

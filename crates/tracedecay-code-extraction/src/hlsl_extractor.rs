@@ -9,7 +9,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 use crate::common::extract_call_expression_sites;
 use crate::complexity::{C_COMPLEXITY, count_complexity};
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind};
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -45,18 +45,12 @@ impl ExtractionState {
         }
     }
 
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -72,32 +66,16 @@ impl ExtractionState {
 
 impl HlslExtractor {
     pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -128,16 +106,11 @@ impl HlslExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        let root = tree.root_node();
+        Self::visit_children(&mut state, root);
 
         state.node_stack.pop();
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -174,6 +147,10 @@ impl HlslExtractor {
             _ => {}
         }
     }
+
+    // -------------------------------------------------------
+    // function_definition
+    // -------------------------------------------------------
 
     fn visit_function_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         let name =
@@ -254,6 +231,10 @@ impl HlslExtractor {
             text.trim().trim_end_matches(';').trim().to_string()
         }
     }
+
+    // -------------------------------------------------------
+    // struct_specifier  (struct / class)
+    // -------------------------------------------------------
 
     fn visit_struct_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
@@ -375,6 +356,10 @@ impl HlslExtractor {
         }
     }
 
+    // -------------------------------------------------------
+    // cbuffer_specifier  (constant buffer)
+    // -------------------------------------------------------
+
     fn visit_cbuffer_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
@@ -423,6 +408,7 @@ impl HlslExtractor {
             });
         }
 
+        // Visit cbuffer members as fields.
         if let Some(body) = node.child_by_field_name("body") {
             state.node_stack.push((name, id));
             Self::visit_cbuffer_members(state, body);
@@ -444,6 +430,10 @@ impl HlslExtractor {
             }
         }
     }
+
+    // -------------------------------------------------------
+    // declaration  (global variables / prototypes)
+    // -------------------------------------------------------
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Skip function prototypes — handled by function_definition.
@@ -524,15 +514,19 @@ impl HlslExtractor {
                 return Some(state.node_text(ident));
             }
             // array_declarator: identifier "[" ... "]"
-            if let Some(arr) = find_direct_child_by_kind(decl, "array_declarator")
-                && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
-            {
-                return Some(state.node_text(ident));
+            if let Some(arr) = find_direct_child_by_kind(decl, "array_declarator") {
+                if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
+                    return Some(state.node_text(ident));
+                }
             }
         }
         // Fallback: any identifier child
         find_direct_child_by_kind(node, "identifier").map(|n| state.node_text(n))
     }
+
+    // -------------------------------------------------------
+    // Preprocessor
+    // -------------------------------------------------------
 
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
@@ -603,6 +597,10 @@ impl HlslExtractor {
         }
     }
 
+    // -------------------------------------------------------
+    // Call site extraction
+    // -------------------------------------------------------
+
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
             &state.source,
@@ -612,6 +610,10 @@ impl HlslExtractor {
             fn_node_id,
         );
     }
+
+    // -------------------------------------------------------
+    // Utility helpers
+    // -------------------------------------------------------
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
@@ -635,15 +637,5 @@ impl crate::LanguageExtractor for HlslExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         HlslExtractor::extract_source(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        HlslExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

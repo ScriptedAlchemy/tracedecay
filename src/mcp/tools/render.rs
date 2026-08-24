@@ -6,7 +6,6 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::context::CONTEXT_PRIORITY_HEADINGS;
-use crate::daemon_client::RequestedOutputFormat;
 use crate::display::format_relative_time;
 use crate::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
@@ -21,37 +20,34 @@ use super::MAX_RESPONSE_CHARS;
 
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
 
-fn parse_format(args: &Value) -> RequestedOutputFormat {
-    crate::application_surface::requested_output_format(args)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Markdown,
+    Json,
+}
+
+fn parse_format(args: &Value) -> OutputFormat {
+    match args.get("format").and_then(Value::as_str) {
+        Some(v) if v.eq_ignore_ascii_case("json") => OutputFormat::Json,
+        _ => OutputFormat::Markdown,
+    }
 }
 
 /// True when the caller explicitly opted into JSON output via `format: "json"`.
 pub(super) fn wants_json(args: &Value) -> bool {
-    parse_format(args) == RequestedOutputFormat::Json
+    parse_format(args) == OutputFormat::Json
 }
 
 pub(super) fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
 where
     F: FnOnce() -> String,
 {
-    finalize_with_format(project_root, parse_format(args), value, md)
-}
-
-pub(super) fn finalize_with_format<F>(
-    project_root: Option<&Path>,
-    format: RequestedOutputFormat,
-    value: &Value,
-    md: F,
-) -> String
-where
-    F: FnOnce() -> String,
-{
-    match format {
-        RequestedOutputFormat::Json => {
-            let json = value.to_string();
+    match parse_format(args) {
+        OutputFormat::Json => {
+            let json = serde_json::to_string(value).unwrap_or_default();
             truncated_json_envelope_with_handle(project_root, &json)
         }
-        RequestedOutputFormat::Markdown => {
+        OutputFormat::Markdown => {
             let text = md();
             if text.is_empty() {
                 return text;
@@ -61,8 +57,40 @@ where
     }
 }
 
-/// Wraps oversized JSON text in a valid preview envelope. With a project root,
-/// stores the full original locally and includes a retrieval handle.
+/// Truncates a string to the maximum response character limit, appending
+/// a truncation notice if necessary.
+///
+/// Legacy, irreversible truncation: no retrieval handle is stored. Prefer
+/// [`truncate_text_with_handle`] for plain-text tool output.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn truncate_response(s: &str) -> String {
+    debug_assert!(!s.is_empty(), "truncate_response called with empty string");
+    if s.len() <= MAX_RESPONSE_CHARS {
+        s.to_string()
+    } else {
+        let started = std::time::Instant::now();
+        let now = current_timestamp();
+        // Find a valid UTF-8 character boundary at or before MAX_RESPONSE_CHARS.
+        let mut end = MAX_RESPONSE_CHARS;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        let truncated = format!("{}\n\n[... truncated at {} chars]", &s[..end], end);
+        observe_response_truncation(
+            s.len(),
+            truncated.len(),
+            false,
+            now,
+            "not_available",
+            started.elapsed(),
+        );
+        truncated
+    }
+}
+
+/// Wraps oversized JSON text in a valid preview envelope. When a project root
+/// is available, stores the full original locally and includes a retrieval
+/// handle.
 ///
 /// If local handle storage is unavailable or fails, the envelope still carries
 /// a preview but also includes explicit recovery metadata so clients can tell
@@ -77,7 +105,6 @@ pub(super) fn truncated_json_envelope_with_handle(
     let started = std::time::Instant::now();
     let now = current_timestamp();
     let handle = prepare_truncated_response_handle(project_root, formatted);
-    let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
         while end > 0 && !formatted.is_char_boundary(end) {
@@ -86,8 +113,8 @@ pub(super) fn truncated_json_envelope_with_handle(
         let preview = &formatted[..end];
         let mut envelope = serde_json::json!({
             "truncated": true,
-            "original_chars": original_chars,
-            "preview_chars": preview.chars().count(),
+            "original_chars": formatted.len(),
+            "preview_chars": preview.len(),
             "preview": preview,
         });
         if let Some(object) = envelope.as_object_mut() {
@@ -108,9 +135,9 @@ pub(super) fn truncated_json_envelope_with_handle(
                 object.insert(
                     "retrieve_instruction".to_string(),
                     serde_json::json!(format!(
-                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original call used `project_selector.project_id`, pass the same selector so the handle is read from that project cache. Only call it if the missing details are needed.",
-                        preview.chars().count(),
-                        original_chars,
+                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original tool call used a project selector (`project_id`, `project_path`, or `project_selector`), pass the same selector to `{RESPONSE_RETRIEVE_TOOL}` so the handle is looked up in the same project cache. Only call it if the missing details are needed to answer the user's request.",
+                        preview.len(),
+                        formatted.len(),
                         record.expires_at,
                         RESPONSE_HANDLE_TTL_SECS,
                         record.handle
@@ -121,7 +148,7 @@ pub(super) fn truncated_json_envelope_with_handle(
                 object.insert("handle_status".to_string(), status.clone());
             }
         }
-        let text = envelope.to_string();
+        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
         if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
             observe_response_truncation(
                 formatted.len(),
@@ -137,6 +164,15 @@ pub(super) fn truncated_json_envelope_with_handle(
         }
         end = end.saturating_sub(1024);
     }
+}
+
+/// Reversible truncation for plain-text tool output. Returns `text` unchanged
+/// when it fits within [`MAX_RESPONSE_CHARS`]; otherwise stores the full text
+/// via the response-handle machinery and returns the readable markdown
+/// truncation envelope (preview plus `rh_` retrieval handle).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn truncate_text_with_handle(project_root: Option<&Path>, text: &str) -> String {
+    truncated_markdown_with_handle(project_root, text)
 }
 
 pub(super) fn markdown_preview_with_handle(
@@ -165,8 +201,8 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
         |preview| {
             format!(
                 "Showing the first {} of {} characters.",
-                preview.chars().count(),
-                text.chars().count()
+                preview.len(),
+                text.len()
             )
         },
     )
@@ -191,8 +227,8 @@ fn markdown_preview_truncation_with_handle(
         |compact_preview| {
             format!(
                 "Showing a lane-budgeted preview of {} characters from {} original characters.",
-                compact_preview.chars().count(),
-                full_text.chars().count()
+                compact_preview.len(),
+                full_text.len()
             )
         },
     )
@@ -335,43 +371,23 @@ fn truncation_handle_status(
     }
 }
 
-/// Runs the synchronous response-handle disk write without stalling the async
-/// executor worker that renders the response.
-///
-/// The truncating render path is synchronous by design (it sits under dozens
-/// of sync handler helpers), but it usually executes on a tokio worker.
-/// `block_in_place` hands that worker's run queue to another thread for the
-/// duration of the write; it panics outside a multi-thread runtime, so the
-/// flavor is checked first and everything else (current-thread runtimes,
-/// plain threads) keeps the previous inline behavior. The remaining
-/// `block_in_place` panic case is a `LocalSet` on a multi-thread runtime,
-/// which this workspace does not use.
-fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
-    }
-}
-
 fn prepare_truncated_response_handle(
     project_root: Option<&Path>,
     text: &str,
 ) -> TruncatedResponseHandle {
     if let Some(root) = project_root {
-        match run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp())) {
+        match store_response_handle(root, text, current_timestamp()) {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
                 unavailable: None,
             },
-            // The adapter records the full typed error in internal telemetry.
-            // Public output must not disclose project-local filesystem paths.
-            Err(_) => TruncatedResponseHandle {
+            Err(err) => TruncatedResponseHandle {
                 record: None,
                 unavailable: Some(serde_json::json!({
                     "reason_code": "handle_store_failed",
-                    "message": "The full response could not be cached locally, so no retrieval handle is available.",
+                    "message": format!(
+                        "The full response could not be cached locally, so no retrieval handle is available: {err}"
+                    ),
                     "retryable": true,
                     "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
                 })),
@@ -562,20 +578,20 @@ pub(super) fn risky_patterns_md(value: &Value) -> String {
         .unwrap_or(matches.len() as u64);
     md.field("Match count", &match_count.to_string());
 
-    if let Some(by_kind) = value.get("by_kind").and_then(Value::as_object)
-        && !by_kind.is_empty()
-    {
-        let mut entries: Vec<(String, u64)> = by_kind
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0)))
-            .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let summary = entries
-            .iter()
-            .map(|(kind, count)| format!("{kind}: {count}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        md.field("By kind", &summary);
+    if let Some(by_kind) = value.get("by_kind").and_then(Value::as_object) {
+        if !by_kind.is_empty() {
+            let mut entries: Vec<(String, u64)> = by_kind
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let summary = entries
+                .iter()
+                .map(|(kind, count)| format!("{kind}: {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            md.field("By kind", &summary);
+        }
     }
     md.blank();
 
@@ -590,15 +606,15 @@ pub(super) fn risky_patterns_md(value: &Value) -> String {
         let file = m.get("file").and_then(Value::as_str).unwrap_or("<unknown>");
         let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
         md.bullet(&format!("**{} at {file}:{line}**", kind.to_uppercase()));
-        if let Some(snippet) = m.get("snippet").and_then(Value::as_str)
-            && !snippet.is_empty()
-        {
-            md.line(&format!("  **Snippet:** {snippet}"));
+        if let Some(snippet) = m.get("snippet").and_then(Value::as_str) {
+            if !snippet.is_empty() {
+                md.line(&format!("  **Snippet:** {snippet}"));
+            }
         }
-        if let Some(enclosing) = m.get("enclosing").and_then(Value::as_str)
-            && !enclosing.is_empty()
-        {
-            md.line(&format!("  **Enclosing:** {enclosing}"));
+        if let Some(enclosing) = m.get("enclosing").and_then(Value::as_str) {
+            if !enclosing.is_empty() {
+                md.line(&format!("  **Enclosing:** {enclosing}"));
+            }
         }
         if m.get("in_test").and_then(Value::as_bool).unwrap_or(false) {
             md.line("  **In test:** true");
@@ -625,29 +641,10 @@ pub(super) fn unused_imports_md(value: &Value) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(imports.len() as u64);
     md.field("Unused import count", &count.to_string());
-    // A paged walk must never read as a whole-repository verdict: state the
-    // scanned scope and how to resume before listing findings.
-    let complete = value.get("complete").and_then(Value::as_bool);
-    if let Some(scanned) = value.get("scanned_files").and_then(Value::as_u64) {
-        md.field("Files scanned", &scanned.to_string());
-    }
-    if complete == Some(false) {
-        md.field("Coverage", "partial");
-        if let Some(reason) = value.get("partial_reason").and_then(Value::as_str) {
-            md.field("Partial reason", reason);
-        }
-        if let Some(cursor) = value.get("next_cursor").and_then(Value::as_str) {
-            md.field("Resume with cursor", cursor);
-        }
-    }
     md.blank();
 
     if imports.is_empty() {
-        if complete == Some(false) {
-            md.empty_note("No unused imports in the scanned page; the walk is incomplete.");
-        } else {
-            md.empty_note("No unused imports found.");
-        }
+        md.empty_note("No unused imports found.");
         return md.render();
     }
 
@@ -675,139 +672,6 @@ pub(super) fn unused_imports_md(value: &Value) -> String {
     md.render()
 }
 
-/// Dedicated markdown renderer for `tracedecay_unmounted_files`.
-///
-/// An empty answer here is a real and welcome verdict — "every source file is
-/// reachable" — so it is spelled out rather than left as the generic renderer's
-/// silence. The per-ecosystem section is not decoration: "unmounted" means
-/// something stronger for cargo than for a bundler, and a language nobody
-/// modelled must say so out loud rather than let a clean report imply coverage
-/// it never had. When findings exist, each one leads with the repair (`add
-/// `mod foo;` to src/daemon.rs`) because the reader's next action is an edit,
-/// not further investigation.
-pub(super) fn unmounted_files_md(value: &Value) -> String {
-    let mut md = Md::new();
-    md.heading(2, "Unmounted Files");
-
-    let unmounted = value
-        .get("unmounted")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-    let count = value
-        .get("unmounted_file_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(unmounted.len() as u64);
-    md.field("Unmounted file count", &count.to_string());
-    // A truncated list must never read as the whole finding.
-    if value.get("complete").and_then(Value::as_bool) == Some(false)
-        && let Some(omitted) = value.get("omitted_count").and_then(Value::as_u64)
-    {
-        md.field("Coverage", "partial");
-        md.field("Omitted", &format!("{omitted} (raise `limit` to see them)"));
-    }
-    md.blank();
-
-    let ecosystems = value
-        .get("ecosystems")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-    if !ecosystems.is_empty() {
-        md.heading(3, "Ecosystems");
-        for ecosystem in ecosystems {
-            render_ecosystem(&mut md, ecosystem);
-        }
-        md.blank();
-    }
-
-    if unmounted.is_empty() {
-        let audited = ecosystems
-            .iter()
-            .any(|ecosystem| ecosystem.get("status").and_then(Value::as_str) == Some("audited"));
-        if audited {
-            md.empty_note(
-                "Every scanned source file is reachable from a declared entry point in the \
-                 ecosystems listed above.",
-            );
-        } else {
-            md.empty_note(
-                "No package of a modelled ecosystem (cargo, npm) was found; nothing was audited.",
-            );
-        }
-        return md.render();
-    }
-
-    md.heading(3, "Findings");
-    for entry in unmounted {
-        let file = entry
-            .get("file")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let ecosystem = entry.get("ecosystem").and_then(Value::as_str).unwrap_or("");
-        let package = entry.get("package").and_then(Value::as_str).unwrap_or("");
-        md.bullet(&format!("**{file}** ({ecosystem} package `{package}`)"));
-        match (
-            entry.get("suggested_declaration").and_then(Value::as_str),
-            entry.get("nearest_mounted_parent").and_then(Value::as_str),
-        ) {
-            (Some(declaration), Some(parent)) => {
-                md.line(&format!("  **Fix:** add `{declaration}` to {parent}"))
-            }
-            (Some(declaration), None) => md.line(&format!(
-                "  **Fix:** no mounted ancestor exists; the whole branch needs a root, then `{declaration}`"
-            )),
-            // No canonical repair: the file is either dead or reached through
-            // a blind spot, and naming an importer would invent one.
-            (None, _) => md.line(
-                "  **Next:** delete it, or confirm it is reached through a blind spot listed above",
-            ),
-        };
-    }
-    md.render()
-}
-
-/// One ecosystem's line in the report, including what its verdict claims.
-fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
-    let name = ecosystem
-        .get("ecosystem")
-        .and_then(Value::as_str)
-        .unwrap_or("<unknown>");
-    let status = ecosystem
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let number = |key: &str| ecosystem.get(key).and_then(Value::as_u64).unwrap_or(0);
-    let findings = number("unmounted_file_count");
-    md.bullet(&format!(
-        "**{name}** — {status} · {} package(s) · {} entry point(s) · {} file(s) scanned · {findings} unmounted",
-        number("package_count"),
-        number("entry_point_count"),
-        number("scanned_file_count"),
-    ));
-    if let Some(note) = ecosystem.get("note").and_then(Value::as_str) {
-        md.line(&format!("  {note}"));
-    }
-    if status != "audited" {
-        return;
-    }
-    if let Some(verdict) = ecosystem.get("verdict").and_then(Value::as_str) {
-        md.line(&format!("  **Unmounted here means:** {verdict}"));
-    }
-    // Blind spots are what turns a finding into a judgement, so they ride with
-    // the findings rather than with the clean runs.
-    if findings == 0 {
-        return;
-    }
-    for blind_spot in ecosystem
-        .get("blind_spots")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice)
-        .iter()
-        .filter_map(Value::as_str)
-    {
-        md.line(&format!("  **Blind spot:** {blind_spot}"));
-    }
-}
-
 fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     let level = diagnostic
         .get("level")
@@ -831,10 +695,10 @@ fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     if let Some(driver) = diagnostic.get("driver").and_then(Value::as_str) {
         md.line(&format!("  **Driver:** {driver}"));
     }
-    if let Some(enclosing) = diagnostic.get("enclosing").and_then(Value::as_str)
-        && !enclosing.is_empty()
-    {
-        md.line(&format!("  **Enclosing:** {enclosing}"));
+    if let Some(enclosing) = diagnostic.get("enclosing").and_then(Value::as_str) {
+        if !enclosing.is_empty() {
+            md.line(&format!("  **Enclosing:** {enclosing}"));
+        }
     }
     if let Some(node) = diagnostic.get("node").filter(|v| !v.is_null()) {
         let name = node
@@ -956,28 +820,28 @@ fn scalar_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Number(n) => {
-            if let Some(f) = n.as_f64()
-                && n.as_i64().is_none()
-                && n.as_u64().is_none()
-            {
-                return format_score(f);
+            if let Some(f) = n.as_f64() {
+                if n.as_i64().is_none() && n.as_u64().is_none() {
+                    return format_score(f);
+                }
             }
             n.to_string()
         }
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
-        _ => v.to_string(),
+        _ => serde_json::to_string(v).unwrap_or_default(),
     }
 }
 
 /// Key-aware scalar rendering: humanizes epoch timestamps for `*_at`/`*_time`
 /// keys and otherwise defers to [`scalar_str`] (which rounds floats).
 fn scalar_str_keyed(key: &str, v: &Value) -> String {
-    if is_timestamp_key(key)
-        && let Some(ts) = v.as_u64()
-        && ts > 100_000_000
-    {
-        return format!("{} ({ts})", format_relative_time(ts));
+    if is_timestamp_key(key) {
+        if let Some(ts) = v.as_u64() {
+            if ts > 100_000_000 {
+                return format!("{} ({ts})", format_relative_time(ts));
+            }
+        }
     }
     scalar_str(v)
 }
@@ -1098,6 +962,7 @@ fn column_rank(col: &str) -> (usize, &str) {
 }
 
 fn render_object_array_records(md: &mut Md, arr: &[Value]) {
+    // Collect the union of keys.
     let mut cols: Vec<String> = Vec::new();
     for e in arr {
         if let Some(obj) = e.as_object() {
@@ -1238,7 +1103,10 @@ fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
         }
         md.blank().heading(depth.min(6), k);
         if depth >= GENERIC_MAX_DEPTH {
-            md.line(&format!("`{v}`"));
+            md.line(&format!(
+                "`{}`",
+                serde_json::to_string(v).unwrap_or_default()
+            ));
         } else {
             render_value(md, v, depth + 1);
         }

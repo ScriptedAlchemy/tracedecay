@@ -1,142 +1,77 @@
-use serde::{Deserialize, Serialize};
-
-pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
-
-// Runtime modules are public because the root composition crate mounts these
-// concrete provider and storage authorities directly.
 pub mod claude;
-pub mod claude_observation;
 pub mod cline_like;
 pub mod codex;
 pub mod codex_app_server;
 pub mod cursor;
+pub mod cursor_agent;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
-mod host_scan;
 pub mod ingest;
-mod ingest_byte_budget;
-mod jsonl_observation_admission;
-pub mod kimi;
 pub mod kiro;
 pub mod lcm;
-pub mod opencode;
-mod opencode_frontier;
-mod opencode_part_scan;
-mod opencode_snapshot;
-mod pipeline_metrics;
 pub mod shared;
-pub mod snapshot_observation;
 pub mod source;
-pub mod store_port;
+pub mod transcript_backfill;
 pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;
 pub mod workflow_state;
 
-pub use crate::{ProviderScope, SessionProvider};
-pub use ingest::{
-    IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestDisposition,
-    TranscriptIngestOutcome, classify_claude_observation_failure,
-    classify_transcript_ingest_disposition, classify_transcript_ingest_failure, home_dir,
-    ingest_project_sources_for_provider, ingest_project_sources_for_provider_with_cancellation,
-    ingest_project_sources_for_provider_with_cancellation_and_codex_state,
-    ingest_user_global_sources_for_provider_with_authorities,
-    ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
-    ingest_user_global_sources_for_startup_with_db,
-    ingest_user_global_sources_for_startup_with_db_and_codex_state, registered_project_roots_from,
-    try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_home,
-};
-pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
-pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-/// Public because the snapshot capture entry points that return it are public.
-pub use snapshot_observation::SnapshotCaptureOutcome;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionMessageSearchResult {
-    pub session: SessionRecord,
-    pub message: SessionMessageRecord,
-    pub score: f64,
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
-/// Inclusive timestamp bounds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSearchTimeRange {
-    pub start_time: Option<i64>,
-    pub end_time: Option<i64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SessionSearchFilters<'a> {
-    pub scope: SessionSearchScope,
-    pub message_type: SessionMessageType,
-    pub parent_session_id: Option<&'a str>,
-    pub time_range: SessionSearchTimeRange,
-}
-
-impl Default for SessionSearchFilters<'_> {
-    fn default() -> Self {
-        Self {
-            scope: SessionSearchScope::All,
-            message_type: SessionMessageType::All,
-            parent_session_id: None,
-            time_range: SessionSearchTimeRange::default(),
+pub(crate) fn vscode_data_dir(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Code")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        home.join(".config/Code")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let appdata_path = std::path::PathBuf::from(&appdata);
+            if appdata_path.starts_with(home) {
+                return appdata_path.join("Code");
+            }
         }
+        home.join("AppData/Roaming/Code")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        home.join(".config/Code")
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionSearchScope {
-    All,
-    ParentsOnly,
-    SubagentsOnly,
-}
-
-impl SessionSearchScope {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "parents_only" => Some(Self::ParentsOnly),
-            "subagents_only" => Some(Self::SubagentsOnly),
-            _ => None,
-        }
+pub(crate) fn kiro_data_dir(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Kiro")
     }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::ParentsOnly => "parents_only",
-            Self::SubagentsOnly => "subagents_only",
-        }
+    #[cfg(target_os = "linux")]
+    {
+        home.join(".config/Kiro")
     }
-}
-
-/// Semantic message filter shared by full-text and LCM retrieval. Providers
-/// sometimes encode tool results with role `user`, so this is intentionally
-/// stronger than the raw role filter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionMessageType {
-    #[default]
-    All,
-    DirectUser,
-    ToolResult,
-}
-
-impl SessionMessageType {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "direct_user" => Some(Self::DirectUser),
-            "tool_result" => Some(Self::ToolResult),
-            _ => None,
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let appdata_path = std::path::PathBuf::from(&appdata);
+            if appdata_path.starts_with(home) {
+                return appdata_path.join("Kiro");
+            }
         }
+        home.join("AppData/Roaming/Kiro")
     }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::DirectUser => "direct_user",
-            Self::ToolResult => "tool_result",
-        }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        home.join(".config/Kiro")
     }
 }

@@ -1,6 +1,6 @@
 ---
 name: diagnosing-analytics
-description: 'Use when checking TraceDecay adoption or telemetry health — usage analytics, silent hooks, stale hook logs, or empty analytics tables. Uses the analytics, doctor, and sessions CLI, never private store files.'
+description: 'Use when checking TraceDecay adoption or telemetry health — usage analytics, silent hooks, stale hook logs, or empty analytics tables. Uses the analytics, doctor, and sessions CLI, never raw database queries.'
 ---
 
 # Diagnosing TraceDecay analytics
@@ -31,7 +31,7 @@ store databases directly.
    (Codex hooks may exist but stay skipped until trusted in Codex's own
    hooks approval prompt).
 4. **`tracedecay tool lcm_status --provider all --json`** and
-   **`tracedecay tool lcm_doctor --provider codex --json`** —
+   **`tracedecay tool lcm_doctor --provider codex --mode diagnose --json`** —
    session-store ingest and compression health per provider.
 5. **`tracedecay sessions search "mcp__tracedecay" --provider all`** — find
    tool usage evidence inside ingested transcripts across providers.
@@ -39,10 +39,6 @@ store databases directly.
    spend rollups.
 7. **Dashboard**: `tracedecay dashboard` serves the same summaries at
    `/api/plugins/analytics/overview|diagnostics|usage|hints`.
-8. **Observatory / costs model → `tracedecay_observatory_read`**: the
-   project's canonical Observatory and Costs models. Read-only; use this
-   when the question is the retained observatory snapshot rather than the
-   analytics diagnostics rollup.
 
 ## Reading the diagnostics output
 
@@ -68,8 +64,8 @@ store databases directly.
 - A zero-row `analytics_events` table inside a project store is not evidence
   that telemetry is broken — durable events live in the user-level store. Run
   `tracedecay analytics diagnostics` before concluding anything is dead.
-- Never inspect private store files directly; their schemas are internal. The
-  diagnostics JSON already merges every relevant source.
+- Never query store databases with sqlite3 or scripts; schemas are internal.
+  The diagnostics JSON already merges every relevant source.
 - If the MCP transport is down, every command above still works — they are
   plain CLI subcommands (see `tracedecay:using-the-cli`).
 
@@ -79,7 +75,7 @@ store databases directly.
   `sessions` subcommands run over shell and need no MCP transport.
 - The `tracedecay tool lcm_status` / `lcm_doctor` calls also work via MCP; if
   those tools are deferred, load once with ToolSearch —
-  `select:tracedecay_lcm_status,tracedecay_lcm_doctor,tracedecay_observatory_read,tracedecay_analytics` — or just use the CLI
+  `select:tracedecay_lcm_status,tracedecay_lcm_doctor` — or just use the CLI
   form shown above (see `tracedecay:using-the-cli`).
 
 ## Deliverable

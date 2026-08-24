@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "id": "memory-supersede-without-dup",
+  "title": "Preference pivots update the existing fact instead of duplicating it",
+  "description": "When a stored preference is superseded (npm -> pnpm), a well-behaved agent updates the existing fact. If a naive add leaves both facts, curation dry-run must propose deleting the older superseded preference.",
+  "adapted_from": "mnemon `memory-merge-supersede` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "contract_notes": "Write-time add remains report-only for supersession, but deterministic curation dry-run enforces hygiene by proposing deletion of the older superseded fact.",
+  "setup": {
+    "facts": [
+      {
+        "content": "User prefers npm as the package manager for this project.",
+        "category": "user_pref",
+        "source": "eval-seed",
+        "trust": 0.7,
+        "retrieval_count": 3
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "fact_store",
+        "args": {
+          "action": "update",
+          "fact_id": "1",
+          "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference)."
+        }
+      }
+    ],
+    "violation": {
+      "expectation": "defend-or-detect",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "fact_store",
+          "args": {
+            "action": "add",
+            "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference).",
+            "category": "user_pref",
+            "source": "eval-agent"
+          }
+        },
+        {
+          "kind": "curate",
+          "apply": false
+        }
+      ]
+    }
+  },
+  "real_model": {
+    "prompts": [
+      "Use your memory tools to update existing project memory. The durable preference is now pnpm, superseding the earlier npm preference. Update or replace the existing entry instead of adding a duplicate. Reply done."
+    ],
+    "max_turns": 8
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "single_package_manager_fact",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%package manager%'",
+      "op": "eq",
+      "value": 1,
+      "phase": "well-behaved-only"
+    },
+    {
+      "kind": "sql",
+      "name": "pivot_to_pnpm_present",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%pnpm%'",
+      "op": "eq",
+      "value": 1,
+      "phase": "well-behaved-only"
+    },
+    {
+      "kind": "sql",
+      "name": "stale_npm_preference_gone",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%prefers npm%'",
+      "op": "eq",
+      "value": 0,
+      "phase": "well-behaved-only"
+    },
+    {
+      "kind": "curate-deletes-source",
+      "name": "dry_run_proposes_deleting_seeded_npm_preference",
+      "source": "eval-seed",
+      "expected": true,
+      "phase": "violation-only"
+    }
+  ]
+}

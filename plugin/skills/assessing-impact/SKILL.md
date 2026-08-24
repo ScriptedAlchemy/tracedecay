@@ -30,15 +30,13 @@ Announce: "Using tracedecay:assessing-impact for <change>."
 | Which tests can see these changed files | `tracedecay_affected` (`files`) |
 | Where the next test is most needed | `tracedecay_test_risk` (`path?`, `limit?`) |
 | "What breaks if I change/touch this" | `tracedecay_impact` (`node_id`) for a symbol, `tracedecay_affected` (`files`) for changed files |
-| Prior run outcomes for those tests | `tracedecay_test_results` |
 
 ## Running the impacted tests
 
 1. `tracedecay_run_affected_tests` (`changed_paths`, `max_tests`, `profile`,
    `timeout_secs`): pass/fail per test with covered source nodes. **Cargo/Rust
    only** — for other stacks use `tracedecay_affected` to get the test set,
-   then the project's own runner on exactly that set. Persist or re-read outcomes with
-   `tracedecay_test_results` when comparing reruns.
+   then the project's own runner on exactly that set.
 2. Compile/type failures during the run → `tracedecay:fixing-build-and-type-errors`.
 
 ## Rules

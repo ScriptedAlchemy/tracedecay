@@ -6,7 +6,7 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
     let project_path = common::canonical_existing_path(project.path());
     let socket_path = common::daemon_socket_path(&home_path);
     let mut owner = spawn_daemon(&home_path, &socket_path);
-    let profile_db_path = init_project(&home_path, &project_path, &socket_path);
+    let db_path = init_project(&home_path, &project_path, &socket_path);
     assert_command_success(
         "owner daemon status",
         &tool_status(&home_path, &project_path, &socket_path),
@@ -14,9 +14,9 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
 
     let socket_before = file_identity(&socket_path).expect("owner socket identity");
     let authority_before = daemon_authority_record(&home_path);
-    let storage_before_contender = wait_for_quiescent_storage(&profile_db_path);
     let mut contender = ChildGuard::new(
         common::tracedecay_command_with_home(&home_path)
+            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .args(["daemon", "run", "--socket"])
             .arg(&socket_path)
             .stdin(Stdio::null())
@@ -47,21 +47,10 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         authority_before,
         "rejected contender changed daemon authority generation"
     );
-    assert_storage_unchanged(
-        "rejected contender wrote through a competing profile database owner",
-        &storage_before_contender,
-        &profile_db_path,
-    );
-    // Contender must be gone before the unavailable-daemon client probes; a
-    // surviving second owner would still race the byte snapshot.
-    assert!(
-        contender.try_wait().expect("contender status").is_some(),
-        "rejected contender is still running after fail-closed rejection"
-    );
 
     stop_child(&mut owner);
     install_unavailable_socket_sentinel(&socket_path);
-    let before = storage_snapshot(&profile_db_path);
+    let before = storage_snapshot(&db_path);
     for (label, mut command) in [
         ("tool", {
             let project_arg = project_path.to_string_lossy().to_string();
@@ -91,6 +80,7 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         }),
     ] {
         command
+            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .current_dir(&project_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -104,10 +94,10 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_storage_unchanged(
-            &format!("{label} used a local profile-database fallback"),
-            &before,
-            &profile_db_path,
+        assert_eq!(
+            storage_snapshot(&db_path),
+            before,
+            "{label} used a local SQLite fallback"
         );
     }
     let hook_event = json!({
@@ -119,6 +109,7 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
     let mut hook = ChildGuard::new(
         common::tracedecay_command_with_home(&home_path)
             .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .arg("hook-cursor-after-file-edit")
             .current_dir(&project_path)
             .stdin(Stdio::piped())
@@ -136,10 +127,10 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         wait_for_exit(&mut hook).is_some(),
         "unavailable-daemon hook client exceeded {PROCESS_TIMEOUT:?}"
     );
-    assert_storage_unchanged(
-        "hook used a local profile-database fallback while daemon was unavailable",
-        &before,
-        &profile_db_path,
+    assert_eq!(
+        storage_snapshot(&db_path),
+        before,
+        "hook used a local SQLite fallback while daemon was unavailable"
     );
 
     let mut restarted = spawn_daemon(&home_path, &socket_path);

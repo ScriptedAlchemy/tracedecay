@@ -1,0 +1,1240 @@
+{
+ "_comment": "Curated static fallback of OpenRouter model pricing (https://openrouter.ai/api/v1/models), captured 2026-06-11. Used when the dashboard is offline and no cached fetch exists. Prices are USD per token, same shape as the live API.",
+ "data": [
+  {
+   "id": "anthropic/claude-3-haiku",
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.00000125",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0.0000003"
+   }
+  },
+  {
+   "id": "anthropic/claude-3.5-haiku",
+   "pricing": {
+    "prompt": "0.0000008",
+    "completion": "0.000004",
+    "input_cache_read": "0.00000008",
+    "input_cache_write": "0.000001"
+   }
+  },
+  {
+   "id": "anthropic/claude-fable-5",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005",
+    "input_cache_read": "0.000001",
+    "input_cache_write": "0.0000125"
+   }
+  },
+  {
+   "id": "anthropic/claude-haiku-4.5",
+   "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000005",
+    "input_cache_read": "0.0000001",
+    "input_cache_write": "0.00000125"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4",
+   "pricing": {
+    "prompt": "0.000015",
+    "completion": "0.000075",
+    "input_cache_read": "0.0000015",
+    "input_cache_write": "0.00001875"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.1",
+   "pricing": {
+    "prompt": "0.000015",
+    "completion": "0.000075",
+    "input_cache_read": "0.0000015",
+    "input_cache_write": "0.00001875"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.5",
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025",
+    "input_cache_read": "0.0000005",
+    "input_cache_write": "0.00000625"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.6",
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025",
+    "input_cache_read": "0.0000005",
+    "input_cache_write": "0.00000625"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.6-fast",
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00015",
+    "input_cache_read": "0.000003",
+    "input_cache_write": "0.0000375"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.7",
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025",
+    "input_cache_read": "0.0000005",
+    "input_cache_write": "0.00000625"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.7-fast",
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00015",
+    "input_cache_read": "0.000003",
+    "input_cache_write": "0.0000375"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.8",
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025",
+    "input_cache_read": "0.0000005",
+    "input_cache_write": "0.00000625"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-4.8-fast",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005",
+    "input_cache_read": "0.000001",
+    "input_cache_write": "0.0000125"
+   }
+  },
+  {
+   "id": "anthropic/claude-sonnet-4",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375"
+   }
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.5",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375"
+   }
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.6",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-chat",
+   "pricing": {
+    "prompt": "0.0000002002",
+    "completion": "0.0000008001"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-chat-v3-0324",
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.00000077",
+    "input_cache_read": "0.000000135"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-chat-v3.1",
+   "pricing": {
+    "prompt": "0.00000021",
+    "completion": "0.00000079",
+    "input_cache_read": "0.00000013"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-r1",
+   "pricing": {
+    "prompt": "0.0000007",
+    "completion": "0.0000025"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-r1-0528",
+   "pricing": {
+    "prompt": "0.0000005",
+    "completion": "0.00000215",
+    "input_cache_read": "0.00000035"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-r1-distill-llama-70b",
+   "pricing": {
+    "prompt": "0.0000007",
+    "completion": "0.0000008"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-r1-distill-qwen-32b",
+   "pricing": {
+    "prompt": "0.00000029",
+    "completion": "0.00000029"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v3.1-terminus",
+   "pricing": {
+    "prompt": "0.00000027",
+    "completion": "0.00000095",
+    "input_cache_read": "0.00000013"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v3.2",
+   "pricing": {
+    "prompt": "0.0000002288",
+    "completion": "0.0000003432"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v3.2-exp",
+   "pricing": {
+    "prompt": "0.00000027",
+    "completion": "0.00000041"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash",
+   "pricing": {
+    "prompt": "0.0000000983",
+    "completion": "0.0000001966",
+    "input_cache_read": "0.0000000197"
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro",
+   "pricing": {
+    "prompt": "0.000000435",
+    "completion": "0.00000087",
+    "input_cache_read": "0.000000003625"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash",
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash-image",
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash-lite",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000004",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash-lite-preview-09-2025",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000004",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-pro",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-pro-preview",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-pro-preview-05-06",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "google/gemini-3-flash-preview",
+   "pricing": {
+    "prompt": "0.0000005",
+    "completion": "0.000003",
+    "input_cache_read": "0.00000005",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-3-pro-image-preview",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000012",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "google/gemini-3.1-flash-image-preview",
+   "pricing": {
+    "prompt": "0.0000005",
+    "completion": "0.000003"
+   }
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite",
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.0000015",
+    "input_cache_read": "0.000000025",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite-preview",
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.0000015",
+    "input_cache_read": "0.000000025",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "google/gemini-3.1-pro-preview",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000012",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "google/gemini-3.1-pro-preview-customtools",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000012",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "google/gemini-3.5-flash",
+   "pricing": {
+    "prompt": "0.0000015",
+    "completion": "0.000009",
+    "input_cache_read": "0.00000015",
+    "input_cache_write": "0.00000008333333333333334"
+   }
+  },
+  {
+   "id": "meta-llama/llama-4-maverick",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006"
+   }
+  },
+  {
+   "id": "meta-llama/llama-4-scout",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000003"
+   }
+  },
+  {
+   "id": "mistralai/devstral-2512",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.000002",
+    "input_cache_read": "0.00000004"
+   }
+  },
+  {
+   "id": "mistralai/mistral-large",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006",
+    "input_cache_read": "0.0000002"
+   }
+  },
+  {
+   "id": "mistralai/mistral-large-2407",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006",
+    "input_cache_read": "0.0000002"
+   }
+  },
+  {
+   "id": "mistralai/mistral-large-2512",
+   "pricing": {
+    "prompt": "0.0000005",
+    "completion": "0.0000015",
+    "input_cache_read": "0.00000005"
+   }
+  },
+  {
+   "id": "mistralai/mistral-medium-3",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.000002",
+    "input_cache_read": "0.00000004"
+   }
+  },
+  {
+   "id": "mistralai/mistral-medium-3-5",
+   "pricing": {
+    "prompt": "0.0000015",
+    "completion": "0.0000075"
+   }
+  },
+  {
+   "id": "mistralai/mistral-medium-3.1",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.000002",
+    "input_cache_read": "0.00000004"
+   }
+  },
+  {
+   "id": "mistralai/mistral-nemo",
+   "pricing": {
+    "prompt": "0.00000002",
+    "completion": "0.00000003"
+   }
+  },
+  {
+   "id": "mistralai/mistral-saba",
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.0000006",
+    "input_cache_read": "0.00000002"
+   }
+  },
+  {
+   "id": "mistralai/mistral-small-24b-instruct-2501",
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0.00000008"
+   }
+  },
+  {
+   "id": "mistralai/mistral-small-2603",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "input_cache_read": "0.000000015"
+   }
+  },
+  {
+   "id": "mistralai/mistral-small-3.1-24b-instruct",
+   "pricing": {
+    "prompt": "0.000000351",
+    "completion": "0.000000555"
+   }
+  },
+  {
+   "id": "mistralai/mistral-small-3.2-24b-instruct",
+   "pricing": {
+    "prompt": "0.000000075",
+    "completion": "0.0000002"
+   }
+  },
+  {
+   "id": "moonshotai/kimi-k2",
+   "pricing": {
+    "prompt": "0.00000057",
+    "completion": "0.0000023"
+   }
+  },
+  {
+   "id": "moonshotai/kimi-k2-0905",
+   "pricing": {
+    "prompt": "0.0000006",
+    "completion": "0.0000025"
+   }
+  },
+  {
+   "id": "moonshotai/kimi-k2-thinking",
+   "pricing": {
+    "prompt": "0.0000006",
+    "completion": "0.0000025"
+   }
+  },
+  {
+   "id": "moonshotai/kimi-k2.5",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.0000019",
+    "input_cache_read": "0.00000009"
+   }
+  },
+  {
+   "id": "moonshotai/kimi-k2.6",
+   "pricing": {
+    "prompt": "0.00000068",
+    "completion": "0.00000341",
+    "input_cache_read": "0.00000034"
+   }
+  },
+  {
+   "id": "openai/gpt-4",
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00006"
+   }
+  },
+  {
+   "id": "openai/gpt-4-turbo",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00003"
+   }
+  },
+  {
+   "id": "openai/gpt-4-turbo-preview",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00003"
+   }
+  },
+  {
+   "id": "openai/gpt-4.1",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000008",
+    "input_cache_read": "0.0000005"
+   }
+  },
+  {
+   "id": "openai/gpt-4.1-mini",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.0000016",
+    "input_cache_read": "0.0000001"
+   }
+  },
+  {
+   "id": "openai/gpt-4.1-nano",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000004",
+    "input_cache_read": "0.000000025"
+   }
+  },
+  {
+   "id": "openai/gpt-4o",
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.00001"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-2024-05-13",
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000015"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-2024-08-06",
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000125"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-2024-11-20",
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000125"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-mini",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "input_cache_read": "0.000000075"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-mini-2024-07-18",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "input_cache_read": "0.000000075"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-mini-search-preview",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006"
+   }
+  },
+  {
+   "id": "openai/gpt-4o-search-preview",
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.00001"
+   }
+  },
+  {
+   "id": "openai/gpt-5",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125"
+   }
+  },
+  {
+   "id": "openai/gpt-5-chat",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125"
+   }
+  },
+  {
+   "id": "openai/gpt-5-codex",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125"
+   }
+  },
+  {
+   "id": "openai/gpt-5-image",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000125"
+   }
+  },
+  {
+   "id": "openai/gpt-5-image-mini",
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.000002",
+    "input_cache_read": "0.00000025"
+   }
+  },
+  {
+   "id": "openai/gpt-5-mini",
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.000002",
+    "input_cache_read": "0.000000025"
+   }
+  },
+  {
+   "id": "openai/gpt-5-nano",
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0.0000004",
+    "input_cache_read": "0.00000001"
+   }
+  },
+  {
+   "id": "openai/gpt-5-pro",
+   "pricing": {
+    "prompt": "0.000015",
+    "completion": "0.00012"
+   }
+  },
+  {
+   "id": "openai/gpt-5.1",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000013"
+   }
+  },
+  {
+   "id": "openai/gpt-5.1-chat",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000013"
+   }
+  },
+  {
+   "id": "openai/gpt-5.1-codex",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000013"
+   }
+  },
+  {
+   "id": "openai/gpt-5.1-codex-max",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "input_cache_read": "0.000000125"
+   }
+  },
+  {
+   "id": "openai/gpt-5.1-codex-mini",
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.000002",
+    "input_cache_read": "0.000000025"
+   }
+  },
+  {
+   "id": "openai/gpt-5.2",
+   "pricing": {
+    "prompt": "0.00000175",
+    "completion": "0.000014",
+    "input_cache_read": "0.000000175"
+   }
+  },
+  {
+   "id": "openai/gpt-5.2-chat",
+   "pricing": {
+    "prompt": "0.00000175",
+    "completion": "0.000014",
+    "input_cache_read": "0.000000175"
+   }
+  },
+  {
+   "id": "openai/gpt-5.2-codex",
+   "pricing": {
+    "prompt": "0.00000175",
+    "completion": "0.000014",
+    "input_cache_read": "0.000000175"
+   }
+  },
+  {
+   "id": "openai/gpt-5.2-pro",
+   "pricing": {
+    "prompt": "0.000021",
+    "completion": "0.000168"
+   }
+  },
+  {
+   "id": "openai/gpt-5.3-chat",
+   "pricing": {
+    "prompt": "0.00000175",
+    "completion": "0.000014",
+    "input_cache_read": "0.000000175"
+   }
+  },
+  {
+   "id": "openai/gpt-5.3-codex",
+   "pricing": {
+    "prompt": "0.00000175",
+    "completion": "0.000014",
+    "input_cache_read": "0.000000175"
+   }
+  },
+  {
+   "id": "openai/gpt-5.4",
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.000015",
+    "input_cache_read": "0.00000025"
+   }
+  },
+  {
+   "id": "openai/gpt-5.4-image-2",
+   "pricing": {
+    "prompt": "0.000008",
+    "completion": "0.000015",
+    "input_cache_read": "0.000002"
+   }
+  },
+  {
+   "id": "openai/gpt-5.4-mini",
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.0000045",
+    "input_cache_read": "0.000000075"
+   }
+  },
+  {
+   "id": "openai/gpt-5.4-nano",
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.00000125",
+    "input_cache_read": "0.00000002"
+   }
+  },
+  {
+   "id": "openai/gpt-5.4-pro",
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00018"
+   }
+  },
+  {
+   "id": "openai/gpt-5.5",
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.00003",
+    "input_cache_read": "0.0000005"
+   }
+  },
+  {
+   "id": "openai/gpt-5.5-pro",
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00018"
+   }
+  },
+  {
+   "id": "openai/o3",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000008",
+    "input_cache_read": "0.0000005"
+   }
+  },
+  {
+   "id": "openai/o3-deep-research",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00004",
+    "input_cache_read": "0.0000025"
+   }
+  },
+  {
+   "id": "openai/o3-mini",
+   "pricing": {
+    "prompt": "0.0000011",
+    "completion": "0.0000044",
+    "input_cache_read": "0.00000055"
+   }
+  },
+  {
+   "id": "openai/o3-mini-high",
+   "pricing": {
+    "prompt": "0.0000011",
+    "completion": "0.0000044",
+    "input_cache_read": "0.00000055"
+   }
+  },
+  {
+   "id": "openai/o3-pro",
+   "pricing": {
+    "prompt": "0.00002",
+    "completion": "0.00008"
+   }
+  },
+  {
+   "id": "openai/o4-mini",
+   "pricing": {
+    "prompt": "0.0000011",
+    "completion": "0.0000044",
+    "input_cache_read": "0.000000275"
+   }
+  },
+  {
+   "id": "openai/o4-mini-deep-research",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000008",
+    "input_cache_read": "0.0000005"
+   }
+  },
+  {
+   "id": "openai/o4-mini-high",
+   "pricing": {
+    "prompt": "0.0000011",
+    "completion": "0.0000044",
+    "input_cache_read": "0.000000275"
+   }
+  },
+  {
+   "id": "qwen/qwen3-14b",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.00000024"
+   }
+  },
+  {
+   "id": "qwen/qwen3-235b-a22b",
+   "pricing": {
+    "prompt": "0.000000455",
+    "completion": "0.00000182"
+   }
+  },
+  {
+   "id": "qwen/qwen3-235b-a22b-2507",
+   "pricing": {
+    "prompt": "0.00000009",
+    "completion": "0.0000001"
+   }
+  },
+  {
+   "id": "qwen/qwen3-235b-a22b-thinking-2507",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000001",
+    "input_cache_read": "0.0000001"
+   }
+  },
+  {
+   "id": "qwen/qwen3-30b-a3b",
+   "pricing": {
+    "prompt": "0.00000012",
+    "completion": "0.0000005"
+   }
+  },
+  {
+   "id": "qwen/qwen3-30b-a3b-instruct-2507",
+   "pricing": {
+    "prompt": "0.00000004815",
+    "completion": "0.00000019305"
+   }
+  },
+  {
+   "id": "qwen/qwen3-30b-a3b-thinking-2507",
+   "pricing": {
+    "prompt": "0.00000008",
+    "completion": "0.0000004",
+    "input_cache_read": "0.00000008"
+   }
+  },
+  {
+   "id": "qwen/qwen3-32b",
+   "pricing": {
+    "prompt": "0.00000008",
+    "completion": "0.00000028"
+   }
+  },
+  {
+   "id": "qwen/qwen3-8b",
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0.0000004",
+    "input_cache_read": "0.00000005"
+   }
+  },
+  {
+   "id": "qwen/qwen3-coder",
+   "pricing": {
+    "prompt": "0.00000022",
+    "completion": "0.0000018"
+   }
+  },
+  {
+   "id": "qwen/qwen3-coder-30b-a3b-instruct",
+   "pricing": {
+    "prompt": "0.00000007",
+    "completion": "0.00000027"
+   }
+  },
+  {
+   "id": "qwen/qwen3-coder-flash",
+   "pricing": {
+    "prompt": "0.000000195",
+    "completion": "0.000000975",
+    "input_cache_read": "0.000000039",
+    "input_cache_write": "0.00000024375"
+   }
+  },
+  {
+   "id": "qwen/qwen3-coder-next",
+   "pricing": {
+    "prompt": "0.00000011",
+    "completion": "0.0000008",
+    "input_cache_read": "0.00000007"
+   }
+  },
+  {
+   "id": "qwen/qwen3-coder-plus",
+   "pricing": {
+    "prompt": "0.00000065",
+    "completion": "0.00000325",
+    "input_cache_read": "0.00000013",
+    "input_cache_write": "0.0000008125"
+   }
+  },
+  {
+   "id": "qwen/qwen3-coder:free",
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   }
+  },
+  {
+   "id": "qwen/qwen3-max",
+   "pricing": {
+    "prompt": "0.00000078",
+    "completion": "0.0000039",
+    "input_cache_read": "0.000000156",
+    "input_cache_write": "0.000000975"
+   }
+  },
+  {
+   "id": "qwen/qwen3-max-thinking",
+   "pricing": {
+    "prompt": "0.00000078",
+    "completion": "0.0000039"
+   }
+  },
+  {
+   "id": "qwen/qwen3-next-80b-a3b-instruct",
+   "pricing": {
+    "prompt": "0.00000009",
+    "completion": "0.0000011"
+   }
+  },
+  {
+   "id": "qwen/qwen3-next-80b-a3b-instruct:free",
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   }
+  },
+  {
+   "id": "qwen/qwen3-next-80b-a3b-thinking",
+   "pricing": {
+    "prompt": "0.0000000975",
+    "completion": "0.00000078"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-235b-a22b-instruct",
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.00000088",
+    "input_cache_read": "0.00000011"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-235b-a22b-thinking",
+   "pricing": {
+    "prompt": "0.00000026",
+    "completion": "0.0000026"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-30b-a3b-instruct",
+   "pricing": {
+    "prompt": "0.00000013",
+    "completion": "0.00000052"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-30b-a3b-thinking",
+   "pricing": {
+    "prompt": "0.00000013",
+    "completion": "0.00000156"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-32b-instruct",
+   "pricing": {
+    "prompt": "0.000000104",
+    "completion": "0.000000416"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-8b-instruct",
+   "pricing": {
+    "prompt": "0.00000008",
+    "completion": "0.0000005"
+   }
+  },
+  {
+   "id": "qwen/qwen3-vl-8b-thinking",
+   "pricing": {
+    "prompt": "0.000000117",
+    "completion": "0.000001365"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-122b-a10b",
+   "pricing": {
+    "prompt": "0.00000026",
+    "completion": "0.00000208"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-27b",
+   "pricing": {
+    "prompt": "0.000000195",
+    "completion": "0.00000156"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-35b-a3b",
+   "pricing": {
+    "prompt": "0.00000014",
+    "completion": "0.000001",
+    "input_cache_read": "0.00000005"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-397b-a17b",
+   "pricing": {
+    "prompt": "0.00000039",
+    "completion": "0.00000234"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-9b",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.00000015"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-flash-02-23",
+   "pricing": {
+    "prompt": "0.000000065",
+    "completion": "0.00000026"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-plus-02-15",
+   "pricing": {
+    "prompt": "0.00000026",
+    "completion": "0.00000156"
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-plus-20260420",
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000018",
+    "input_cache_write": "0.000000375"
+   }
+  },
+  {
+   "id": "qwen/qwen3.6-27b",
+   "pricing": {
+    "prompt": "0.000000289",
+    "completion": "0.0000024"
+   }
+  },
+  {
+   "id": "qwen/qwen3.6-35b-a3b",
+   "pricing": {
+    "prompt": "0.00000014",
+    "completion": "0.000001"
+   }
+  },
+  {
+   "id": "qwen/qwen3.6-flash",
+   "pricing": {
+    "prompt": "0.0000001875",
+    "completion": "0.000001125",
+    "input_cache_write": "0.000000234375"
+   }
+  },
+  {
+   "id": "qwen/qwen3.6-max-preview",
+   "pricing": {
+    "prompt": "0.00000104",
+    "completion": "0.00000624",
+    "input_cache_write": "0.0000013"
+   }
+  },
+  {
+   "id": "qwen/qwen3.6-plus",
+   "pricing": {
+    "prompt": "0.000000325",
+    "completion": "0.00000195",
+    "input_cache_write": "0.00000040625"
+   }
+  },
+  {
+   "id": "qwen/qwen3.7-max",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00000375",
+    "input_cache_read": "0.00000025",
+    "input_cache_write": "0.0000015625"
+   }
+  },
+  {
+   "id": "qwen/qwen3.7-plus",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.0000016",
+    "input_cache_read": "0.00000008",
+    "input_cache_write": "0.0000005"
+   }
+  },
+  {
+   "id": "x-ai/grok-4.20",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.0000025",
+    "input_cache_read": "0.0000002"
+   }
+  },
+  {
+   "id": "x-ai/grok-4.20-multi-agent",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006",
+    "input_cache_read": "0.0000002"
+   }
+  },
+  {
+   "id": "x-ai/grok-4.3",
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.0000025",
+    "input_cache_read": "0.0000002"
+   }
+  },
+  {
+   "id": "x-ai/grok-build-0.1",
+   "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000002",
+    "input_cache_read": "0.0000002"
+   }
+  }
+ ]
+}

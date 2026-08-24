@@ -1,12 +1,10 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay_sessions::runtime::source::{
-    FileDiscoveryLimit, TranscriptDiscoveryBounds, TranscriptSource,
-};
-use tracedecay_sessions::runtime::vibe::VibeSource;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::source::{TranscriptSource, ingest_source};
+use tracedecay::sessions::vibe::VibeSource;
 
-use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
 fn write_vibe_session(
@@ -62,9 +60,7 @@ async fn vibe_messages_populate_searchable_session_messages() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    let stats = ingest_source(&db, &source, &project, None).await;
     assert_eq!(stats.messages_upserted, 2);
 
     let results = db
@@ -131,16 +127,14 @@ async fn vibe_messages_are_incremental() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
+        ingest_source(&db, &source, &project, None)
             .await
-            .unwrap()
             .messages_upserted,
         2
     );
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
+        ingest_source(&db, &source, &project, None)
             .await
-            .unwrap()
             .messages_upserted,
         0
     );
@@ -162,9 +156,8 @@ async fn vibe_messages_are_incremental() {
     drop(file);
 
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
+        ingest_source(&db, &source, &project, None)
             .await
-            .unwrap()
             .messages_upserted,
         1
     );
@@ -181,9 +174,8 @@ async fn vibe_session_for_other_project_is_skipped() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
+        ingest_source(&db, &source, &project, None)
             .await
-            .unwrap()
             .messages_upserted,
         0
     );
@@ -200,9 +192,7 @@ async fn vibe_user_scope_includes_only_unregistered_sessions() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home).for_user_scope(vec![project.clone()]);
-    let stats = try_ingest_source(&db, &source, tmp.path(), None)
-        .await
-        .unwrap();
+    let stats = ingest_source(&db, &source, tmp.path(), None).await;
     assert_eq!(stats.messages_upserted, 2);
     assert!(db.get_session("vibe", "registered-vibe").await.is_none());
     let session = db.get_session("vibe", "user-vibe").await.unwrap();
@@ -210,119 +200,6 @@ async fn vibe_user_scope_includes_only_unregistered_sessions() {
     assert_eq!(session.project_path, "user");
 }
 
-#[test]
-fn vibe_history_enumeration_is_bounded() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path();
-    for index in 0..513 {
-        let dir = home.join(format!(".vibe/logs/session/session-{index:04}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("messages.jsonl"), "").unwrap();
-    }
-    let source = VibeSource::with_home(home);
-    let report = source
-        .discover_transcript_paths(home, TranscriptDiscoveryBounds::from_discovered_units(512));
-    assert_eq!(report.paths.len(), 512);
-    assert_eq!(report.truncated, Some(FileDiscoveryLimit::FileCount));
-    assert_eq!(source.transcript_paths(home).len(), 512);
-}
-
-#[test]
-fn vibe_ineligible_jsonl_does_not_crowd_eligible_under_cap() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path();
-    let root = home.join(".vibe/logs/session");
-    for index in 0..40 {
-        let dir = root.join(format!("noise-{index:02}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("events.jsonl"), "").unwrap();
-    }
-    for (name, stamp) in [("session-old", 10u64), ("session-new", 20u64)] {
-        let dir = root.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("messages.jsonl");
-        std::fs::write(&path, "").unwrap();
-        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(stamp);
-        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
-    }
-    let source = VibeSource::with_home(home);
-    let report = source.discover_transcript_paths(
-        home,
-        TranscriptDiscoveryBounds {
-            max_files: 2,
-            ..TranscriptDiscoveryBounds::from_discovered_units(2)
-        },
-    );
-    assert_eq!(report.paths.len(), 2);
-    assert!(
-        report.paths[0].ends_with("session-new/messages.jsonl"),
-        "newest eligible must win despite ineligible crowding: {:?}",
-        report.paths
-    );
-    assert!(report.paths[1].ends_with("session-old/messages.jsonl"));
-    assert!(!report.is_truncated());
-}
-
-#[test]
-fn vibe_discovery_pagination_progresses_older_and_keeps_new_on_page_zero() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path();
-    let root = home.join(".vibe/logs/session");
-    for (name, stamp) in [
-        ("session-a", 10u64),
-        ("session-b", 20u64),
-        ("session-c", 30u64),
-    ] {
-        let dir = root.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("messages.jsonl");
-        std::fs::write(&path, "").unwrap();
-        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(stamp);
-        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
-    }
-    let source = VibeSource::with_home(home);
-    let bounds = TranscriptDiscoveryBounds {
-        max_files: 2,
-        ..TranscriptDiscoveryBounds::from_discovered_units(2)
-    };
-    let (page0, omitted0) = source.discover_transcript_paths_page(home, bounds, 0);
-    assert_eq!(page0.paths.len(), 2);
-    assert!(page0.paths[0].ends_with("session-c/messages.jsonl"));
-    assert!(page0.paths[1].ends_with("session-b/messages.jsonl"));
-    assert_eq!(page0.truncated, Some(FileDiscoveryLimit::FileCount));
-    assert_eq!(omitted0, 1);
-
-    let (page1, omitted1) = source.discover_transcript_paths_page(home, bounds, 2);
-    assert_eq!(page1.paths.len(), 1);
-    assert!(page1.paths[0].ends_with("session-a/messages.jsonl"));
-    assert!(!page1.is_truncated());
-    assert_eq!(omitted1, 2);
-
-    let arrived_dir = root.join("session-d");
-    std::fs::create_dir_all(&arrived_dir).unwrap();
-    let arrived = arrived_dir.join("messages.jsonl");
-    std::fs::write(&arrived, "").unwrap();
-    let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(40);
-    filetime::set_file_mtime(&arrived, filetime::FileTime::from_system_time(mtime)).unwrap();
-    let (page0_after, _) = source.discover_transcript_paths_page(home, bounds, 0);
-    assert!(page0_after.paths[0].ends_with("session-d/messages.jsonl"));
-    assert!(
-        page0_after
-            .paths
-            .iter()
-            .any(|path| path.ends_with("session-c/messages.jsonl"))
-    );
-    assert!(
-        !page0_after
-            .paths
-            .iter()
-            .any(|path| path.ends_with("session-a/messages.jsonl")),
-        "oldest must yield page-0 slots to newer arrivals"
-    );
-}
-
-/// A bounded git timeout (`Unknown` membership) must exclude the session
-/// without persisting any cursor, so a later pass can re-resolve it.
 #[cfg(unix)]
 #[tokio::test]
 async fn vibe_unknown_project_membership_defers_persistence_and_offset() {
@@ -335,11 +212,10 @@ async fn vibe_unknown_project_membership_defers_persistence_and_offset() {
         let messages = write_vibe_session(&home, &nested, "unknown-vibe");
 
         let db = open_project_session_db(&project).await.unwrap();
-        let source = VibeSource::with_home(&home).for_user_scope(vec![project.clone()]);
+        let source = VibeSource::with_home(&home).for_user_scope(vec![project]);
         assert_eq!(
-            try_ingest_source(&db, &source, tmp.path(), None)
+            ingest_source(&db, &source, tmp.path(), None)
                 .await
-                .unwrap()
                 .messages_upserted,
             0
         );
@@ -352,17 +228,6 @@ async fn vibe_unknown_project_membership_defers_persistence_and_offset() {
         return;
     }
 
-    run_unknown_membership_child(
-        CHILD_ENV,
-        "vibe::vibe_unknown_project_membership_defers_persistence_and_offset",
-    );
-}
-
-/// Re-runs this test binary with `GIT` pointing at a script that outlives the
-/// bounded capture deadline, so every session-ingest git identity resolution
-/// times out into `Unknown` inside the child.
-#[cfg(unix)]
-pub(super) fn run_unknown_membership_child(child_env: &str, test_name: &str) {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -370,22 +235,29 @@ pub(super) fn run_unknown_membership_child(child_env: &str, test_name: &str) {
     let fake_git = tmp.path().join("git-timeout");
     std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
     std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
-        .arg(test_name)
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("vibe::vibe_unknown_project_membership_defers_persistence_and_offset")
         .arg("--exact")
-        .env(child_env, "1")
+        .env(CHILD_ENV, "1")
         .env("GIT", fake_git)
-        .output()
+        .env("GIT_DIR", "/nonexistent/tracedecay-vibe-timeout-git-dir")
+        .status()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success(),
-        "child must defer unknown project membership\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        status.success(),
+        "child must defer unknown project membership"
     );
-    // `--exact` exits 0 on a name miss; require the non-vacuous single run.
-    assert!(
-        stdout.contains("1 passed"),
-        "child filter must match exactly one test\nstdout:\n{stdout}"
-    );
+}
+
+#[test]
+fn vibe_history_enumeration_is_bounded() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path();
+    for index in 0..513 {
+        let dir = home.join(format!(".vibe/logs/session/session-{index:04}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("messages.jsonl"), "").unwrap();
+    }
+    let source = VibeSource::with_home(home);
+    assert_eq!(source.transcript_paths(home).len(), 512);
 }

@@ -1,8 +1,56 @@
-use std::fmt::Write as _;
-
 use serde_json::Value;
 
 use super::render::{self, Md};
+
+pub(super) fn fact_store_md(args: &Value, value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Fact Store");
+    let action = render::field_str(value, "action");
+    if !action.is_empty() {
+        md.field("action", action);
+    }
+    append_fact_store_request(&mut md, args);
+    if let Some(count) = value.get("count").and_then(Value::as_i64) {
+        md.field("count", &count.to_string());
+    }
+
+    if let Some(removed) = value.get("removed").and_then(Value::as_bool) {
+        md.field("removed", if removed { "true" } else { "false" });
+    }
+    append_fact_store_diff(&mut md, value);
+
+    if let Some(fact) = value.get("fact").filter(|fact| fact.is_object()) {
+        md.blank().heading(3, "Fact");
+        append_fact_md(&mut md, fact, value);
+    }
+
+    if let Some(results) = value.get("results").and_then(Value::as_array) {
+        md.blank().heading(3, "Facts");
+        if results.is_empty() {
+            md.empty_note("No matching facts.");
+        } else {
+            for result in results {
+                append_fact_md(&mut md, fact_payload(result), result);
+            }
+        }
+    }
+
+    if let Some(history) = value.get("trust_history").and_then(Value::as_array) {
+        md.blank().heading(3, "Trust History");
+        if history.is_empty() {
+            md.empty_note("No trust feedback recorded.");
+        } else {
+            for item in history.iter().take(10) {
+                md.bullet(&compact_json_summary(item));
+            }
+            if history.len() > 10 {
+                md.bullet(&format!("... {} more", history.len() - 10));
+            }
+        }
+    }
+
+    md.render()
+}
 
 pub(super) fn skill_list_md(value: &Value) -> String {
     let mut md = Md::new();
@@ -74,7 +122,7 @@ pub(super) fn skill_view_md(value: &Value) -> String {
                 let bytes = file
                     .get("bytes")
                     .and_then(Value::as_array)
-                    .map(Vec::len)
+                    .map(|bytes| bytes.len())
                     .unwrap_or_default();
                 md.bullet(&format!("**{path}** - {bytes} bytes"));
             }
@@ -105,84 +153,151 @@ pub(super) fn automation_artifact_md(value: &Value) -> String {
     md.render()
 }
 
-pub(super) fn automation_run_list_md(value: &Value) -> String {
-    let mut md = Md::new();
-    md.heading(2, "Automation Runs");
+fn append_fact_store_request(md: &mut Md, args: &Value) {
     for key in [
-        "status",
-        "count",
+        "query",
+        "entity",
+        "category",
+        "min_trust",
+        "threshold",
         "limit",
-        "has_more",
-        "malformed_row_count",
-        "completeness",
     ] {
-        let rendered = render::generic_md(value.get(key).unwrap_or(&Value::Null));
-        md.field(key, rendered.trim());
-    }
-    md.blank().heading(3, "Runs");
-    let Some(runs) = value.get("runs").and_then(Value::as_array) else {
-        md.empty_note("No runs field returned.");
-        return md.render();
-    };
-    if runs.is_empty() {
-        md.empty_note("No automation runs recorded.");
-    } else {
-        for run in runs {
-            let run_id = render::field_str(run, "run_id");
-            let task = render::field_str(run, "task");
-            let status = render::field_str(run, "status");
-            let completed_at = render::field_str(run, "completed_at");
-            md.bullet(&format!(
-                "**{run_id}** - task: {task}; status: {status}; completed_at: {completed_at}"
-            ));
+        let text = compact_scalar(args.get(key));
+        if !text.is_empty() {
+            md.field(key, &text);
         }
     }
-    md.render()
+    let entities = string_list(args.get("entities"));
+    if !entities.is_empty() {
+        md.field("entities", &entities.join(", "));
+    }
 }
 
-pub(super) fn automation_run_view_md(value: &Value) -> String {
-    let mut md = Md::new();
-    let record = value.get("run").unwrap_or(&Value::Null);
-    let run_id = render::field_str(record, "run_id");
-    md.heading(2, &format!("Automation Run: {run_id}"));
-    md.field("status", render::field_str(value, "status"));
-    for key in [
-        "task",
-        "trigger",
-        "backend",
-        "model",
-        "status",
-        "started_at",
-        "completed_at",
-    ] {
-        let text = render::field_str(record, key);
+fn append_fact_store_diff(md: &mut Md, value: &Value) {
+    for key in ["diff", "closest_fact_id", "similarity", "reason", "error"] {
+        let text = compact_scalar(value.get(key));
         if !text.is_empty() {
-            md.field(key, text);
+            md.field(key, &text);
         }
     }
-    for key in [
-        "reviewed_count",
-        "accepted_count",
-        "rejected_count",
-        "skipped_count",
-    ] {
-        if let Some(count) = record.get(key).and_then(Value::as_u64) {
-            md.field(key, &count.to_string());
-        }
+}
+
+fn fact_payload(value: &Value) -> &Value {
+    value
+        .get("fact")
+        .filter(|fact| fact.is_object())
+        .unwrap_or(value)
+}
+
+fn append_fact_md(md: &mut Md, fact: &Value, envelope: &Value) {
+    let id = fact
+        .get("fact_id")
+        .and_then(Value::as_i64)
+        .map(|id| format!("#{id}"))
+        .unwrap_or_else(|| "#?".to_string());
+    let category = compact_scalar(fact.get("category"));
+    let trust = fact
+        .get("trust_score")
+        .and_then(Value::as_f64)
+        .map(|score| format!("{score:.3}"))
+        .unwrap_or_default();
+    let content = compact_text(&render::field_str(fact, "content"));
+    let mut head = id;
+    if !category.is_empty() {
+        head.push(' ');
+        head.push_str(&category);
     }
-    if let Some(artifacts) = record.get("artifacts").and_then(Value::as_array) {
-        md.blank().heading(3, "Artifacts");
-        if artifacts.is_empty() {
-            md.empty_note("No artifacts recorded.");
-        } else {
-            for artifact in artifacts {
-                let kind = render::field_str(artifact, "kind");
-                let sha256 = render::field_str(artifact, "sha256");
-                md.bullet(&format!("**{kind}** - sha256: {sha256}"));
+    if !trust.is_empty() {
+        head.push_str(" trust ");
+        head.push_str(&trust);
+    }
+    if let Some(score) = envelope
+        .get("score")
+        .and_then(Value::as_f64)
+        .map(|score| format!("{score:.3}"))
+    {
+        head.push_str(" score ");
+        head.push_str(&score);
+    }
+    if !content.is_empty() {
+        head.push_str(": ");
+        head.push_str(&content);
+    }
+    md.bullet(&head);
+
+    let detail = fact_detail_line(fact);
+    if !detail.is_empty() {
+        md.line(&format!("  {detail}"));
+    }
+    let why = compact_text(&render::field_str(envelope, "why"));
+    if !why.is_empty() {
+        md.line(&format!("  why: {why}"));
+    }
+}
+
+fn fact_detail_line(fact: &Value) -> String {
+    let mut parts = Vec::new();
+    let entities = string_list(fact.get("entities"));
+    if !entities.is_empty() {
+        parts.push(format!("entities: {}", entities.join(", ")));
+    }
+    let tags = string_list(fact.get("tags"));
+    if !tags.is_empty() {
+        parts.push(format!("tags: {}", tags.join(", ")));
+    }
+    let source = compact_scalar(fact.get("source"));
+    if !source.is_empty() {
+        parts.push(format!("source: {source}"));
+    }
+    parts.join("; ")
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(compact_text)
+                .filter(|text| !text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn compact_scalar(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => compact_text(text),
+        Some(Value::Number(number)) => number.to_string(),
+        Some(Value::Bool(true)) => "true".to_string(),
+        Some(Value::Bool(false)) => "false".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn compact_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn compact_json_summary(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut parts = Vec::new();
+            for key in ["created_at", "trust_score", "feedback", "source", "note"] {
+                let text = compact_scalar(map.get(key));
+                if !text.is_empty() {
+                    parts.push(format!("{key}: {text}"));
+                }
+            }
+            if parts.is_empty() {
+                serde_json::to_string(value).unwrap_or_default()
+            } else {
+                parts.join("; ")
             }
         }
+        _ => compact_scalar(Some(value)),
     }
-    md.render()
 }
 
 fn value_str<'a>(value: &'a Value, pointer: &str) -> &'a str {
@@ -217,7 +332,7 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
         format!("**{id}** - {title}")
     };
     if !state.is_empty() {
-        let _ = write!(line, " ({state})");
+        line.push_str(&format!(" ({state})"));
     }
     md.bullet(&line);
 

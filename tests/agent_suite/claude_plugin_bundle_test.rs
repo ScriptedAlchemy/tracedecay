@@ -2,7 +2,7 @@
 //! the shared `plugin/` tree.
 //!
 //! These mirror the sibling bundle tests (`plugin_manifest_schema_test.rs`,
-//! `plugin_config_schema_test.rs`, `shared_skill_contract_test.rs`) but operate
+//! `plugin_config_schema_test.rs`, `plugin_skill_contract_test.rs`) but operate
 //! purely on the on-disk shared tree, asserting Claude's manifests, MCP config,
 //! lifecycle hooks, skills, commands, and agents are shaped correctly and stay
 //! in sync with the canonical agent catalog (`plugin/agents/`).
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::plugin_validation_support::{body_after_frontmatter, read_json_file};
-use tracedecay_agent_hosts::automation::skill_frontmatter::parse_skill_frontmatter;
+use tracedecay::automation::skill_frontmatter::parse_skill_frontmatter;
 
 /// The shared plugin tree root (holds Claude's manifest, skills, commands, and
 /// agents; Claude's host-specific files are `README-claude.md`, `.mcp.json`,
@@ -46,8 +46,6 @@ const EXPECTED_SKILLS: &[&str] = &[
     "inspecting-managed-skills",
     "investigating-unexpected-changes",
     "managing-session-context",
-    "managing-work",
-    "managing-workflows",
     "project-memory",
     "reviewing-changes",
     "tracing-functions",
@@ -86,7 +84,7 @@ const EXPECTED_AGENTS: &[&str] = &[
 
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
 /// asserting it is present and non-empty. Mirrors the frontmatter approach in
-/// `shared_skill_contract_test.rs` (manual parse via `parse_skill_frontmatter`,
+/// `plugin_skill_contract_test.rs` (manual parse via `parse_skill_frontmatter`,
 /// no new YAML dependency).
 fn required_scalar(raw: &str, field: &str, path: &Path) -> String {
     let frontmatter = parse_skill_frontmatter(raw)
@@ -251,18 +249,26 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
         .and_then(Value::as_object)
         .unwrap_or_else(|| panic!("{} must declare a hooks object", hooks_path.display()));
 
-    // Only proven native lifecycle boundaries are registered. Tool-routing,
-    // prompt interception, and advisory work happen through explicit host
-    // surfaces or the daemon after bounded event admission.
+    // (event, expected subcommand, expected matcher). The PostToolUse matcher
+    // is derived from the tool lists so the on-disk JSON is validated against
+    // the single source of truth and can never silently drift.
+    let post_matcher = tracedecay::hooks::claude_post_tool_use_matcher();
     let expected: &[(&str, &str, Option<&str>)] = &[
+        ("PreToolUse", "hook-pre-tool-use", Some("Agent")),
+        ("UserPromptSubmit", "hook-prompt-submit", None),
         ("Stop", "hook-stop", None),
         ("SessionStart", "hook-claude-session-start", None),
-        ("PostCompact", "hook-claude-post-compact", None),
         (
             "PostToolUse",
             "hook-claude-post-tool-use",
-            Some("Edit|MultiEdit|Write|NotebookEdit"),
+            Some(post_matcher.as_str()),
         ),
+        (
+            "PostToolUseFailure",
+            "hook-claude-post-tool-use",
+            Some("Bash"),
+        ),
+        ("SubagentStart", "hook-claude-subagent-start", None),
     ];
 
     let actual_events: BTreeSet<String> = hooks.keys().cloned().collect();
@@ -273,7 +279,7 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
     assert_eq!(
         actual_events,
         expected_events,
-        "{} must declare exactly the supported native lifecycle events",
+        "{} must declare exactly the 7 expected lifecycle events",
         hooks_path.display()
     );
 
@@ -348,7 +354,7 @@ fn claude_bundle_ships_exactly_the_expected_skills() {
     assert_eq!(
         sorted_subdir_names(&skills_root),
         expected,
-        "claude-plugin/skills must contain exactly the expected skill directories"
+        "claude-plugin/skills must contain exactly the expected 15 skill directories"
     );
 }
 
@@ -388,7 +394,7 @@ fn claude_bundle_ships_exactly_the_expected_commands() {
     assert_eq!(
         sorted_file_names(&commands_root, "md"),
         expected,
-        "claude-plugin/commands must contain exactly the expected command files"
+        "claude-plugin/commands must contain exactly the expected 13 command files"
     );
 }
 
@@ -537,23 +543,14 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         !root.join("plugin/overlays/cursor/agents").exists(),
         "Cursor adapters must be generated, not hand-authored"
     );
-    // The host installers moved to `tracedecay-agent-hosts` in the crate
-    // split; assert against the live tree so this stays a real check and not
-    // a path that can never exist.
-    let host_agents = root.join("crates/tracedecay-agent-hosts/src/agents");
     assert!(
-        host_agents.is_dir(),
-        "host installer sources moved; update this guard to the new location"
-    );
-    assert!(
-        !host_agents.join("codex_agents").exists(),
+        !root.join("src/agents/codex_agents").exists(),
         "Codex adapters must be generated, not hand-authored"
     );
 
     let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
     let temp = tempfile::tempdir().unwrap();
-    tracedecay_agent_hosts::automation::agent_targets::install_codex_managed_agents(temp.path())
-        .unwrap();
+    tracedecay::automation::agent_targets::install_codex_managed_agents(temp.path()).unwrap();
     for agent in EXPECTED_AGENTS {
         let stem = agent.trim_end_matches(".md");
         let claude_path = root.join("plugin/agents").join(agent);
@@ -561,10 +558,8 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         let cursor = cursor_files
             .iter()
             .find(|(path, _)| *path == format!("agents/{agent}"))
-            .map_or_else(
-                || panic!("missing generated Cursor adapter for {agent}"),
-                |(_, contents)| *contents,
-            );
+            .map(|(_, contents)| *contents)
+            .unwrap_or_else(|| panic!("missing generated Cursor adapter for {agent}"));
         let codex_path = temp
             .path()
             .join(".codex/agents")

@@ -7,18 +7,6 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use tree_sitter::Language;
 
-/// Package-owned patched Rust grammar.
-pub mod rust_grammar {
-    use tree_sitter_language::LanguageFn;
-
-    unsafe extern "C" {
-        fn tracedecay_tree_sitter_rust() -> *const ();
-    }
-
-    /// The patched Rust grammar compiled from `vendor/tree-sitter-rust`.
-    pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tracedecay_tree_sitter_rust) };
-}
-
 // tree-sitter-wgsl 0.0.6 was built against tree-sitter 0.20, whose Language
 // type is not assignment-compatible with 0.26. Re-declare the raw C symbol so
 // we can construct a LanguageFn with the correct pointer type directly.
@@ -33,6 +21,7 @@ mod wgsl_grammar {
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_wgsl) };
 }
 
+#[cfg(test)]
 fn has_large_grammar_tier() -> bool {
     cfg!(any(
         feature = "lang-pascal",
@@ -68,6 +57,7 @@ fn has_large_grammar_tier() -> bool {
     ))
 }
 
+#[cfg(test)]
 fn has_medium_grammar_tier() -> bool {
     cfg!(any(
         feature = "lite",
@@ -81,7 +71,7 @@ fn has_medium_grammar_tier() -> bool {
 
 /// Cached map of language key -> `Language` built once from the enabled grammar tiers.
 static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
-    let languages = std::iter::empty::<(&'static str, Language)>();
+    let mut map: HashMap<&'static str, Language> = HashMap::new();
 
     #[cfg(any(
         feature = "lite",
@@ -91,10 +81,9 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
         feature = "lang-bash",
         feature = "lang-lua"
     ))]
-    let languages = languages.chain(
+    map.extend(
         tracedecay_medium_treesitters::all_languages()
             .into_iter()
-            .filter(|(name, _)| *name != "rust")
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
@@ -130,29 +119,20 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
         feature = "lang-toml",
         feature = "lang-lean"
     ))]
-    let languages = languages.chain(
+    map.extend(
         tracedecay_large_treesitters::all_languages()
             .into_iter()
-            .filter(|(name, _)| *name != "rust")
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
-    let languages = languages.chain(
-        std::iter::once(("rust", rust_grammar::LANGUAGE.into()))
-            .filter(|_| has_medium_grammar_tier() || has_large_grammar_tier()),
-    );
-
     #[cfg(feature = "lang-wgsl")]
-    let languages = languages.chain(std::iter::once(("wgsl", wgsl_grammar::LANGUAGE.into())));
+    map.insert("wgsl", wgsl_grammar::LANGUAGE.into());
 
     // HLSL uses the newer LanguageFn API.
     #[cfg(feature = "lang-hlsl")]
-    let languages = languages.chain(std::iter::once((
-        "hlsl",
-        tree_sitter_hlsl::LANGUAGE_HLSL.into(),
-    )));
+    map.insert("hlsl", tree_sitter_hlsl::LANGUAGE_HLSL.into());
 
-    languages.collect()
+    map
 });
 
 /// Returns the `tree_sitter::Language` for the given extractor language key.

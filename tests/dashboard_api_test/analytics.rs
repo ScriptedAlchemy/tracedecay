@@ -5,34 +5,26 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
-    http_agent, pick_free_port, wait_for_dashboard,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
+    message_record_at, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
 };
-use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
-use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
-use tracedecay::global_db::AnalyticsEventInsert;
-use tracedecay_domain::{
-    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RejectedArgumentErrorClassV1,
-    RejectedArgumentNameV1, RejectedArgumentObservedV1, RejectedArgumentSurfaceV1,
-    RetrievalQueryObservedV1,
-};
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb};
+use tracedecay::sessions::cursor::project_session_db_path;
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::resolve_layout_for_current_profile;
+use tracedecay::tracedecay::TraceDecay;
 
 struct Fixture {
     _tmp: TempDir,
     _env_guard: EnvVarGuard,
-    _data_dir_guard: EnvVarGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
-    store_root: PathBuf,
-    host_runtime: Arc<DashboardTestRuntimeV1>,
+    global_db_path: PathBuf,
+    session_db_path: PathBuf,
 }
 
 impl Drop for Fixture {
@@ -89,6 +81,7 @@ fn subagent_session_with_metadata(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn message(
     id: &str,
     role: &str,
@@ -98,68 +91,57 @@ fn message(
     tool_names: Option<&str>,
     metadata_json: Option<&str>,
 ) -> SessionMessageRecord {
-    MessageRecordBuilder::new("codex", id, "analytics-session", role, ordinal, text, kind)
-        .with_timestamp(Some(1_760_000_000 + ordinal))
-        .with_model(Some("gpt-5.5"))
-        .with_tool_names(tool_names)
-        .with_metadata(metadata_json)
-        .build()
+    message_record_at(
+        "codex",
+        id,
+        "analytics-session",
+        role,
+        ordinal,
+        Some(1_760_000_000 + ordinal),
+        text,
+        kind,
+        Some("gpt-5.5"),
+        tool_names,
+        None,
+        None,
+        metadata_json,
+    )
 }
 
-async fn seed_session_store(runtime: &DashboardTestRuntimeV1, project: &Path) {
+async fn seed_session_store(db_path: &Path, project: &Path) {
+    let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
+    assert!(gdb.upsert_session(&session(project)).await);
     assert!(
-        runtime
-            .upsert_session_for_test(HostAdmissionScope::Project, &session(project))
-            .await
-            .expect("seed session")
+        gdb.upsert_session(&subagent_session(
+            project,
+            "subagent-code-explorer",
+            "tracedecay-code-explorer"
+        ))
+        .await
     );
     assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &subagent_session(
-                    project,
-                    "subagent-code-explorer",
-                    "tracedecay-code-explorer",
-                ),
-            )
-            .await
-            .expect("seed code explorer subagent")
+        gdb.upsert_session(&subagent_session(
+            project,
+            "subagent-session-historian",
+            "session-historian"
+        ))
+        .await
     );
     assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &subagent_session(project, "subagent-session-historian", "session-historian",),
-            )
+        gdb.upsert_session(&subagent_session(project, "subagent-worker", "worker"))
             .await
-            .expect("seed session historian subagent")
     );
     assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &subagent_session(project, "subagent-worker", "worker"),
-            )
-            .await
-            .expect("seed worker subagent")
-    );
-    assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &subagent_session_with_metadata(
-                    project,
-                    "subagent-code-health-auditor",
-                    "auditor",
-                    serde_json::json!({
-                        "agent_nickname": "tracedecay-code-health-auditor",
-                        "agent_role": "auditor"
-                    }),
-                ),
-            )
-            .await
-            .expect("seed code health auditor subagent")
+        gdb.upsert_session(&subagent_session_with_metadata(
+            project,
+            "subagent-code-health-auditor",
+            "auditor",
+            serde_json::json!({
+                "agent_nickname": "tracedecay-code-health-auditor",
+                "agent_role": "auditor"
+            })
+        ))
+        .await
     );
 
     let rows = [
@@ -202,12 +184,7 @@ async fn seed_session_store(runtime: &DashboardTestRuntimeV1, project: &Path) {
     ];
 
     for row in rows {
-        assert!(
-            runtime
-                .upsert_session_message_for_test(HostAdmissionScope::Project, &row)
-                .await
-                .expect("seed analytics session message")
-        );
+        assert!(gdb.upsert_session_message(&row).await);
     }
 }
 
@@ -229,136 +206,9 @@ fn analytics_event(project_id: &str, timestamp: i64, event_kind: &str) -> Analyt
     }
 }
 
-fn observability_event(
-    project_id: &str,
-    timestamp: i64,
-    terminal_result: ObservabilityTerminalResultV1,
-) -> AnalyticsEventInsert {
-    let envelope = ObservabilityEnvelopeV1 {
-        event_id: "dashboard-observability-failed".to_string(),
-        event_kind: "retrieval.query.completed.v1".to_string(),
-        schema_revision: 1,
-        idempotency_key: "dashboard-observability-failed".to_string(),
-        trace_id: "dashboard-observability-trace".to_string(),
-        scope_ref: project_id.to_string(),
-        capability: "retrieval".to_string(),
-        operation: "query".to_string(),
-        event_time_micros: timestamp.saturating_mul(1_000_000),
-        observation_time_micros: timestamp.saturating_mul(1_000_000),
-        valid_from_micros: None,
-        valid_until_micros: None,
-        quantity: None,
-        unit: None,
-        terminal_result: Some(terminal_result),
-        producer_revision: "dashboard-test.v1".to_string(),
-        configuration_revision: "dashboard-test.v1".to_string(),
-        policy_revision: "dashboard-test.v1".to_string(),
-        watermark: "dashboard-test:1".to_string(),
-        coverage: CoverageStateV1::Known,
-        sampling_probability: None,
-        retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
-        emitted_count: 1,
-        delayed_count: 0,
-        dropped_count: 0,
-        process_boot_id: "dashboard-test-boot".to_string(),
-        producer_sequence: 1,
-        payload: ObservabilityPayloadV1::RetrievalQuery(RetrievalQueryObservedV1 {
-            query_family: "exact_technical".to_string(),
-            enabled_lanes: vec!["exact_literal".to_string()],
-            candidate_budget: 1,
-            context_budget: 1,
-            token_budget: 1,
-            answered: false,
-            source_coverage: CoverageStateV1::Known,
-            lane_coverage: CoverageStateV1::Known,
-        }),
-    };
-    AnalyticsEventInsert {
-        provider: "tracedecay-observability".to_string(),
-        project_id: project_id.to_string(),
-        session_id: None,
-        timestamp,
-        event_kind: envelope.event_kind.clone(),
-        hook_name: None,
-        tool_name: None,
-        tool_category: None,
-        skill_name: None,
-        hint_category: None,
-        hint_id: Some(envelope.idempotency_key.clone()),
-        outcome: Some("failed".to_string()),
-        metadata_json: Some(
-            serde_json::to_string(&envelope).expect("serialize observability event"),
-        ),
-    }
-}
-
-fn rejected_argument_event(
-    project_id: &str,
-    timestamp: i64,
-    surface: RejectedArgumentSurfaceV1,
-    operation: &str,
-    argument: RejectedArgumentNameV1,
-    error_class: RejectedArgumentErrorClassV1,
-    sequence: u64,
-) -> AnalyticsEventInsert {
-    let payload = ObservabilityPayloadV1::RejectedArgument(RejectedArgumentObservedV1 {
-        surface,
-        operation: operation.to_owned(),
-        argument,
-        error_class,
-        schema_revision: 1,
-    });
-    let envelope = ObservabilityEnvelopeV1 {
-        event_id: format!("dashboard-rejected-argument-{sequence}"),
-        event_kind: payload.event_kind().to_owned(),
-        schema_revision: 1,
-        idempotency_key: format!("dashboard-rejected-argument-{sequence}"),
-        trace_id: format!("dashboard-rejected-argument-trace-{sequence}"),
-        scope_ref: project_id.to_string(),
-        capability: "application_surface".to_string(),
-        operation: operation.to_owned(),
-        event_time_micros: timestamp.saturating_mul(1_000_000),
-        observation_time_micros: timestamp.saturating_mul(1_000_000),
-        valid_from_micros: None,
-        valid_until_micros: None,
-        quantity: None,
-        unit: None,
-        terminal_result: Some(ObservabilityTerminalResultV1::Denied),
-        producer_revision: "dashboard-test.v1".to_string(),
-        configuration_revision: "dashboard-test.v1".to_string(),
-        policy_revision: "dashboard-test.v1".to_string(),
-        watermark: format!("dashboard-test:{sequence}"),
-        coverage: CoverageStateV1::Known,
-        sampling_probability: None,
-        retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
-        emitted_count: 1,
-        delayed_count: 0,
-        dropped_count: 0,
-        process_boot_id: "dashboard-test-boot".to_string(),
-        producer_sequence: sequence,
-        payload,
-    };
-    AnalyticsEventInsert {
-        provider: "tracedecay-observability".to_string(),
-        project_id: project_id.to_string(),
-        session_id: None,
-        timestamp,
-        event_kind: envelope.event_kind.clone(),
-        hook_name: None,
-        tool_name: None,
-        tool_category: None,
-        skill_name: None,
-        hint_category: None,
-        hint_id: Some(envelope.idempotency_key.clone()),
-        outcome: Some("rejected".to_string()),
-        metadata_json: Some(
-            serde_json::to_string(&envelope).expect("serialize rejected-argument event"),
-        ),
-    }
-}
-
-async fn seed_durable_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+async fn seed_durable_analytics(db_path: &Path, project_root: &Path) {
+    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
+    let project_id = GlobalDb::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -385,15 +235,15 @@ async fn seed_durable_analytics(runtime: &DashboardTestRuntimeV1, project_root: 
         },
     ];
     for row in rows {
-        runtime
-            .append_analytics_event_for_test(HostAdmissionScope::Profile, &row)
+        gdb.append_analytics_event(&row)
             .await
             .expect("append durable analytics event");
     }
 }
 
-fn seed_hook_analytics(store_root: &Path) {
-    std::fs::create_dir_all(store_root).expect("create store root");
+fn seed_hook_analytics(project_root: &Path) {
+    let layout = resolve_layout_for_current_profile(project_root).expect("resolve store layout");
+    std::fs::create_dir_all(&layout.data_root).expect("create store root");
     let rows = [
         serde_json::json!({
             "event": "hook_invoked",
@@ -420,14 +270,15 @@ fn seed_hook_analytics(store_root: &Path) {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(
-        store_root.join("hook_analytics.jsonl"),
+        layout.data_root.join("hook_analytics.jsonl"),
         format!("{content}\n"),
     )
     .expect("write hook analytics");
 }
 
-async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+async fn seed_durable_recent_window(db_path: &Path, project_root: &Path) {
+    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
+    let project_id = GlobalDb::canonical_project_key(project_root);
     let mut events: Vec<_> = (0..10_000)
         .map(|offset| analytics_event(&project_id, 1_760_000_000 + offset, "older_noise"))
         .collect();
@@ -436,14 +287,14 @@ async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_ro
         outcome: Some("used".to_string()),
         ..analytics_event(&project_id, 1_760_020_000, "skill")
     });
-    runtime
-        .append_analytics_events_for_test(HostAdmissionScope::Profile, &events)
+    gdb.append_analytics_events(&events)
         .await
         .expect("append durable analytics events");
 }
 
-async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+async fn seed_fallback_analytics(db_path: &Path, project_root: &Path) {
+    let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
+    let project_id = GlobalDb::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -464,8 +315,7 @@ async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root:
         },
     ];
     for row in rows {
-        runtime
-            .append_analytics_event_for_test(HostAdmissionScope::Project, &row)
+        gdb.append_analytics_event(&row)
             .await
             .expect("append fallback analytics event");
     }
@@ -483,46 +333,28 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guard = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
-    let profile_root = tmp.path().join("profile").join(".tracedecay");
-    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    let project_id =
-        tracedecay_domain::ProjectId::new("dashboard_analytics_fixture").expect("project identity");
-    let host_runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
-            .await
-            .expect("analytics host-admission runtime"),
-    );
-    let cg = host_runtime
-        .initialize_project_graph_for_test(
-            &project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
-                profile_root: Some(profile_root.clone()),
-                global_db_path: Some(global_db_path),
-            },
-        )
+    // Pre-create both GlobalDb-schema stores from the cached empty template
+    // so seeding and dashboard startup open existing DBs instead of paying a
+    // full schema creation each (slow on Windows).
+    write_empty_global_db_schema(&global_db_path).await;
+    let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
-    let store_root = cg.store_layout().data_root.clone();
-    seed_session_store(&host_runtime, &project_root).await;
+    let session_db_path = project_session_db_path(&project_root);
+    write_empty_global_db_schema(&session_db_path).await;
+    seed_session_store(&session_db_path, &project_root).await;
     if seed_durable_events {
-        seed_durable_analytics(&host_runtime, &project_root).await;
+        seed_durable_analytics(&global_db_path, &project_root).await;
     }
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let server_runtime = Arc::clone(&host_runtime);
-    let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
-        let authority = server_runtime
-            .dashboard_test_authority()
-            .expect("dashboard analytics authority");
-        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
-            server_graph,
-            authority,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+        let _ = dashboard::run_until_shutdown_for_tests(
+            &cg,
             "127.0.0.1",
             port,
-            dashboard::spa_router(),
+            false,
             std::future::pending(),
         )
         .await;
@@ -532,12 +364,11 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     Fixture {
         _tmp: tmp,
         _env_guard: env_guard,
-        _data_dir_guard: data_dir_guard,
         base_url,
         server,
         project_root,
-        store_root,
-        host_runtime,
+        global_db_path,
+        session_db_path,
     }
 }
 
@@ -583,10 +414,10 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["schema_revision"], 1);
-        assert_eq!(overview["domain_state"], "ready");
-        let overview = &overview["payload"];
-        assert!(overview["db"].as_str().is_some_and(|path| !path.is_empty()));
+        assert_eq!(
+            overview["db"],
+            fixture.session_db_path.display().to_string()
+        );
         assert_eq!(overview["hints"]["available"], false);
         assert_eq!(overview["hints"]["by_category"][0]["emitted"], 0);
 
@@ -636,9 +467,6 @@ fn analytics_api_prefers_durable_events_when_available() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["schema_revision"], 1);
-        assert_eq!(overview["domain_state"], "ready");
-        let overview = &overview["payload"];
         assert_eq!(overview["hints"]["source"], "analytics_events");
         assert_eq!(overview["usage"]["source"], "analytics_events");
 
@@ -659,7 +487,7 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
-        seed_hook_analytics(&fixture.store_root);
+        seed_hook_analytics(&fixture.project_root);
         let agent = http_agent();
 
         let (status, diagnostics) = get_json(
@@ -667,8 +495,6 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
             &format!("{}/api/plugins/analytics/diagnostics", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(diagnostics["schema_revision"], 1);
-        let diagnostics = &diagnostics["payload"];
         assert_eq!(diagnostics["source"], "analytics_events");
         assert_eq!(diagnostics["message_count"], 4);
         assert_eq!(diagnostics["event_count"], 3);
@@ -701,86 +527,6 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
     });
 }
 
-/// The subagent tree journey: seeded parent/child sessions, through the mounted
-/// route, out as a pre-order tree with real edges.
-///
-/// This is the measure the sibling `/agents` rollup cannot make. The same store
-/// answers that route with four independent per-agent counts; here it must
-/// answer with the delegation arrows between them, or the Agents workspace is
-/// back to showing a rollup captioned as a tree.
-#[test]
-fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(true).await;
-        let agent = http_agent();
-
-        let (status, response) = get_json(
-            &agent,
-            &format!("{}/api/plugins/analytics/subagent-tree", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(response["schema_revision"], 1);
-
-        let payload = &response["payload"];
-        assert_eq!(payload["available"], true);
-        assert_eq!(payload["source"], "sessions");
-        assert_eq!(payload["truncated"], false);
-
-        // One seeded root plus its four seeded subagents.
-        assert_eq!(payload["sessions_read"], 5);
-        assert_eq!(payload["root_count"], 1);
-        assert_eq!(payload["edge_count"], 4);
-        assert_eq!(payload["max_depth"], 1);
-        assert_eq!(payload["missing_parent_count"], 0);
-        assert_eq!(payload["cycle_count"], 0);
-
-        let nodes = payload["nodes"].as_array().expect("tree nodes");
-        assert_eq!(nodes.len(), 5);
-
-        // Pre-order: the root leads, and it owns every other session.
-        assert_eq!(nodes[0]["session_id"], "analytics-session");
-        assert_eq!(nodes[0]["depth"], 0);
-        assert_eq!(nodes[0]["link"], "root");
-        assert_eq!(
-            nodes[0]["descendants"], 4,
-            "the root must own the whole delegated subtree"
-        );
-
-        for child in &nodes[1..] {
-            assert_eq!(child["depth"], 1, "every seeded subagent is one level down");
-            assert_eq!(child["link"], "linked");
-            assert_eq!(child["parent_session_id"], "analytics-session");
-            assert_eq!(child["is_subagent"], true);
-        }
-
-        // The edge set is the point of the route: without it these five rows
-        // are the same five islands `/agents` already served.
-        let mut delegated: Vec<&str> = nodes[1..]
-            .iter()
-            .map(|child| child["session_id"].as_str().expect("session id"))
-            .collect();
-        delegated.sort_unstable();
-        assert_eq!(
-            delegated,
-            vec![
-                "subagent-code-explorer",
-                "subagent-code-health-auditor",
-                "subagent-session-historian",
-                "subagent-worker",
-            ]
-        );
-
-        // Coverage is a real denominator, not a decoration.
-        assert_eq!(response["coverage"]["completeness"], "complete");
-        assert_eq!(response["coverage"]["unit"], "subagent_sessions");
-        assert_eq!(response["coverage"]["denominator"], 5);
-    });
-}
-
 #[test]
 fn analytics_api_filters_fallback_events_to_current_project() {
     let _lock = ENV_LOCK
@@ -789,7 +535,7 @@ fn analytics_api_filters_fallback_events_to_current_project() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        seed_fallback_analytics(&fixture.host_runtime, &fixture.project_root).await;
+        seed_fallback_analytics(&fixture.session_db_path, &fixture.project_root).await;
         let agent = http_agent();
 
         let (status, overview) = get_json(
@@ -797,9 +543,6 @@ fn analytics_api_filters_fallback_events_to_current_project() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["schema_revision"], 1);
-        assert_eq!(overview["domain_state"], "ready");
-        let overview = &overview["payload"];
         assert_eq!(overview["hints"]["source"], "analytics_events");
         assert_eq!(overview["usage"]["source"], "analytics_events");
 
@@ -823,7 +566,7 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        seed_durable_recent_window(&fixture.host_runtime, &fixture.project_root).await;
+        seed_durable_recent_window(&fixture.global_db_path, &fixture.project_root).await;
         let agent = http_agent();
 
         let (status, overview) = get_json(
@@ -831,9 +574,6 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["schema_revision"], 1);
-        assert_eq!(overview["domain_state"], "ready");
-        let overview = &overview["payload"];
         assert_eq!(overview["usage"]["source"], "analytics_events");
         assert_eq!(overview["usage"]["event_count"], 10_000);
 
@@ -843,225 +583,5 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
             1,
             "skill",
         );
-    });
-}
-
-/// The canonical Observatory and Costs reads stamp real observed windows.
-///
-/// This test previously also read `/api/plugins/analytics/observatory{,/export}`
-/// and `/api/plugins/savings/costs{,/export}` and asserted all four agreed with
-/// the two canonical routes. Those four were alias mounts over the very same
-/// `observatory_model`/`costs_model` the canonical routes serve, with no
-/// dashboard, SDK, CLI, or MCP consumer; they are deleted, and with them the
-/// assertions that a value equalled itself read through a second URL.
-///
-/// What survives is the part that was never about the duplication: each
-/// canonical read must carry its metrics with a genuine `temporal.horizon`
-/// rather than an absent or inverted window — enforced inside
-/// `metric_parity_view`, which panics on a metric that omits one.
-#[test]
-fn canonical_observatory_and_costs_reads_stamp_real_observed_windows() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(true).await;
-        let agent = http_agent();
-
-        let (status, observatory_dashboard) =
-            get_json(&agent, &format!("{}/api/observatory", fixture.base_url));
-        assert_eq!(status, 200);
-        assert_eq!(observatory_dashboard["schema_revision"], 1);
-        assert!(!metric_parity_view(&observatory_dashboard["payload"]["metrics"]).is_empty());
-
-        let (status, costs_dashboard) =
-            get_json(&agent, &format!("{}/api/costs", fixture.base_url));
-        assert_eq!(status, 200);
-        assert_eq!(costs_dashboard["schema_revision"], 1);
-        for series in ["usage", "estimated_cost"] {
-            assert!(
-                !metric_parity_view(&costs_dashboard["payload"][series]).is_empty(),
-                "costs {series} carried no metrics to check a horizon on"
-            );
-        }
-    });
-}
-
-/// Metric content with each read's own observation horizon removed.
-///
-/// Every surface answers a separate request and stamps `temporal.horizon` with
-/// the window it actually observed, so two reads taken microseconds apart
-/// legitimately carry different `until_micros`. Parity is about value,
-/// coverage, provenance, and cohort agreeing across surfaces; the horizon is
-/// checked here for being a real observed window instead.
-fn metric_parity_view(metrics: &Value) -> Vec<Value> {
-    let rows = metrics
-        .as_array()
-        .unwrap_or_else(|| panic!("expected a metrics array: {metrics}"));
-    assert!(
-        !rows.is_empty(),
-        "metric parity needs at least one metric: {metrics}"
-    );
-    rows.iter()
-        .map(|metric| {
-            let horizon = &metric["temporal"]["horizon"];
-            let (Some(since), Some(until)) = (
-                horizon["since_micros"].as_i64(),
-                horizon["until_micros"].as_i64(),
-            ) else {
-                panic!("metric omitted its observation horizon: {metric}");
-            };
-            assert!(
-                since < until,
-                "each read must stamp a real observed window: {horizon}"
-            );
-            let mut compared = metric.clone();
-            compared["temporal"]["horizon"] = Value::Null;
-            compared
-        })
-        .collect()
-}
-
-#[test]
-fn observatory_counts_canonical_failed_outcomes() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
-        fixture
-            .host_runtime
-            .append_analytics_event_for_test(
-                HostAdmissionScope::Profile,
-                &observability_event(
-                    &project_id,
-                    tracedecay::tracedecay::current_timestamp(),
-                    ObservabilityTerminalResultV1::Failed,
-                ),
-            )
-            .await
-            .expect("append canonical failed event");
-
-        let (status, observatory) = get_json(
-            &http_agent(),
-            &format!("{}/api/observatory", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        let failures = observatory["payload"]["metrics"]
-            .as_array()
-            .and_then(|metrics| {
-                metrics
-                    .iter()
-                    .find(|metric| metric["metric"] == "observability_failures")
-            })
-            .expect("observability failures metric");
-        assert_eq!(failures["value"], 1.0);
-    });
-}
-
-#[test]
-fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
-        let timestamp = tracedecay::tracedecay::current_timestamp();
-        fixture
-            .host_runtime
-            .append_analytics_event_for_test(
-                HostAdmissionScope::Profile,
-                &rejected_argument_event(
-                    &project_id,
-                    timestamp,
-                    RejectedArgumentSurfaceV1::Cli,
-                    "feedback_diagnostics",
-                    RejectedArgumentNameV1::RequestBody,
-                    RejectedArgumentErrorClassV1::InvalidShape,
-                    1,
-                ),
-            )
-            .await
-            .expect("append first rejected-argument event");
-        fixture
-            .host_runtime
-            .append_analytics_event_for_test(
-                HostAdmissionScope::Profile,
-                &rejected_argument_event(
-                    &project_id,
-                    timestamp,
-                    RejectedArgumentSurfaceV1::Cli,
-                    "feedback_diagnostics",
-                    RejectedArgumentNameV1::RequestBody,
-                    RejectedArgumentErrorClassV1::InvalidShape,
-                    2,
-                ),
-            )
-            .await
-            .expect("append second rejected-argument event");
-        fixture
-            .host_runtime
-            .append_analytics_event_for_test(
-                HostAdmissionScope::Profile,
-                &rejected_argument_event(
-                    &project_id,
-                    timestamp,
-                    RejectedArgumentSurfaceV1::Mcp,
-                    "feedback_list",
-                    RejectedArgumentNameV1::Operation,
-                    RejectedArgumentErrorClassV1::Unauthorized,
-                    3,
-                ),
-            )
-            .await
-            .expect("append mcp rejected-argument event");
-
-        let (status, observatory) = get_json(
-            &http_agent(),
-            &format!("{}/api/observatory", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        let rejected = &observatory["payload"]["rejected_arguments"];
-        assert_eq!(rejected["coverage"]["state"], "known");
-        assert_eq!(rejected["rejected_total"], 3);
-        assert!(rejected["rejection_rate"].is_null());
-        let groups = rejected["groups"]
-            .as_array()
-            .expect("rejected-argument groups");
-        assert_eq!(groups.len(), 2);
-        let cli = groups
-            .iter()
-            .find(|group| group["surface"] == "cli")
-            .expect("cli group");
-        assert_eq!(cli["count"], 2);
-        assert_eq!(cli["operation"], "feedback_diagnostics");
-        assert_eq!(cli["error_class"], "invalid_shape");
-        let mcp = groups
-            .iter()
-            .find(|group| group["surface"] == "mcp")
-            .expect("mcp group");
-        assert_eq!(mcp["count"], 1);
-        assert_eq!(mcp["error_class"], "unauthorized");
-    });
-}
-
-#[test]
-fn costs_read_model_is_mounted_on_the_active_dashboard() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
-        assert_eq!(status, 200);
-        assert_eq!(costs["payload"]["authorized_scope_ref"], "all");
-        assert!(costs["payload"]["usage"].is_array());
-        assert!(costs["payload"]["estimated_cost"].is_array());
     });
 }

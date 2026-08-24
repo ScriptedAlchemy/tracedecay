@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "memory-ranking-morphology",
+  "title": "Current multi-token morphology queries still rank the on-topic fact first",
+  "description": "Exercises the Risk B install/installing and backup/backups families with today’s shipped ordering: when a second anchor token is present, the on-topic fact still ranks ahead of the unrelated distractor even though single-token stemming is still absent.",
+  "contract": "stable",
+  "contract_notes": "This M1 baseline stays green on the current system while covering the morphology families called out in Risk B. M4 should tighten these into explicit stemming expectations once porter-backed search lands.",
+  "setup": {
+    "facts": [
+      {
+        "content": "Use pnpm for installing dependencies in this monorepo",
+        "category": "project",
+        "source": "on-topic-install-morph",
+        "trust": 0.5,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Use npm to install packages",
+        "category": "project",
+        "source": "off-topic-install-exact",
+        "trust": 0.5,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Always back up the database nightly before deploy",
+        "category": "project",
+        "source": "on-topic-backup-split",
+        "trust": 0.5,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Database backups run via pg_dump every night",
+        "category": "project",
+        "source": "on-topic-backup-plural",
+        "trust": 0.5,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Acme primary database runs on Postgres",
+        "category": "project",
+        "source": "off-topic-backup-exact",
+        "trust": 0.5,
+        "retrieval_count": 0
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [],
+    "violation": null
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "morphology_fixture_loaded",
+      "sql": "SELECT COUNT(*) FROM memory_facts",
+      "op": "eq",
+      "value": 5
+    },
+    {
+      "kind": "search-rank",
+      "name": "install_query_keeps_installing_fact_on_top",
+      "query": "install dependencies",
+      "top_fact_source": "on-topic-install-morph",
+      "min_rank_gap": 1,
+      "limit": 5
+    },
+    {
+      "kind": "search-rank",
+      "name": "backup_query_keeps_backup_fact_on_top",
+      "query": "database backup",
+      "top_fact_source": "on-topic-backup-plural",
+      "min_rank_gap": 1,
+      "limit": 5
+    }
+  ]
+}

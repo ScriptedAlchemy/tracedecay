@@ -9,9 +9,12 @@
 //! evidence that a run did not finish cleanly, including for providers/sessions
 //! that never produced a `wf_*` run directory.
 
+use libsql::{Connection, params};
 use serde::Serialize;
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+pub trait WorkflowStateStore {
+    fn dashboard_connection(&self) -> libsql::Connection;
+}
 
 /// Max characters of collapsed evidence text kept per unfinished-run row before
 /// a single-character `…` truncation, so one row never dominates the listing.
@@ -28,27 +31,32 @@ pub struct WorkflowStateItem {
     pub evidence: String,
 }
 
-/// Reads through one caller-pinned snapshot, so every returned row is observed
-/// at a single database generation. The store adapter owns opening it.
-pub async fn list_unfinished(
-    snapshot: &impl QueryExecutor,
+pub async fn list_unfinished<S>(db: &S, limit: usize) -> Result<Vec<WorkflowStateItem>, String>
+where
+    S: WorkflowStateStore,
+{
+    let conn = db.dashboard_connection();
+    query_unfinished(&conn, limit).await
+}
+
+async fn query_unfinished(
+    conn: &Connection,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {
     let limit = limit.clamp(1, 250) as i64;
-    let mut rows = snapshot
+    let mut rows = conn
         .query(
-            "SELECT raw.provider, raw.session_id, raw.message_id, raw.ordinal, raw.content,
-                    COALESCE(raw.snippet_text, ''), COALESCE(raw.metadata_json, '')
-             FROM lcm_raw_messages_fts
-             JOIN lcm_raw_messages AS raw
-               ON raw.store_id = lcm_raw_messages_fts.rowid
-             WHERE lcm_raw_messages_fts MATCH ?1
-             ORDER BY COALESCE(raw.timestamp, 0) DESC, raw.store_id DESC
-             LIMIT ?2",
-            params![
-                r#""session limit" OR blocked OR interrupted OR "runs 0""#,
-                limit
-            ],
+            "SELECT provider, session_id, message_id, ordinal, content,
+                    COALESCE(snippet_text, ''), COALESCE(metadata_json, '')
+             FROM lcm_raw_messages
+             WHERE lower(content) LIKE '%session limit%'
+                OR lower(content) LIKE '%blocked%'
+                OR lower(content) LIKE '%interrupted%'
+                OR lower(content) LIKE '%runs:0%'
+                OR lower(content) LIKE '%\"runs\":0%'
+             ORDER BY COALESCE(timestamp, 0) DESC, store_id DESC
+             LIMIT ?1",
+            params![limit],
         )
         .await
         .map_err(|e| e.to_string())?;

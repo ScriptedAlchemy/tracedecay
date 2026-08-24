@@ -18,35 +18,32 @@ pub(super) struct DiagnosticsFileFingerprint {
 
 impl DiagnosticsFingerprint {
     pub(super) async fn capture(project_root: &Path, scope: &Scope) -> Result<Self> {
+        let paths = diagnostics_input_paths(project_root, scope)?;
         let project_root = project_root.to_path_buf();
-        let scope = scope.clone();
-        tokio::task::spawn_blocking(move || {
-            let paths = diagnostics_input_paths(&project_root, &scope)?;
-            Ok(Self::from_paths(&project_root, paths))
-        })
-        .await
-        .map_err(|err| TraceDecayError::Config {
-            message: format!("failed to join diagnostics fingerprint task: {err}"),
-        })?
+        tokio::task::spawn_blocking(move || Self::from_paths(&project_root, paths))
+            .await
+            .map_err(|err| TraceDecayError::Config {
+                message: format!("failed to join diagnostics fingerprint task: {err}"),
+            })?
     }
 
-    fn from_paths(project_root: &Path, paths: Vec<PathBuf>) -> Self {
+    fn from_paths(project_root: &Path, paths: Vec<PathBuf>) -> Result<Self> {
         let mut fingerprint = Self { files: Vec::new() };
         for path in paths {
-            fingerprint.include_path(project_root, &path);
+            fingerprint.include_path(project_root, &path)?;
         }
         fingerprint
             .files
             .sort_by(|left, right| left.path.cmp(&right.path));
-        fingerprint
+        Ok(fingerprint)
     }
 
-    fn include_path(&mut self, project_root: &Path, path: &Path) {
+    fn include_path(&mut self, project_root: &Path, path: &Path) -> Result<()> {
         let Ok(metadata) = std::fs::metadata(path) else {
-            return;
+            return Ok(());
         };
         if !metadata.is_file() {
-            return;
+            return Ok(());
         }
         let modified = metadata
             .modified()
@@ -60,6 +57,7 @@ impl DiagnosticsFingerprint {
             bytes: metadata.len(),
             mtime_nanos: modified,
         });
+        Ok(())
     }
 }
 
@@ -103,12 +101,12 @@ fn should_walk_diagnostics_path(path: &Path) -> bool {
 }
 
 fn is_diagnostics_input(path: &Path) -> bool {
-    if let Some(
-        "Cargo.lock" | "Cargo.toml" | "package.json" | "tsconfig.json" | "pyproject.toml"
-        | "pyrightconfig.json",
-    ) = path.file_name().and_then(|name| name.to_str())
-    {
-        return true;
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(
+            "Cargo.lock" | "Cargo.toml" | "package.json" | "tsconfig.json" | "pyproject.toml"
+            | "pyrightconfig.json",
+        ) => return true,
+        _ => {}
     }
 
     matches!(

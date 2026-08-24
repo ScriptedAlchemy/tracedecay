@@ -1,67 +1,26 @@
+#![allow(dead_code, unused_imports)]
+
 pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::Command;
-pub(crate) use std::sync::Arc;
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, MessageRecordBuilder, create_runtime,
-    fake_codex_bin, get_json, http_agent, http_agent_with_timeout, install_fake_codex_launcher,
-    pick_free_port, response_to_json, tempdir_or_panic, wait_for_dashboard,
+    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, fake_codex_bin, get_json,
+    http_agent, http_agent_with_timeout, install_fake_codex_launcher, pick_free_port,
+    response_to_json, tempdir_or_panic, wait_for_dashboard, write_empty_global_db_schema,
 };
-pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
+pub(crate) use tracedecay::errors::TraceDecayError;
+pub(crate) use tracedecay::global_db::GlobalDb;
+pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
+pub(crate) use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 pub(crate) use tracedecay::tracedecay::TraceDecay;
-pub(crate) use tracedecay_domain::{
-    ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
-};
-pub(crate) use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
-
-pub(crate) fn test_fact_write_control() -> tracedecay_store::FactWriteControl {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let commit_started = Arc::new(AtomicBool::new(false));
-    tracedecay_store::FactWriteControl::new(
-        {
-            let interrupted = Arc::clone(&interrupted);
-            Arc::new(move || interrupted.load(Ordering::Acquire))
-        },
-        Arc::new(move || {
-            commit_started
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        }),
-    )
-}
-
-pub(crate) struct MessageDetails<'a> {
-    pub(crate) timestamp: i64,
-    pub(crate) model: Option<&'a str>,
-    pub(crate) metadata_json: Option<&'a str>,
-}
-
-pub(crate) fn message(
-    message_id: &str,
-    session_id: &str,
-    role: &str,
-    ordinal: i64,
-    text: &str,
-    details: MessageDetails<'_>,
-) -> SessionMessageRecord {
-    MessageRecordBuilder::new(
-        "cursor", message_id, session_id, role, ordinal, text, "message",
-    )
-    .with_timestamp(Some(details.timestamp))
-    .with_model(details.model)
-    .with_metadata(details.metadata_json)
-    .build()
-}
 
 /// Longer than 200 chars on purpose: list/projection payloads truncate
 /// `content` at 200, so this fact proves the `/fact/{id}` detail endpoint
@@ -78,11 +37,9 @@ pub(crate) struct DashboardFixture {
     pub(crate) _home_guard: EnvVarGuard,
     pub(crate) _userprofile_guard: EnvVarGuard,
     pub(crate) home: std::path::PathBuf,
-    pub(crate) global_db_path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
-    pub(crate) host_runtime: Arc<DashboardTestRuntimeV1>,
-    pub(crate) project_graphs: dashboard::DashboardTestProjectGraphsV1,
+    pub(crate) project_db_path: std::path::PathBuf,
     pub(crate) server: DashboardServer,
 }
 
@@ -114,68 +71,35 @@ impl Drop for DashboardServer {
     }
 }
 
-pub(crate) fn spawn_dashboard_server_with_host_runtime(
-    cg: TraceDecay,
-    host_runtime: Arc<DashboardTestRuntimeV1>,
-    project_graphs: dashboard::DashboardTestProjectGraphsV1,
-    port: u16,
-) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, port)
+pub(crate) fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
+    spawn_dashboard_server_with_runner(cg, port, true)
 }
 
-pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
-    cg: TraceDecay,
-    host_runtime: Arc<DashboardTestRuntimeV1>,
-    project_graphs: dashboard::DashboardTestProjectGraphsV1,
-    port: u16,
-) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, port)
+pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> DashboardServer {
+    spawn_dashboard_server_with_runner(cg, port, false)
 }
 
 fn spawn_dashboard_server_with_runner(
     cg: TraceDecay,
-    host_authority: Option<(
-        Arc<DashboardTestRuntimeV1>,
-        dashboard::DashboardTestProjectGraphsV1,
-    )>,
-    mount_configuration_runtime: bool,
     port: u16,
+    repair_memory_on_startup: bool,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
         let runtime = create_runtime();
         runtime.block_on(async move {
-            let cg = Arc::new(cg);
-            let (host_runtime, project_graphs) = match host_authority {
-                Some(authority) => authority,
-                None => (
-                    open_dashboard_host_runtime(&cg).await,
-                    dashboard::DashboardTestProjectGraphsV1::default(),
-                ),
-            };
-            let authority = if mount_configuration_runtime {
-                host_runtime
-                    .dashboard_test_authority_with_configuration(&cg)
-                    .await
-            } else {
-                host_runtime
-                    .dashboard_test_authority_with_session_reads(&cg)
-                    .await
-            }
-            .expect("dashboard test authority");
-            let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
-                cg.clone(),
-                authority,
-                project_graphs,
+            let result = dashboard::run_until_shutdown_for_tests(
+                &cg,
                 "127.0.0.1",
                 port,
-                dashboard::spa_router(),
+                repair_memory_on_startup,
                 async move {
                     let _ = shutdown_rx.await;
                 },
             )
             .await;
             let _ = cg.checkpoint().await;
+            cg.close();
             let _ = result;
         });
     });
@@ -186,375 +110,222 @@ fn spawn_dashboard_server_with_runner(
 }
 
 pub(crate) fn write_file(path: &Path, content: &str) {
-    if let Some(parent) = path.parent()
-        && let Err(err) = fs::create_dir_all(parent)
-    {
-        panic!("failed to create {}: {err}", parent.display());
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            panic!("failed to create {}: {err}", parent.display());
+        }
     }
     if let Err(err) = fs::write(path, content) {
         panic!("failed to write {}: {err}", path.display());
     }
 }
 
-pub(crate) async fn setup_project(
-    project_root: &Path,
-) -> (TraceDecay, Arc<DashboardTestRuntimeV1>) {
+pub(crate) async fn setup_project(project_root: &Path) -> TraceDecay {
     write_file(
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    let project_id = tracedecay::storage::read_repository_identity_marker(project_root)
-        .unwrap_or_else(|error| panic!("read dashboard fixture identity: {error}"))
-        .and_then(|marker| ProjectId::new(marker.project_id).ok())
-        .unwrap_or_else(|| {
-            let suffix = project_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or("project")
-                .replace(|character: char| !character.is_ascii_alphanumeric(), "_");
-            ProjectId::new(format!("dashboard_fixture_{suffix}"))
-                .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
-        });
-    let profile_root = tracedecay::storage::default_profile_root()
-        .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
-    let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: None,
-    };
-    let runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, project_root, project_id)
-            .await
-            .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
-    );
-    let graph = runtime
-        .initialize_project_graph_for_test(project_root, open_options)
-        .await
-        .unwrap_or_else(|error| panic!("initialize dashboard fixture graph: {error}"));
-    (graph, runtime)
-}
-
-pub(crate) async fn open_dashboard_host_runtime(cg: &TraceDecay) -> Arc<DashboardTestRuntimeV1> {
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|project_id| ProjectId::new(project_id.to_owned()).ok())
-        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project id"));
-    let project_id_text = project_id.as_str().to_owned();
-    let runtime = Arc::new(
-        DashboardTestRuntimeV1::project(
-            tracedecay::storage::default_profile_root()
-                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
-            cg.project_root(),
-            project_id,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open dashboard host-admission runtime: {error}")),
-    );
-    runtime
-        .upsert_code_project(&project_id_text, cg.project_root(), None, None, None)
-        .await
-        .unwrap_or_else(|error| panic!("register dashboard fixture project: {error}"));
-    runtime
-}
-
-pub(crate) struct DashboardAutomaticFactReceipt {
-    pub(crate) apply_id: String,
-    pub(crate) fact_id: String,
-}
-
-fn dashboard_fixture_project_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
-    let raw_project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project id"));
-    let project_id = tracedecay_domain::ProjectId::new(raw_project_id.to_owned())
-        .unwrap_or_else(|error| panic!("invalid dashboard fixture project id: {error}"));
-    tracedecay_domain::FactOwnerV1::Project { project_id }
-}
-
-/// Records an automatic fact effect through the canonical receipt authority.
-/// No sidecar JSON participates in this fixture.
-pub(crate) async fn record_dashboard_automatic_fact(
-    cg: &TraceDecay,
-    run_id: &str,
-    content: &str,
-) -> DashboardAutomaticFactReceipt {
-    use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
-    use tracedecay_agent_hosts::automation::automatic_facts::{
-        AutomaticFactState, record_session_automatic_facts,
-    };
-    use tracedecay_usecases::memory::MemoryApplication;
-
-    let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner, DatabaseFactStore::new(cg.db()))
-        .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
-    let request = tracedecay_usecases::memory::ProjectMemoryFactAddRequest {
-        content: content.to_string(),
-        category: FactCategoryV1::Project,
-        source_label: Some("dashboard-outcome-test".to_string()),
-        tags: vec!["automation".to_string(), "outcome".to_string()],
-        entities: vec!["TraceDecay".to_string()],
-        trust: Some(
-            Confidence::new(0.9)
-                .unwrap_or_else(|error| panic!("build automatic fact trust: {error}")),
-        ),
-        metadata: serde_json::json!({"origin": "dashboard-outcome-test"}),
-    };
-    let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
-    let batch = record_session_automatic_facts(
-        &memory,
-        &run_control,
-        run_id,
-        Some("dashboard-outcome-test"),
-        &[serde_json::json!({
-            "add_fact_request": request,
-            "validation": { "fixture": "dashboard-outcome-test" },
-        })],
-    )
-    .await
-    .unwrap_or_else(|error| panic!("record outcome automatic fact receipt: {error}"));
-    assert!(
-        batch.retry_error.is_none(),
-        "outcome automatic fact receipt must not require retry: {:?}",
-        batch.retry_error
-    );
-    let receipt = batch
-        .receipts
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("outcome automatic fact application must return a receipt"));
-    assert_eq!(receipt.state, AutomaticFactState::Applied);
-    DashboardAutomaticFactReceipt {
-        apply_id: receipt.apply_id,
-        fact_id: receipt.applied_fact_id.unwrap_or_else(|| {
-            panic!("applied outcome automatic fact receipt needs canonical fact identity")
-        }),
+    // Pre-create the GlobalDb-schema stores that init and the dashboard
+    // server will open, from the cached empty template: opening an existing
+    // DB is a file copy instead of a full schema creation (slow on Windows).
+    if let Some(global_db_path) = std::env::var_os(GLOBAL_DB_ENV) {
+        let global_db_path = PathBuf::from(global_db_path);
+        if !global_db_path.exists() {
+            write_empty_global_db_schema(&global_db_path).await;
+        }
     }
+    let cg = match TraceDecay::init(project_root).await {
+        Ok(cg) => cg,
+        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
+    };
+    let sessions_db_path = &cg.store_layout().sessions_db_path;
+    if !sessions_db_path.exists() {
+        write_empty_global_db_schema(sessions_db_path).await;
+    }
+    cg
 }
 
-pub(crate) async fn delete_dashboard_automatic_fact(
-    cg: &TraceDecay,
-    receipt: &DashboardAutomaticFactReceipt,
-) {
-    use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
-
-    let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
-        .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
-    let context = MemoryOperationContext::from_request_id(
-        &owner,
-        "dashboard-outcome-test-delete",
-        &receipt.apply_id,
-        None,
-    )
-    .unwrap_or_else(|error| panic!("derive outcome deletion identity: {error}"));
-    let canonical_fact_id = FactId::new(receipt.fact_id.clone())
-        .unwrap_or_else(|error| panic!("parse outcome canonical fact identity: {error}"));
-    assert!(
-        memory
-            .remove_canonical_fact(canonical_fact_id, context, &test_fact_write_control(),)
-            .await
-            .unwrap_or_else(|error| panic!("delete outcome fact: {error:?}"))
-            .was_removed()
-    );
+pub(crate) fn blob_param(bytes: Vec<u8>) -> libsql::Value {
+    libsql::Value::Blob(bytes)
 }
 
-pub(crate) struct DashboardMemoryFixture {
-    pub(crate) near_duplicate_fact_id: FactId,
-    pub(crate) near_duplicate_last_event_id: FactEventId,
-}
-
-pub(crate) async fn seed_dashboard_fact(
-    cg: &TraceDecay,
-    content: &str,
-    category: FactCategoryV1,
-    trust: f64,
-    tags: &[&str],
-    entities: &[&str],
-) -> FactId {
-    use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_store::ProjectMemoryFactProjectionV1;
-    use tracedecay_usecases::memory::{
-        MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
+    let conn = cg.db().conn();
+    let vec_a = match HolographicEncoder::serialize(&[0.20, 0.35, 0.50]) {
+        Ok(value) => value,
+        Err(err) => panic!("failed to serialize vec_a: {err}"),
+    };
+    let vec_b = match HolographicEncoder::serialize(&[0.21, 0.34, 0.49]) {
+        Ok(value) => value,
+        Err(err) => panic!("failed to serialize vec_b: {err}"),
+    };
+    let vec_c = match HolographicEncoder::serialize(&[2.1, -1.2, 0.9]) {
+        Ok(value) => value,
+        Err(err) => panic!("failed to serialize vec_c: {err}"),
+    };
+    let bank_a = match HolographicEncoder::serialize(&[0.1, 0.2, 0.3]) {
+        Ok(value) => value,
+        Err(err) => panic!("failed to serialize bank_a: {err}"),
+    };
+    let bank_b = match HolographicEncoder::serialize(&[0.4, 0.5, 0.6]) {
+        Ok(value) => value,
+        Err(err) => panic!("failed to serialize bank_b: {err}"),
     };
 
-    let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
-        .unwrap_or_else(|error| panic!("initialize dashboard memory fixture: {error}"));
-    let request = ProjectMemoryFactAddRequest {
-        content: content.to_owned(),
-        category,
-        source_label: Some("dashboard-fixture".to_owned()),
-        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-        entities: entities.iter().map(|entity| (*entity).to_owned()).collect(),
-        trust: Some(
-            Confidence::new(trust)
-                .unwrap_or_else(|error| panic!("dashboard fixture trust: {error}")),
-        ),
-        metadata: serde_json::json!({}),
-    };
-    let actor = ActorId::new("actor.dashboard-fixture".to_owned())
-        .unwrap_or_else(|error| panic!("build dashboard fixture actor: {error}"));
-    let preflight = memory
-        .preflight_project_memory_fact_add(request, Some(actor))
-        .unwrap_or_else(|error| panic!("preflight dashboard fact: {error}"));
-    let write_control = test_fact_write_control();
-    let outcome = memory
-        .add_preflighted_project_memory_fact(preflight, &write_control)
-        .await
-        .unwrap_or_else(|error| panic!("seed dashboard fact: {error}"));
-    let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
-        panic!("dashboard fixture fact was rejected by the privacy authority: {content}");
-    };
-    let ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact() else {
-        panic!("dashboard fixture fact payload is unavailable: {content}");
-    };
-    assert_eq!(fact.content(), content);
-    fact.fact_id().clone()
-}
+    if let Err(err) = conn.execute("BEGIN IMMEDIATE", ()).await {
+        panic!("failed to begin memory fixture transaction: {err}");
+    }
 
-pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixture {
-    // Seed through the canonical application preflight and write authorities
-    // so fixture facts use the same sanitization and commit path as production.
-    let fixtures = [
+    let inserts = [
         (
-            "Cache invalidation policy must be explicit",
-            FactCategoryV1::Project,
-            0.97,
-            vec!["cache", "policy"],
-            vec!["CachePolicy"],
+            "INSERT INTO memory_facts
+                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            libsql::params![
+                101_i64,
+                "Cache invalidation policy must be explicit",
+                "project",
+                "[\"cache\",\"policy\"]",
+                0.97_f64,
+                8_i64,
+                5_i64,
+                1_700_000_000_i64,
+                1_700_000_100_i64,
+                blob_param(vec_a.clone()),
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64
+            ],
         ),
         (
-            "Cache invalidation policy must stay explicit",
-            FactCategoryV1::Project,
-            0.95,
-            vec!["cache", "policy"],
-            vec!["CachePolicy"],
+            "INSERT INTO memory_facts
+                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            libsql::params![
+                102_i64,
+                "Cache invalidation policy must stay explicit",
+                "project",
+                "[\"cache\",\"policy\"]",
+                0.95_f64,
+                6_i64,
+                4_i64,
+                1_700_000_010_i64,
+                1_700_000_110_i64,
+                blob_param(vec_b.clone()),
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64
+            ],
         ),
         (
-            LONG_FACT_CONTENT,
-            FactCategoryV1::Tool,
-            0.71,
-            vec!["lcm", "ux"],
-            vec!["LCMTab", "SimilarityView"],
+            "INSERT INTO memory_facts
+                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            libsql::params![
+                103_i64,
+                LONG_FACT_CONTENT,
+                "tool",
+                "[\"lcm\",\"ux\"]",
+                0.76_f64,
+                3_i64,
+                2_i64,
+                1_700_000_020_i64,
+                1_700_000_120_i64,
+                blob_param(vec_c.clone()),
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64
+            ],
         ),
     ];
-    let mut fact_ids = Vec::with_capacity(fixtures.len());
-    for (content, category, trust, tags, entities) in fixtures {
-        fact_ids.push(seed_dashboard_fact(cg, content, category, trust, &tags, &entities).await);
+    for (sql, params) in inserts {
+        if let Err(err) = conn.execute(sql, params).await {
+            panic!("failed to insert memory fact: {err}");
+        }
     }
-    let tool_fact_id = fact_ids[2].clone();
-    for (action, note) in [
-        (
-            tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful,
-            Some("confirmed durable".to_string()),
-        ),
-        (
-            tracedecay_store::ProjectMemoryFactFeedbackActionV1::Unhelpful,
-            None,
-        ),
-    ] {
-        use tracedecay::store::memory::DatabaseFactStore;
-        use tracedecay_store::{ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactIdV1};
-        use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
 
-        let owner = dashboard_fixture_project_owner(cg);
-        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
-            .unwrap_or_else(|error| panic!("initialize dashboard feedback fixture: {error}"));
-        let context = MemoryOperationContext::from_logical_effect(
-            &owner,
-            "dashboard-fixture-feedback",
-            &serde_json::json!({
-                "fact_id": tool_fact_id.as_str(),
-                "action": format!("{action:?}"),
-            }),
-            None,
-        )
-        .unwrap_or_else(|error| panic!("derive dashboard feedback identity: {error}"));
-        memory
-            .record_project_memory_fact_feedback(
-                ProjectMemoryFactFeedbackCommandV1::new(
-                    ProjectMemoryFactIdV1::new(owner, tool_fact_id.clone())
-                        .unwrap_or_else(|error| panic!("dashboard feedback target: {error}")),
-                    context.operation_id().clone(),
-                    None,
-                    action,
-                    None,
-                    Some("dashboard-test".to_owned()),
-                    note,
-                )
-                .unwrap_or_else(|error| panic!("dashboard feedback command: {error}")),
-                &test_fact_write_control(),
+    let entity_rows = [
+        (
+            201_i64,
+            "CachePolicy",
+            "cachepolicy",
+            "concept",
+            "[\"cache policy\"]",
+        ),
+        (202_i64, "LCMTab", "lcmtab", "feature", "[\"lcm tab\"]"),
+        (203_i64, "SimilarityView", "similarityview", "feature", "[]"),
+    ];
+    for (entity_id, name, normalized_name, entity_type, aliases) in entity_rows {
+        if let Err(err) = conn
+            .execute(
+                "INSERT INTO memory_entities
+                    (entity_id, name, normalized_name, entity_type, aliases, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                libsql::params![
+                    entity_id,
+                    name,
+                    normalized_name,
+                    entity_type,
+                    aliases,
+                    1_700_000_050_i64
+                ],
             )
             .await
-            .unwrap_or_else(|error| panic!("seed dashboard feedback: {error:?}"));
+        {
+            panic!("failed to insert memory entity: {err}");
+        }
     }
-    use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_store::{FactReadControl, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
-    use tracedecay_usecases::memory::MemoryApplication;
-    let near_duplicate_fact_id = fact_ids[1].clone();
-    let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
-        .unwrap_or_else(|error| panic!("initialize dashboard memory fixture: {error}"));
-    let projection = memory
-        .get_project_memory_fact(
-            ProjectMemoryFactIdV1::new(owner, near_duplicate_fact_id.clone())
-                .unwrap_or_else(|error| panic!("dashboard fixture target: {error}")),
-            &FactReadControl::new(Arc::new(|| false)),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("read dashboard fixture target: {error}"))
-        .unwrap_or_else(|| panic!("dashboard fixture target disappeared"));
-    let ProjectMemoryFactProjectionV1::Available(projection) = projection else {
-        panic!("dashboard fixture target payload unavailable");
-    };
-    DashboardMemoryFixture {
-        near_duplicate_fact_id,
-        near_duplicate_last_event_id: projection.last_event_id().clone(),
+
+    let joins = [
+        (101_i64, 201_i64),
+        (102_i64, 201_i64),
+        (103_i64, 202_i64),
+        (103_i64, 203_i64),
+    ];
+    for (fact_id, entity_id) in joins {
+        if let Err(err) = conn
+            .execute(
+                "INSERT INTO memory_fact_entities (fact_id, entity_id) VALUES (?1, ?2)",
+                libsql::params![fact_id, entity_id],
+            )
+            .await
+        {
+            panic!("failed to insert memory_fact_entities row: {err}");
+        }
+    }
+
+    // The "project" bank's stored fact_count is deliberately stale (5 vs the
+    // 2 live project facts): bank counts are denormalized snapshots from the
+    // last bundle rebuild, and the overview API must report live membership.
+    let bank_rows = [("project", bank_a, 5_i64), ("tool", bank_b, 1_i64)];
+    for (name, vector, fact_count) in bank_rows {
+        if let Err(err) = conn
+            .execute(
+                "INSERT INTO memory_banks
+                    (bank_name, vector, hrr_dim, fact_count, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
+                    name,
+                    blob_param(vector),
+                    3_i64,
+                    fact_count,
+                    1_700_000_130_i64
+                ],
+            )
+            .await
+        {
+            panic!("failed to insert memory bank: {err}");
+        }
+    }
+
+    if let Err(err) = conn.execute("COMMIT", ()).await {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        panic!("failed to commit memory fixture transaction: {err}");
     }
 }
 
-/// Resolve a seeded fact through the served dashboard instead of coupling
-/// tests to legacy numeric IDs or storage rows.
-pub(crate) fn fixture_fact_id(
-    agent: &ureq::Agent,
-    fixture: &DashboardFixture,
-    content_prefix: &str,
-) -> FactId {
-    let (status, overview) = get_json(
-        agent,
-        &format!("{}/api/plugins/holographic/?limit=100", fixture.base_url),
-    );
-    assert_eq!(status, 200, "dashboard fixture overview must succeed");
-    overview["payload"]["holographic"]["facts"]
-        .as_array()
-        .and_then(|facts| {
-            facts.iter().find_map(|fact| {
-                fact.get("content")
-                    .and_then(Value::as_str)
-                    .filter(|content| content.starts_with(content_prefix))
-                    .and_then(|_| fact.get("fact_id").and_then(Value::as_str))
-                    .and_then(|fact_id| FactId::new(fact_id.to_owned()).ok())
-            })
-        })
-        .unwrap_or_else(|| panic!("seeded dashboard fact not found for prefix: {content_prefix}"))
-}
-
-pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_path: &Path) {
+pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "sess-dashboard-1".to_string(),
-        // Production registers project sessions under the registered project
-        // identity; the canonical observation projection reconciles its
-        // session row against this one, so a divergent ad-hoc key would be
-        // an output collision, not a merge.
-        project_key: runtime.project_id().as_str().to_string(),
+        project_key: "tracedecay-fixture".to_string(),
         project_path: project_path.display().to_string(),
         title: Some("Dashboard fixture session".to_string()),
         started_at: Some(1_700_001_000),
@@ -566,11 +337,7 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
         agent_id: None,
         parent_tool_use_id: None,
     };
-    if !runtime
-        .upsert_session_for_test(HostAdmissionScope::Project, &session)
-        .await
-        .unwrap_or_else(|error| panic!("failed to upsert session fixture: {error}"))
-    {
+    if !global_db.upsert_session(&session).await {
         panic!("failed to upsert session fixture");
     }
 
@@ -623,64 +390,20 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
     ];
 
     for message in messages {
-        // Production ingest persists every message as a canonical durable
-        // observation (which projects the session_messages row itself) plus
-        // the raw LCM payload row; the session-temporal refresh discovers
-        // sessions ONLY from the observation effects, so the fixture walks
-        // the same two writes instead of raw session_messages upserts the
-        // temporal projection would never see.
-        runtime
-            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "failed to ingest raw LCM fixture message {}: {error}",
-                    message.message_id
-                )
-            });
-        runtime
-            .seed_session_message_observation_for_test(
-                tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
-                    project_id: runtime.project_id().as_str(),
-                    provider: &message.provider,
-                    session_id: &message.session_id,
-                    message_id: &message.message_id,
-                    role: &message.role,
-                    content: &message.text,
-                    model: message.model.as_deref(),
-                    timestamp: message.timestamp.unwrap_or_else(|| {
-                        panic!("fixture message {} has no timestamp", message.message_id)
-                    }),
-                    ordinal: u64::try_from(message.ordinal).unwrap_or_else(|_| {
-                        panic!(
-                            "fixture message {} has a negative ordinal",
-                            message.message_id
-                        )
-                    }),
-                },
-            )
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "failed to seed canonical observation for {}: {error}",
-                    message.message_id
-                )
-            });
+        if !global_db.upsert_session_message(&message).await {
+            panic!(
+                "failed to upsert LCM message fixture {}",
+                message.message_id
+            );
+        }
     }
-    let msg_1 = match runtime
-        .lcm_raw_store_id_for_test(HostAdmissionScope::Project, "cursor", "msg-1")
-        .await
-        .unwrap_or_else(|error| panic!("load seeded message msg-1: {error}"))
-    {
-        Some(store_id) => store_id,
+
+    let msg_1 = match global_db.lcm_load_raw_message("cursor", "msg-1").await {
+        Some(record) => record.store_id,
         None => panic!("missing seeded message msg-1"),
     };
-    let msg_2 = match runtime
-        .lcm_raw_store_id_for_test(HostAdmissionScope::Project, "cursor", "msg-2")
-        .await
-        .unwrap_or_else(|error| panic!("load seeded message msg-2: {error}"))
-    {
-        Some(store_id) => store_id,
+    let msg_2 = match global_db.lcm_load_raw_message("cursor", "msg-2").await {
+        Some(record) => record.store_id,
         None => panic!("missing seeded message msg-2"),
     };
 
@@ -704,21 +427,9 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
                 .to_string(),
         ),
     };
-    if let Err(err) = runtime
-        .lcm_insert_summary_node_for_test(HostAdmissionScope::Project, draft)
-        .await
-    {
+    if let Err(err) = global_db.lcm_insert_summary_node(draft).await {
         panic!("failed to insert summary node fixture: {err}");
     }
-    // Materialize AFTER every seeded write (messages and the summary node):
-    // the frozen temporal generation serves reads, so anything published
-    // after materialization would be invisible to generation-bound reads.
-    runtime
-        .materialize_session_temporal_refresh_for_test("sess-dashboard-1")
-        .await
-        .unwrap_or_else(|error| {
-            panic!("failed to materialize LCM fixture session refresh: {error}")
-        });
 }
 
 pub(crate) fn post_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
@@ -754,7 +465,7 @@ pub(crate) struct FakeCodexAppServer {
 }
 
 impl FakeCodexAppServer {
-    pub(crate) fn new_memory_curator(fact_id: FactId, last_event_id: FactEventId) -> Self {
+    pub(crate) fn new_memory_curator() -> Self {
         let temp = tempdir_or_panic();
         let script_path = temp.path().join("codex.py");
         let bin = fake_codex_bin(temp.path());
@@ -767,8 +478,6 @@ if len(sys.argv) != 2 or sys.argv[1] != "app-server":
     sys.exit(42)
 if os.environ.get("TRACEDECAY_CODEX_SUMMARY_CHILD") != "1":
     sys.exit(43)
-fact_id = __FACT_ID__
-last_event_id = __LAST_EVENT_ID__
 
 for line in sys.stdin:
     msg = json.loads(line)
@@ -783,17 +492,11 @@ for line in sys.stdin:
     elif method == "turn/start":
         payload = {
             "ops": [{
-                "op": "normalize_tags",
-                "target": {
-                    "fact_id": fact_id,
-                    "expected_last_event_id": last_event_id,
-                },
-                "tags": ["cache", "curated", "policy"],
-                "evidence_facts": [{
-                    "fact_id": fact_id,
-                    "expected_last_event_id": last_event_id,
-                }],
-                "confidence": 0.98
+                "cluster_id": "cluster-0000",
+                "op": "delete",
+                "fact_id": 102,
+                "confidence": 0.98,
+                "reason": "near duplicate of fact 101"
             }]
         }
         print(json.dumps({
@@ -802,43 +505,24 @@ for line in sys.stdin:
         }), flush=True)
         print(json.dumps({"method": "turn/completed"}), flush=True)
         break
-"#
-        .replace(
-            "__FACT_ID__",
-            &serde_json::to_string(fact_id.as_str())
-                .unwrap_or_else(|error| panic!("encode fake curator fact id: {error}")),
-        )
-        .replace(
-            "__LAST_EVENT_ID__",
-            &serde_json::to_string(last_event_id.as_str())
-                .unwrap_or_else(|error| panic!("encode fake curator event id: {error}")),
-        );
-        write_file(&script_path, &script);
+"#;
+        write_file(&script_path, script);
         install_fake_codex_launcher(&script_path, &bin);
         Self { _temp: temp, bin }
     }
 }
 
 pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
-    start_dashboard_fixture_with_options(seed_lcm, true, false).await
+    start_dashboard_fixture_with_options(seed_lcm, true).await
 }
 
 pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, false, false).await
-}
-
-pub(crate) async fn start_dashboard_configuration_fixture() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, false, true).await
-}
-
-pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, true, true).await
+    start_dashboard_fixture_with_options(false, false).await
 }
 
 async fn start_dashboard_fixture_with_options(
     seed_lcm: bool,
     seed_memory: bool,
-    mount_configuration_runtime: bool,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = tmp
@@ -846,50 +530,48 @@ async fn start_dashboard_fixture_with_options(
         .canonicalize()
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
     let project_root = tmp_root.join("project");
+    let global_db_path = tmp_root.join("global").join("global.db");
     let profile_root = tmp_root.join("profile").join(".tracedecay");
-    let requested_global_db_path = profile_root.join("global.db");
     // Skill lifecycle endpoints re-export managed skills into agent configs
     // under the process home; point HOME at the fixture so tests never touch
     // the developer's real agent installations.
     let home = tmp_root.join("home");
     std::fs::create_dir_all(&home)
         .unwrap_or_else(|err| panic!("failed to create fixture home: {err}"));
-    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &requested_global_db_path);
+    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     let home_guard = EnvVarGuard::set("HOME", &home);
     let userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
-    std::fs::create_dir_all(&project_root)
-        .unwrap_or_else(|err| panic!("failed to create fixture project root: {err}"));
-    if let Err(err) = tracedecay::storage::pin_fixture_repository_identity(
+    if let Err(err) = write_enrollment_marker(
         &project_root,
-        "dashboard_fixture_project",
+        &EnrollmentMarker {
+            project_id: "dashboard_fixture".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
     ) {
         panic!("failed to enroll dashboard fixture in profile storage: {err}");
     }
 
-    // Root composition retains the exact graph and registered database
-    // authorities for the server lifetime.
-    let (cg, host_runtime) = setup_project(&project_root).await;
-    let global_db_path = host_runtime
-        .database_path(HostAdmissionScope::Profile)
-        .expect("dashboard fixture profile database path")
-        .to_path_buf();
+    // `setup_project` pre-creates the global and session stores from the
+    // cached empty template, so the init-time registry write, LCM seeding,
+    // and the dashboard server's startup LCM resolve + catch-up ingest all
+    // open existing DBs instead of each paying a full schema creation (slow
+    // on Windows).
+    let cg = setup_project(&project_root).await;
     if seed_memory {
         seed_memory_fixture(&cg).await;
     }
 
-    let project_graphs = dashboard::DashboardTestProjectGraphsV1::default();
     if seed_lcm {
-        seed_lcm_fixture(&host_runtime, &project_root).await;
+        let session_store = open_project_session_store(&project_root).await;
+        seed_lcm_fixture(&session_store, &project_root).await;
+        drop(session_store);
     }
+
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let server = spawn_dashboard_server_with_runner(
-        cg,
-        Some((Arc::clone(&host_runtime), project_graphs.clone())),
-        mount_configuration_runtime,
-        port,
-    );
+    let project_db_path = cg.store_layout().graph_db_path.clone();
+    let server = spawn_dashboard_server(cg, port);
 
     let agent = http_agent();
     wait_for_dashboard(&agent, &base_url).await;
@@ -901,12 +583,145 @@ async fn start_dashboard_fixture_with_options(
         _home_guard: home_guard,
         _userprofile_guard: userprofile_guard,
         home,
-        global_db_path,
         base_url,
         project_root,
-        host_runtime,
-        project_graphs,
+        project_db_path,
         server,
+    }
+}
+
+/// Counts rows in the fixture's project DB matching `sql` (a SELECT COUNT query
+/// with one `?1` bind), via a fresh read connection. Used to prove hard deletes
+/// actually removed rows (and their entity links) from the store that
+/// `tracedecay_fact_store` recall reads.
+pub(crate) async fn count_in_project_db(
+    fixture: &DashboardFixture,
+    sql: &str,
+    fact_id: i64,
+) -> i64 {
+    let db = match libsql::Builder::new_local(&fixture.project_db_path)
+        .build()
+        .await
+    {
+        Ok(db) => db,
+        Err(err) => panic!("failed to open project DB for verification: {err}"),
+    };
+    let conn = match db.connect() {
+        Ok(conn) => conn,
+        Err(err) => panic!("failed to connect to project DB: {err}"),
+    };
+    let mut rows = match conn.query(sql, libsql::params![fact_id]).await {
+        Ok(rows) => rows,
+        Err(err) => panic!("verification query failed: {err}"),
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(-1),
+        Ok(None) => -1,
+        Err(err) => panic!("verification row read failed: {err}"),
+    }
+}
+
+pub(crate) async fn string_in_project_db(
+    fixture: &DashboardFixture,
+    sql: &str,
+    fact_id: i64,
+) -> Option<String> {
+    let conn = project_db_conn(fixture).await;
+    let mut rows = match conn.query(sql, libsql::params![fact_id]).await {
+        Ok(rows) => rows,
+        Err(err) => panic!("verification query failed: {err}"),
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<String>(0).ok(),
+        Ok(None) => None,
+        Err(err) => panic!("verification row read failed: {err}"),
+    }
+}
+
+pub(crate) async fn project_db_conn(fixture: &DashboardFixture) -> libsql::Connection {
+    let db = match libsql::Builder::new_local(&fixture.project_db_path)
+        .build()
+        .await
+    {
+        Ok(db) => db,
+        Err(err) => panic!("failed to open project DB directly: {err}"),
+    };
+    let conn = match db.connect() {
+        Ok(conn) => conn,
+        Err(err) => panic!("failed to connect to project DB directly: {err}"),
+    };
+    // The running dashboard can write to this store concurrently; wait out
+    // transient write locks instead of failing the fixture mutation.
+    if let Err(err) = conn.execute_batch("PRAGMA busy_timeout = 5000;").await {
+        panic!("failed to set busy_timeout on project DB connection: {err}");
+    }
+    conn
+}
+
+/// Swaps a fact's vector the way every production re-encode does: alongside
+/// an `updated_at` bump (`update_fact` / `update_fact_vector` always bump it;
+/// the startup repair only fills NULL vectors, which changes the vectored
+/// count instead). The similarity cache fingerprint is metadata-only and
+/// relies on exactly that contract.
+pub(crate) async fn set_fact_vector_and_bump_updated_at(
+    fixture: &DashboardFixture,
+    fact_id: i64,
+    phases: &[f64],
+) {
+    let conn = project_db_conn(fixture).await;
+    let vector = match HolographicEncoder::serialize(phases) {
+        Ok(vector) => vector,
+        Err(err) => panic!("failed to serialize replacement vector: {err}"),
+    };
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = ?1, hrr_algebra = 'amari_fhrr', hrr_dim = ?2,
+                 updated_at = updated_at + 1
+             WHERE fact_id = ?3",
+            libsql::params![blob_param(vector), phases.len() as i64, fact_id],
+        )
+        .await
+    {
+        panic!("failed to update fact vector fixture: {err}");
+    }
+}
+
+pub(crate) async fn clear_fact_vector_without_touching_updated_at(
+    fixture: &DashboardFixture,
+    fact_id: i64,
+) {
+    let conn = project_db_conn(fixture).await;
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = NULL
+             WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+    {
+        panic!("failed to clear fact vector fixture: {err}");
+    }
+}
+
+pub(crate) async fn set_fact_access_without_touching_updated_at(
+    fixture: &DashboardFixture,
+    fact_id: i64,
+    access_count: i64,
+    last_recalled_at: i64,
+) {
+    let conn = project_db_conn(fixture).await;
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET access_count = ?1, last_recalled_at = ?2
+             WHERE fact_id = ?3",
+            libsql::params![access_count, last_recalled_at, fact_id],
+        )
+        .await
+    {
+        panic!("failed to update fact access fixture: {err}");
     }
 }
 
@@ -960,20 +775,32 @@ pub(crate) fn commit_all(project: &Path, message: &str) {
     );
 }
 
-/// Opens the resolved registered project session authority.
-pub(crate) async fn open_project_session_store(project_root: &Path) -> Arc<DashboardTestRuntimeV1> {
-    let project_id = tracedecay::storage::read_repository_identity_marker(project_root)
-        .unwrap_or_else(|error| panic!("read dashboard project identity: {error}"))
-        .and_then(|marker| ProjectId::new(marker.project_id).ok())
-        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project identity"));
-    Arc::new(
-        DashboardTestRuntimeV1::project(
-            tracedecay::storage::default_profile_root()
-                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
-            project_root,
-            project_id,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open dashboard project session authority: {error}")),
-    )
+pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay, context: &str) {
+    for attempt in 0..20 {
+        match cg.index_all().await {
+            Ok(_) => return,
+            Err(TraceDecayError::SyncLock { .. }) if attempt < 19 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(err) => panic!("{context}: {err}"),
+        }
+    }
+}
+
+/// Opens (creating if needed) the resolved project session store — profile
+/// sharded by default, project-local only for explicit or legacy projects.
+/// A missing store is written from the cached empty-schema template so the
+/// open skips full schema creation (a large fixed cost on Windows).
+pub(crate) async fn open_project_session_store(project_root: &Path) -> GlobalDb {
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
+    if !db_path.exists() {
+        write_empty_global_db_schema(&db_path).await;
+    }
+    match GlobalDb::open_at(&db_path).await {
+        Some(db) => db,
+        None => panic!(
+            "failed to open project session store at {}",
+            db_path.display()
+        ),
+    }
 }

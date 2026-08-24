@@ -1,6 +1,6 @@
 # Code Coverage Report
 
-**Version:** 0.1.0-beta.37
+**Version:** 3.2.2
 **Date:** 2026-04-05
 **Tool:** [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)
 **Total tests:** 1,046

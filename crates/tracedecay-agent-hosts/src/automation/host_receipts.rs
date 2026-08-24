@@ -6,14 +6,43 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use super::config_error;
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::storage::PrivateStoreIo;
 use crate::tracedecay::current_timestamp;
-use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
 
 const STATE_FILE: &str = "host_receipts.json";
 const LOCK_FILE: &str = "host_receipts.lock";
+
+/// Host-supplied routing metadata retained with terminal receipts until LCM
+/// ingest consumes the matching session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookRouteMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// Host terminal metadata persisted beside a pending receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookTerminalReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_watermark: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingHostReceipt {
@@ -49,28 +78,10 @@ struct HostReceiptState {
     recent_dedupe_keys: Vec<String>,
 }
 
-fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {
-    route.session_id =
-        crate::privacy::protect_optional_sensitive_structural_id(route.session_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt route identity"))?;
-    route.thread_id =
-        crate::privacy::protect_optional_sensitive_structural_id(route.thread_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt route identity"))?;
-    Ok(route)
-}
-
-fn protect_receipt_structural_ids(mut receipt: HookTerminalReceipt) -> Result<HookTerminalReceipt> {
-    receipt.tool_call_id =
-        crate::privacy::protect_optional_sensitive_structural_id(receipt.tool_call_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.turn_id =
-        crate::privacy::protect_optional_sensitive_structural_id(receipt.turn_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.transcript_watermark = crate::privacy::protect_optional_sensitive_structural_id(
-        receipt.transcript_watermark.as_deref(),
-    )
-    .map_err(|_| config_error("invalid host receipt identity"))?;
-    Ok(receipt)
+fn config_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: message.into(),
+    }
 }
 
 fn session_key(route: Option<&HookRouteMetadata>) -> String {
@@ -128,19 +139,12 @@ fn with_locked_state<T>(
     Ok(output)
 }
 
-/// Every hook terminal receipt a host reports lands here: a locked
-/// read-modify-write of the dashboard state file. This is the per-tool-call
-/// disk boundary, so it is measured as one unit rather than its internal
-/// dedupe/serialize steps.
-#[hotpath::measure]
 pub async fn record(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
     receipt: HookTerminalReceipt,
 ) -> Result<bool> {
     let root = dashboard_root.to_path_buf();
-    let route = route.map(protect_route_structural_ids).transpose()?;
-    let receipt = protect_receipt_structural_ids(receipt)?;
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
@@ -171,18 +175,13 @@ pub async fn record(
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
-/// Per-turn boundary write: the same locked state file as [`record`], but
-/// gated on transcript ingestion rather than the raw tool-call receipt.
-#[hotpath::measure]
 pub async fn mark_turn_ingested(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
     transcript_watermark: &str,
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
-    let route = route.map(protect_route_structural_ids).transpose()?;
-    let watermark = crate::privacy::protect_sensitive_structural_id(transcript_watermark)
-        .map_err(|_| config_error("invalid host receipt watermark"))?;
+    let watermark = transcript_watermark.to_string();
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
@@ -283,7 +282,7 @@ mod tests {
                 .unwrap()
         );
         assert!(!record(tmp.path(), route, receipt("call-1")).await.unwrap());
-        mark_turn_ingested(tmp.path(), Some(pending_route("session-1")), "message-1")
+        mark_turn_ingested(tmp.path(), pending_route("session-1"), "message-1")
             .await
             .unwrap();
         let pending = oldest_ready(tmp.path()).await.unwrap().unwrap().pending;
@@ -297,13 +296,13 @@ mod tests {
     async fn serves_parallel_sessions_oldest_first() {
         let tmp = tempfile::tempdir().unwrap();
         for session_id in ["session-1", "session-2"] {
-            let route = Some(pending_route(session_id));
+            let route = pending_route(session_id);
             assert!(
                 record(tmp.path(), route, receipt(session_id))
                     .await
                     .unwrap()
             );
-            mark_turn_ingested(tmp.path(), Some(pending_route(session_id)), session_id)
+            mark_turn_ingested(tmp.path(), pending_route(session_id), session_id)
                 .await
                 .unwrap();
         }
@@ -311,49 +310,13 @@ mod tests {
         assert_eq!(pending.pending.session_key, "session-1");
     }
 
-    #[tokio::test]
-    async fn credential_canary_receipt_join_survives_state_reopen() {
-        let tmp = tempfile::tempdir().unwrap();
-        let raw = ["AKIA", "SYNTHETIC", "CANARY", "5"].concat();
-        let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
-        let route = Some(pending_route(&raw));
-        let mut terminal = receipt(&raw);
-        terminal.turn_id = Some(raw.clone());
-        terminal.transcript_watermark = Some(raw.clone());
-
-        assert!(record(tmp.path(), route.clone(), terminal).await.unwrap());
-        mark_turn_ingested(tmp.path(), route, &raw).await.unwrap();
-
-        let persisted = std::fs::read_to_string(tmp.path().join(STATE_FILE)).unwrap();
-        assert!(!persisted.contains(&raw));
-        drop(persisted);
-
-        let ready = oldest_ready(tmp.path()).await.unwrap().unwrap();
-        assert_eq!(ready.pending.session_key, protected);
-        assert_eq!(ready.transcript_watermark, protected);
-        let route = ready.pending.route.expect("protected route");
-        assert_eq!(route.session_id.as_deref(), Some(protected.as_str()));
-        assert_eq!(
-            ready.pending.receipt.tool_call_id.as_deref(),
-            Some(protected.as_str())
-        );
-        assert_eq!(
-            ready.pending.receipt.turn_id.as_deref(),
-            Some(protected.as_str())
-        );
-        assert_eq!(
-            ready.pending.receipt.transcript_watermark.as_deref(),
-            Some(protected.as_str())
-        );
-    }
-
-    fn pending_route(session_id: &str) -> HookRouteMetadata {
-        HookRouteMetadata {
+    fn pending_route(session_id: &str) -> Option<HookRouteMetadata> {
+        Some(HookRouteMetadata {
             session_id: Some(session_id.to_string()),
             thread_id: None,
             cwd: None,
             worktree: None,
             branch: None,
-        }
+        })
     }
 }

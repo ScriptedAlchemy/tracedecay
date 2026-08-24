@@ -1,27 +1,58 @@
-//! LCM value types owned by the session store.
-//!
-//! The DB-free retrieval and rendering contracts live in
-//! [`crate::lcm`] and are re-exported here so
-//! `sessions::lcm` remains the single import surface for the session engine.
-//! Only infrastructure-facing conversions — notably the SQL error mapping —
-//! stay in this module.
+pub const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
+pub const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
+pub const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tracedecay]";
 
-pub use crate::lcm::contracts::{
-    LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
-    LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
-    LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
-    LcmExpandedSummarySource, LcmPayloadExpansion, LcmPayloadRef, LcmRawMessage,
-    LcmRawMessageMetadata, LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
-    LcmSummaryNodeOverview,
-};
-pub use crate::retrieval_content::{
-    DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
-};
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmRawMessage {
+    pub provider: String,
+    pub message_id: String,
+    pub session_id: String,
+    pub store_id: i64,
+    pub role: String,
+    pub ordinal: i64,
+    pub timestamp: Option<i64>,
+    pub content: String,
+    pub content_hash: String,
+    pub storage_kind: LcmStorageKind,
+    pub payload_ref: Option<String>,
+    pub legacy_source: bool,
+    pub legacy_truncated: bool,
+    pub metadata_json: Option<String>,
+}
 
-impl From<tracedecay_runtime_core::db::engine::Error> for LcmError {
-    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
-        Self::Db(err.to_string())
-    }
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadRef {
+    pub payload_ref: String,
+    pub provider: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub kind: String,
+    pub content_hash: String,
+    pub byte_count: u64,
+    pub char_count: u64,
+    pub created_at: i64,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadExpansion {
+    pub payload_ref: String,
+    pub provider: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub content: String,
+    pub offset: u64,
+    pub char_count: u64,
+    pub total_char_count: u64,
+    pub byte_count: u64,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcmSourceRef {
+    RawMessage { store_id: i64 },
+    SummaryNode { node_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -40,35 +71,44 @@ pub struct LcmSummaryNodeDraft {
     pub metadata_json: Option<String>,
 }
 
-/// Explicit identity and predecessor edge for one immutable summary
-/// publication. `draft` is also materialized into the legacy LCM tables as a
-/// compatibility projection in the authoritative transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LcmImmutableSummaryPublication {
-    pub summary_id: String,
-    pub predecessor_summary_id: Option<String>,
-    pub draft: LcmSummaryNodeDraft,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LcmSummaryPublicationDisposition {
-    Published,
-    ExactReplay,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LcmSummaryPublicationReceipt {
-    pub summary: LcmSummaryNode,
-    pub disposition: LcmSummaryPublicationDisposition,
-    pub generation: i64,
-    pub frozen_watermarks_json: String,
-    pub published_at: i64,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryNode {
+    pub node_id: String,
+    pub provider: String,
+    pub conversation_id: String,
+    pub session_id: String,
+    pub depth: i64,
+    pub summary_text: String,
+    pub summary_hash: String,
+    pub source_refs: Vec<LcmSourceRef>,
+    pub summary_token_count: i64,
+    pub source_token_count: i64,
+    pub source_time_start: Option<i64>,
+    pub source_time_end: Option<i64>,
+    pub expand_hint: Option<String>,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmSummaryExpansion {
     pub summary: LcmSummaryNode,
     pub sources: Vec<LcmExpandedSummarySource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmContentSlice {
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmContentRange {
+    pub offset: u64,
+    pub limit: u64,
+    pub returned_chars: u64,
+    pub total_chars: u64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -223,15 +263,15 @@ pub struct LcmGrepRequest {
 /// interactive retrieval can select parent/subagent and semantic message type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LcmGrepFilters {
-    pub relationship_scope: crate::runtime::SessionSearchScope,
-    pub message_type: crate::runtime::SessionMessageType,
+    pub relationship_scope: crate::SessionSearchScope,
+    pub message_type: crate::SessionMessageType,
 }
 
 impl Default for LcmGrepFilters {
     fn default() -> Self {
         Self {
-            relationship_scope: crate::runtime::SessionSearchScope::All,
-            message_type: crate::runtime::SessionMessageType::All,
+            relationship_scope: crate::SessionSearchScope::All,
+            message_type: crate::SessionMessageType::All,
         }
     }
 }
@@ -260,6 +300,71 @@ pub struct LcmGrepOutcome {
     pub hits: Vec<LcmGrepHit>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub capped_sessions: std::collections::BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcmExpandTarget {
+    RawMessage { store_id: i64 },
+    SummaryNode { node_id: String },
+    ExternalPayload { payload_ref: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub target: LcmExpandTarget,
+    pub content_slice: Option<LcmContentSlice>,
+    /// Zero-based offset into a summary node's immediate source list
+    /// (summary-node targets only). Mirrors hermes-lcm `lcm_expand`
+    /// `source_offset`.
+    #[serde(default)]
+    pub source_offset: usize,
+    /// Maximum number of immediate sources returned from `source_offset`
+    /// (summary-node targets only). `None` returns all remaining sources,
+    /// mirroring hermes-lcm `lcm_expand` `source_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_limit: Option<usize>,
+}
+
+/// Pagination metadata for a summary node's immediate source list, mirroring
+/// the hermes-lcm `lcm_expand` pagination payload (`_pagination_payload` in
+/// `tools.py`). `TraceDecay` slices each returned source by characters via
+/// `content_slice` instead of sharing a token budget across sources, so the
+/// resume cursor is `next_source_offset` alone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandSourcePagination {
+    pub source_offset: usize,
+    pub source_limit: usize,
+    pub returned_sources: usize,
+    pub total_sources: usize,
+    pub next_source_offset: Option<usize>,
+    pub has_more: bool,
+    pub remaining_sources: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandResponse {
+    pub kind: String,
+    pub content: String,
+    pub content_range: LcmContentRange,
+    pub raw_message: Option<LcmRawMessage>,
+    pub summary_node: Option<LcmSummaryNode>,
+    pub summary_sources: Vec<LcmExpandedSummarySource>,
+    pub payload_ref: Option<String>,
+    /// Whether a raw-message target belongs to the requesting session.
+    /// Mirrors hermes-lcm `from_current_session`; raw-message targets only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_current_session: Option<bool>,
+    /// Legacy compatibility note mirrored from hermes-lcm payloads. Modern
+    /// cross-session expansion flows should rely on `payload_ref` +
+    /// `raw_message.session_id` and remain note-free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub externalized_note: Option<String>,
+    /// Source-list pagination metadata (summary-node targets only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pagination: Option<LcmExpandSourcePagination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -310,8 +415,6 @@ pub struct LcmExpandQueryPagination {
     pub kind: String,
     pub node_id: Option<String>,
     pub source_ref: Option<LcmSourceRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<tracedecay_domain::HydrationStateV1>,
     pub next_content_offset: Option<u64>,
     pub has_more: bool,
 }
@@ -333,6 +436,102 @@ pub struct LcmExpandQueryContextBlock {
     pub content_range: LcmContentRange,
     pub raw_message: Option<LcmRawMessage>,
     pub summary_node: Option<LcmSummaryNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryNodeOverview {
+    pub node_id: String,
+    pub conversation_id: String,
+    pub depth: i64,
+    pub summary_preview: String,
+    pub source_count: usize,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmRawMessageOverview {
+    pub message_id: String,
+    pub store_id: i64,
+    pub role: String,
+    pub storage_kind: LcmStorageKind,
+    pub payload_ref: Option<String>,
+    pub content_preview: String,
+    pub content_range: LcmContentRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcmDescribeTarget {
+    Session,
+    SummaryNode { node_id: String },
+    ExternalPayload { payload_ref: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub target: LcmDescribeTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeSourceOverview {
+    pub source_kind: String,
+    pub source_ref: LcmSourceRef,
+    pub store_id: Option<i64>,
+    pub node_id: Option<String>,
+    pub role: Option<String>,
+    pub storage_kind: Option<LcmStorageKind>,
+    pub summary_token_count: Option<i64>,
+    pub source_token_count: Option<i64>,
+    pub expand_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeSummaryNode {
+    pub node_id: String,
+    pub conversation_id: String,
+    pub depth: i64,
+    pub summary_token_count: i64,
+    pub source_token_count: i64,
+    pub source_time_start: Option<i64>,
+    pub source_time_end: Option<i64>,
+    pub expand_hint: Option<String>,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+    pub source_count: usize,
+    pub children: Vec<LcmDescribeSourceOverview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeExternalPayload {
+    pub payload_ref: String,
+    pub provider: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub kind: String,
+    pub content_hash: String,
+    pub byte_count: u64,
+    pub char_count: u64,
+    pub created_at: i64,
+    pub metadata_json: Option<String>,
+    pub content_preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeResponse {
+    pub target: String,
+    pub provider: String,
+    pub session_id: String,
+    pub raw_message_count: i64,
+    pub summary_node_count: i64,
+    pub external_payload_count: i64,
+    pub first_store_id: Option<i64>,
+    pub last_store_id: Option<i64>,
+    pub raw_messages: Vec<LcmRawMessageOverview>,
+    pub summary_nodes: Vec<LcmSummaryNodeOverview>,
+    pub summary_node: Option<LcmDescribeSummaryNode>,
+    pub external_payload: Option<LcmDescribeExternalPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -366,41 +565,12 @@ pub const LCM_DEFAULT_SUMMARY_FAN_IN: usize = 4;
 pub const LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 
 /// Raw-store size diagnostics mirroring the hermes-lcm `lcm_status` `store`
-/// block. `estimated_tokens` uses the LCM whitespace budget heuristic
-/// (`lcm_budget_tokens`) over stored message content.
-///
-/// `messages` is the exact row count. The token estimate has to read every
-/// message body, which on a multi-gigabyte profile store cannot finish inside
-/// a request deadline, so `token_estimate` states how much of the store the
-/// reported estimate actually covers.
+/// block. `estimated_tokens` uses the engine's deterministic whitespace
+/// token estimate over stored message content.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmStoreStatus {
     pub messages: i64,
     pub estimated_tokens: i64,
-    pub token_estimate: LcmStoreTokenCoverage,
-}
-
-/// Coverage of the raw-store token estimate.
-///
-/// A partial estimate is a typed state, never a smaller number presented as
-/// the whole store: `complete` is false, `scanned_messages` reports how many
-/// bodies were summed, and `next_after_store_id` resumes the scan.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmStoreTokenCoverage {
-    pub complete: bool,
-    pub scanned_messages: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_after_store_id: Option<i64>,
-}
-
-impl LcmStoreTokenCoverage {
-    pub const fn complete(scanned_messages: i64) -> Self {
-        Self {
-            complete: true,
-            scanned_messages,
-            next_after_store_id: None,
-        }
-    }
 }
 
 /// Per-depth summary counters mirroring the hermes-lcm `lcm_status`
@@ -437,7 +607,7 @@ pub struct LcmConfigStatus {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmNoiseClassificationConfig {
+pub struct LcmCleanConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -547,24 +717,7 @@ pub struct LcmPayloadGcStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LcmPayloadCoverageState {
-    Complete,
-    Partial,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmPayloadCoverage {
-    pub state: LcmPayloadCoverageState,
-    pub scanned_metadata_refs: i64,
-    pub scanned_files: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPayloadStatus {
-    pub coverage: LcmPayloadCoverage,
     pub externalized_count: i64,
     pub missing_count: i64,
     pub unreferenced_count: i64,
@@ -637,7 +790,6 @@ pub enum LcmMaintenanceDebt {
 pub struct LcmPreflightRequest {
     pub provider: String,
     pub session_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<serde_json::Value>,
     pub current_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -666,6 +818,8 @@ pub struct LcmPreflightRequest {
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stateless_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_message_patterns: Vec<String>,
 }
 
 /// Host notification that a session crossed a compression boundary.
@@ -751,14 +905,6 @@ pub struct LcmSummaryRequest {
     pub extraction_request: Option<LcmExtractionRequest>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LcmRelationProjectionStatus {
-    #[default]
-    NotApplicable,
-    Pending,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCompressionResponse {
     pub status: String,
@@ -774,10 +920,90 @@ pub struct LcmCompressionResponse {
     pub context_recovery_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_status: Option<String>,
-    #[serde(default)]
-    pub relation_projection_status: LcmRelationProjectionStatus,
     pub frontier: LcmLifecycleState,
     pub summary_request: Option<LcmSummaryRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandedSummarySource {
+    pub source_ref: LcmSourceRef,
+    pub content: String,
+    pub content_range: Option<LcmContentRange>,
+    #[serde(default)]
+    pub content_truncated: bool,
+    pub raw_message: Option<LcmRawMessage>,
+    pub summary_node: Option<Box<LcmSummaryNode>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LcmError {
+    InvalidPayloadRef,
+    PayloadNotFound,
+    PayloadNotOwnedBySession,
+    PayloadMissing,
+    PayloadGcd,
+    PayloadIntegrityMismatch,
+    StillReferenced,
+    SummaryNodeNotFound,
+    SummarySourceNotOwnedBySession,
+    LifecycleStateNotFound,
+    Db(String),
+    Io(String),
+}
+
+impl From<libsql::Error> for LcmError {
+    fn from(err: libsql::Error) -> Self {
+        Self::Db(err.to_string())
+    }
+}
+
+impl std::fmt::Display for LcmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPayloadRef => write!(f, "invalid payload ref"),
+            Self::PayloadNotFound => write!(f, "payload not found"),
+            Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),
+            Self::PayloadMissing => write!(f, "payload file missing"),
+            Self::PayloadGcd => write!(f, "payload already garbage collected"),
+            Self::PayloadIntegrityMismatch => write!(f, "payload integrity mismatch"),
+            Self::StillReferenced => write!(f, "payload still referenced"),
+            Self::SummaryNodeNotFound => write!(f, "summary node not found"),
+            Self::SummarySourceNotOwnedBySession => {
+                write!(f, "summary source not owned by session")
+            }
+            Self::LifecycleStateNotFound => {
+                write!(f, "payload database error: lifecycle state not found")
+            }
+            Self::Db(message) => write!(f, "payload database error: {message}"),
+            Self::Io(message) => write!(f, "payload IO error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for LcmError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmStorageKind {
+    Inline,
+    External,
+}
+
+impl LcmStorageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::External => "external",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "inline" => Some(Self::Inline),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

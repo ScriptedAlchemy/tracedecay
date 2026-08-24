@@ -1,6 +1,4 @@
-use tracedecay_agent_hosts::automation::agent_targets::{
-    install_codex_managed_agents, remove_managed_agents,
-};
+use tracedecay::automation::agent_targets::{install_codex_managed_agents, remove_managed_agents};
 
 const EXPECTED_AGENT_IDS: &[&str] = &[
     "code-explorer",

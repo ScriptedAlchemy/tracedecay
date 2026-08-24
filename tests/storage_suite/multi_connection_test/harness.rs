@@ -1,7 +1,4 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -10,8 +7,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::common;
 use serde_json::{Value, json};
+use tracedecay::db::SQLITE_UNSAFE_FAST_ENV;
+use tracedecay::storage::{default_profile_project_id, profile_sharded_data_root};
+
+use crate::common;
 
 pub(super) const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(super) const CLIENT_COUNT: usize = 12;
@@ -55,13 +55,16 @@ pub(super) fn init_project(home: &Path, project: &Path, socket_path: &Path) -> P
 
     let output = common::tracedecay_command_with_home(home)
         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
+        .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .arg("init")
         .current_dir(project)
         .output()
         .expect("tracedecay init should run");
     assert_command_success("tracedecay init", &output);
 
-    home.join(".tracedecay").join("global.db")
+    let profile_root = home.join(".tracedecay");
+    let data_root = profile_sharded_data_root(&profile_root, &default_profile_project_id(project));
+    data_root.join(tracedecay::config::db_filename(&data_root))
 }
 
 pub(super) fn assert_command_success(label: &str, output: &std::process::Output) {
@@ -75,49 +78,30 @@ pub(super) fn assert_command_success(label: &str, output: &std::process::Output)
 
 fn wait_for_socket(socket_path: &Path, child: &mut Child) {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
-    common::poll_until(
-        deadline,
-        Duration::from_millis(25),
-        || {
-            if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-                return Some(());
-            }
-            if let Some(status) = child.try_wait().expect("read daemon status") {
-                panic!("daemon exited before opening socket: {status}");
-            }
-            None
-        },
-        || "daemon socket did not become ready".to_string(),
-    );
+    loop {
+        if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("read daemon status") {
+            panic!("daemon exited before opening socket: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon socket did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
     let mut child = ChildGuard::new(
         common::tracedecay_command_with_home(home)
+            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .args(["daemon", "run", "--socket"])
             .arg(socket_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn daemon"),
-    );
-    wait_for_socket(socket_path, &mut child);
-    child
-}
-
-pub(super) fn spawn_daemon_with_stderr(
-    home: &Path,
-    socket_path: &Path,
-    stderr: std::fs::File,
-) -> ChildGuard {
-    let mut child = ChildGuard::new(
-        common::tracedecay_command_with_home(home)
-            .args(["daemon", "run", "--socket"])
-            .arg(socket_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("spawn daemon"),
     );
@@ -236,6 +220,7 @@ impl McpProxy {
                     "TRACEDECAY_CLIENT_INSTANCE_ID",
                     format!("broker-test-{ordinal}"),
                 )
+                .env_remove(SQLITE_UNSAFE_FAST_ENV)
                 .args(["serve", "--path"])
                 .arg(project)
                 .current_dir(project)
@@ -381,59 +366,6 @@ pub(super) fn storage_snapshot(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .collect()
 }
 
-/// Compact digest of a storage family snapshot for assertion messages.
-pub(super) fn storage_snapshot_digest(snapshot: &BTreeMap<PathBuf, Vec<u8>>) -> String {
-    let mut hasher = DefaultHasher::new();
-    for (path, bytes) in snapshot {
-        path.hash(&mut hasher);
-        bytes.hash(&mut hasher);
-    }
-    format!("{:016x}:{} files", hasher.finish(), snapshot.len())
-}
-
-pub(super) fn assert_storage_unchanged(
-    label: &str,
-    before: &BTreeMap<PathBuf, Vec<u8>>,
-    db_path: &Path,
-) {
-    let after = storage_snapshot(db_path);
-    assert_eq!(
-        after,
-        *before,
-        "{label}: durable SQLite family changed\nbefore={}\nafter={}",
-        storage_snapshot_digest(before),
-        storage_snapshot_digest(&after),
-    );
-}
-
-/// Blocks until the owner daemon's post-open maintenance (legacy memory
-/// cutover receipts, repair passes) stops mutating the project store, so
-/// byte-stability assertions measure only the window under test instead of
-/// racing the owner's own startup writes.
-pub(super) fn wait_for_quiescent_storage(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let previous = RefCell::new(storage_snapshot(db_path));
-    let stable_samples = RefCell::new(0_u8);
-    common::poll_until(
-        deadline,
-        Duration::ZERO,
-        || {
-            std::thread::sleep(Duration::from_millis(250));
-            let current = storage_snapshot(db_path);
-            if current == *previous.borrow() {
-                let mut stable_samples = stable_samples.borrow_mut();
-                *stable_samples += 1;
-                (*stable_samples >= 8).then_some(current)
-            } else {
-                *previous.borrow_mut() = current;
-                *stable_samples.borrow_mut() = 0;
-                None
-            }
-        },
-        || "project storage never became quiescent under the owner daemon".to_string(),
-    )
-}
-
 pub(super) fn daemon_authority_record(home: &Path) -> Value {
     serde_json::from_slice(
         &std::fs::read(home.join(".tracedecay/daemon-authority.json"))
@@ -446,6 +378,7 @@ pub(super) fn tool_status(home: &Path, project: &Path, socket_path: &Path) -> st
     let project_arg = project.to_string_lossy().to_string();
     common::tracedecay_command_with_home(home)
         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
+        .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .current_dir(project)
         .args([
             "tool",

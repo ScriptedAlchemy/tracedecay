@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
@@ -47,17 +47,12 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -86,35 +81,23 @@ impl ExtractionState {
 }
 
 impl DockerfileExtractor {
+    /// Extract code graph nodes and edges from a Dockerfile source file.
+    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
+    /// `source` is the Dockerfile source code to parse.
     pub fn extract_dockerfile(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
 
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
+        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -144,17 +127,13 @@ impl DockerfileExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        // Walk the AST.
+        let root = tree.root_node();
+        Self::visit_children(&mut state, root);
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -169,6 +148,21 @@ impl DockerfileExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
+    /// Visit all children of a node.
+    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                Self::visit_node(state, child);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "from_instruction" => Self::visit_from(state, node),
@@ -242,6 +236,7 @@ impl DockerfileExtractor {
             state.register_stage_target(stage_index.to_string(), &id);
             state.register_stage_target(alias_name.clone(), &id);
 
+            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -288,6 +283,7 @@ impl DockerfileExtractor {
             state.nodes.push(graph_node);
             state.register_stage_target(stage_index.to_string(), &id);
 
+            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -362,6 +358,7 @@ impl DockerfileExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -417,6 +414,7 @@ impl DockerfileExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -474,6 +472,7 @@ impl DockerfileExtractor {
                     };
                     state.nodes.push(graph_node);
 
+                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -541,6 +540,7 @@ impl DockerfileExtractor {
                     };
                     state.nodes.push(graph_node);
 
+                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -653,15 +653,5 @@ impl crate::LanguageExtractor for DockerfileExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_dockerfile(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
     }
 }

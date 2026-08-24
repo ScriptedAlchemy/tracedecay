@@ -1,3 +1,4 @@
+// Rust guideline compliant 2026-05-25
 //! Runtime telemetry snapshot for diagnosing CPU/RAM regressions
 //! (issue #80).
 //!
@@ -6,68 +7,18 @@
 //! sizes, journal mode) so users hitting unexpected resource pressure
 //! can attach a structured snapshot to a bug report.
 //!
-//! `cpu_percent` is the process-tick delta over [`CPU_SAMPLE_WINDOW`].
-//! sysinfo 0.32 on Linux computes `cpu_usage()` only for
-//! `ProcessesToUpdate::All`; a targeted PID refresh updates utime/stime
-//! but leaves usage at 0. Linux therefore uses the same `/proc/self/stat`
-//! utime+stime authority as semantic evaluation. Callers pay ~200 ms
-//! latency per snapshot.
+//! `cpu_percent` requires a refresh interval to be meaningful — sysinfo
+//! reports CPU% as a delta between two refreshes. [`collect`] performs
+//! the refresh, sleeps for [`CPU_SAMPLE_WINDOW`], then refreshes again.
+//! Callers therefore pay ~200 ms latency per snapshot.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
 use crate::errors::{Result, TraceDecayError};
-
-mod store_runtime;
-
-pub use store_runtime::{
-    RuntimeRegistryAggregateSnapshot, RuntimeRegistryShardSnapshot, RuntimeRegistrySnapshot,
-    RuntimeRegistryWriterSnapshot,
-};
-
-/// Async reader for the generation census attached by an exact daemon route.
-pub(crate) type GenerationCensusFuture =
-    Pin<Box<dyn Future<Output = GenerationCensusSnapshot> + Send + 'static>>;
-pub(crate) type GenerationCensusReader =
-    Arc<dyn Fn() -> GenerationCensusFuture + Send + Sync + 'static>;
-
-/// Closed reasons for a generation census that cannot be observed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GenerationCensusUnavailableReason {
-    AuthorityUnavailable,
-    ExactScopeGenerationNotReady,
-    SealedGenerationCensusInvalid,
-}
-
-impl GenerationCensusUnavailableReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::AuthorityUnavailable => "authority_unavailable",
-            Self::ExactScopeGenerationNotReady => "exact_scope_generation_not_ready",
-            Self::SealedGenerationCensusInvalid => "sealed_generation_census_invalid",
-        }
-    }
-}
-
-/// Runtime telemetry's truthful view of code-index census availability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum GenerationCensusSnapshot {
-    Observed {
-        #[serde(flatten)]
-        statistics: tracedecay_code_index::production::CodeIndexGenerationStatisticsV1,
-    },
-    Unavailable {
-        reason: GenerationCensusUnavailableReason,
-    },
-}
 
 /// Window over which `cpu_percent` is sampled.
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(200);
@@ -78,9 +29,9 @@ pub struct RuntimeSnapshot {
     /// Captured at (Unix epoch seconds).
     pub captured_at: u64,
     /// `tracedecay` build version (e.g. `6.0.0`).
-    pub tracedecay_version: String,
+    pub tracedecay_version: &'static str,
     /// Host OS short name (`macos`, `linux`, `windows`, …).
-    pub host_os: String,
+    pub host_os: &'static str,
     pub process: ProcessSnapshot,
     pub database: DatabaseSnapshot,
 }
@@ -104,7 +55,7 @@ pub struct ProcessSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseSnapshot {
     pub project_root: PathBuf,
-    /// Canonical durable database currently owned by this project runtime.
+    /// `<root>/.tracedecay/<branch>.db` or whichever DB is being served.
     pub db_path: PathBuf,
     /// Canonical identity of the file owned by this process, when resolvable.
     pub canonical_db_path: PathBuf,
@@ -124,69 +75,13 @@ pub struct DatabaseSnapshot {
     pub dirty_marker: DirtyMarkerSnapshot,
     /// Kernel writer lease currently observed for this database.
     pub writer_owner: WriterOwnerSnapshot,
-    /// Aggregate source, symbol, and edge facts from the exact sealed code
-    /// generation, or the typed reason that authority is not mounted.
-    pub generation_census: GenerationCensusSnapshot,
-    /// Live reader-pool occupancy for this store, when the pool is attached.
-    ///
-    /// Reader saturation is the failure users actually hit — a query reports
-    /// `reader acquisition saturated` and there is otherwise nothing to look
-    /// at. This is the after-the-fact evidence: where the workers went, and
-    /// whether anyone is queued behind them.
-    pub reader_pool: Option<ReaderPoolOccupancy>,
-    /// Bounded daemon store-runtime registry telemetry for all mounted shards.
-    pub runtime_registry: RuntimeRegistrySnapshot,
-}
-
-/// Per-lane reader-pool occupancy at one instant.
-///
-/// `available + leased + limbo` accounts for every worker in a lane. `limbo`
-/// is a worker whose lease ended but whose snapshot rollback has not been
-/// confirmed; `waiting` is acquisitions blocked for capacity, which is what
-/// separates a lane that is busy from one that is turning callers away.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReaderPoolOccupancy {
-    /// `ready` or `draining`.
-    pub state: String,
-    /// Successful exact-SQL snapshot admissions since this reader pool attached.
-    pub snapshot_admissions: u64,
-    pub general: ReaderLaneOccupancy,
-    pub health: ReaderLaneOccupancy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReaderLaneOccupancy {
-    pub workers: u16,
-    pub available: u16,
-    pub leased: u16,
-    pub limbo: u16,
-    pub waiting: u16,
-}
-
-impl ReaderPoolOccupancy {
-    fn from_pool(snapshot: &crate::db::engine::ReaderPoolSnapshot) -> Self {
-        Self {
-            state: match snapshot.state {
-                crate::db::engine::ReaderPoolState::Ready => "ready".to_string(),
-                crate::db::engine::ReaderPoolState::Draining => "draining".to_string(),
-            },
-            snapshot_admissions: snapshot.snapshot_admissions,
-            general: ReaderLaneOccupancy {
-                workers: snapshot.general_workers,
-                available: snapshot.available_general,
-                leased: snapshot.leased_general,
-                limbo: snapshot.limbo_general,
-                waiting: snapshot.waiting_general,
-            },
-            health: ReaderLaneOccupancy {
-                workers: snapshot.health_workers,
-                available: snapshot.available_health,
-                leased: snapshot.leased_health,
-                limbo: snapshot.limbo_health,
-                waiting: snapshot.waiting_health,
-            },
-        }
-    }
+    /// Total source size we've indexed, from the `files` table sum, in
+    /// bytes — useful to compute the "DB / source" ratio.
+    pub source_total_bytes: u64,
+    /// Total node + edge counts. Lets the user compare DB bloat to
+    /// graph size — a 25× ratio with a tiny graph is suspicious.
+    pub node_count: u64,
+    pub edge_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,44 +115,28 @@ pub struct DirtyMarkerSnapshot {
 ///
 /// Two responsibilities: (a) sample our own process via `sysinfo`,
 /// (b) `stat` the `SQLite` files and ask the connection for its journal
-/// mode. Unavailable pragmas remain optional; failures to identify or stat the
-/// store itself fail the read instead of fabricating a zero-sized database.
+/// mode. Both are best-effort — failures degrade to zeroes / `None`
+/// rather than failing the whole snapshot, because the value of this
+/// tool is recording *what's available* during a spike.
 pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapshot> {
-    collect_with_integrity(cg, false).await
-}
-
-pub async fn collect_with_integrity(
-    cg: &crate::tracedecay::TraceDecay,
-    include_integrity: bool,
-) -> Result<RuntimeSnapshot> {
-    collect_with_integrity_and_generation_census(cg, include_integrity, None).await
-}
-
-#[hotpath::measure]
-pub(crate) async fn collect_with_integrity_and_generation_census(
-    cg: &crate::tracedecay::TraceDecay,
-    include_integrity: bool,
-    generation_census_reader: Option<&GenerationCensusReader>,
-) -> Result<RuntimeSnapshot> {
-    let process = sample_process()?;
-    let database =
-        collect_database_with_generation_census(cg, include_integrity, generation_census_reader)
-            .await?;
+    let process = sample_process();
+    let database = collect_database(cg).await?;
     let captured_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            TraceDecayError::Io(std::io::Error::other(format!(
-                "runtime telemetry clock precedes Unix epoch: {error}"
-            )))
-        })?
-        .as_secs();
+        .map_or(0, |d| d.as_secs());
     Ok(RuntimeSnapshot {
         captured_at,
-        tracedecay_version: crate::version::build_version().to_owned(),
-        host_os: std::env::consts::OS.to_owned(),
+        tracedecay_version: env!("CARGO_PKG_VERSION"),
+        host_os: std::env::consts::OS,
         process,
         database,
     })
+}
+
+/// Render a `RuntimeSnapshot` as the JSON wire shape used by both the
+/// CLI (`--json` flag) and the MCP tool result.
+pub fn to_pretty_json(snap: &RuntimeSnapshot) -> String {
+    serde_json::to_string_pretty(snap).unwrap_or_default()
 }
 
 /// Render a `RuntimeSnapshot` as a human-readable status block for
@@ -266,63 +145,16 @@ pub(crate) async fn collect_with_integrity_and_generation_census(
 pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     let p = &snap.process;
     let d = &snap.database;
-    let pct_of_system_mem = (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0;
-    let generation_census = match &d.generation_census {
-        GenerationCensusSnapshot::Observed { statistics } if statistics.source_total_bytes > 0 => {
-            format!(
-                "{} source / {} symbols / {} edges; db/source {:.1}×",
-                bytes_human(statistics.source_total_bytes),
-                statistics.symbol_count,
-                statistics.edge_count,
-                d.db_size_bytes as f64 / statistics.source_total_bytes as f64,
-            )
-        }
-        GenerationCensusSnapshot::Observed { statistics } => format!(
-            "{} source / {} symbols / {} edges; db/source unavailable",
-            bytes_human(statistics.source_total_bytes),
-            statistics.symbol_count,
-            statistics.edge_count,
-        ),
-        GenerationCensusSnapshot::Unavailable { reason } => {
-            format!("unavailable: {}", reason.as_str())
-        }
+    let pct_of_system_mem = if p.system_total_memory_bytes > 0 {
+        (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0
+    } else {
+        0.0
     };
-    let runtime_queue = format!(
-        "{} shard ops / {}; global {} / {} budget",
-        d.runtime_registry.aggregate.queued_operations,
-        bytes_human(d.runtime_registry.aggregate.queued_bytes),
-        d.runtime_registry
-            .aggregate
-            .global_queued_bytes
-            .map_or_else(|| "unknown".to_owned(), bytes_human),
-        bytes_human(d.runtime_registry.global_queue_max_bytes),
-    );
-    let runtime_contention = format!(
-        "writer busy {}, readers waiting general {} / health {}",
-        d.runtime_registry.aggregate.writer_busy_events,
-        d.runtime_registry.aggregate.general_reader_waiters,
-        d.runtime_registry.aggregate.health_reader_waiters,
-    );
-    let runtime_interrupts = format!(
-        "cancelled {}, deadline {}, shed {}, conflicts {}; {}/{} active writers observed ({})",
-        d.runtime_registry.aggregate.cancelled_operations,
-        d.runtime_registry.aggregate.deadline_exceeded_operations,
-        d.runtime_registry.aggregate.shed_operations,
-        d.runtime_registry.aggregate.conflicted_operations,
-        d.runtime_registry.aggregate.writer_telemetry_shards,
-        d.runtime_registry.aggregate.writer_present,
-        if d.runtime_registry.aggregate.writer_telemetry_complete {
-            "complete"
-        } else {
-            "partial"
-        },
-    );
-    let runtime_writer_time = format!(
-        "queue {} µs / transaction {} µs across {} committed batches since current writer start",
-        d.runtime_registry.aggregate.writer_queue_wait_micros,
-        d.runtime_registry.aggregate.writer_transaction_micros,
-        d.runtime_registry.aggregate.committed_batches,
-    );
+    let bloat_ratio = if d.source_total_bytes > 0 {
+        d.db_size_bytes as f64 / d.source_total_bytes as f64
+    } else {
+        0.0
+    };
     format!(
         "tracedecay {ver} runtime snapshot ({os})\n\
          ────────────────────────────────────────\n\
@@ -342,15 +174,9 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            page size        {page_size}\n\
            quick check      {quick_check}\n\
            dirty marker     {dirty}\n\
-           generation census {generation_census}\n\
-           readers general  {readers_general}\n\
-           readers health   {readers_health}\n\
-           runtime shards    {runtime_shards} observed ({runtime_opening} opening, {runtime_draining} draining, {runtime_omitted} detail omitted)\n\
-           runtime queue     {runtime_queue}\n\
-           runtime contention {runtime_contention}\n\
-           runtime interrupts {runtime_interrupts}\n\
-           runtime writer time {runtime_writer_time}\n\
-           runtime wal       {runtime_wal}\n\
+           source indexed   {src}\n\
+           db / source      {ratio:.1}×\n\
+           nodes / edges    {nodes} / {edges}\n\
         ",
         ver = snap.tracedecay_version,
         os = snap.host_os,
@@ -385,37 +211,10 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         } else {
             "absent"
         },
-        generation_census = generation_census,
-        readers_general = d.reader_pool.as_ref().map_or_else(
-            || "(unattached)".to_string(),
-            |pool| lane_line(&pool.general)
-        ),
-        readers_health = d.reader_pool.as_ref().map_or_else(
-            || "(unattached)".to_string(),
-            |pool| lane_line(&pool.health)
-        ),
-        runtime_shards = d.runtime_registry.inventory_shards,
-        runtime_opening = d.runtime_registry.aggregate.opening,
-        runtime_draining = d.runtime_registry.aggregate.draining,
-        runtime_omitted = d.runtime_registry.omitted_shards,
-        runtime_queue = runtime_queue,
-        runtime_contention = runtime_contention,
-        runtime_interrupts = runtime_interrupts,
-        runtime_writer_time = runtime_writer_time,
-        runtime_wal = d
-            .runtime_registry
-            .aggregate
-            .wal_bytes
-            .map_or_else(|| "unknown".to_owned(), bytes_human),
-    )
-}
-
-/// One reader lane as a single terminal line. Waiters are the saturation
-/// signal, so they are always shown rather than elided when zero.
-fn lane_line(lane: &ReaderLaneOccupancy) -> String {
-    format!(
-        "{} workers ({} available, {} leased, {} limbo), {} waiting",
-        lane.workers, lane.available, lane.leased, lane.limbo, lane.waiting
+        src = bytes_human(d.source_total_bytes),
+        ratio = bloat_ratio,
+        nodes = d.node_count,
+        edges = d.edge_count,
     )
 }
 
@@ -423,75 +222,11 @@ fn lane_line(lane: &ReaderLaneOccupancy) -> String {
 // Process sampling
 // ---------------------------------------------------------------------------
 
-fn sample_process() -> Result<ProcessSnapshot> {
+fn sample_process() -> ProcessSnapshot {
     sample_process_with_window(CPU_SAMPLE_WINDOW)
 }
 
-/// Linux process CPU ticks (`utime + stime`) from `/proc/self/stat`.
-///
-/// Shared with semantic evaluation so runtime and quality samples use one
-/// process-tick authority.
-pub(crate) fn read_linux_process_cpu_ticks() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
-        let fields = stat.get(stat.rfind(')')? + 1..)?.split_whitespace();
-        let fields = fields.collect::<Vec<_>>();
-        let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
-        let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
-        user_ticks.checked_add(system_ticks)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-pub(crate) fn linux_clock_ticks_per_second() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        static TICKS_PER_SECOND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        if let Some(ticks) = TICKS_PER_SECOND.get() {
-            return Some(*ticks);
-        }
-        let output = std::process::Command::new("getconf")
-            .arg("CLK_TCK")
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let ticks = std::str::from_utf8(&output.stdout)
-            .ok()?
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|ticks| *ticks != 0)?;
-        let _ = TICKS_PER_SECOND.set(ticks);
-        Some(ticks)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-fn cpu_percent_from_linux_ticks(
-    start_ticks: u64,
-    end_ticks: u64,
-    elapsed: Duration,
-    ticks_per_second: u64,
-) -> Option<f32> {
-    let wall_secs = elapsed.as_secs_f64();
-    if wall_secs <= 0.0 || ticks_per_second == 0 {
-        return Some(0.0);
-    }
-    let cpu_secs = end_ticks.saturating_sub(start_ticks) as f64 / ticks_per_second as f64;
-    Some((cpu_secs / wall_secs * 100.0) as f32)
-}
-
-#[hotpath::measure]
-fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnapshot> {
+fn sample_process_with_window(cpu_sample_window: Duration) -> ProcessSnapshot {
     let pid = Pid::from_u32(std::process::id());
 
     // Refresh only *our own* process. The previous implementation passed
@@ -510,56 +245,27 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
             .with_memory(sysinfo::MemoryRefreshKind::new().with_ram())
             .with_cpu(sysinfo::CpuRefreshKind::new()),
     );
-    // Memory and identity still come from a targeted PID refresh. Linux
-    // `cpu_usage()` stays 0 after `ProcessesToUpdate::Some`; CPU% is the
-    // `/proc/self/stat` tick delta over the same window.
-    let start_ticks = read_linux_process_cpu_ticks();
-    let sampled_at = Instant::now();
+    // Two reads bracketing a sleep are required: sysinfo reports
+    // `cpu_usage()` as the delta between successive refreshes.
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
     std::thread::sleep(cpu_sample_window);
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
-    let elapsed = sampled_at.elapsed();
-    let end_ticks = read_linux_process_cpu_ticks();
 
-    let process = sys.process(pid).ok_or_else(|| {
-        TraceDecayError::Io(std::io::Error::other(
-            "runtime telemetry could not sample the serving process",
-        ))
-    })?;
-    let system_cpu_count = sys.cpus().len();
-    let system_total_memory_bytes = sys.total_memory();
-    if system_cpu_count == 0 || system_total_memory_bytes == 0 {
-        return Err(TraceDecayError::Io(std::io::Error::other(
-            "runtime telemetry could not sample host capacity",
-        )));
-    }
-    let cpu_percent = match (start_ticks, end_ticks, linux_clock_ticks_per_second()) {
-        (Some(start), Some(end), Some(ticks_per_second)) => {
-            cpu_percent_from_linux_ticks(start, end, elapsed, ticks_per_second).ok_or_else(
-                || {
-                    TraceDecayError::Io(std::io::Error::other(
-                        "runtime telemetry could not convert Linux process ticks to CPU percent",
-                    ))
-                },
-            )?
-        }
-        _ if cfg!(target_os = "linux") => {
-            return Err(TraceDecayError::Io(std::io::Error::other(
-                "runtime telemetry could not read Linux process ticks",
-            )));
-        }
-        _ => process.cpu_usage(),
-    };
+    let proc = sys.process(pid);
+    let rss_bytes = proc.map_or(0, sysinfo::Process::memory);
+    let virtual_bytes = proc.map_or(0, sysinfo::Process::virtual_memory);
+    let cpu_percent = proc.map_or(0.0, sysinfo::Process::cpu_usage);
+    let uptime_secs = proc.map_or(0, sysinfo::Process::run_time);
 
-    Ok(ProcessSnapshot {
+    ProcessSnapshot {
         pid: std::process::id(),
-        rss_bytes: process.memory(),
-        virtual_bytes: process.virtual_memory(),
+        rss_bytes,
+        virtual_bytes,
         cpu_percent,
-        uptime_secs: process.run_time(),
-        system_cpu_count,
-        system_total_memory_bytes,
-    })
+        uptime_secs,
+        system_cpu_count: sys.cpus().len(),
+        system_total_memory_bytes: sys.total_memory(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -568,23 +274,13 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
 
 pub(crate) async fn collect_database(
     cg: &crate::tracedecay::TraceDecay,
-    include_integrity: bool,
-) -> Result<DatabaseSnapshot> {
-    collect_database_with_generation_census(cg, include_integrity, None).await
-}
-
-#[hotpath::measure]
-async fn collect_database_with_generation_census(
-    cg: &crate::tracedecay::TraceDecay,
-    include_integrity: bool,
-    generation_census_reader: Option<&GenerationCensusReader>,
 ) -> Result<DatabaseSnapshot> {
     let project_root = cg.project_root().to_path_buf();
     let db_path = cg.db_path().clone();
-    let canonical_db_path = db_path.canonicalize()?;
-    let db_size_bytes = file_size(&db_path)?;
-    let wal_size_bytes = file_size(&with_suffix(&db_path, "-wal"))?;
-    let shm_size_bytes = file_size(&with_suffix(&db_path, "-shm"))?;
+    let canonical_db_path = db_path.canonicalize().unwrap_or_else(|_| db_path.clone());
+    let db_size_bytes = file_size(&db_path);
+    let wal_size_bytes = file_size(&with_suffix(&db_path, "-wal"));
+    let shm_size_bytes = file_size(&with_suffix(&db_path, "-shm"));
     let journal_mode = read_journal_mode(cg).await.ok();
     let synchronous = read_pragma_i64(cg, "PRAGMA synchronous", "read_synchronous")
         .await
@@ -593,14 +289,9 @@ async fn collect_database_with_generation_census(
         .await
         .ok()
         .and_then(|value| u64::try_from(value).ok());
-    let (quick_check_ok, quick_check_error) = if include_integrity {
-        match cg.quick_check_report().await {
-            Ok(None) => (Some(true), None),
-            Ok(Some(problem)) => (Some(false), Some(problem)),
-            Err(error) => (None, Some(error.to_string())),
-        }
-    } else {
-        (None, None)
+    let (quick_check_ok, quick_check_error) = match cg.quick_check().await {
+        Ok(ok) => (Some(ok), None),
+        Err(error) => (None, Some(error.to_string())),
     };
     let dirty_marker = read_dirty_marker(&with_suffix(&db_path, ".dirty"));
     let writer_owner = match crate::db::probe_writer_owner(&db_path) {
@@ -616,20 +307,8 @@ async fn collect_database_with_generation_census(
             error: error.to_string(),
         },
     };
-    let generation_census = match generation_census_reader {
-        Some(reader) => hotpath::future!(reader(), label = "runtime_generation_census").await,
-        None => GenerationCensusSnapshot::Unavailable {
-            reason: GenerationCensusUnavailableReason::AuthorityUnavailable,
-        },
-    };
-    let reader_pool = cg
-        .db()
-        .read_connection()
-        .reader_pool_occupancy()
-        .as_ref()
-        .map(ReaderPoolOccupancy::from_pool);
-    let runtime_registry =
-        RuntimeRegistrySnapshot::from_projection(cg.store_runtime_registry().runtime_telemetry());
+    let source_total_bytes = read_source_total_bytes(cg).await.unwrap_or(0);
+    let (node_count, edge_count) = read_graph_counts(cg).await.unwrap_or((0, 0));
     Ok(DatabaseSnapshot {
         project_root,
         db_path,
@@ -644,9 +323,9 @@ async fn collect_database_with_generation_census(
         quick_check_error,
         dirty_marker,
         writer_owner,
-        generation_census,
-        reader_pool,
-        runtime_registry,
+        source_total_bytes,
+        node_count,
+        edge_count,
     })
 }
 
@@ -688,12 +367,8 @@ fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
     }
 }
 
-fn file_size(path: &Path) -> Result<u64> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
-    }
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -705,7 +380,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 async fn read_journal_mode(cg: &crate::tracedecay::TraceDecay) -> Result<String> {
     let mut rows = cg
         .db()
-        .read_connection()
+        .conn()
         .query("PRAGMA journal_mode", ())
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -734,15 +409,15 @@ async fn read_pragma_i64(
     sql: &str,
     operation: &str,
 ) -> Result<i64> {
-    let mut rows = cg
-        .db()
-        .read_connection()
-        .query(sql, ())
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to query {sql}: {error}"),
-            operation: operation.to_string(),
-        })?;
+    let mut rows =
+        cg.db()
+            .conn()
+            .query(sql, ())
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query {sql}: {error}"),
+                operation: operation.to_string(),
+            })?;
     rows.next()
         .await
         .map_err(|error| TraceDecayError::Database {
@@ -758,6 +433,68 @@ async fn read_pragma_i64(
             message: format!("failed to decode {sql}: {error}"),
             operation: operation.to_string(),
         })
+}
+
+async fn read_source_total_bytes(cg: &crate::tracedecay::TraceDecay) -> Result<u64> {
+    let mut rows = cg
+        .db()
+        .conn()
+        .query("SELECT COALESCE(SUM(size), 0) FROM files", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to sum source bytes: {e}"),
+            operation: "read_source_total_bytes".to_string(),
+        })?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read source-sum row: {e}"),
+            operation: "read_source_total_bytes".to_string(),
+        })?
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "no source-sum row returned".to_string(),
+            operation: "read_source_total_bytes".to_string(),
+        })?;
+    let v: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
+        message: format!("failed to decode source-sum: {e}"),
+        operation: "read_source_total_bytes".to_string(),
+    })?;
+    Ok(u64::try_from(v).unwrap_or(0))
+}
+
+async fn read_graph_counts(cg: &crate::tracedecay::TraceDecay) -> Result<(u64, u64)> {
+    let nodes = scalar_count(cg, "SELECT COUNT(*) FROM nodes").await?;
+    let edges = scalar_count(cg, "SELECT COUNT(*) FROM edges").await?;
+    Ok((nodes, edges))
+}
+
+async fn scalar_count(cg: &crate::tracedecay::TraceDecay, sql: &str) -> Result<u64> {
+    let mut rows = cg
+        .db()
+        .conn()
+        .query(sql, ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("scalar query failed: {e}"),
+            operation: "scalar_count".to_string(),
+        })?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("scalar row read failed: {e}"),
+            operation: "scalar_count".to_string(),
+        })?
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "no scalar row".to_string(),
+            operation: "scalar_count".to_string(),
+        })?;
+    let v: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
+        message: format!("scalar decode failed: {e}"),
+        operation: "scalar_count".to_string(),
+    })?;
+    Ok(u64::try_from(v).unwrap_or(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -784,13 +521,6 @@ fn bytes_human(n: u64) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn runtime_snapshot_deserializes_from_owned_transport_json() {
-        fn require_owned_transport_decode<T: serde::de::DeserializeOwned>() {}
-
-        require_owned_transport_decode::<RuntimeSnapshot>();
-    }
 
     #[test]
     fn bytes_human_formats_units() {
@@ -839,129 +569,6 @@ mod tests {
         assert_eq!(marker.state, None);
     }
 
-    /// A saturated pool is the case the survey exists for, so the rendered
-    /// report has to show where the workers went and who is queued behind
-    /// them — not just a total.
-    #[test]
-    fn reader_lane_line_reports_occupancy_and_waiters() {
-        let line = lane_line(&ReaderLaneOccupancy {
-            workers: 8,
-            available: 0,
-            leased: 6,
-            limbo: 2,
-            waiting: 3,
-        });
-
-        assert_eq!(
-            line,
-            "8 workers (0 available, 6 leased, 2 limbo), 3 waiting"
-        );
-    }
-
-    #[test]
-    fn reader_pool_occupancy_projects_both_lanes_onto_the_wire() {
-        let occupancy = ReaderPoolOccupancy::from_pool(&crate::db::engine::ReaderPoolSnapshot {
-            state: crate::db::engine::ReaderPoolState::Draining,
-            general_workers: 8,
-            available_general: 1,
-            health_workers: 1,
-            available_health: 0,
-            leased_general: 5,
-            leased_health: 1,
-            limbo_general: 2,
-            limbo_health: 0,
-            waiting_general: 4,
-            waiting_health: 0,
-            snapshot_admissions: 73,
-        });
-        let wire = serde_json::to_value(&occupancy).unwrap();
-
-        assert_eq!(wire["state"], "draining");
-        assert_eq!(wire["general"]["workers"], 8);
-        assert_eq!(wire["general"]["limbo"], 2);
-        assert_eq!(wire["general"]["waiting"], 4);
-        assert_eq!(wire["health"]["leased"], 1);
-        assert_eq!(wire["snapshot_admissions"], 73);
-        // Every worker in a lane is accounted for by exactly one bucket.
-        assert_eq!(
-            occupancy.general.available + occupancy.general.leased + occupancy.general.limbo,
-            occupancy.general.workers
-        );
-    }
-
-    #[test]
-    fn cpu_percent_from_linux_ticks_is_cpu_seconds_over_wall() {
-        assert_eq!(
-            cpu_percent_from_linux_ticks(10, 110, Duration::from_secs(1), 100),
-            Some(100.0)
-        );
-        assert_eq!(
-            cpu_percent_from_linux_ticks(0, 50, Duration::from_secs(2), 100),
-            Some(25.0)
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_runtime_cpu_percent_follows_proc_tick_delta_not_sysinfo_pid_refresh() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let worker = {
-            let stop = std::sync::Arc::clone(&stop);
-            std::thread::spawn(move || {
-                let mut acc = 0u64;
-                while !stop.load(Ordering::Relaxed) {
-                    acc = acc.wrapping_mul(1_664_525).wrapping_add(1);
-                }
-                std::hint::black_box(acc);
-            })
-        };
-        let start_ticks = read_linux_process_cpu_ticks().expect("procfs ticks before sample");
-        let sysinfo_cpu = {
-            let pid = Pid::from_u32(std::process::id());
-            let refresh = ProcessRefreshKind::new().with_cpu().with_memory();
-            let mut sys = System::new_with_specifics(
-                RefreshKind::new()
-                    .with_memory(sysinfo::MemoryRefreshKind::new().with_ram())
-                    .with_cpu(sysinfo::CpuRefreshKind::new()),
-            );
-            sys.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::Some(&[pid]),
-                true,
-                refresh,
-            );
-            std::thread::sleep(Duration::from_millis(200));
-            sys.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::Some(&[pid]),
-                true,
-                refresh,
-            );
-            sys.process(pid)
-                .expect("sysinfo must still see this pid")
-                .cpu_usage()
-        };
-        let snap = sample_process_with_window(Duration::from_millis(200))
-            .expect("runtime CPU sample must observe the serving process");
-        let end_ticks = read_linux_process_cpu_ticks().expect("procfs ticks after sample");
-        stop.store(true, Ordering::Relaxed);
-        worker.join().expect("busy worker");
-
-        assert!(
-            end_ticks > start_ticks,
-            "tick authority must observe work during the sample window ({start_ticks} -> {end_ticks})"
-        );
-        assert!(
-            sysinfo_cpu.abs() < f32::EPSILON,
-            "sysinfo 0.32 Linux leaves cpu_usage at 0 after Some(&[pid]); that field is not CPU authority (observed {sysinfo_cpu})"
-        );
-        assert!(
-            snap.cpu_percent > 0.0,
-            "cpu_percent must come from /proc tick deltas, not sysinfo cpu_usage() after Some(&[pid]); got {}",
-            snap.cpu_percent
-        );
-    }
-
     /// Regression guard for the Windows `STATUS_STACK_OVERFLOW` report against
     /// `tracedecay_runtime`: the process-sampling path must fit comfortably
     /// inside a stack far smaller than Windows' 1 MiB main-thread default.
@@ -975,8 +582,7 @@ mod tests {
             .expect("spawn small-stack thread");
         let snap = handle
             .join()
-            .expect("sample_process must not overflow a 512 KiB stack")
-            .expect("sample_process must observe process and host capacity");
+            .expect("sample_process must not overflow a 512 KiB stack");
         assert_eq!(snap.pid, std::process::id());
     }
 }

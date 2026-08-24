@@ -7,102 +7,79 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay_runtime_core::worktree::GitRepoIdentityOutcome;
 
-use crate::runtime::SessionMessageRecord;
-pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
-
-/// Shareable handle to a read-only rusqlite connection over a foreign
-/// (non-TraceDecay-owned) `SQLite` store.
-///
-/// The mutex makes the handle `Sync`, so async ingest futures may hold it
-/// across await points and stay `Send`; every SQL call runs on a blocking
-/// thread via [`SqliteReadConn::with`], keeping the async executor unblocked.
-#[derive(Clone)]
-pub struct SqliteReadConn {
-    inner: Arc<Mutex<rusqlite::Connection>>,
-}
-
-impl SqliteReadConn {
-    pub fn new(conn: rusqlite::Connection) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(conn)),
-        }
-    }
-
-    /// Runs `body` against the connection on a blocking thread. Returns `None`
-    /// only if the blocking task itself fails (cancellation/panic), which
-    /// callers degrade to the same outcome as any SQL error.
-    pub async fn with<T, F>(&self, body: F) -> Option<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
-    {
-        let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-            body(&guard)
-        })
-        .await
-        .ok()
-    }
-}
+use crate::SessionMessageRecord;
 
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
 pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Counters returned by an ingestion pass.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptIngestStats {
+    pub sessions_upserted: u64,
+    pub messages_upserted: u64,
+}
+
+impl TranscriptIngestStats {
+    /// Accumulate another pass's counters into this one.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            sessions_upserted: self
+                .sessions_upserted
+                .saturating_add(other.sessions_upserted),
+            messages_upserted: self
+                .messages_upserted
+                .saturating_add(other.messages_upserted),
+        }
+    }
+}
+
+/// The incremental position persisted between ingestion runs.
+///
+/// `position` is interpreted per cursor kind: a byte offset (`ByteOffset`), a
+/// stable 64-bit content hash prefix (`ContentHash`), or a last-seen `rowid`
+/// (`RowCursor`). `mtime` is the file modification time in epoch seconds, used
+/// to detect rewrites and to skip unchanged files cheaply.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoredCursor {
+    pub position: u64,
+    pub mtime: u64,
+    pub file_id: u64,
+}
+
+/// Mapped rows read past the stored cursor, plus the advanced cursor.
+pub struct NewRows<T> {
+    pub items: Vec<T>,
+    pub new_cursor: StoredCursor,
+}
 
 /// **`RowCursor`** reader for SQLite-backed transcript stores (Zed, Copilot CLI
 /// `session-store.db`).
 ///
 /// Selects rows whose rowid is greater than `prev.position` (the last-seen
 /// rowid), ordered ascending, mapping each through `map_row` *during* iteration
-/// (rows must not outlive the statement cursor) and advancing the stored cursor
-/// to the maximum rowid seen. `select_sql` must select the rowid as its first
+/// (libsql rows must not outlive the cursor) and advancing the stored cursor to
+/// the maximum rowid seen. `select_sql` must select the rowid as its first
 /// column and accept a single `?` bound to the previous rowid, e.g.
 /// `"SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid"`.
 /// Fail-open: any query error yields `None`; `map_row` returning `None` skips
-/// that row while still advancing the cursor. The whole read runs as one
-/// blocking call on the connection's thread.
-pub async fn read_new_rows<T, F>(
-    conn: &SqliteReadConn,
+/// that row while still advancing the cursor.
+pub async fn read_new_rows<T>(
+    conn: &libsql::Connection,
     select_sql: &str,
     prev: StoredCursor,
-    map_row: F,
-) -> Option<NewRows<T>>
-where
-    T: Send + 'static,
-    F: FnMut(i64, &rusqlite::Row<'_>) -> Option<T> + Send + 'static,
-{
-    let select_sql = select_sql.to_string();
-    conn.with(move |conn| read_new_rows_sync(conn, &select_sql, prev, map_row))
-        .await
-        .flatten()
-}
-
-fn read_new_rows_sync<T>(
-    conn: &rusqlite::Connection,
-    select_sql: &str,
-    prev: StoredCursor,
-    mut map_row: impl FnMut(i64, &rusqlite::Row<'_>) -> Option<T>,
+    mut map_row: impl FnMut(i64, &libsql::Row) -> Option<T>,
 ) -> Option<NewRows<T>> {
-    let mut statement = match conn.prepare(select_sql) {
-        Ok(statement) => statement,
-        Err(error) => {
-            tracing::debug!(
-                select_sql,
-                previous_rowid = prev.position,
-                error = %error,
-                "skipping transcript row source query"
-            );
-            return None;
-        }
-    };
-    let mut result_rows = match statement.query(rusqlite::params![prev.position as i64]) {
+    let mut result_rows = match conn
+        .query(select_sql, libsql::params![prev.position as i64])
+        .await
+    {
         Ok(rows) => rows,
         Err(error) => {
             tracing::debug!(
@@ -117,8 +94,8 @@ fn read_new_rows_sync<T>(
 
     let mut items = Vec::new();
     let mut max_rowid = prev.position;
-    while let Ok(Some(row)) = result_rows.next() {
-        let Ok(rowid) = row.get::<_, i64>(0) else {
+    while let Ok(Some(row)) = result_rows.next().await {
+        let Ok(rowid) = row.get::<i64>(0) else {
             tracing::debug!(
                 select_sql,
                 "skipping transcript row without rowid in column 0"
@@ -128,7 +105,7 @@ fn read_new_rows_sync<T>(
         if rowid as u64 > max_rowid {
             max_rowid = rowid as u64;
         }
-        if let Some(item) = map_row(rowid, row) {
+        if let Some(item) = map_row(rowid, &row) {
             items.push(item);
         }
     }
@@ -160,13 +137,8 @@ pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
     ProjectRootMatcher::new(project_root).contains(path)
 }
 
-/// Tri-state project membership for one transcript working directory.
-///
-/// `Unknown` is reserved for bounded git-identity timeouts: the path could not
-/// be attributed to or excluded from the project without blocking. Callers that
-/// persist ingest cursors must defer instead of treating it as `NoMatch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectMembership {
+pub(crate) enum ProjectMembership {
     Match,
     NoMatch,
     Unknown,
@@ -177,7 +149,7 @@ impl ProjectMembership {
         if value { Self::Match } else { Self::NoMatch }
     }
 
-    pub fn definitive(self) -> Option<bool> {
+    pub(crate) fn definitive(self) -> Option<bool> {
         match self {
             Self::Match => Some(true),
             Self::NoMatch => Some(false),
@@ -186,17 +158,13 @@ impl ProjectMembership {
     }
 }
 
-/// Resolver for a path's git repository identity, injectable so tests can fake
-/// bounded-timeout (`Unknown`) outcomes without a real blocking repository.
-pub type GitIdentityResolver = fn(&Path) -> GitRepoIdentityOutcome;
-
-/// How long an `Unknown` (timed-out) identity resolution is served from cache
-/// before the next lookup retries the underlying git discovery.
+pub(crate) type GitIdentityResolver =
+    fn(&Path) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome;
 const LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
 struct LocationWorktreeCacheEntry {
-    outcome: OnceLock<GitRepoIdentityOutcome>,
+    outcome: OnceLock<tracedecay_runtime_core::worktree::GitRepoIdentityOutcome>,
     unknown_retry_after: Mutex<Option<Instant>>,
 }
 
@@ -208,27 +176,27 @@ struct ProjectRootMatcherCacheEntry {
 
 /// A project root with its git worktree/common-dir resolutions computed once,
 /// so repeated membership tests (e.g. one per discovered workflow run) do not
-/// re-resolve the fixed project side. A single [`ProjectRootMatcher::contains`]
-/// call is exactly equivalent to [`path_belongs_to_project`], which is a thin
-/// wrapper over it.
+/// re-run `git_worktree_root`/`git_common_dir` on the fixed project side. A
+/// single [`ProjectRootMatcher::contains`] call is exactly equivalent to
+/// [`path_belongs_to_project`], which is a thin wrapper over it.
 #[derive(Debug)]
-pub struct ProjectRootMatcher {
+pub(crate) struct ProjectRootMatcher {
     root: PathBuf,
-    identity: GitRepoIdentityOutcome,
+    identity: tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
     identity_resolver: GitIdentityResolver,
     path_membership: Mutex<HashMap<PathBuf, bool>>,
 }
 
 impl ProjectRootMatcher {
     /// Resolve the fixed project-side git identity once.
-    pub fn new(project_root: &Path) -> Self {
+    pub(crate) fn new(project_root: &Path) -> Self {
         Self::new_with_identity_resolver(
             project_root,
             tracedecay_runtime_core::worktree::git_repo_identity_outcome,
         )
     }
 
-    pub fn new_with_identity_resolver(
+    pub(crate) fn new_with_identity_resolver(
         project_root: &Path,
         identity_resolver: GitIdentityResolver,
     ) -> Self {
@@ -244,15 +212,15 @@ impl ProjectRootMatcher {
     /// project's git worktree or common dir, or discovers back to the root.
     /// Each distinct path is resolved once for this matcher, so repeated
     /// transcript rows with the same cwd do not repeatedly discover/open git.
-    pub fn contains(&self, path: &Path) -> bool {
+    pub(crate) fn contains(&self, path: &Path) -> bool {
         self.contains_status(path) == ProjectMembership::Match
     }
 
-    pub fn contains_status(&self, path: &Path) -> ProjectMembership {
+    pub(crate) fn contains_status(&self, path: &Path) -> ProjectMembership {
         if let Some(belongs) = self
             .path_membership
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(path)
             .copied()
         {
@@ -263,7 +231,7 @@ impl ProjectRootMatcher {
         if let Some(definitive) = belongs.definitive() {
             self.path_membership
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(path.to_path_buf(), definitive);
         }
         belongs
@@ -280,21 +248,26 @@ impl ProjectRootMatcher {
     fn contains_uncached_with(
         &self,
         path: &Path,
-        identity_resolver: impl FnOnce(&Path) -> GitRepoIdentityOutcome,
+        identity_resolver: impl FnOnce(
+            &Path,
+        )
+            -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
         discover_project_root: impl FnOnce(&Path) -> Option<PathBuf>,
     ) -> ProjectMembership {
         if paths_equal(path, &self.root) {
             return ProjectMembership::Match;
         }
-        if self.identity == GitRepoIdentityOutcome::Unknown {
+        if self.identity == tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown {
             return ProjectMembership::Unknown;
         }
 
         let path_identity = identity_resolver(path);
         match (&self.identity, path_identity) {
             (
-                GitRepoIdentityOutcome::Resolved(project_identity),
-                GitRepoIdentityOutcome::Resolved(path_identity),
+                tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(
+                    project_identity,
+                ),
+                tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(path_identity),
             ) => {
                 if paths_equal(
                     &path_identity.worktree_root,
@@ -307,7 +280,8 @@ impl ProjectRootMatcher {
                     &project_identity.common_dir,
                 ));
             }
-            (GitRepoIdentityOutcome::Unknown, _) | (_, GitRepoIdentityOutcome::Unknown) => {
+            (tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown, _)
+            | (_, tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown) => {
                 return ProjectMembership::Unknown;
             }
             _ => {}
@@ -325,11 +299,9 @@ impl ProjectRootMatcher {
 ///
 /// A source parses many transcript files for the same project. Keeping the
 /// matcher here avoids reopening the same git repository once per file while
-/// retaining per-path membership caching inside [`ProjectRootMatcher`]. An
-/// `Unknown` (timed-out) identity is served from cache only for a cooldown,
-/// after which the next lookup re-resolves it.
+/// retaining per-path membership caching inside [`ProjectRootMatcher`].
 #[derive(Clone, Debug)]
-pub struct ProjectRootMatcherCache {
+pub(crate) struct ProjectRootMatcherCache {
     matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcherCacheEntry>>>>,
     location_worktrees: Arc<Mutex<HashMap<PathBuf, Arc<LocationWorktreeCacheEntry>>>>,
     identity_resolver: GitIdentityResolver,
@@ -354,7 +326,7 @@ impl ProjectRootMatcherCache {
         }
     }
 
-    pub fn get(&self, project_root: &Path) -> Arc<ProjectRootMatcher> {
+    pub(crate) fn get(&self, project_root: &Path) -> Arc<ProjectRootMatcher> {
         self.get_at(project_root, Instant::now())
     }
 
@@ -366,7 +338,7 @@ impl ProjectRootMatcherCache {
             let entry = self
                 .matchers
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .entry(key.clone())
                 .or_insert_with(|| {
                     Arc::new(ProjectRootMatcherCacheEntry {
@@ -378,7 +350,9 @@ impl ProjectRootMatcherCache {
                     })
                 })
                 .clone();
-            if entry.matcher.identity != GitRepoIdentityOutcome::Unknown {
+            if entry.matcher.identity
+                != tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown
+            {
                 return entry.matcher.clone();
             }
 
@@ -386,7 +360,7 @@ impl ProjectRootMatcherCache {
                 let mut retry_after = entry
                     .unknown_retry_after
                     .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let retry_after =
                     retry_after.get_or_insert(now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
                 now >= *retry_after
@@ -395,7 +369,10 @@ impl ProjectRootMatcherCache {
                 return entry.matcher.clone();
             }
 
-            let mut matchers = self.matchers.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut matchers = self
+                .matchers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if matchers
                 .get(&key)
                 .is_some_and(|cached| Arc::ptr_eq(cached, &entry))
@@ -405,11 +382,11 @@ impl ProjectRootMatcherCache {
         }
     }
 
-    pub fn membership(&self, path: &Path, project_root: &Path) -> ProjectMembership {
+    pub(crate) fn membership(&self, path: &Path, project_root: &Path) -> ProjectMembership {
         self.get(project_root).contains_status(path)
     }
 
-    pub fn membership_against_roots(
+    pub(crate) fn membership_against_roots(
         &self,
         path: &Path,
         project_roots: &[PathBuf],
@@ -435,7 +412,7 @@ impl ProjectRootMatcherCache {
     /// repeat git discovery thousands of times for the same cwd. Keep this
     /// source-lifetime like the project matchers and use the bounded CLI-first
     /// identity path instead of opening the repository object database.
-    pub fn git_worktree_root(&self, cwd: &Path) -> Option<PathBuf> {
+    pub(crate) fn git_worktree_root(&self, cwd: &Path) -> Option<PathBuf> {
         self.git_worktree_root_at(
             cwd,
             Instant::now(),
@@ -447,13 +424,13 @@ impl ProjectRootMatcherCache {
         &self,
         cwd: &Path,
         now: Instant,
-        identity_resolver: &impl Fn(&Path) -> GitRepoIdentityOutcome,
+        identity_resolver: &impl Fn(&Path) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
     ) -> Option<PathBuf> {
         loop {
             let resolution = self
                 .location_worktrees
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .entry(cwd.to_path_buf())
                 .or_insert_with(|| Arc::new(LocationWorktreeCacheEntry::default()))
                 .clone();
@@ -462,16 +439,16 @@ impl ProjectRootMatcherCache {
                 .get_or_init(|| identity_resolver(cwd))
                 .clone()
             {
-                GitRepoIdentityOutcome::Resolved(identity) => {
+                tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(identity) => {
                     return Some(identity.worktree_root);
                 }
-                GitRepoIdentityOutcome::NotFound => return None,
-                GitRepoIdentityOutcome::Unknown => {
+                tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::NotFound => return None,
+                tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown => {
                     let should_retry = {
                         let mut retry_after = resolution
                             .unknown_retry_after
                             .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let retry_after = retry_after
                             .get_or_insert(now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
                         now >= *retry_after
@@ -483,124 +460,13 @@ impl ProjectRootMatcherCache {
                     let mut worktrees = self
                         .location_worktrees
                         .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if worktrees
                         .get(cwd)
                         .is_some_and(|cached| Arc::ptr_eq(cached, &resolution))
                     {
                         worktrees.remove(cwd);
                     }
-                }
-            }
-        }
-    }
-}
-
-/// Decides whether one transcript record belongs to the scope currently being
-/// ingested.
-///
-/// Every file-backed provider draws the same line, because the two ingest
-/// scopes partition the same records between them:
-///
-/// * **Project** scope keeps a record when its working directory belongs to
-///   the project being ingested.
-/// * **Profile** (user-global) scope keeps a record when its working directory
-///   belongs to *no* registered project — records with no working directory at
-///   all are user-global by definition. That is exactly the complement of the
-///   project scopes, so each record lands in one store and not both.
-///
-/// Resolving the fixed root side once is the point: the equivalent per-record
-/// [`path_belongs_to_project`] call re-resolves the same unchanging root for
-/// every record.
-pub enum TranscriptScopeMatcher {
-    Project(Arc<ProjectRootMatcher>),
-    Profile(Vec<Arc<ProjectRootMatcher>>),
-}
-
-impl TranscriptScopeMatcher {
-    pub fn project(project_root: &Path) -> Self {
-        Self::Project(Arc::new(ProjectRootMatcher::new(project_root)))
-    }
-
-    pub fn profile(registered_roots: &[PathBuf]) -> Self {
-        Self::Profile(
-            registered_roots
-                .iter()
-                .map(|root| Arc::new(ProjectRootMatcher::new(root)))
-                .collect(),
-        )
-    }
-
-    /// Profile scope when `registered_roots` is present, project scope
-    /// otherwise — the shape every provider source carries as an
-    /// `Option<Vec<PathBuf>>` user scope beside its project root.
-    pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
-        registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
-    }
-
-    pub fn project_cached(project_root: &Path, cache: &ProjectRootMatcherCache) -> Self {
-        Self::Project(cache.get(project_root))
-    }
-
-    pub fn profile_cached(registered_roots: &[PathBuf], cache: &ProjectRootMatcherCache) -> Self {
-        Self::Profile(
-            registered_roots
-                .iter()
-                .map(|root| cache.get(root))
-                .collect(),
-        )
-    }
-
-    /// [`Self::for_scope`] resolved through a source-lifetime matcher cache,
-    /// so a source parsing many transcripts reuses one git identity resolution
-    /// per root instead of re-discovering it per file.
-    pub fn for_scope_cached(
-        project_root: &Path,
-        registered_roots: Option<&[PathBuf]>,
-        cache: &ProjectRootMatcherCache,
-    ) -> Self {
-        match registered_roots {
-            None => Self::project_cached(project_root, cache),
-            Some(roots) => Self::profile_cached(roots, cache),
-        }
-    }
-
-    /// True when a record with this working directory belongs to the scope.
-    /// An `Unknown` membership counts as "does not belong"; callers that can
-    /// defer ingestion should use [`Self::membership`] instead.
-    pub fn accepts(&self, cwd: Option<&Path>) -> bool {
-        match self {
-            Self::Project(project) => cwd.is_some_and(|cwd| project.contains(cwd)),
-            Self::Profile(registered) => {
-                cwd.is_none_or(|cwd| !registered.iter().any(|root| root.contains(cwd)))
-            }
-        }
-    }
-
-    /// Tri-state scope acceptance: `Match`/`NoMatch` mirror [`Self::accepts`],
-    /// while `Unknown` reports that a bounded git timeout left the record's
-    /// scope undecided — deferring callers must not persist their cursor.
-    pub fn membership(&self, cwd: Option<&Path>) -> ProjectMembership {
-        match self {
-            Self::Project(project) => cwd.map_or(ProjectMembership::NoMatch, |cwd| {
-                project.contains_status(cwd)
-            }),
-            Self::Profile(registered) => {
-                let Some(cwd) = cwd else {
-                    return ProjectMembership::Match;
-                };
-                let mut unknown = false;
-                for matcher in registered {
-                    match matcher.contains_status(cwd) {
-                        ProjectMembership::Match => return ProjectMembership::NoMatch,
-                        ProjectMembership::NoMatch => {}
-                        ProjectMembership::Unknown => unknown = true,
-                    }
-                }
-                if unknown {
-                    ProjectMembership::Unknown
-                } else {
-                    ProjectMembership::Match
                 }
             }
         }
@@ -816,10 +682,7 @@ pub fn append_location_metadata(
     );
 }
 
-/// [`append_location_metadata`] with the cwd's worktree resolved through a
-/// source-lifetime cache, so one transcript's repeated cwd does not re-run git
-/// discovery for every message row.
-pub fn append_location_metadata_cached(
+pub(crate) fn append_location_metadata_cached(
     map: &mut serde_json::Map<String, Value>,
     keys: TranscriptLocationMetadataKeys,
     location: TranscriptLocation<'_>,
@@ -887,10 +750,10 @@ pub fn usage_counters_from(value: &Value) -> Option<Value> {
             counters.insert(key.to_string(), Value::from(count));
         }
     }
-    if !counters.contains_key("cache_read_input_tokens")
-        && let Some(count) = usage.get("cached_input_tokens").and_then(Value::as_i64)
-    {
-        counters.insert("cache_read_input_tokens".to_string(), Value::from(count));
+    if !counters.contains_key("cache_read_input_tokens") {
+        if let Some(count) = usage.get("cached_input_tokens").and_then(Value::as_i64) {
+            counters.insert("cache_read_input_tokens".to_string(), Value::from(count));
+        }
     }
     if !counters.is_empty()
         && !counters.contains_key("input_tokens")
@@ -930,9 +793,10 @@ fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
             if matches!(
                 map.get("type").and_then(Value::as_str),
                 Some("tool_use" | "tool_call" | "function_call")
-            ) && let Some(name) = map.get("name").and_then(Value::as_str)
-            {
-                tools.push(name.to_string());
+            ) {
+                if let Some(name) = map.get("name").and_then(Value::as_str) {
+                    tools.push(name.to_string());
+                }
             }
             for key in ["tool_call", "functionCall", "function_call", "function"] {
                 if let Some(name) = map
@@ -999,7 +863,6 @@ mod tests {
 
     use serde_json::{Value, json};
     use tempfile::TempDir;
-    use tracedecay_runtime_core::worktree::{GitRepoIdentity, GitRepoIdentityOutcome};
 
     use super::LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN;
     use super::ProjectMembership;
@@ -1013,23 +876,23 @@ mod tests {
 
     static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    fn unknown_then_resolved_identity(path: &Path) -> GitRepoIdentityOutcome {
+    fn unknown_then_resolved_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
         if MATCHER_CACHE_RESOLVER_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
-            GitRepoIdentityOutcome::Unknown
+            crate::worktree::GitRepoIdentityOutcome::Unknown
         } else {
-            GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+            crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
                 worktree_root: path.to_path_buf(),
                 common_dir: path.join(".git"),
             })
         }
     }
 
-    fn resolved_test_identity(path: &Path) -> GitRepoIdentityOutcome {
+    fn resolved_test_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
         let root = path
             .ancestors()
             .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
             .unwrap_or(path);
-        GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
             worktree_root: root.to_path_buf(),
             common_dir: root.join(".git"),
         })
@@ -1046,8 +909,8 @@ mod tests {
 
         let membership = matcher.contains_uncached_with(
             &nested_cwd,
-            |_| GitRepoIdentityOutcome::Unknown,
-            |_| panic!("timeout must not fall through to project discovery"),
+            |_| crate::worktree::GitRepoIdentityOutcome::Unknown,
+            |_| panic!("timeout must not fall through to project discovery/gix"),
         );
 
         assert_eq!(membership, ProjectMembership::Unknown);
@@ -1079,14 +942,17 @@ mod tests {
             cache.get_at(&root, now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN / 2);
 
         assert!(Arc::ptr_eq(&first, &during_cooldown));
-        assert_eq!(first.identity, GitRepoIdentityOutcome::Unknown);
+        assert_eq!(
+            first.identity,
+            crate::worktree::GitRepoIdentityOutcome::Unknown
+        );
         assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 1);
 
         let retried = cache.get_at(&root, now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
         assert!(!Arc::ptr_eq(&first, &retried));
         assert!(matches!(
             retried.identity,
-            GitRepoIdentityOutcome::Resolved(_)
+            crate::worktree::GitRepoIdentityOutcome::Resolved(_)
         ));
         assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 2);
     }
@@ -1101,12 +967,14 @@ mod tests {
         let now = Instant::now();
         let resolver = |path: &Path| {
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                GitRepoIdentityOutcome::Unknown
+                crate::worktree::GitRepoIdentityOutcome::Unknown
             } else {
-                GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
-                    worktree_root: path.to_path_buf(),
-                    common_dir: path.join(".git"),
-                })
+                crate::worktree::GitRepoIdentityOutcome::Resolved(
+                    crate::worktree::GitRepoIdentity {
+                        worktree_root: path.to_path_buf(),
+                        common_dir: path.join(".git"),
+                    },
+                )
             }
         };
 

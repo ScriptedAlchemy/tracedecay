@@ -3,10 +3,13 @@
 //! Codex rollouts carry far more than the `user_message`/`agent_message`
 //! conversation turns: patch applications, shell (`exec_command`) tool calls,
 //! plan updates, per-turn boundaries, MCP tool calls (including `TraceDecay`'s
-//! own), web searches, and sub-agent routing. This module turns those lines
-//! into compact, provider-neutral rows with the shared kind vocabulary used by
-//! the Claude/Cursor ingestion (`file_edit`, `tool_call`, `plan`,
-//! `turn_boundary`, `web_search`, `subagent_activity`).
+//! own), web searches, and sub-agent routing. Before this module those lines
+//! were dropped (`message_from_line` returned `None` for every non-message
+//! `event_msg`, and generic `response_item` tool events were only cataloged as
+//! opaque `tool_event` rows). Here they become compact, provider-neutral rows
+//! with the shared kind vocabulary used by the Claude/Cursor ingestion work
+//! (`file_edit`, `tool_call`, `plan`, `turn_boundary`, `web_search`,
+//! `subagent_activity`).
 //!
 //! Guardrails:
 //! * Text columns stay short (a command line, a stdout summary, a query). Heavy
@@ -27,7 +30,7 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use super::CodexMeta;
-use crate::runtime::SessionMessageRecord;
+use crate::SessionMessageRecord;
 use crate::runtime::shared::preview_truncated;
 
 const PROVIDER: &str = "codex";
@@ -121,7 +124,7 @@ impl CodexStructuredState {
                 let Some(payload) = record.get("payload") else {
                     return;
                 };
-                if let Some(policy) = super::meta::string_field(payload, "approval_policy") {
+                if let Some(policy) = string_field(payload, "approval_policy") {
                     self.summary.approval_policy = Some(policy);
                 }
                 if let Some(sandbox) = payload
@@ -130,7 +133,7 @@ impl CodexStructuredState {
                 {
                     self.summary.sandbox_policy = Some(sandbox.to_string());
                 }
-                if let Some(effort) = super::meta::string_field(payload, "effort").or_else(|| {
+                if let Some(effort) = string_field(payload, "effort").or_else(|| {
                     payload
                         .pointer("/collaboration_mode/settings/reasoning_effort")
                         .and_then(Value::as_str)
@@ -138,7 +141,7 @@ impl CodexStructuredState {
                 }) {
                     self.summary.effort = Some(effort);
                 }
-                if let Some(model) = super::meta::string_field(payload, "model") {
+                if let Some(model) = string_field(payload, "model") {
                     self.summary.models.insert(model);
                 }
             }
@@ -181,7 +184,7 @@ impl CodexStructuredState {
                 let payload = record.get("payload")?;
                 let row = match payload.get("type").and_then(Value::as_str)? {
                     "patch_apply_end" => {
-                        Some(patch_apply_row(record, payload, meta, model, path, offset))
+                        patch_apply_row(record, payload, meta, model, path, offset)
                     }
                     "task_started" | "task_complete" | "turn_aborted" => {
                         turn_boundary_row(record, payload, meta, model, path, offset)
@@ -190,9 +193,9 @@ impl CodexStructuredState {
                         mcp_tool_call_row(record, payload, meta, model, path, offset)
                     }
                     "web_search_end" => web_search_row(record, payload, meta, model, path, offset),
-                    "sub_agent_activity" => Some(sub_agent_activity_row(
-                        record, payload, meta, model, path, offset,
-                    )),
+                    "sub_agent_activity" => {
+                        sub_agent_activity_row(record, payload, meta, model, path, offset)
+                    }
                     _ => return None,
                 };
                 Some(row.into_iter().collect())
@@ -381,6 +384,14 @@ impl CodexStructuredState {
     }
 }
 
+fn string_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn timestamp_of(record: &Value) -> Option<i64> {
     super::timestamp_from_record(record)
 }
@@ -416,7 +427,7 @@ fn rate_limits_snapshot(rate_limits: Option<&Value>) -> Option<Value> {
 
 /// Parse the JSON `arguments` blob carried on a `function_call` (Codex encodes
 /// it as a JSON *string*, occasionally as an inline object).
-pub(super) fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
+fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
     match arguments {
         Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).ok(),
         Some(value @ Value::Object(_)) => Some(value.clone()),
@@ -565,11 +576,10 @@ fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<Str
 /// next whitespace or `:`.
 fn read_js_object_key(s: &str, i: usize) -> (String, usize) {
     let bytes = s.as_bytes();
-    if i < s.len()
-        && matches!(bytes[i], b'"' | b'\'' | b'`')
-        && let Some((key, next)) = read_js_string(s, i)
-    {
-        return (key, next);
+    if i < s.len() && matches!(bytes[i], b'"' | b'\'' | b'`') {
+        if let Some((key, next)) = read_js_string(s, i) {
+            return (key, next);
+        }
     }
     let mut j = i;
     while j < s.len() && !bytes[j].is_ascii_whitespace() && bytes[j] != b':' {
@@ -726,11 +736,11 @@ fn parse_leading_int(text: &str) -> Option<i64> {
     let text = text.trim_start();
     let mut chars = text.chars();
     let mut digits = String::new();
-    if let Some(first) = chars.clone().next()
-        && first == '-'
-    {
-        digits.push('-');
-        chars.next();
+    if let Some(first) = chars.clone().next() {
+        if first == '-' {
+            digits.push('-');
+            chars.next();
+        }
     }
     for ch in chars {
         if ch.is_ascii_digit() {
@@ -758,34 +768,33 @@ fn parse_leading_float(text: &str) -> Option<f64> {
     }
 }
 
-struct BuildRowRequest<'a> {
-    meta: &'a CodexMeta,
-    model: Option<&'a str>,
-    path: &'a Path,
+#[allow(clippy::too_many_arguments)]
+fn build_row(
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
     offset: i64,
     timestamp: Option<i64>,
-    role: &'a str,
-    kind: &'a str,
+    role: &str,
+    kind: &str,
     text: String,
     tool_names: Option<String>,
-    metadata: &'a Value,
-}
-
-fn build_row(request: BuildRowRequest<'_>) -> SessionMessageRecord {
+    metadata: &Value,
+) -> SessionMessageRecord {
     SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id: format!("{}:{}", request.meta.session_id, request.offset),
-        session_id: request.meta.session_id.clone(),
-        role: request.role.to_string(),
-        timestamp: request.timestamp,
-        ordinal: request.offset,
-        text: request.text,
-        kind: Some(request.kind.to_string()),
-        model: request.model.map(str::to_string),
-        tool_names: request.tool_names,
-        source_path: Some(request.path.to_string_lossy().to_string()),
-        source_offset: Some(request.offset),
-        metadata_json: serde_json::to_string(request.metadata).ok(),
+        message_id: format!("{}:{offset}", meta.session_id),
+        session_id: meta.session_id.clone(),
+        role: role.to_string(),
+        timestamp,
+        ordinal: offset,
+        text,
+        kind: Some(kind.to_string()),
+        model: model.map(str::to_string),
+        tool_names,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(metadata).ok(),
     }
 }
 
@@ -854,18 +863,18 @@ fn exec_command_row(
         }
     }
 
-    build_row(BuildRowRequest {
+    build_row(
         meta,
-        model: exec.model.as_deref(),
+        exec.model.as_deref(),
         path,
-        offset: exec.offset,
-        timestamp: exec.timestamp,
-        role: "tool",
-        kind: "tool_call",
-        text: preview_truncated(&exec.cmd, TEXT_PREVIEW_BYTES),
-        tool_names: Some("exec_command".to_string()),
-        metadata: &Value::Object(metadata),
-    })
+        exec.offset,
+        exec.timestamp,
+        "tool",
+        "tool_call",
+        preview_truncated(&exec.cmd, TEXT_PREVIEW_BYTES),
+        Some("exec_command".to_string()),
+        &Value::Object(metadata),
+    )
 }
 
 /// Commit refs mined from one exec result, split by evidence strength.
@@ -965,7 +974,7 @@ fn patch_apply_row(
     model: Option<&str>,
     path: &Path,
     offset: i64,
-) -> SessionMessageRecord {
+) -> Option<SessionMessageRecord> {
     let changes = payload.get("changes").and_then(Value::as_object);
     let mut files = Vec::new();
     if let Some(changes) = changes {
@@ -1016,18 +1025,18 @@ fn patch_apply_row(
     }
     metadata.insert("files".to_string(), Value::Array(files));
 
-    build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
-        timestamp: timestamp_of(record),
-        role: "tool",
-        kind: "file_edit",
+        timestamp_of(record),
+        "tool",
+        "file_edit",
         text,
-        tool_names: Some("apply_patch".to_string()),
-        metadata: &Value::Object(metadata),
-    })
+        Some("apply_patch".to_string()),
+        &Value::Object(metadata),
+    ))
 }
 
 /// Count unified-diff hunks (`@@ … @@` headers) without keeping the diff body.
@@ -1082,18 +1091,18 @@ fn turn_boundary_row(
     insert_i64(&mut metadata, "completed_at", payload.get("completed_at"));
     insert_str(&mut metadata, "reason", payload.get("reason"));
 
-    Some(build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
-        timestamp: timestamp_of(record),
-        role: "system",
-        kind: "turn_boundary",
+        timestamp_of(record),
+        "system",
+        "turn_boundary",
         text,
-        tool_names: None,
-        metadata: &Value::Object(metadata),
-    }))
+        None,
+        &Value::Object(metadata),
+    ))
 }
 
 fn mcp_tool_call_row(
@@ -1135,10 +1144,7 @@ fn mcp_tool_call_row(
     insert_str(&mut metadata, "call_id", payload.get("call_id"));
     insert_str(&mut metadata, "plugin_id", payload.get("plugin_id"));
     if let Some(arguments) = invocation.and_then(|inv| inv.get("arguments")) {
-        // `Value`'s `Display` is the same canonical JSON rendering without a
-        // failure mode, so the recorded arguments can no longer collapse to an
-        // empty string that reads as "the tool was called with no arguments".
-        let serialized = arguments.to_string();
+        let serialized = serde_json::to_string(arguments).unwrap_or_default();
         metadata.insert(
             "arguments".to_string(),
             Value::String(preview_truncated(&serialized, ARG_METADATA_BYTES)),
@@ -1154,18 +1160,18 @@ fn mcp_tool_call_row(
         metadata.insert("error".to_string(), Value::String(error));
     }
 
-    Some(build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
-        timestamp: timestamp_of(record),
-        role: "tool",
-        kind: "tool_call",
-        text: tool_names.clone(),
-        tool_names: Some(tool_names),
-        metadata: &Value::Object(metadata),
-    }))
+        timestamp_of(record),
+        "tool",
+        "tool_call",
+        tool_names.clone(),
+        Some(tool_names),
+        &Value::Object(metadata),
+    ))
 }
 
 /// Codex encodes MCP call durations as `{ "secs": s, "nanos": n }`.
@@ -1196,32 +1202,30 @@ fn web_search_row(
     let queries: Vec<Value> = payload
         .pointer("/action/queries")
         .and_then(Value::as_array)
-        .map_or_else(
-            || vec![Value::String(query.to_string())],
-            |arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(|q| Value::String(q.to_string()))
-                    .collect()
-            },
-        );
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|q| Value::String(q.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![Value::String(query.to_string())]);
 
     let mut metadata = base_metadata("codex_web_search", "web_search_end");
     insert_str(&mut metadata, "call_id", payload.get("call_id"));
     metadata.insert("queries".to_string(), Value::Array(queries));
 
-    Some(build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
-        timestamp: timestamp_of(record),
-        role: "tool",
-        kind: "web_search",
-        text: preview_truncated(query, TEXT_PREVIEW_BYTES),
-        tool_names: Some("web_search".to_string()),
-        metadata: &Value::Object(metadata),
-    }))
+        timestamp_of(record),
+        "tool",
+        "web_search",
+        preview_truncated(query, TEXT_PREVIEW_BYTES),
+        Some("web_search".to_string()),
+        &Value::Object(metadata),
+    ))
 }
 
 fn sub_agent_activity_row(
@@ -1231,7 +1235,7 @@ fn sub_agent_activity_row(
     model: Option<&str>,
     path: &Path,
     offset: i64,
-) -> SessionMessageRecord {
+) -> Option<SessionMessageRecord> {
     let activity_kind = payload
         .get("kind")
         .and_then(Value::as_str)
@@ -1257,18 +1261,18 @@ fn sub_agent_activity_row(
         payload.get("occurred_at_ms"),
     );
 
-    build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
-        timestamp: timestamp_of(record),
-        role: "system",
-        kind: "subagent_activity",
-        text: preview_truncated(&text, TEXT_PREVIEW_BYTES),
-        tool_names: None,
-        metadata: &Value::Object(metadata),
-    })
+        timestamp_of(record),
+        "system",
+        "subagent_activity",
+        preview_truncated(&text, TEXT_PREVIEW_BYTES),
+        None,
+        &Value::Object(metadata),
+    ))
 }
 
 fn inter_agent_row(
@@ -1298,27 +1302,27 @@ fn inter_agent_row(
         Value::String(recipient.to_string()),
     );
     metadata.insert("encrypted".to_string(), Value::Bool(encrypted));
-    if let Some(others) = payload.get("other_recipients").and_then(Value::as_array)
-        && !others.is_empty()
-    {
-        metadata.insert("other_recipients".to_string(), Value::Array(others.clone()));
+    if let Some(others) = payload.get("other_recipients").and_then(Value::as_array) {
+        if !others.is_empty() {
+            metadata.insert("other_recipients".to_string(), Value::Array(others.clone()));
+        }
     }
     if let Some(trigger) = payload.get("trigger_turn").and_then(Value::as_bool) {
         metadata.insert("trigger_turn".to_string(), Value::Bool(trigger));
     }
 
-    Some(build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
-        timestamp: timestamp_of(record),
-        role: "system",
-        kind: "subagent_activity",
-        text: format!("Codex agent message: {author} -> {recipient} (encrypted)"),
-        tool_names: None,
-        metadata: &Value::Object(metadata),
-    }))
+        timestamp_of(record),
+        "system",
+        "subagent_activity",
+        format!("Codex agent message: {author} -> {recipient} (encrypted)"),
+        None,
+        &Value::Object(metadata),
+    ))
 }
 
 fn update_plan_row(
@@ -1357,18 +1361,18 @@ fn update_plan_row(
     insert_str(&mut metadata, "explanation", args.get("explanation"));
     metadata.insert("steps".to_string(), Value::Array(steps));
 
-    Some(build_row(BuildRowRequest {
+    Some(build_row(
         meta,
         model,
         path,
         offset,
         timestamp,
-        role: "assistant",
-        kind: "plan",
-        text: preview_truncated(&lines.join("\n"), TEXT_PREVIEW_BYTES),
-        tool_names: Some("update_plan".to_string()),
-        metadata: &Value::Object(metadata),
-    }))
+        "assistant",
+        "plan",
+        preview_truncated(&lines.join("\n"), TEXT_PREVIEW_BYTES),
+        Some("update_plan".to_string()),
+        &Value::Object(metadata),
+    ))
 }
 
 fn insert_str(metadata: &mut Map<String, Value>, key: &str, value: Option<&Value>) {
@@ -1640,6 +1644,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.role, "tool");
         assert_eq!(row.kind.as_deref(), Some("tool_call"));
+        // The command text is searchable (the whole point of the fix).
         assert_eq!(row.text, "gh pr merge 366");
         assert_eq!(row.tool_names.as_deref(), Some("exec_command"));
         // Keyed on the call offset, not the output offset.

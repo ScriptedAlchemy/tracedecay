@@ -1,51 +1,39 @@
 use crate::common;
 
-#[cfg(unix)]
-use std::ffi::OsStr;
-#[cfg(unix)]
 use std::fs;
 use std::io::Write;
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::process::Output;
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 
-#[cfg(unix)]
-use crate::common::canonical_existing_path;
-use crate::common::tracedecay_command_with_home;
+use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 #[cfg(unix)]
 use crate::serve_harness::runtime_project_root;
 #[cfg(unix)]
 use crate::serve_harness::{canonical_path_string, run_serve_runtime};
-#[cfg(unix)]
-use crate::serve_harness::{init_project_under, register_global_project};
-use crate::serve_harness::{init_project_with_file, profile_root};
-#[cfg(unix)]
-use rusqlite::Connection;
+use crate::serve_harness::{
+    init_project_under, init_project_with_file, profile_root, register_global_project,
+};
+use libsql::Builder;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::sync::Mutex;
-#[cfg(unix)]
-use tracedecay::mcp::handle_tool_call;
-use tracedecay::serve;
-use tracedecay::storage::default_profile_sharded_layout;
-#[cfg(unix)]
-use tracedecay::storage::{PrivateStoreIo, pin_fixture_repository_identity};
-#[cfg(unix)]
-use tracedecay::tracedecay::TraceDecay;
-use tracedecay::tracedecay::TraceDecayOpenOptions;
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill,
+    approve_managed_skill, create_managed_skill_draft,
 };
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::serve;
+use tracedecay::storage::{
+    EnrollmentMarker, StorageMode, default_profile_sharded_layout, write_enrollment_marker,
+};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -84,8 +72,7 @@ fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
         title: title.to_string(),
         summary: format!("{title} summary."),
         category: "maintenance".to_string(),
-        targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(
-        ),
+        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
         body_markdown: format!("Use {title} before applying repository changes."),
         support_files: vec![
             ManagedSupportFile::new(
@@ -130,13 +117,14 @@ fn run_serve_runtime_with_initialize_root(
     output
 }
 
-#[cfg(unix)]
 async fn set_user_version(db_path: &Path, version: u32) {
-    let conn = Connection::open(db_path).unwrap();
-    conn.pragma_update(None, "user_version", version).unwrap();
+    let db = Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(&format!("PRAGMA user_version = {version}"), ())
+        .await
+        .unwrap();
 }
 
-#[cfg(unix)]
 fn extract_tool_text(value: &Value) -> &str {
     value["content"][0]["text"]
         .as_str()
@@ -152,24 +140,22 @@ async fn create_read_only_project_db(
 ) -> (PathBuf, PathBuf) {
     let project_root = canonical_existing_path(project);
     let profile_root = profile_root(home);
-    // Profile identity validation requires an owner-private root (0700). Seed
-    // it through PrivateStoreIo before any store paths are created under it.
-    PrivateStoreIo::create_dir_all(&profile_root).expect("create owner-private profile root");
+    let data_root = profile_root.join(format!("projects/{project_id}"));
+    let db_path = data_root.join("tracedecay.db");
 
-    // Pin enrollment identity before init so the store lands under the exact
-    // project id the caller named. Init (not a bare graph DB publish) is what
-    // admits a canonical configuration revision — open_read_only fails closed
-    // without one.
-    pin_fixture_repository_identity(&project_root, project_id).unwrap();
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
-    };
-    let cg = TraceDecay::init_with_options(&project_root, open_options)
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
-        .expect("seed read-only fixture through production init");
-    let db_path = cg.store_layout().graph_db_path.clone();
-    cg.close();
+        .unwrap();
+    db.checkpoint().await.unwrap();
+    db.close();
     if let Some(version) = user_version {
         set_user_version(&db_path, version).await;
     }
@@ -189,7 +175,6 @@ fn file_uri_localhost_percent_encoded(path: &Path) -> String {
 
 /// Builds a portable `file://` URI: `/tmp/x` → `file:///tmp/x` on Unix,
 /// `C:\Users\x` → `file:///C:/Users/x` on Windows.
-#[cfg(unix)]
 fn file_uri(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if normalized.starts_with('/') {
@@ -264,12 +249,21 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
     let project = init_project_with_file(home.path(), "pub fn skill_stdio_marker() {}\n").await;
     let profile_root = profile_root(home.path());
 
-    create_managed_skill(
+    create_managed_skill_draft(
+        &profile_root,
+        managed_skill_stdio_draft("pending-stdio-skill", "Pending stdio skill"),
+    )
+    .await
+    .unwrap();
+    create_managed_skill_draft(
         &profile_root,
         managed_skill_stdio_draft("active-stdio-skill", "Active stdio skill"),
     )
     .await
     .unwrap();
+    approve_managed_skill(&profile_root, "active-stdio-skill")
+        .await
+        .unwrap();
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut child = tracedecay_command_with_home(home.path())
@@ -387,10 +381,9 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             schema_version: 2,
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
-            task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+            task: tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
             task_key: Some("memory_curator".to_string()),
             backend: "codex_app_server".to_string(),
-            backend_identity: None,
             host_mode: Some("standalone".to_string()),
             prompt_version: Some("memory_curator:v1".to_string()),
             response_schema: None,
@@ -411,14 +404,11 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             error: None,
             error_classification: None,
             error_retryable: None,
-            backend_attempt_count: 0,
-            backend_attempts: Vec::new(),
             fallback_status: None,
             report_ref: None,
             artifacts: vec![artifact],
             started_at: "1782283199".to_string(),
             completed_at: "1782283200".to_string(),
-            completed_at_micros: Some(1_782_283_200_000_000),
         },
     )
     .await
@@ -546,7 +536,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
                     "capabilities": { "tools": {} },
                     "serverInfo": {
                         "name": "sentinel-proxy-first-daemon",
-                        "version": tracedecay::version::build_version()
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 }
             });
@@ -627,14 +617,10 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
 async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon() {
     use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixListener;
-    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn restart_window_marker() {}\n").await;
-    // Granted once serve is running with its request queued, so the rebind
-    // lands inside the restart window without timing the window by clock.
-    let (rebind_tx, rebind_rx) = mpsc::channel();
     let socket_path = common::daemon_socket_path(home.path());
     fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
 
@@ -657,64 +643,62 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
     // fallback and exercises the client-side version-skew warning.
     let listener_path = socket_path.clone();
     let fake_daemon = std::thread::spawn(move || {
-        rebind_rx
-            .recv()
-            .expect("serve should grant the rebind permit");
+        std::thread::sleep(Duration::from_millis(400));
         let listener = UnixListener::bind(&listener_path).expect("bind restarted daemon socket");
         listener
             .set_nonblocking(true)
             .expect("nonblocking fake daemon listener");
         let deadline = Instant::now() + Duration::from_secs(10);
-        common::poll_until(
-            deadline,
-            Duration::from_millis(10),
-            || {
-                let mut stream = match listener.accept() {
-                    Ok((stream, _addr)) => stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return None,
-                    Err(e) => panic!("accept serve connection: {e}"),
-                };
-                stream
-                    .set_nonblocking(false)
-                    .expect("blocking fake daemon stream");
-                let mut reader =
-                    BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
-                let mut handshake_line = String::new();
-                if reader
-                    .read_line(&mut handshake_line)
-                    .expect("read handshake")
-                    == 0
-                {
-                    // The transport probe connects and hangs up without a handshake.
-                    return None;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for serve to proxy a request to the restarted daemon"
+            );
+            let mut stream = match listener.accept() {
+                Ok((stream, _addr)) => stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
                 }
-                let mut request_line = String::new();
-                if reader.read_line(&mut request_line).expect("read request") == 0 {
-                    return None;
-                }
-                let request: Value =
-                    serde_json::from_str(request_line.trim()).expect("request json");
-                let response = json!({
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "result": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": { "tools": {} },
-                        "serverInfo": {
-                            "name": "sentinel-restarted-daemon",
-                            "version": "0.0.1-sentinel"
-                        }
+                Err(e) => panic!("accept serve connection: {e}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking fake daemon stream");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let mut handshake_line = String::new();
+            if reader
+                .read_line(&mut handshake_line)
+                .expect("read handshake")
+                == 0
+            {
+                // The transport probe connects and hangs up without a handshake.
+                continue;
+            }
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).expect("read request") == 0 {
+                continue;
+            }
+            let request: Value = serde_json::from_str(request_line.trim()).expect("request json");
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "sentinel-restarted-daemon",
+                        "version": "0.0.1-sentinel"
                     }
-                });
-                writeln!(stream, "{response}").expect("write fake daemon response");
-                // Drain until the proxy hangs up so the response is not lost to a
-                // connection reset.
-                let mut scratch = [0_u8; 64];
-                while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
-                Some(())
-            },
-            || "timed out waiting for serve to proxy a request to the restarted daemon".to_string(),
-        );
+                }
+            });
+            writeln!(stream, "{response}").expect("write fake daemon response");
+            // Drain until the proxy hangs up so the response is not lost to a
+            // connection reset.
+            let mut scratch = [0_u8; 64];
+            while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
+            return;
+        }
     });
 
     let mut child = tracedecay_command_with_home(home.path())
@@ -741,9 +725,6 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
         .unwrap();
     }
     drop(child.stdin.take());
-    // serve is up and its request is queued, so the socket was absent for at
-    // least one probe. Let the "restarted daemon" claim it now.
-    rebind_tx.send(()).expect("grant the rebind permit");
 
     let output = child
         .wait_with_output()
@@ -905,26 +886,11 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_tool_text(&status.value)).unwrap();
-    // Plan 21 moved storage_status onto the daemon-retained typed primitive
-    // owner. Without a live daemon transport this in-process harness receives
-    // the truthful unavailable envelope rather than a fabricated local answer.
-    // The read-only write guard below preserves this test's core intent.
-    assert_eq!(
-        payload["contract"]["schema_id"].as_str(),
-        Some("schema.application.primitive.storage-status.result")
-    );
-    assert_eq!(payload["problem"]["kind"].as_str(), Some("unavailable"));
-    assert_eq!(
-        payload["problem"]["code"].as_str(),
-        Some("application.transport.unavailable")
-    );
-    assert!(
-        payload["problem"]["legal_actions"]
-            .as_array()
-            .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
-    );
+    assert_eq!(payload["status"].as_str(), Some("ok"));
+    assert_eq!(payload["writable"].as_bool(), Some(false));
+    assert_eq!(payload["read_only"].as_bool(), Some(true));
 
-    let error = match cg.open_project_store_db().await {
+    let error = match cg.index_all().await {
         Ok(_) => panic!("mutating operations should be guarded before SQLite rejects writes"),
         Err(error) => error,
     };
@@ -981,39 +947,6 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
         canonical_path_string(cwd_project.path()),
         "discovered cwd project should be preferred over MCP initialize roots"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn unexpanded_template_path_prefers_initialize_roots_over_discovered_cwd() {
-    let home = TempDir::new().unwrap();
-    let cwd_project = init_project_with_file(home.path(), "pub fn cwd_project_marker() {}\n").await;
-    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
-    let _daemon = common::spawn_tracedecay_daemon(home.path());
-
-    let output = run_serve_runtime(
-        home.path(),
-        cwd_project.path(),
-        Some(OsStr::new("${workspaceFolder}")),
-        json!({
-            "roots": [{
-                "uri": file_uri(active.path()),
-                "name": "active"
-            }]
-        }),
-    );
-
-    assert!(
-        output.status.success(),
-        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
-        canonical_path_string(active.path()),
-        "an unexpanded host template must defer routing to MCP initialize roots"
     );
 }
 

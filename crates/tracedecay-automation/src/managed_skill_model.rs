@@ -1,14 +1,13 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use crate::Result;
-use crate::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
-use crate::managed_skill_validation::{
+
+use super::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
+use super::managed_skill_validation::{
     MAX_NATIVE_SKILL_DESCRIPTION_CHARS, MAX_NATIVE_SKILL_NAME_CHARS, validate_managed_skill,
     validate_native_skill_markdown, validate_support_file,
 };
@@ -17,8 +16,10 @@ pub const MAX_MANAGED_SUPPORT_FILES: usize = 20;
 pub const MAX_MANAGED_SUPPORT_FILE_BYTES: usize = 64 * 1024;
 pub const MAX_MANAGED_SKILL_BODY_BYTES: usize = 256 * 1024;
 
-/// Provenance marker written into every host-loadable skill file materialized
-/// by TraceDecay automation.
+/// Provenance marker written into the frontmatter of every host-loadable
+/// skill file that `TraceDecay` automation materializes. The materialization
+/// reconciler owns (updates/removes) only files carrying this exact marker, so
+/// user-authored and repo-local dev skills are never touched.
 pub const MATERIALIZED_SKILL_MANAGED_BY: &str = "tracedecay-automation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -40,8 +41,12 @@ impl SkillInstallTarget {
         matches!(self, Self::Cursor | Self::Codex | Self::Hermes)
     }
 
+    /// True for hosts that reconcile their managed-skill listing as a
+    /// marker-gated block inside a prompt file. Native-overlay hosts
+    /// (Cursor/Codex) deploy a skills directory instead, and Hermes owns its
+    /// own curation — neither writes a prompt-index block.
     pub fn writes_prompt_index(self) -> bool {
-        !self.is_native_overlay()
+        !self.is_native_overlay() && self != Self::Hermes
     }
 
     pub fn prompt_label(self) -> &'static str {
@@ -124,18 +129,27 @@ fn truncate_frontmatter_chars(value: &str, max_chars: usize) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillSource {
     AutomationRun,
-    User,
+    UserDraft,
     Import,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillState {
+    PendingApproval,
     Active,
     Disabled,
     Archived,
 }
 
+/// Where an active managed skill is host-materialized as a real `SKILL.md`.
+///
+/// Defaults to [`Self::Global`]: a skill is written only into the user's global
+/// host dirs (`~/.claude`, `~/.codex`) and is never poured into every project
+/// checkout, so repos are not polluted with untracked `.claude/skills/**` files
+/// and hosts do not load duplicate copies. Skills whose evidence is genuinely
+/// project-local opt into [`Self::Project`] to also materialize into the
+/// enclosing project root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillMaterializationScope {
@@ -145,10 +159,15 @@ pub enum ManagedSkillMaterializationScope {
 }
 
 impl ManagedSkillMaterializationScope {
+    /// Whether this skill should also be materialized into project checkouts.
     pub fn materializes_into_projects(self) -> bool {
         matches!(self, Self::Project)
     }
 
+    /// Whether this is the default (global-only) scope. Used to keep the
+    /// serialized record additive: the field is omitted for global skills, so
+    /// existing `skill.json` payloads are byte-for-byte unchanged.
+    // `serde(skip_serializing_if)` requires a `&self` predicate.
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn is_global(&self) -> bool {
         matches!(self, Self::Global)
@@ -203,19 +222,20 @@ impl ManagedSkillDraft {
                 summary: self.summary,
                 category: self.category,
                 targets: self.targets,
-                state: ManagedSkillState::Active,
+                state: ManagedSkillState::PendingApproval,
                 materialization_scope: ManagedSkillMaterializationScope::default(),
                 pinned: false,
                 checksum: String::new(),
                 created_at: now,
                 updated_at: now,
-                activated_at: Some(now),
+                approved_at: None,
                 absorbed_into: None,
                 archived_reason: None,
                 provenance: self.provenance,
             },
             body_markdown: self.body_markdown,
             support_files: self.support_files,
+            pending_update: None,
         };
         validate_managed_skill(&skill)?;
         skill.refresh_checksum();
@@ -232,6 +252,9 @@ pub struct ManagedSkillMetadata {
     #[serde(default = "default_managed_skill_targets")]
     pub targets: Vec<SkillInstallTarget>,
     pub state: ManagedSkillState,
+    /// Host-materialization reach. Defaults to global-only so records written
+    /// before this field existed (and every automation-authored skill) never
+    /// spray materialized files into project checkouts.
     #[serde(
         default,
         skip_serializing_if = "ManagedSkillMaterializationScope::is_global"
@@ -243,10 +266,15 @@ pub struct ManagedSkillMetadata {
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+    /// When the skill last transitioned into `Active` (human approval).
+    /// Anchors post-approval outcome tracking; absent for never-approved
+    /// skills and records written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activated_at: Option<i64>,
+    pub approved_at: Option<i64>,
+    /// Canonical managed-skill id that absorbed this archived skill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absorbed_into: Option<String>,
+    /// Structured lifecycle reason retained when a skill is archived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_reason: Option<String>,
     pub provenance: ManagedSkillProvenance,
@@ -257,6 +285,8 @@ pub struct ManagedSkill {
     pub metadata: ManagedSkillMetadata,
     pub body_markdown: String,
     pub support_files: Vec<ManagedSupportFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_update: Option<ManagedSkillPendingUpdate>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,12 +300,54 @@ pub struct ManagedSkillUpdate {
     pub pinned: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedSkillPendingUpdate {
+    pub base_checksum: String,
+    pub staged_at: i64,
+    pub metadata: ManagedSkillMetadata,
+    pub body_markdown: String,
+    #[serde(default)]
+    pub support_files: Vec<ManagedSupportFile>,
+    /// Lifecycle state the skill transitions to when this staged change is
+    /// approved. `None` keeps the historical behavior (promote to `Active`).
+    /// Staged consolidations set `Some(Archived)`; skill content is always
+    /// preserved on disk (archive, never delete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_state: Option<ManagedSkillState>,
+    /// Reviewer-facing reason recorded when the change was staged (used by
+    /// consolidation proposals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_reason: Option<String>,
+}
+
+impl ManagedSkillPendingUpdate {
+    pub fn into_skill(self) -> ManagedSkill {
+        ManagedSkill {
+            metadata: self.metadata,
+            body_markdown: self.body_markdown,
+            support_files: self.support_files,
+            pending_update: None,
+        }
+    }
+
+    pub fn normalize_timestamps(&mut self) {
+        let mut skill = ManagedSkill {
+            metadata: self.metadata.clone(),
+            body_markdown: self.body_markdown.clone(),
+            support_files: self.support_files.clone(),
+            pending_update: None,
+        };
+        skill.normalize_timestamps();
+        self.metadata = skill.metadata;
+    }
+}
+
 impl ManagedSkill {
     pub fn set_state(&mut self, state: ManagedSkillState) {
         if self.metadata.state != state {
             self.metadata.state = state;
             if state == ManagedSkillState::Active {
-                self.metadata.activated_at = Some(current_metadata_timestamp());
+                self.metadata.approved_at = Some(current_metadata_timestamp());
             }
             self.touch();
         }
@@ -379,10 +451,15 @@ impl ManagedSkill {
         Ok(output)
     }
 
+    /// Kebab-case slug used as the directory name for the host-loadable
+    /// materialized skill (`<skills_dir>/<slug>/SKILL.md`). Derived from the
+    /// managed-skill id the same way the native overlay derives its `name:`.
     pub fn host_skill_slug(&self) -> String {
         native_skill_name(&self.metadata.id)
     }
 
+    /// Stable identity of the complete host-loadable package contract: the
+    /// rendered `SKILL.md` fields/body plus every support path and payload.
     pub fn materialized_package_hash(&self) -> Result<String> {
         let markdown = self.render_materialized_skill_markdown_with_hash("<package-hash>")?;
         let mut hasher = Sha256::new();
@@ -390,6 +467,8 @@ impl ManagedSkill {
         let mut support_files = self.support_files.iter().collect::<Vec<_>>();
         support_files.sort_by(|left, right| left.path.cmp(&right.path));
         for support in support_files {
+            // Keep package-hash path bytes slash-normalized so Windows
+            // on-disk recompute (which joins Path components with `/`) matches.
             let key = support
                 .path
                 .components()
@@ -404,18 +483,27 @@ impl ManagedSkill {
             hasher.update(b"\0");
             hasher.update(&support.bytes);
         }
-        Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
+        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
     }
 
+    /// Renders a host-loadable `SKILL.md` with provenance frontmatter marking
+    /// the file as owned by `TraceDecay` automation. Hosts (Claude Code, Codex)
+    /// read `name`/`description`; the extra `managed-by`/`skill-id`/
+    /// `content-hash`/`skill-version` keys are ignored by the host but let the
+    /// reconciler own exactly its own files and detect drift.
     pub fn render_materialized_skill_markdown(&self) -> Result<String> {
         let package_hash = self.materialized_package_hash()?;
         self.render_materialized_skill_markdown_with_hash(&package_hash)
     }
 
     fn render_materialized_skill_markdown_with_hash(&self, package_hash: &str) -> Result<String> {
+        // Reuse the native name/description derivation + bounds so the host
+        // frontmatter shape matches the overlay exactly.
         let name = native_skill_name(&self.metadata.id);
         let description = managed_skill_description(&self.metadata.summary);
         {
+            // Validate the host-facing fields via the native validator by
+            // rendering a name/description-only document first.
             let native_only = format!(
                 "---\nname: {name}\ndescription: {}\n---\n\n{}\n",
                 frontmatter_string(&description),
@@ -473,25 +561,22 @@ impl ManagedSkill {
             hasher.update(b"\0");
             hasher.update(&file.bytes);
         }
-        encode_tagged_lowercase_hex("sha256:", &hasher.finalize())
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 }
 
-#[doc(hidden)]
 pub fn current_metadata_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        .unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use crate::skill_frontmatter::parse_skill_frontmatter;
-
     use super::*;
+    use crate::skill_frontmatter::parse_skill_frontmatter;
 
     #[test]
     fn native_skill_markdown_round_trips_escaped_description() {
@@ -504,7 +589,7 @@ mod tests {
             body_markdown: "# Native escape\n".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::User,
+                source: ManagedSkillSource::UserDraft,
                 actor: "tester".to_string(),
                 run_id: None,
             },
@@ -519,30 +604,6 @@ mod tests {
             frontmatter["description"].as_scalar(),
             Some(r#"Use when checking "quoted" paths like C:\tmp"#)
         );
-    }
-
-    #[test]
-    fn materialized_skill_is_active_with_an_activation_timestamp() {
-        let skill = ManagedSkillDraft {
-            id: "immediate-activation".to_string(),
-            title: "Immediate activation".to_string(),
-            summary: "Materialize policy-validated guidance immediately.".to_string(),
-            category: "testing".to_string(),
-            targets: vec![SkillInstallTarget::Claude],
-            body_markdown: "# Immediate activation\n".to_string(),
-            support_files: Vec::new(),
-            provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::AutomationRun,
-                actor: "automation".to_string(),
-                run_id: Some("run-1".to_string()),
-            },
-        }
-        .materialize()
-        .unwrap();
-
-        assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-        assert_eq!(skill.metadata.activated_at, Some(skill.metadata.created_at));
-        assert_eq!(skill.metadata.updated_at, skill.metadata.created_at);
     }
 
     #[test]

@@ -24,11 +24,10 @@ Multi-branch is fully opt-in. Without it, tracedecay behaves exactly as before: 
 one graph, sync re-indexes whatever is on disk.
 
 When you opt in, tracedecay creates a `branch-meta.json` file inside the active project store that tracks
-which branches have their own database. The store lives in your user profile
-(`~/.tracedecay/projects/<project-id>`), never inside the repository:
+which branches have their own database. In repo-local mode, the storage layout looks like this:
 
 ```
-~/.tracedecay/projects/<project-id>/
+.tracedecay/
   tracedecay.db             # default branch (main/master)
   branch-meta.json          # branch tracking metadata
   branches/
@@ -36,9 +35,10 @@ which branches have their own database. The store lives in your user profile
     release_3_4.db
 ```
 
-Projects indexed by an older TraceDecay may still carry a leftover repo-local
-`.tracedecay/` directory. Its identity is adopted into the profile registry on
-first open; after that the directory is ignored and can be deleted.
+Projects indexed before the rebrand may still use a legacy `.tracedecay/` directory
+with the same layout; it is honored as a fallback.
+
+Profile-backed projects keep the same logical layout in their profile shard. The repository may contain only an enrollment marker, while `branch-meta.json`, `tracedecay.db`, and `branches/*.db` live under the resolved store root.
 
 Creating a new branch database is cheap. TraceDecay copies the nearest ancestor's database
 (usually `main`) and then runs an incremental sync that only re-parses files whose content
@@ -119,7 +119,7 @@ changes on the next sync cycle.
 
 ## How the MCP server selects a database
 
-When the MCP server starts (via `tracedecay serve`), it reads `.git/HEAD`
+When the MCP server starts (via `tracedecay mcp` or `tracedecay serve`), it reads `.git/HEAD`
 to determine the current branch and opens the corresponding database.
 
 If the current branch is tracked, queries run against its own database with full accuracy.

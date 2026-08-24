@@ -6,20 +6,17 @@ use serde::{Deserialize, Serialize};
 use super::config_error;
 use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
 use crate::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::tracedecay::current_timestamp;
+use crate::tracedecay::current_timestamp;
 
 mod analytics;
 mod overlap;
 mod recommendations;
 
-pub use crate::ports::session_store::AnalyticsEventRecord;
 pub use analytics::analytics_import_key_for_request;
-pub use analytics::ingest_analytics_events;
-pub use analytics::ingest_project_analytics_events;
+pub use analytics::{ingest_analytics_events, ingest_project_analytics_events};
 pub use overlap::{
     DEFAULT_SKILL_OVERLAP_LIMIT, SKILL_OVERLAP_CONTENT_THRESHOLD, SKILL_OVERLAP_TITLE_THRESHOLD,
-    SkillOverlapCandidate, detected_skill_overlap_pair, detected_skill_overlap_partner,
-    skill_overlap_candidates,
+    SkillOverlapCandidate, skill_overlap_candidates,
 };
 pub use recommendations::{skill_improvement_recommendations, stale_skill_recommendations};
 
@@ -65,13 +62,13 @@ pub struct SkillUsageRecord {
     /// When the skill last transitioned into the active state; mirrors the
     /// managed skill metadata so outcome scoring works from summaries alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activated_at: Option<i64>,
-    /// View/use totals captured at activation time so activity since activation
+    pub approved_at: Option<i64>,
+    /// View/use totals captured at approval time so activity since approval
     /// is an exact delta rather than a heuristic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view_count_at_activation: Option<u64>,
+    pub view_count_at_approval: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_count_at_activation: Option<u64>,
+    pub use_count_at_approval: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +106,7 @@ pub struct SkillImprovementRecommendation {
 impl Default for SkillUsageLedger {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 1,
             records: BTreeMap::new(),
             imported_analytics_events: BTreeSet::new(),
         }
@@ -119,7 +116,7 @@ impl Default for SkillUsageLedger {
 impl SkillUsageRecord {
     fn new(skill_id: String, timestamp: i64) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 1,
             skill_id,
             title: None,
             category: None,
@@ -136,26 +133,21 @@ impl SkillUsageRecord {
             last_viewed_at: None,
             last_used_at: None,
             last_patched_at: None,
-            activated_at: None,
-            view_count_at_activation: None,
-            use_count_at_activation: None,
+            approved_at: None,
+            view_count_at_approval: None,
+            use_count_at_approval: None,
         }
     }
 
     fn merge_skill_metadata(&mut self, skill: &ManagedSkill) {
-        self.schema_version = 2;
         self.title = Some(skill.metadata.title.clone());
         self.category = Some(skill.metadata.category.clone());
         self.state = Some(skill.metadata.state);
         self.pinned = skill.metadata.pinned;
         self.created_by = Some(skill.metadata.provenance.actor.clone());
         self.provenance_source = Some(skill.metadata.provenance.source);
-        if self.activated_at != skill.metadata.activated_at {
-            self.activated_at = skill.metadata.activated_at;
-            if self.activated_at.is_some() {
-                self.view_count_at_activation = Some(self.view_count);
-                self.use_count_at_activation = Some(self.use_count);
-            }
+        if skill.metadata.approved_at.is_some() {
+            self.approved_at = skill.metadata.approved_at;
         }
     }
 
@@ -237,6 +229,24 @@ pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill
         .entry(skill_id.clone())
         .or_insert_with(|| SkillUsageRecord::new(skill_id, 0));
     record.merge_skill_metadata(skill);
+    save_skill_usage_ledger(profile_root, &ledger).await
+}
+
+/// Records an approval on the usage ledger: stamps `approved_at` and
+/// snapshots the current view/use totals as post-approval baselines so
+/// adoption can be measured as an exact delta.
+pub async fn record_skill_approval(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
+    let mut ledger = load_skill_usage_ledger(profile_root).await?;
+    let skill_id = skill.metadata.id.clone();
+    let approved_at = skill.metadata.approved_at.unwrap_or_else(current_timestamp);
+    let record = ledger
+        .records
+        .entry(skill_id.clone())
+        .or_insert_with(|| SkillUsageRecord::new(skill_id, approved_at));
+    record.merge_skill_metadata(skill);
+    record.approved_at = Some(approved_at);
+    record.view_count_at_approval = Some(record.view_count);
+    record.use_count_at_approval = Some(record.use_count);
     save_skill_usage_ledger(profile_root, &ledger).await
 }
 

@@ -1,8 +1,9 @@
 //! Content-similarity primitives shared by the write-time diff check and the
 //! dashboard's similarity/curation analytics.
 //!
-//! Runtime and dashboard consumers share these token-overlap primitives so
-//! retrieval and curation classification cannot drift.
+//! Moved here from `src/dashboard/memory_analysis.rs` so `MemoryStore::add_fact`
+//! can classify near-duplicates at write time without depending on the
+//! dashboard; the dashboard re-exports these to keep its behavior identical.
 
 use std::collections::BTreeSet;
 
@@ -11,7 +12,7 @@ const TOKEN_STOPWORDS: &[&str] = &[
     "it", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with",
 ];
 
-pub(crate) fn content_tokens(content: &str) -> BTreeSet<String> {
+pub fn content_tokens(content: &str) -> BTreeSet<String> {
     let mut tokens = BTreeSet::new();
     let mut current = String::new();
     for ch in content.chars() {
@@ -45,7 +46,7 @@ pub fn lexical_overlap(a: &str, b: &str) -> (serde_json::Value, f64, f64) {
 }
 
 /// Pre-tokenized variant of [`lexical_overlap`].
-pub(crate) fn lexical_overlap_tokens(
+pub fn lexical_overlap_tokens(
     a_tokens: &BTreeSet<String>,
     b_tokens: &BTreeSet<String>,
 ) -> (serde_json::Value, f64, f64) {
@@ -82,12 +83,20 @@ pub fn similarity_classification(
         return "likely_duplicate";
     }
     if similarity >= 0.90 && (overlap_coefficient >= 0.35 || token_overlap >= 0.20) {
-        return "high_similarity";
+        return "merge_candidate";
     }
     if similarity >= 0.97 && overlap_coefficient >= 0.25 {
-        return "high_similarity";
+        return "merge_candidate";
     }
     "related"
+}
+
+/// Phase-cosine similarity between two equal-length phase vectors.
+pub fn phase_cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    a.iter().zip(b).map(|(x, y)| (x - y).cos()).sum::<f64>() / a.len() as f64
 }
 
 #[cfg(test)]
@@ -120,8 +129,15 @@ mod tests {
         );
         assert_eq!(
             similarity_classification(0.92, 0.25, 0.4),
-            "high_similarity"
+            "merge_candidate"
         );
         assert_eq!(similarity_classification(0.80, 0.1, 0.1), "related");
+    }
+
+    #[test]
+    fn phase_cosine_identical_vectors() {
+        let v = vec![0.1, 0.2, 0.3];
+        let sim = phase_cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-10);
     }
 }

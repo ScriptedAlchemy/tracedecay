@@ -2,22 +2,26 @@
 //! hint telemetry, the fact-store funnel, and automation run rollups over a
 //! seeded `analytics_events` store.
 
-#[cfg(feature = "test-transport")]
-use serde_json::json;
+use serde_json::{Value, json};
 
-#[cfg(feature = "test-transport")]
-use crate::support::{
-    extract_json, extract_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture, real_mcp_server, setup_empty_project,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay::global_db::AnalyticsEventInsert;
-#[cfg(feature = "test-transport")]
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-#[cfg(feature = "test-transport")]
+use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb, global_db_path};
+use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::current_timestamp;
 
-#[cfg(feature = "test-transport")]
+fn extract_text(v: &Value) -> String {
+    v.get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .and_then(|t| t.get("text"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn extract_json(v: &Value) -> Value {
+    serde_json::from_str(&extract_text(v)).expect("tool response should be valid JSON")
+}
+
 fn tool_call_event(
     project_id: &str,
     tool_name: &str,
@@ -41,7 +45,6 @@ fn tool_call_event(
     }
 }
 
-#[cfg(feature = "test-transport")]
 fn hint_event(
     project_id: &str,
     event_kind: &str,
@@ -65,53 +68,54 @@ fn hint_event(
     }
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
-    let fixture = production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
+    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
+    let project_id = GlobalDb::canonical_project_key(cg.project_root());
+    let now = current_timestamp();
 
-    for _ in 0..2 {
-        handle_real_server_tool_call(
-            &server,
-            "tracedecay_grep",
-            json!({"pattern": "helper", "fixed_strings": true}),
-        )
-        .await;
-    }
-    let failed_grep = handle_real_server_tool_call_raw(&server, "tracedecay_grep", json!({})).await;
+    let gdb = GlobalDb::open()
+        .await
+        .expect("isolated test global db should open");
+    gdb.append_analytics_events(&[
+        tool_call_event(&project_id, "tracedecay_grep", "ok", now - 60),
+        tool_call_event(&project_id, "tracedecay_grep", "ok", now - 50),
+        tool_call_event(&project_id, "tracedecay_grep", "error", now - 40),
+        tool_call_event(&project_id, "tracedecay_fact_store", "ok", now - 30),
+    ])
+    .await
+    .expect("seeding analytics events should succeed");
+
+    // Markdown (default) response carries the tier/tool breakdown as
+    // human-readable text.
+    let res = handle_tool_call(&cg, "tracedecay_analytics", json!({}), None, None)
+        .await
+        .expect("tracedecay_analytics should succeed");
+    let text = extract_text(&res.value);
+    assert!(text.contains("Usage Analytics"), "missing heading: {text}");
     assert!(
-        failed_grep["error"].is_object(),
-        "missing grep pattern must fail over production MCP: {failed_grep}"
+        text.contains("navigation"),
+        "missing navigation tier: {text}"
     );
-    handle_real_server_tool_call(&server, "tracedecay_fact_store_list", json!({})).await;
-    server.ledger_writes_settled().await;
+    assert!(text.contains("memory"), "missing memory tier: {text}");
+    assert!(text.contains("tracedecay_grep"), "missing top tool: {text}");
+    assert!(
+        text.contains("Zero-Call Defined Tools"),
+        "missing zero-call section: {text}"
+    );
 
     // JSON response carries the same data in the typed shape the markdown
     // was rendered from.
-    let json_res =
-        handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
-            .await;
-    let payload = extract_json(&json_res);
-    assert!(
-        payload["observatory"]["metrics"]
-            .as_array()
-            .is_some_and(|metrics| !metrics.is_empty()),
-        "MCP analytics must expose canonical Observatory values and coverage"
-    );
-    assert!(
-        payload["costs"]["usage"]
-            .as_array()
-            .is_some_and(|metrics| !metrics.is_empty()),
-        "MCP analytics must expose canonical Costs values and coverage"
-    );
-    assert!(
-        payload["observatory"]["metrics"][0]["coverage"]["state"].is_string(),
-        "MCP Observatory metrics must retain typed coverage"
-    );
+    let json_res = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("json format should succeed");
+    let payload = extract_json(&json_res.value);
     let tools = &payload["tools"];
     assert_eq!(tools["available"].as_bool(), Some(true));
     assert_eq!(tools["distinct_tools_called"].as_i64(), Some(2));
@@ -153,107 +157,84 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     assert!(
         !sample
             .iter()
-            .any(|name| name == "tracedecay_grep" || name == "tracedecay_fact_store_list"),
+            .any(|name| name == "tracedecay_grep" || name == "tracedecay_fact_store"),
         "called tools must not appear in the zero-call sample: {sample:?}"
     );
-
-    // Markdown response carries the tier/tool breakdown as human-readable
-    // text. Run it after the count assertions because the real server records
-    // its own tool calls asynchronously.
-    let res = handle_real_server_tool_call(
-        &server,
-        "tracedecay_analytics",
-        json!({"format": "markdown"}),
-    )
-    .await;
-    let text = extract_text(&res);
-    assert!(text.contains("Usage Analytics"), "missing heading: {text}");
-    assert!(
-        text.contains("navigation"),
-        "missing navigation tier: {text}"
-    );
-    assert!(text.contains("memory"), "missing memory tier: {text}");
-    assert!(text.contains("tracedecay_grep"), "missing top tool: {text}");
-    assert!(
-        text.contains("Zero-Call Defined Tools"),
-        "missing zero-call section: {text}"
-    );
-    drop(server);
-    fixture.harness.shutdown().await;
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_section_filter_returns_only_the_requested_section() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let server = real_mcp_server(cg).await;
+    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
 
-    let res = handle_real_server_tool_call(
-        &server,
+    let res = handle_tool_call(
+        &cg,
         "tracedecay_analytics",
-        json!({"section": "tools", "format": "json"}),
+        json!({"section": "facts", "format": "json"}),
+        None,
+        None,
     )
-    .await;
-    let payload = extract_json(&res);
+    .await
+    .expect("tracedecay_analytics with section=facts should succeed");
+    let payload = extract_json(&res.value);
+    assert!(payload.get("facts").is_some(), "facts section missing");
     assert!(
-        payload.get("tools").is_some(),
-        "tools section missing: {payload}"
+        payload.get("tools").is_none(),
+        "tools section should be omitted"
     );
-    for unrelated in ["hints", "facts", "automation", "observatory", "costs"] {
-        assert!(
-            payload.get(unrelated).is_none(),
-            "sectioned analytics unexpectedly included {unrelated}"
-        );
-    }
+    assert!(
+        payload.get("hints").is_none(),
+        "hints section should be omitted"
+    );
+    assert!(
+        payload.get("automation").is_none(),
+        "automation section should be omitted"
+    );
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_rejects_unknown_scope_and_section() {
-    let fixture = production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
+    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
 
-    let response = handle_real_server_tool_call_raw(
-        &server,
+    let err = handle_tool_call(
+        &cg,
         "tracedecay_analytics",
         json!({"scope": "bogus"}),
+        None,
+        None,
     )
-    .await;
-    let message = response["error"]["message"]
-        .as_str()
-        .expect("unknown scope must return a JSON-RPC error message");
-    assert!(message.contains("scope"), "unexpected error: {response}");
+    .await
+    .expect_err("unknown scope should be rejected");
+    assert!(err.to_string().contains("scope"), "unexpected error: {err}");
 
-    let response = handle_real_server_tool_call_raw(
-        &server,
+    let err = handle_tool_call(
+        &cg,
         "tracedecay_analytics",
         json!({"section": "bogus"}),
+        None,
+        None,
     )
-    .await;
-    let message = response["error"]["message"]
-        .as_str()
-        .expect("unknown section must return a JSON-RPC error message");
-    assert!(message.contains("section"), "unexpected error: {response}");
-    drop(server);
-    fixture.harness.shutdown().await;
+    .await
+    .expect_err("unknown section should be rejected");
+    assert!(
+        err.to_string().contains("section"),
+        "unexpected error: {err}"
+    );
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_degrades_gracefully_for_a_zero_data_project() {
-    let fixture = production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
+    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
 
-    let res =
-        handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
-            .await;
-    let payload = extract_json(&res);
+    let res = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("tracedecay_analytics should succeed even with no recorded activity");
+    let payload = extract_json(&res.value);
 
     assert_eq!(payload["event_count"].as_i64(), Some(0));
     assert_eq!(payload["tools"]["available"].as_bool(), Some(false));
@@ -278,35 +259,24 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(payload["automation"]["available"].as_bool(), Some(true));
     assert_eq!(payload["automation"]["records_in_window"].as_i64(), Some(0));
 
-    drop(server);
-    fixture.harness.shutdown().await;
-
-    let markdown_fixture = production_composition_fixture().await;
-    let markdown_server = markdown_fixture
-        .harness
-        .server(&markdown_fixture.project_root)
-        .expect("production project server");
-    let md_res = handle_real_server_tool_call(
-        &markdown_server,
-        "tracedecay_analytics",
-        json!({"format": "markdown"}),
-    )
-    .await;
-    let text = extract_text(&md_res);
+    let md_res = handle_tool_call(&cg, "tracedecay_analytics", json!({}), None, None)
+        .await
+        .expect("markdown format should also succeed with no data");
+    let text = extract_text(&md_res.value);
     assert!(
         text.contains("No MCP tool calls recorded"),
         "expected an empty-state note in markdown: {text}"
     );
-    drop(markdown_server);
-    markdown_fixture.harness.shutdown().await;
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
-    let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
+    let project_id = GlobalDb::canonical_project_key(cg.project_root());
     let timestamp = current_timestamp() - 60;
+    let gdb = GlobalDb::open()
+        .await
+        .expect("isolated test global db should open");
 
     let events = vec![
         hint_event(&project_id, "hint_emitted", None, timestamp),
@@ -314,43 +284,43 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
         hint_event(&project_id, "suppressed_duplicate", None, timestamp),
         tool_call_event(&project_id, "tracedecay_grep", "ok", timestamp),
     ];
-    fixture
-        .harness
-        .append_profile_analytics_events_for_test(&events)
+    gdb.append_analytics_events(&events)
         .await
         .expect("seeding a busy analytics window should succeed");
-    let unrelated_event = AnalyticsEventInsert {
-        provider: "codex".to_string(),
-        project_id: project_id.clone(),
-        session_id: Some("busy-session".to_string()),
-        timestamp,
-        event_kind: "hook_completed".to_string(),
-        hook_name: Some("PostToolUse".to_string()),
-        tool_name: None,
-        tool_category: None,
-        skill_name: None,
-        hint_category: None,
-        hint_id: None,
-        outcome: Some("observed".to_string()),
-        metadata_json: None,
-    };
-    fixture
-        .harness
-        .append_profile_analytics_events_for_test(&vec![unrelated_event; 10_001])
+    let db = libsql::Builder::new_local(global_db_path().expect("test global DB path"))
+        .build()
         .await
-        .expect("seed more than ten thousand unrelated newer events");
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
+        .expect("open test global DB directly");
+    let conn = db.connect().expect("connect test global DB");
+    conn.execute(
+        "WITH RECURSIVE seq(n) AS (
+             VALUES(0)
+             UNION ALL
+             SELECT n + 1 FROM seq WHERE n < 100
+         )
+         INSERT INTO analytics_events
+             (provider, project_id, session_id, timestamp, event_kind, hook_name, outcome)
+         SELECT 'codex', ?1, 'busy-session', ?2, 'hook_completed', 'PostToolUse', 'observed'
+         FROM seq AS left_seq CROSS JOIN seq AS right_seq
+         LIMIT 10001",
+        libsql::params![project_id.as_str(), timestamp],
+    )
+    .await
+    .expect("seed more than ten thousand unrelated newer events");
 
-    let response =
-        handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
-            .await;
-    let payload = extract_json(&response);
-    assert_eq!(payload["event_count"].as_i64(), Some(10_005));
-    assert_eq!(payload["event_count_truncated"].as_bool(), Some(false));
-    let search = payload["hints"]["by_category"]
+    let hint_response = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"section": "hints", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("hint analytics should succeed");
+    let hints = extract_json(&hint_response.value);
+    assert_eq!(hints["event_count"].as_i64(), Some(10_005));
+    assert_eq!(hints["event_count_truncated"].as_bool(), Some(false));
+    let search = hints["hints"]["by_category"]
         .as_array()
         .expect("hint categories")
         .iter()
@@ -360,12 +330,20 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     assert_eq!(search["followed"].as_i64(), Some(1));
     assert_eq!(search["suppressed"].as_i64(), Some(1));
 
-    assert_eq!(payload["tools"]["distinct_tools_called"].as_i64(), Some(1));
+    let tool_response = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"section": "tools", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("tool analytics should succeed");
+    let tools = extract_json(&tool_response.value);
+    assert_eq!(tools["tools"]["distinct_tools_called"].as_i64(), Some(1));
     assert_eq!(
-        payload["tools"]["top_tools"][0]["tool_name"],
+        tools["tools"]["top_tools"][0]["tool_name"],
         "tracedecay_grep"
     );
-    assert_eq!(payload["tools"]["top_tools"][0]["calls"].as_i64(), Some(1));
-    drop(server);
-    fixture.harness.shutdown().await;
+    assert_eq!(tools["tools"]["top_tools"][0]["calls"].as_i64(), Some(1));
 }

@@ -1,11 +1,11 @@
 //! Host-loadable materialization of managed skills (Hermes skill-directory
 //! analogue).
 //!
-//! Managed skills live in the `TraceDecay` profile store. Prompt-index hosts
-//! resolve their complete body through the `tracedecay automation skills view`
-//! CLI journey (see [`crate::automation::skill_targets`]); that is
-//! discoverable but never *natively loaded*: the host does not treat a managed
-//! skill as one of its own skills.
+//! Managed skills live in the `TraceDecay` profile store and are surfaced to
+//! prompt-index hosts through a marker block that points at the
+//! `tracedecay_skill_view` MCP tool (see [`crate::automation::skill_targets`]).
+//! That is discoverable but never *natively loaded*: the host does not treat a
+//! managed skill as one of its own skills.
 //!
 //! This module closes that gap the way Hermes does — by writing each active
 //! managed skill as a real, host-loadable `SKILL.md` into the host's own skills
@@ -17,22 +17,22 @@
 //! `content-hash` in its frontmatter. The reconciler updates or removes *only*
 //! files carrying that marker whose recorded hash still matches the file on
 //! disk. A user (or the repo's own dev skills under the same directory) that
-//! edits a materialized file forks it: the reconciler then leaves it untouched.
+//! edits a materialized file forks it: the reconciler then leaves it untouched
+//! and [`doctor_scope`] reports the drift.
 //!
 //! Lifecycle:
-//! - **activate** (validated create/update → Active) → materialize.
+//! - **activate** (`skills approve` → Active, or auto-enable) → materialize.
 //! - **deactivate/archive/disable/remove** → the skill drops out of the active
 //!   set and the reconciler removes its materialized file (fork-protected).
 //! - **body update** → re-materialize (hash changes, file rewritten).
 //! - **`tracedecay update` / install** → reconcile every detected host+scope.
+//! - **`tracedecay doctor`** → report missing/forked/orphaned materializations.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 
 use super::config_error;
 pub use crate::automation::managed_skills::managed_skill_root;
@@ -133,15 +133,14 @@ impl MaterializationScope {
         self.skill_dir(slug).join(SKILL_FILE)
     }
 
-    /// Human-readable `host/scope` label for reconciliation reports.
+    /// Human-readable `host/scope` label for reports and doctor output.
     pub fn describe(&self) -> String {
         format!("{}/{}", self.host.label(), self.kind.label())
     }
 }
 
 /// Outcome of materializing one skill into one scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterializeAction {
     /// The file was created or rewritten to match the active skill.
     Written,
@@ -154,9 +153,19 @@ pub enum MaterializeAction {
     SkippedForked,
 }
 
+impl MaterializeAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Unchanged => "unchanged",
+            Self::SkippedForeign => "skipped_foreign",
+            Self::SkippedForked => "skipped_forked",
+        }
+    }
+}
+
 /// Outcome of removing one materialized skill from one scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveAction {
     /// The managed file was deleted.
     Removed,
@@ -168,8 +177,19 @@ pub enum RemoveAction {
     SkippedForked,
 }
 
+impl RemoveAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Absent => "absent",
+            Self::SkippedForeign => "skipped_foreign",
+            Self::SkippedForked => "skipped_forked",
+        }
+    }
+}
+
 /// A single materialize result within a reconcile report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializeEntry {
     pub skill_id: String,
     pub path: PathBuf,
@@ -177,7 +197,7 @@ pub struct MaterializeEntry {
 }
 
 /// A single removal result within a reconcile report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveEntry {
     pub skill_id: String,
     pub path: PathBuf,
@@ -185,7 +205,7 @@ pub struct RemoveEntry {
 }
 
 /// Result of reconciling one scope against the active managed-skill set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
     pub materialized: Vec<MaterializeEntry>,
     pub removed: Vec<RemoveEntry>,
@@ -207,6 +227,89 @@ impl ReconcileReport {
             .iter()
             .filter(|entry| entry.action == RemoveAction::Removed)
             .count()
+    }
+
+    pub fn forked_count(&self) -> usize {
+        self.materialized
+            .iter()
+            .filter(|entry| entry.action == MaterializeAction::SkippedForked)
+            .count()
+            + self
+                .removed
+                .iter()
+                .filter(|entry| entry.action == RemoveAction::SkippedForked)
+                .count()
+    }
+}
+
+/// A drift finding reported by [`doctor_scope`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillDrift {
+    /// An active skill has no materialized file in this scope.
+    Missing { skill_id: String, path: PathBuf },
+    /// A managed file was edited by the user; the reconciler will not clobber
+    /// it (the skill is effectively user-forked here).
+    Forked { skill_id: String, path: PathBuf },
+    /// A foreign file occupies the slot an active skill would materialize to.
+    Conflict { skill_id: String, path: PathBuf },
+    /// A managed file exists for a skill that is no longer active; a reconcile
+    /// would remove it.
+    Orphan { skill_id: String, path: PathBuf },
+    /// A managed file for a no-longer-active skill that this installation did
+    /// not author (committed by another installation, or a legacy manifest with
+    /// no recorded author). `tracedecay update` will refuse to remove it, so
+    /// doctor must not prescribe update.
+    ForeignOrphan { skill_id: String, path: PathBuf },
+    /// A non-fatal problem: a per-skill check failed, or two active skill ids
+    /// collide on the same host slug. Reported so one bad package never hides
+    /// drift for the rest of the scope.
+    Warning {
+        skill_id: String,
+        path: PathBuf,
+        message: String,
+    },
+}
+
+impl SkillDrift {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Missing { .. } => "missing",
+            Self::Forked { .. } => "forked",
+            Self::Conflict { .. } => "conflict",
+            Self::Orphan { .. } => "orphan",
+            Self::ForeignOrphan { .. } => "foreign-orphan",
+            Self::Warning { .. } => "warning",
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Missing { path, .. }
+            | Self::Forked { path, .. }
+            | Self::Conflict { path, .. }
+            | Self::Orphan { path, .. }
+            | Self::ForeignOrphan { path, .. }
+            | Self::Warning { path, .. } => path,
+        }
+    }
+
+    pub fn skill_id(&self) -> &str {
+        match self {
+            Self::Missing { skill_id, .. }
+            | Self::Forked { skill_id, .. }
+            | Self::Conflict { skill_id, .. }
+            | Self::Orphan { skill_id, .. }
+            | Self::ForeignOrphan { skill_id, .. }
+            | Self::Warning { skill_id, .. } => skill_id,
+        }
+    }
+
+    /// The human-readable detail for a [`Self::Warning`], if any.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Warning { message, .. } => Some(message.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -232,7 +335,7 @@ struct MaterializationManifest {
     /// Absent on manifests written before this field existed (and on packages
     /// re-derived from disk without a known installation); such packages are
     /// never auto-removed from a *project* scope — they may be another user's
-    /// committed files.
+    /// committed files — but doctor still reports them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materialized_by: Option<String>,
     files: BTreeMap<String, String>,
@@ -272,12 +375,12 @@ impl FileProvenance {
         self.managed_by.as_deref() == Some(MATERIALIZED_SKILL_MANAGED_BY)
     }
 
-    /// Legacy (pre-package-hash) fork check: the recorded `content-hash` was
-    /// the body-only hash, so a file is a fork when the body on disk no longer
-    /// hashes to it. Only meaningful for the body-hash domain; callers first
-    /// try [`recompute_on_disk_package`] for the package-hash domain. A managed
-    /// file missing a content-hash is treated as forked so we never silently
-    /// overwrite something we cannot verify.
+    /// Legacy (pre-package-hash, PR #362) fork check: the recorded
+    /// `content-hash` was the body-only hash, so a file is a fork when the body
+    /// on disk no longer hashes to it. Only meaningful for the body-hash domain;
+    /// callers first try [`recompute_on_disk_package`] for the package-hash
+    /// domain (PR #366+). A managed file missing a content-hash is treated as
+    /// forked so we never silently overwrite something we cannot verify.
     fn is_legacy_forked(&self) -> bool {
         match (&self.content_hash, &self.body_hash) {
             (Some(recorded), Some(actual)) => recorded != actual,
@@ -341,7 +444,7 @@ fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> 
 }
 
 /// Recomputes the package hash of a manifest-less managed package directly from
-/// disk (package-hash domain). Reconstructs the render placeholder by
+/// disk (PR #366+ package-hash domain). Reconstructs the render placeholder by
 /// swapping the recorded `content-hash` back to `<package-hash>`, folds in the
 /// on-disk support files exactly as [`ManagedSkill::materialized_package_hash`]
 /// does, and — when the result matches the recorded hash — returns a re-derived
@@ -351,6 +454,8 @@ fn recompute_on_disk_package(
     dir: &Path,
     provenance: &FileProvenance,
 ) -> Result<Option<MaterializationManifest>> {
+    use sha2::{Digest, Sha256};
+
     let Some(recorded) = provenance.content_hash.as_deref() else {
         return Ok(None);
     };
@@ -386,7 +491,7 @@ fn recompute_on_disk_package(
         hasher.update(bytes);
         files.insert(key, hash_bytes(bytes));
     }
-    let recomputed = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
+    let recomputed = format!("sha256:{}", hex::encode(hasher.finalize()));
     if recomputed != recorded {
         return Ok(None);
     }
@@ -421,7 +526,8 @@ fn on_disk_body_markdown(contents: &str) -> Option<String> {
 }
 
 fn hash_body(body: &str) -> String {
-    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(body.as_bytes()))
+    use sha2::{Digest, Sha256};
+    format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())))
 }
 
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
@@ -448,7 +554,7 @@ pub fn installation_id(profile_root: &Path) -> String {
         Err(_) => format!(
             "pid-{}-{}",
             std::process::id(),
-            tracedecay_runtime_core::tracedecay::current_timestamp()
+            crate::tracedecay::current_timestamp()
         ),
     };
     if fs::create_dir_all(profile_root).is_ok() {
@@ -488,7 +594,7 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
 
 /// Inter-process lock held for the duration of a single package's
 /// materialize/remove transaction. Serializes concurrent `tracedecay update` /
-/// automatic validated activation runs (and multiple worktrees
+/// `skills approve` / background auto-enable runs (and multiple worktrees
 /// sharing a global scope) so the TOCTOU pending-file window cannot interleave
 /// two transactions and wedge a package as forked. The lock file lives outside
 /// the tracked skills tree (OS temp dir, keyed by the package path) so it never
@@ -503,7 +609,8 @@ impl Drop for PackageLock {
 }
 
 fn package_lock_path(package_dir: &Path) -> PathBuf {
-    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
+    use sha2::{Digest, Sha256};
+    let key = hex::encode(Sha256::digest(package_dir.to_string_lossy().as_bytes()));
     std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
 }
 
@@ -1038,6 +1145,34 @@ fn initial_support_path_conflicts(
     Ok(false)
 }
 
+fn materialized_package_is_forked(
+    dir: &Path,
+    skill_id: &str,
+    provenance: &FileProvenance,
+) -> Result<bool> {
+    match read_materialization_manifest(dir, skill_id)? {
+        ManifestState::Missing => {
+            // A lost manifest does not mean a fork: the package may still be
+            // pristine in the package-hash domain (#366+) or the legacy
+            // body-hash domain (#362). Only a genuine content drift is a fork.
+            if recompute_on_disk_package(dir, provenance)?.is_some() {
+                Ok(false)
+            } else {
+                Ok(provenance.is_legacy_forked())
+            }
+        }
+        ManifestState::Foreign => Ok(true),
+        ManifestState::Owned(manifest) => {
+            for (relative, expected_hash) in &manifest.files {
+                if artifact_state(dir, relative, expected_hash)? == ArtifactState::Forked {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Single-skill operations
 // ---------------------------------------------------------------------------
@@ -1211,9 +1346,9 @@ fn package_is_foreign_to_installation(
 }
 
 /// Removes one materialized skill by slug from one scope. Fork-protected: a
-/// user-edited managed file is preserved; a foreign file is never touched; a
-/// committed project-scope package authored by a different installation is
-/// left in place.
+/// user-edited managed file is preserved (and later surfaces as a doctor
+/// `Forked` finding); a foreign file is never touched; a committed project-scope
+/// package authored by a different installation is left in place.
 pub fn remove_materialized_skill(
     scope: &MaterializationScope,
     slug: &str,
@@ -1299,13 +1434,14 @@ fn prune_skill_dir(scope: &MaterializationScope, slug: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Scope reconciliation
+// Scope reconcile + doctor
 // ---------------------------------------------------------------------------
 
 /// Short, stable disambiguator derived from a full skill id, used to suffix a
 /// host slug when two distinct ids collide on the same base slug.
 fn short_id_hash(skill_id: &str) -> String {
-    sha256_hex(skill_id.as_bytes())[..8].to_string()
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(skill_id.as_bytes()))[..8].to_string()
 }
 
 /// Assigns a host slug to every active skill, disambiguating collisions.
@@ -1315,9 +1451,9 @@ fn short_id_hash(skill_id: &str) -> String {
 /// a truncated prefix). Without disambiguation the second skill's package would
 /// be seen as `Foreign` and silently never load. Every skill whose base slug is
 /// shared by another active skill is suffixed with a short stable hash of its
-/// id; non-colliding skills keep their base slug. The result is parallel to
-/// `active_skills`.
-fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
+/// id; non-colliding skills keep their base slug. Returns `(slug, collided)`
+/// parallel to `active_skills`.
+fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<(String, bool)> {
     let base: Vec<String> = active_skills
         .iter()
         .map(ManagedSkill::host_skill_slug)
@@ -1331,9 +1467,12 @@ fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
         .zip(base.iter())
         .map(|(skill, slug)| {
             if counts.get(slug.as_str()).copied().unwrap_or(0) > 1 {
-                format!("{slug}-{}", short_id_hash(&skill.metadata.id))
+                (
+                    format!("{slug}-{}", short_id_hash(&skill.metadata.id)),
+                    true,
+                )
             } else {
-                slug.clone()
+                (slug.clone(), false)
             }
         })
         .collect()
@@ -1352,7 +1491,7 @@ pub fn reconcile_scope(
     let mut active_slugs = std::collections::BTreeSet::new();
 
     let slugs = assign_host_slugs(active_skills);
-    for (skill, slug) in active_skills.iter().zip(slugs.iter()) {
+    for (skill, (slug, _collided)) in active_skills.iter().zip(slugs.iter()) {
         active_slugs.insert(slug.clone());
         match materialize_skill_into(scope, skill, slug, installation_id) {
             Ok(entry) => report.materialized.push(entry),
@@ -1377,6 +1516,98 @@ pub fn reconcile_scope(
     }
 
     Ok(report)
+}
+
+/// Reports drift between the active managed-skill set and one scope's
+/// materialized files: missing, forked, conflicting, or orphaned files. Never
+/// aborts on a single bad package — a per-skill failure is surfaced as a
+/// [`SkillDrift::Warning`] so the rest of the scope's drift is still reported.
+pub fn doctor_scope(
+    scope: &MaterializationScope,
+    active_skills: &[ManagedSkill],
+    installation_id: &str,
+) -> Vec<SkillDrift> {
+    let mut drift = Vec::new();
+    let mut active_slugs = std::collections::BTreeSet::new();
+
+    let slugs = assign_host_slugs(active_skills);
+    for (skill, (slug, collided)) in active_skills.iter().zip(slugs.iter()) {
+        active_slugs.insert(slug.clone());
+        let path = scope.skill_md(slug);
+        if *collided {
+            drift.push(SkillDrift::Warning {
+                skill_id: skill.metadata.id.clone(),
+                path: path.clone(),
+                message: format!(
+                    "host slug collides with another active skill; materialized as '{slug}'"
+                ),
+            });
+        }
+        match read_file_provenance(&path) {
+            Ok(None) => drift.push(SkillDrift::Missing {
+                skill_id: skill.metadata.id.clone(),
+                path,
+            }),
+            Ok(Some(existing)) if !existing.is_managed() => drift.push(SkillDrift::Conflict {
+                skill_id: skill.metadata.id.clone(),
+                path,
+            }),
+            Ok(Some(existing)) => {
+                match materialized_package_is_forked(
+                    &scope.skill_dir(slug),
+                    &skill.metadata.id,
+                    &existing,
+                ) {
+                    Ok(true) => drift.push(SkillDrift::Forked {
+                        skill_id: skill.metadata.id.clone(),
+                        path,
+                    }),
+                    Ok(false) => {}
+                    Err(err) => drift.push(SkillDrift::Warning {
+                        skill_id: skill.metadata.id.clone(),
+                        path,
+                        message: format!("materialization check failed: {err}"),
+                    }),
+                }
+            }
+            Err(err) => drift.push(SkillDrift::Warning {
+                skill_id: skill.metadata.id.clone(),
+                path,
+                message: format!("materialization check failed: {err}"),
+            }),
+        }
+    }
+
+    match managed_slugs_in_scope(scope) {
+        Ok(slugs) => {
+            for (slug, skill_id) in slugs {
+                if active_slugs.contains(&slug) {
+                    continue;
+                }
+                let dir = scope.skill_dir(&slug);
+                // Only an `Owned` manifest carries a trusted author. Missing,
+                // foreign, or unreadable manifests all mean the author is
+                // unknown — update cannot verify authorship, so treat as `None`.
+                let manifest = match read_materialization_manifest(&dir, &skill_id) {
+                    Ok(ManifestState::Owned(m)) => Some(m),
+                    Ok(ManifestState::Missing | ManifestState::Foreign) | Err(_) => None,
+                };
+                let path = scope.skill_md(&slug);
+                if package_is_foreign_to_installation(scope, manifest.as_ref(), installation_id) {
+                    drift.push(SkillDrift::ForeignOrphan { skill_id, path });
+                } else {
+                    drift.push(SkillDrift::Orphan { skill_id, path });
+                }
+            }
+        }
+        Err(err) => drift.push(SkillDrift::Warning {
+            skill_id: String::new(),
+            path: scope.skills_dir(),
+            message: format!("could not enumerate materialized skills: {err}"),
+        }),
+    }
+
+    drift
 }
 
 /// Lists `(slug, skill_id)` for every `TraceDecay`-managed `SKILL.md` currently
@@ -1440,7 +1671,7 @@ fn skills_for_host(skills: &[ManagedSkill], host: MaterializationHost) -> Vec<Ma
 
 /// Skills that should materialize into a given scope. Every active host skill
 /// materializes into the user's global scope; only skills explicitly marked
-/// project-scoped also materialize into project checkouts, so an automatic activation
+/// project-scoped also materialize into project checkouts, so a single approval
 /// never pours untracked `.claude/skills/**` files into every repo the user
 /// runs from (and hosts never load duplicate global+project copies).
 fn skills_for_scope(skills: &[ManagedSkill], scope: &MaterializationScope) -> Vec<ManagedSkill> {
@@ -1522,16 +1753,17 @@ pub fn reconcile_detected_scopes(
 
 /// Resolves the enclosing project root for materialization from a starting
 /// directory (usually the process cwd), so running from a subdirectory
-/// materializes and reconciles against the repo root rather than the subdir.
-/// Prefers the tracedecay-registered project root, then the git worktree/repo
-/// checkout root, then falls back to the starting directory.
+/// materializes into the repo root rather than the subdir — and so drift is
+/// reported and cleaned up against a single stable root regardless of where the
+/// command is run. Prefers the tracedecay-registered project root, then the git
+/// worktree/repo checkout root, then falls back to the starting directory.
 pub fn resolve_project_root(start: &Path) -> PathBuf {
     crate::config::discover_project_root(start)
         .or_else(|| crate::worktree::git_worktree_root(start))
         .unwrap_or_else(|| start.to_path_buf())
 }
 
-/// Non-fatal reconcile for lifecycle call sites (activate, install,
+/// Non-fatal reconcile for lifecycle call sites (approve, auto-enable, install,
 /// update): resolves the profile root from the process environment, reconciles
 /// every detected host+scope, and logs (rather than propagates) failures so a
 /// materialization problem never breaks an activation or install.
@@ -1541,11 +1773,23 @@ pub fn reconcile_after_activation(profile_root: &Path, project_root: &Path) {
     };
     let (_results, errors) = reconcile_detected_scopes(profile_root, &home, project_root);
     for error in errors {
-        tracing::warn!(%error, "managed skill materialization failed");
+        eprintln!("warning: managed skill materialization failed for {error}");
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-#[path = "skill_materialization_tests.rs"]
-mod skill_materialization_tests;
+/// Reports materialization drift across every detected scope for `doctor`.
+pub fn doctor_detected_scopes(
+    profile_root: &Path,
+    home: &Path,
+    project_root: &Path,
+) -> Result<Vec<(MaterializationScope, Vec<SkillDrift>)>> {
+    let skills = load_active_managed_skills(profile_root)?;
+    let installation = installation_id(profile_root);
+    let mut out = Vec::new();
+    for scope in detect_scopes(home, project_root) {
+        let scope_skills = skills_for_scope(&skills, &scope);
+        let drift = doctor_scope(&scope, &scope_skills, &installation);
+        out.push((scope.clone(), drift));
+    }
+    Ok(out)
+}

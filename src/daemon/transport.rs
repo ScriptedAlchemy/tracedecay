@@ -1,10 +1,7 @@
 use std::fmt;
-use std::future::Future;
 #[cfg(any(not(unix), test))]
 use std::net::IpAddr;
 use std::net::SocketAddr;
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -137,22 +134,6 @@ pub enum BrokerStream {
     Tcp(tokio::net::TcpStream),
 }
 
-/// Owned halves keep the concrete Tokio socket available for readiness
-/// probes. The generic `tokio::io::split` halves intentionally hide it behind
-/// a mutex and cannot report the distinction between RDHUP (request-half
-/// close) and HUP (full peer close).
-pub(super) enum BrokerReadHalf {
-    #[cfg(unix)]
-    Unix(tokio::net::unix::OwnedReadHalf),
-    Tcp(tokio::net::tcp::OwnedReadHalf),
-}
-
-pub(super) enum BrokerWriteHalf {
-    #[cfg(unix)]
-    Unix(tokio::net::unix::OwnedWriteHalf),
-    Tcp(tokio::net::tcp::OwnedWriteHalf),
-}
-
 impl BrokerStream {
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self> {
         match endpoint {
@@ -171,96 +152,6 @@ impl BrokerStream {
 
     pub fn into_split(self) -> (tokio::io::ReadHalf<Self>, tokio::io::WriteHalf<Self>) {
         tokio::io::split(self)
-    }
-
-    pub(super) fn into_owned_split(self) -> (BrokerReadHalf, BrokerWriteHalf) {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(stream) => {
-                let (reader, writer) = stream.into_split();
-                (BrokerReadHalf::Unix(reader), BrokerWriteHalf::Unix(writer))
-            }
-            Self::Tcp(stream) => {
-                let (reader, writer) = stream.into_split();
-                (BrokerReadHalf::Tcp(reader), BrokerWriteHalf::Tcp(writer))
-            }
-        }
-    }
-}
-
-impl AsyncRead for BrokerReadHalf {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            #[cfg(unix)]
-            Self::Unix(reader) => Pin::new(reader).poll_read(context, buffer),
-            Self::Tcp(reader) => Pin::new(reader).poll_read(context, buffer),
-        }
-    }
-}
-
-impl AsyncWrite for BrokerWriteHalf {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            #[cfg(unix)]
-            Self::Unix(writer) => Pin::new(writer).poll_write(context, buffer),
-            Self::Tcp(writer) => Pin::new(writer).poll_write(context, buffer),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            #[cfg(unix)]
-            Self::Unix(writer) => Pin::new(writer).poll_flush(context),
-            Self::Tcp(writer) => Pin::new(writer).poll_flush(context),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            #[cfg(unix)]
-            Self::Unix(writer) => Pin::new(writer).poll_shutdown(context),
-            Self::Tcp(writer) => Pin::new(writer).poll_shutdown(context),
-        }
-    }
-}
-
-impl BrokerWriteHalf {
-    /// Poll the native writable-readiness future once without waiting while a
-    /// caller holds the shared writer mutex. A pending readiness registration
-    /// is retried by the caller on its next bounded polling interval.
-    pub(super) async fn peer_write_readiness_now(
-        &self,
-    ) -> Option<std::io::Result<tokio::io::Ready>> {
-        let mut readiness = Box::pin(self.peer_write_readiness());
-        std::future::poll_fn(|context| match readiness.as_mut().poll(context) {
-            std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
-            std::task::Poll::Pending => std::task::Poll::Ready(None),
-        })
-        .await
-    }
-
-    pub(super) async fn peer_write_readiness(&self) -> std::io::Result<tokio::io::Ready> {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(writer) => writer.ready(tokio::io::Interest::WRITABLE).await,
-            Self::Tcp(writer) => writer.ready(tokio::io::Interest::WRITABLE).await,
-        }
-    }
-
-    pub(super) fn consume_write_readiness(&self) -> std::io::Result<()> {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(writer) => writer.try_write(&[]).map(|_| ()),
-            Self::Tcp(writer) => writer.try_write(&[]).map(|_| ()),
-        }
     }
 }
 
@@ -314,71 +205,33 @@ pub enum BrokerListener {
     Tcp(tokio::net::TcpListener),
 }
 
-/// Owner-only mode the daemon's Unix socket must carry for its whole lifetime.
 #[cfg(unix)]
-const DAEMON_SOCKET_MODE: u32 = 0o600;
-
-/// Longest socket path `bind(2)`/`connect(2)` accept on this platform.
-///
-/// `sockaddr_un` reserves 104 bytes for the NUL-terminated path on macOS and
-/// the BSDs and 108 on Linux; a longer path fails the syscall itself, so it
-/// must be refused (or re-derived) before it reaches the kernel.
-#[cfg(unix)]
-pub(crate) const MAX_UNIX_SOCKET_PATH_BYTES: usize =
-    if cfg!(any(target_os = "linux", target_os = "android")) {
-        107
-    } else {
-        103
-    };
-
-#[cfg(unix)]
-pub(crate) fn unix_socket_path_within_limit(path: &Path) -> bool {
-    path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
-}
-
-/// Refuse to publish a socket through a symlink or a directory that is not
-/// owned privately by the current user.
-#[cfg(unix)]
-pub(super) fn ensure_private_socket_parent(path: &Path) -> Result<()> {
+fn ensure_private_socket_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    tracedecay_private_fs::validate_private_directory(parent).map_err(|error| {
+    let metadata = std::fs::metadata(parent).map_err(|error| {
         config_error(format!(
-            "refusing to publish daemon socket '{}' outside a private directory owned by the current user '{}': {error}",
-            path.display(),
-            parent.display(),
+            "failed to inspect daemon socket directory '{}': {error}",
+            parent.display()
         ))
-    })
-}
-
-/// Binds the daemon's Unix socket and narrows it to its owner before the
-/// listener is handed back.
-///
-/// `bind(2)` creates the socket inode with `0o777 & !umask`, so the socket is
-/// briefly group- and world-connectable. Callers used to close that gap after
-/// recording the endpoint in the authority file, which left the wide-open
-/// socket live and discoverable across a durable write. Narrowing here means no
-/// caller can publish or accept on a socket that is not already owner-only, and
-/// a socket that cannot be narrowed is torn down instead of served.
-#[cfg(unix)]
-fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener> {
-    // Binding the real path (rather than staging elsewhere and renaming) keeps
-    // `EADDRINUSE` as the kernel-level guarantee that only one daemon owns the
-    // endpoint.
-    let listener = tokio::net::UnixListener::bind(path)?;
-    if let Err(e) =
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(DAEMON_SOCKET_MODE))
-    {
-        drop(listener);
-        let _ = std::fs::remove_file(path);
+    })?;
+    if !metadata.is_dir() {
         return Err(config_error(format!(
-            "failed to restrict daemon socket '{}' to its owner: {e}",
-            path.display()
+            "daemon socket parent '{}' is not a directory",
+            parent.display()
         )));
     }
-    Ok(listener)
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(config_error(format!(
+            "refusing to publish daemon socket '{}' outside a private directory: '{}' has mode {mode:04o}; restrict it to 0700",
+            path.display(),
+            parent.display(),
+        )));
+    }
+    Ok(())
 }
 
 impl BrokerListener {
@@ -386,18 +239,23 @@ impl BrokerListener {
         match endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => {
-                // Refuse an over-long path with a typed remedy instead of the
-                // kernel's opaque "invalid argument": SUN_LEN overflow must
-                // never surface as an unexplained daemon startup failure.
-                if !unix_socket_path_within_limit(path) {
+                ensure_private_socket_parent(path)?;
+                let listener = tokio::net::UnixListener::bind(path)?;
+                if let Err(error) =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                {
+                    drop(listener);
+                    let cleanup = match std::fs::remove_file(path) {
+                        Ok(()) => String::new(),
+                        Err(cleanup_error) => {
+                            format!("; cleanup also failed: {cleanup_error}")
+                        }
+                    };
                     return Err(config_error(format!(
-                        "daemon socket path '{}' exceeds this platform's Unix socket path limit ({MAX_UNIX_SOCKET_PATH_BYTES} bytes); set {} to a shorter path",
+                        "failed to restrict permissions on daemon socket '{}': {error}{cleanup}",
                         path.display(),
-                        crate::daemon::SOCKET_ENV,
                     )));
                 }
-                ensure_private_socket_parent(path)?;
-                let listener = bind_owner_only_unix_listener(path)?;
                 Ok((Self::Unix(listener), endpoint.clone()))
             }
             DaemonEndpoint::Loopback(address) => {
@@ -431,7 +289,39 @@ pub fn default_loopback_endpoint() -> DaemonEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_is_owner_only_when_bind_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("daemon.sock");
+        let endpoint = DaemonEndpoint::Unix(path.clone());
+
+        let (_listener, _) = BrokerListener::bind(&endpoint).await.unwrap();
+
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_rejects_public_parent_before_publishing_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = directory.path().join("daemon.sock");
+        let endpoint = DaemonEndpoint::Unix(path.clone());
+
+        let Err(error) = BrokerListener::bind(&endpoint).await else {
+            panic!("public socket parent must be rejected");
+        };
+
+        assert!(error.to_string().contains("private directory"), "{error}");
+        assert!(!path.exists());
+    }
 
     #[test]
     fn loopback_endpoint_round_trips_and_rejects_remote_addresses() {
@@ -447,92 +337,6 @@ mod tests {
         assert!(decoded.authenticate("0123456789abcdef"));
         assert!(!decoded.authenticate("0123456789abcdee"));
         assert!(!decoded.authenticate("short"));
-    }
-
-    /// The daemon socket must never be observable with wider-than-owner
-    /// permissions, so `bind` narrows it before any caller can publish the
-    /// endpoint or accept on it.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unix_listener_is_owner_only_the_moment_bind_returns() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = dir.path().join("daemon.sock");
-        let (_listener, _endpoint) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone()))
-            .await
-            .unwrap();
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, DAEMON_SOCKET_MODE, "daemon socket must be owner-only");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unix_listener_rejects_non_private_parent_before_binding() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = dir.path().join("daemon.sock");
-
-        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
-            panic!("public socket parent must be rejected");
-        };
-
-        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
-        assert!(error.to_string().contains("private directory"), "{error}");
-        assert!(!path.exists(), "socket must not be bound before rejection");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unix_listener_rejects_symlinked_private_parent_before_binding() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let target = dir.path().join("target");
-        std::fs::create_dir(&target).unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let linked_parent = dir.path().join("linked-parent");
-        symlink(&target, &linked_parent).unwrap();
-        let path = linked_parent.join("daemon.sock");
-
-        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
-            panic!("symlinked socket parent must be rejected");
-        };
-
-        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
-        assert!(error.to_string().contains("private directory"), "{error}");
-        assert!(
-            !target.join("daemon.sock").exists(),
-            "rejection must not bind through the symlink"
-        );
-    }
-
-    /// A `SUN_LEN` overflow must be a typed refusal naming its remedy, not the
-    /// kernel's opaque bind failure that reads as an unexplained daemon crash.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unix_listener_refuses_over_long_socket_path_with_a_typed_remedy() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir
-            .path()
-            .join("s".repeat(MAX_UNIX_SOCKET_PATH_BYTES))
-            .join("daemon.sock");
-
-        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
-            panic!("over-long socket path must be refused before bind");
-        };
-
-        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
-        let message = error.to_string();
-        assert!(message.contains("Unix socket path limit"), "{message}");
-        assert!(
-            message.contains(crate::daemon::SOCKET_ENV),
-            "the refusal must name the override remedy: {message}"
-        );
     }
 
     #[tokio::test]

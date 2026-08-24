@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::ComplexityMetrics;
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -45,17 +45,12 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -91,36 +86,23 @@ fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
 }
 
 impl BatchExtractor {
+    /// Extract code graph nodes and edges from a Batch source file.
+    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
+    /// `source` is the Batch source code to parse.
     pub fn extract_batch(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
 
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
+        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -150,18 +132,13 @@ impl BatchExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let children = collect_children(tree.root_node());
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_root_child(&mut state, &children, child);
-        });
+        // Walk the AST.
+        let root = tree.root_node();
+        Self::visit_top_level(&mut state, root);
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -176,6 +153,7 @@ impl BatchExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
+    /// Visit all top-level children of the root program node.
     ///
     /// Batch files use labels as function-like constructs. Labels are top-level
     /// siblings in the AST (not containers). We group code between consecutive
@@ -186,20 +164,19 @@ impl BatchExtractor {
     /// `root.child(i)` repeatedly — tree-sitter's `child(i)` is O(i), so the
     /// previous index loops were O(N²) on large `.bat` files. See `complexity.rs`
     /// for the same fix on the universal hot path.
-    fn visit_root_child(state: &mut ExtractionState, children: &[TsNode<'_>], child: TsNode<'_>) {
-        match child.kind() {
-            "label" => {
-                if let Some(index) = children
-                    .iter()
-                    .position(|candidate| candidate.id() == child.id())
-                {
-                    Self::visit_label(state, children, index);
+    fn visit_top_level(state: &mut ExtractionState, root: TsNode<'_>) {
+        let children = collect_children(root);
+
+        for (i, child) in children.iter().enumerate() {
+            match child.kind() {
+                "label" => {
+                    Self::visit_label(state, &children, i);
                 }
+                "variable_assignment" => {
+                    Self::visit_variable_assignment(state, *child);
+                }
+                _ => {}
             }
-            "variable_assignment" => {
-                Self::visit_variable_assignment(state, child);
-            }
-            _ => {}
         }
     }
 
@@ -269,6 +246,7 @@ impl BatchExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -278,6 +256,7 @@ impl BatchExtractor {
             });
         }
 
+        // Extract call sites from siblings belonging to this label's body.
         Self::extract_label_call_sites(state, children, label_index, &id);
     }
 
@@ -345,6 +324,7 @@ impl BatchExtractor {
         };
         state.nodes.push(graph_node);
 
+        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -355,11 +335,16 @@ impl BatchExtractor {
         }
     }
 
+    // ----------------------------
+    // Helper extraction methods
+    // ----------------------------
+
     /// Extract docstrings from `REM` or `::` comment lines preceding a label.
     ///
     /// Looks backward from the label's position in the root children list
-    /// for consecutive comment nodes. Takes the root child slice materialized
-    /// by `extract_tree` rather than repeatedly walking sibling links.
+    /// for consecutive comment nodes. Takes a `&[TsNode]` slice (built once
+    /// by `visit_top_level`) instead of the root node — see the cursor
+    /// rationale on `visit_top_level`.
     fn extract_docstring(
         state: &ExtractionState,
         children: &[TsNode<'_>],
@@ -434,6 +419,7 @@ impl BatchExtractor {
             }
         }
 
+        // Recurse into children.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -489,32 +475,5 @@ impl crate::LanguageExtractor for BatchExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_batch(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        match scope {
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument => {
-                Self::extract_tree(file_path, source, tree, scope)
-            }
-            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_) => {
-                let full = Self::extract_tree(
-                    file_path,
-                    source,
-                    tree,
-                    crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-                );
-                crate::parsed_extraction::ParsedExtraction::reset(
-                    full.result,
-                    crate::parsed_extraction::ParsedExtractionResetReason::ChangedRootIdentity,
-                    source.len(),
-                )
-            }
-        }
     }
 }

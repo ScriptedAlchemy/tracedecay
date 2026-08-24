@@ -5,9 +5,8 @@
 
 use std::fmt::Write as _;
 
-use crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
-use crate::runtime_telemetry::GenerationCensusSnapshot;
-use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
+use crate::timeutil::format_yyyy_mm_dd;
+use crate::types::GraphStats;
 
 /// Formats a token count as a compact string (e.g. "1.2M", "45.3k").
 pub fn format_token_count(tokens: u64) -> String {
@@ -98,6 +97,7 @@ pub struct CostRow {
     pub efficiency_pct: f64,
 }
 
+/// Prints only the header section of the status table (version, tokens, sync times).
 /// Optional branch info for the status display.
 pub struct BranchInfo {
     pub branch: String,
@@ -105,10 +105,8 @@ pub struct BranchInfo {
     pub is_fallback: bool,
 }
 
-/// Prints only the header section of the status table (version, tokens, sync times).
 pub fn print_status_header(
-    census: &GenerationCensusSnapshot,
-    freshness: Option<&CodeIndexWorktreeFreshnessV1>,
+    stats: &GraphStats,
     tokens_saved: u64,
     global_tokens_saved: Option<u64>,
     worldwide: Option<u64>,
@@ -117,7 +115,9 @@ pub fn print_status_header(
     cost_info: Option<&CostRow>,
 ) {
     let num_cols = 3;
-    let cell_width = compute_cell_width(&census_cells(census));
+    let mut sorted_kinds: Vec<_> = stats.nodes_by_kind.iter().collect();
+    sorted_kinds.sort_by_key(|(k, _)| (*k).clone());
+    let cell_width = compute_cell_width(&sorted_kinds);
     let inner_width = cell_width * num_cols + (num_cols - 1);
 
     println!("{}", table_separator('╭', '─', '╮', cell_width, num_cols));
@@ -126,46 +126,45 @@ pub fn print_status_header(
     if let Some(ci) = cost_info {
         print_cost_row(ci, inner_width);
     }
-    print_freshness_row(freshness, inner_width);
+    print_sync_row(
+        stats.last_sync_at,
+        stats.last_full_sync_at,
+        stats.last_sync_duration_ms,
+        inner_width,
+    );
     if let Some(bi) = branch_info {
         print_branch_row(bi, inner_width);
     }
     println!("{}", table_separator('╰', '─', '╯', cell_width, num_cols));
 }
 
-/// Inputs for rendering the compact status table.
-///
-/// The readings come straight from the daemon status contract: the sealed
-/// generation census (`graph_statistics`) and the scheduler's freshness view
-/// (`code_index_freshness`). Absent readings render as their typed reasons —
-/// nothing is defaulted to zero.
-#[derive(Clone, Copy)]
-pub struct StatusTable<'a> {
-    pub census: &'a GenerationCensusSnapshot,
-    pub freshness: Option<&'a CodeIndexWorktreeFreshnessV1>,
-    pub tokens_saved: u64,
-    pub global_tokens_saved: Option<u64>,
-    pub worldwide: Option<u64>,
-    pub country_flags: &'a [String],
-    pub branch_info: Option<&'a BranchInfo>,
-    pub cost_info: Option<&'a CostRow>,
-}
-
-/// Prints the status output from named inputs.
-pub fn print_status_table_with(table: StatusTable<'_>) {
-    let StatusTable {
-        census,
-        freshness,
-        tokens_saved,
-        global_tokens_saved,
-        worldwide,
-        country_flags,
-        branch_info,
-        cost_info,
-    } = table;
+/// Prints the status output as a compact bordered table.
+#[allow(clippy::too_many_arguments)]
+pub fn print_status_table(
+    stats: &GraphStats,
+    tokens_saved: u64,
+    global_tokens_saved: Option<u64>,
+    worldwide: Option<u64>,
+    country_flags: &[String],
+    branch_info: Option<&BranchInfo>,
+    cost_info: Option<&CostRow>,
+    details: bool,
+) {
     let num_cols = 3;
-    let census_cells = census_cells(census);
-    let cell_width = compute_cell_width(&census_cells);
+    debug_assert!(
+        stats.file_count > 0 || stats.node_count == 0,
+        "print_status_table: node_count should be 0 when file_count is 0"
+    );
+    debug_assert!(
+        stats.node_count >= stats.file_count || stats.file_count == 0,
+        "print_status_table: node_count should be >= file_count"
+    );
+
+    let mut sorted_kinds: Vec<_> = stats.nodes_by_kind.iter().collect();
+    sorted_kinds.sort_by_key(|(k, _)| (*k).clone());
+    let num_kind_rows = sorted_kinds.len().div_ceil(num_cols);
+
+    let cell_width = compute_cell_width(&sorted_kinds);
     let inner_width = cell_width * num_cols + (num_cols - 1);
 
     println!("{}", table_separator('╭', '─', '╮', cell_width, num_cols));
@@ -174,47 +173,26 @@ pub fn print_status_table_with(table: StatusTable<'_>) {
     if let Some(ci) = cost_info {
         print_cost_row(ci, inner_width);
     }
-    print_freshness_row(freshness, inner_width);
+    print_sync_row(
+        stats.last_sync_at,
+        stats.last_full_sync_at,
+        stats.last_sync_duration_ms,
+        inner_width,
+    );
     if let Some(bi) = branch_info {
         print_branch_row(bi, inner_width);
     }
-    match census_cells {
-        Some(cells) => {
-            println!("{}", table_separator('├', '┬', '┤', cell_width, num_cols));
-            print_table_rows(&[cells], cell_width, num_cols);
-            println!("{}", table_separator('╰', '┴', '╯', cell_width, num_cols));
-        }
-        None => {
-            // The census is a typed absence: print its reason rather than a
-            // row of fabricated zero counts.
-            let line = census_absence_line(census);
-            let available = inner_width.saturating_sub(2);
-            let pad = available.saturating_sub(line.len());
-            println!("│ \x1b[2m{}\x1b[0m{} │", line, " ".repeat(pad));
-            println!("{}", table_separator('╰', '─', '╯', cell_width, num_cols));
-        }
-    }
-}
+    println!("{}", table_separator('├', '┬', '┤', cell_width, num_cols));
 
-/// The three census cells, or `None` when the census is a typed absence.
-fn census_cells(census: &GenerationCensusSnapshot) -> Option<Vec<(&'static str, String)>> {
-    match census {
-        GenerationCensusSnapshot::Observed { statistics } => Some(vec![
-            ("Symbols", format_number(statistics.symbol_count)),
-            ("Edges", format_number(statistics.edge_count)),
-            ("Source", format_bytes(statistics.source_total_bytes)),
-        ]),
-        GenerationCensusSnapshot::Unavailable { .. } => None,
-    }
-}
+    let stats_rows = build_stats_rows(stats, num_cols);
+    print_table_rows(&stats_rows, cell_width, num_cols);
 
-fn census_absence_line(census: &GenerationCensusSnapshot) -> String {
-    match census {
-        GenerationCensusSnapshot::Observed { .. } => String::new(),
-        GenerationCensusSnapshot::Unavailable { reason } => {
-            format!("graph census unavailable: {}", reason.as_str())
-        }
+    if details && !sorted_kinds.is_empty() {
+        println!("{}", table_separator('├', '┼', '┤', cell_width, num_cols));
+        print_kind_rows(&sorted_kinds, num_kind_rows, num_cols, cell_width);
     }
+
+    println!("{}", table_separator('╰', '┴', '╯', cell_width, num_cols));
 }
 
 /// Maximum cell width — caps total table width at 100 columns.
@@ -225,17 +203,22 @@ const MAX_CELL_WIDTH: usize = 32;
 /// Each flag = 3 cols (2 emoji + 1 space), first = 2 → fits 26; use 25 for margin.
 const MAX_DISPLAY_FLAGS: usize = 25;
 
-/// Compute cell width from the widest census cell, capped at `MAX_CELL_WIDTH`.
-fn compute_cell_width(cells: &Option<Vec<(&'static str, String)>>) -> usize {
-    let widest = cells
+/// Compute cell width from the widest node-kind entry, capped at `MAX_CELL_WIDTH`.
+fn compute_cell_width(sorted_kinds: &[(&String, &u64)]) -> usize {
+    let max_kind_len = sorted_kinds
         .iter()
-        .flatten()
-        .map(|(label, value)| label.len() + value.len())
+        .map(|(k, _)| k.len())
         .max()
-        .unwrap_or(15);
-    (widest + 3).clamp(22, MAX_CELL_WIDTH)
+        .unwrap_or(10);
+    let max_count_len = sorted_kinds
+        .iter()
+        .map(|(_, c)| format_number(**c).len())
+        .max()
+        .unwrap_or(5);
+    (max_kind_len + max_count_len + 3).clamp(22, MAX_CELL_WIDTH)
 }
 
+/// Print the top title row: version (left) + country flags (right).
 /// Returns a shuffled copy of `flags` using xorshift64 seeded from time + PID.
 ///
 /// Avoids pulling in `rand` for what is purely a cosmetic per-render shuffle.
@@ -263,9 +246,8 @@ fn shuffle_flags(flags: &[String]) -> Vec<String> {
     out
 }
 
-/// Print the top title row: version (left) + country flags (right).
 fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
-    let version = crate::version::build_version();
+    let version = env!("CARGO_PKG_VERSION");
     let title = format!("   TraceDecay v{version}");
     let title_display_width = title.len();
     let available = inner_width.saturating_sub(2);
@@ -342,43 +324,42 @@ fn print_tokens_row(
     println!("│ {}\x1b[32m{}\x1b[0m │", " ".repeat(pad), tokens_text);
 }
 
-/// Print the third title row: the scheduler's freshness view, right-aligned
-/// in dim. An absent reading names itself instead of rendering "never".
-fn print_freshness_row(freshness: Option<&CodeIndexWorktreeFreshnessV1>, inner_width: usize) {
-    let sync_text = match freshness {
-        Some(freshness) => {
-            let mut parts = Vec::new();
-            if let Some(reconciled) = freshness.last_reconcile_micros {
-                parts.push(format!(
-                    "Reconciled {}",
-                    format_relative_time(unix_seconds_from_micros(reconciled))
-                ));
-            }
-            if let Some(sealed) = freshness.sealed_at_micros {
-                parts.push(format!(
-                    "Sealed {}",
-                    format_relative_time(unix_seconds_from_micros(sealed))
-                ));
-            }
-            if let Some(state) = freshness.staleness_state.as_deref() {
-                parts.push(state.to_owned());
-            }
-            if parts.is_empty() {
-                "no sealed generation yet".to_owned()
-            } else {
-                parts.join("  ")
-            }
-        }
-        None => "code index freshness unavailable".to_owned(),
+fn format_duration_ms(ms: u64) -> String {
+    if ms == 0 {
+        return String::new();
+    }
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
+/// Print the third title row: last sync and full sync timestamps, right-aligned in dim.
+fn print_sync_row(
+    last_sync_at: u64,
+    last_full_sync_at: u64,
+    last_sync_duration_ms: u64,
+    inner_width: usize,
+) {
+    let duration = format_duration_ms(last_sync_duration_ms);
+    let sync_part = if duration.is_empty() {
+        format!("Last sync {}", format_relative_time(last_sync_at))
+    } else {
+        format!(
+            "Last sync {} ({})",
+            format_relative_time(last_sync_at),
+            duration
+        )
     };
+    let sync_text = format!(
+        "{}  Full sync {}",
+        sync_part,
+        format_relative_time(last_full_sync_at)
+    );
     let available = inner_width.saturating_sub(2);
     let pad = available.saturating_sub(sync_text.len());
     println!("│ {}\x1b[2m{}\x1b[0m │", " ".repeat(pad), sync_text);
-}
-
-/// Whole seconds since the Unix epoch from a non-negative microsecond stamp.
-fn unix_seconds_from_micros(micros: i64) -> u64 {
-    u64::try_from(micros / 1_000_000).unwrap_or(0)
 }
 
 fn print_branch_row(info: &BranchInfo, inner_width: usize) {
@@ -417,6 +398,48 @@ fn print_cost_row(cost_info: &CostRow, inner_width: usize) {
     println!("│ {}\x1b[36m{}\x1b[0m │", " ".repeat(pad), text);
 }
 
+/// Build the stats rows (files/nodes/edges, DB size, languages).
+fn build_stats_rows(stats: &GraphStats, num_cols: usize) -> Vec<Vec<(&str, String)>> {
+    let mut sorted_langs: Vec<_> = stats.files_by_language.iter().collect();
+    sorted_langs.sort_by(|a, b| b.1.cmp(a.1));
+
+    let mut rows: Vec<Vec<(&str, String)>> = vec![vec![
+        ("Files", format_number(stats.file_count)),
+        ("Nodes", format_number(stats.node_count)),
+        ("Edges", format_number(stats.edge_count)),
+    ]];
+
+    let mut second_row: Vec<(&str, String)> = vec![("DB Size", format_bytes(stats.db_size_bytes))];
+    if stats.total_source_bytes > 0 {
+        second_row.push(("Source", format_bytes(stats.total_source_bytes)));
+    }
+    let mut lang_idx = 0;
+    while second_row.len() < num_cols && lang_idx < sorted_langs.len() {
+        let (lang, count) = sorted_langs[lang_idx];
+        second_row.push((lang.as_str(), format_number(*count)));
+        lang_idx += 1;
+    }
+    while second_row.len() < num_cols {
+        second_row.push(("", String::new()));
+    }
+    rows.push(second_row);
+
+    while lang_idx < sorted_langs.len() {
+        let mut row: Vec<(&str, String)> = Vec::new();
+        for _ in 0..num_cols {
+            if lang_idx < sorted_langs.len() {
+                let (lang, count) = sorted_langs[lang_idx];
+                row.push((lang.as_str(), format_number(*count)));
+                lang_idx += 1;
+            } else {
+                row.push(("", String::new()));
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// Print rows of label-value pairs in a bordered table.
 fn print_table_rows(rows: &[Vec<(&str, String)>], cell_width: usize, num_cols: usize) {
     for row in rows {
@@ -432,13 +455,7 @@ fn print_table_rows(rows: &[Vec<(&str, String)>], cell_width: usize, num_cols: u
     }
 }
 
-pub fn print_gain_total(
-    project: &str,
-    range: &str,
-    saved_tokens: u64,
-    calls: u64,
-    usd: Option<f64>,
-) {
+pub fn print_gain_total(project: &str, range: &str, saved_tokens: u64, calls: u64, usd: f64) {
     let saved_str = format_token_count(saved_tokens);
     println!("  {:<28} {:>12}", "Scope", project);
     println!("  {:<28} {:>12}", "Range", range);
@@ -447,14 +464,11 @@ pub fn print_gain_total(
     println!(
         "  {:<28} {:>12}",
         "USD saved (Sonnet input)",
-        usd.map_or_else(|| "unavailable".to_owned(), |value| format!("${value:.2}"))
+        format!("${usd:.2}")
     );
 }
 
-pub fn print_gain_history<F: Fn(u64) -> Option<f64>>(
-    rows: &[crate::global_db::SavingsDay],
-    to_usd: F,
-) {
+pub fn print_gain_history<F: Fn(u64) -> f64>(rows: &[crate::global_db::SavingsDay], to_usd: F) {
     println!(
         "  {:<12} {:>10} {:>8} {:>10}",
         "Day (UTC)", "Tokens", "Calls", "USD"
@@ -469,7 +483,29 @@ pub fn print_gain_history<F: Fn(u64) -> Option<f64>>(
             date,
             saved_str,
             r.calls,
-            usd.map_or_else(|| "unavailable".to_owned(), |value| format!("${value:.2}"))
+            format!("${usd:.2}")
         );
+    }
+}
+
+/// Print node kinds in column-major order.
+fn print_kind_rows(
+    sorted_kinds: &[(&String, &u64)],
+    num_kind_rows: usize,
+    num_cols: usize,
+    cell_width: usize,
+) {
+    for r in 0..num_kind_rows {
+        print!("│");
+        for c in 0..num_cols {
+            let idx = r + c * num_kind_rows;
+            if idx < sorted_kinds.len() {
+                let (kind, count) = &sorted_kinds[idx];
+                print!("{}", format_cell(kind, &format_number(**count), cell_width));
+            } else {
+                print!("{}", " ".repeat(cell_width));
+            }
+            print!("{}", if c < num_cols - 1 { "│" } else { "│\n" });
+        }
     }
 }

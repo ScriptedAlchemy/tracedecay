@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use tracedecay_agent_hosts::shell::{ShellInvocation, shell_invocations, shell_words};
+use crate::shell::{ShellInvocation, shell_invocations, shell_words};
 
 /// Task category for a single API turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -2,98 +2,38 @@
 name = "tracedecay-dashboard-api"
 version = "0.1.0"
 publish = false
-edition.workspace = true
+edition = "2024"
 license = "MIT"
-description = "HTTP dashboard API surface (routes, read models and services) for TraceDecay"
+description = "Dashboard HTTP routes, read models, and services for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 axum = "0.8"
-clru = "0.6"
-hotpath.workspace = true
-schemars = "1.2.1"
+dirs = "6"
+glob = "0.3"
+libsql = "0.9.30"
+open = "5.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
 tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = "0.5"
 tracing = "0.1"
-tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
-tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+ureq = { version = "3", features = ["json"] }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
+tracedecay-automation = { path = "../tracedecay-automation" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-lsp = { path = "../tracedecay-lsp" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-usecases = { path = "../tracedecay-usecases" }
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "tracedecay-agent-hosts/hotpath",
-    "tracedecay-api/hotpath",
-    "tracedecay-application/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-hooks/hotpath",
-    "tracedecay-lsp/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-usecases/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-agent-hosts/hotpath-alloc",
-    "tracedecay-api/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-lsp/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-agent-hosts/hotpath-cpu",
-    "tracedecay-api/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-lsp/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
-]
 default = []
-# Mirrors the root crate's features; the root forwards its own selections here.
-token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting"]
-test-transport = ["tracedecay-agent-hosts/test-transport"]
+token-counting = ["dep:tiktoken-rs"]
+test-transport = []
 
 [dev-dependencies]
 tempfile = "3"
-# The dashboard lib-test target owns registered-store and engine fixtures.
-# Dev-only feature unification keeps those helpers out of production builds.
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

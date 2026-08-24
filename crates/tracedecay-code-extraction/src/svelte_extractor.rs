@@ -13,51 +13,43 @@
 //! * `<script module>` — module-level script (Svelte 5)
 //! * `<script context="module">` — module-level script (Svelte 4)
 
-use std::borrow::Cow;
-
-use crate::types::ExtractionResult;
+use crate::LanguageExtractor;
 use crate::typescript_extractor::TypeScriptExtractor;
-use crate::{ExtractionArtifactV1, LanguageExtractor};
-use tree_sitter::Tree;
+use tracedecay_domain::code_intelligence::ExtractionResult;
 
 /// Extracts code graph nodes and edges from Svelte single-file components.
 #[derive(Debug)]
 pub struct SvelteExtractor;
 
 impl SvelteExtractor {
+    /// Extract nodes and edges from a Svelte source file.
     pub fn extract_svelte(file_path: &str, source: &str) -> ExtractionResult {
         let masked = Self::mask_non_script(source);
         TypeScriptExtractor::extract_typescript(file_path, &masked)
     }
 
-    /// Replace every byte outside `<script>` blocks with whitespace.
+    /// Replace every line outside `<script>` blocks with an empty line.
     ///
-    /// Keeping both byte length and line endings unchanged means the TypeScript
-    /// tree and every extracted coordinate remain valid for the original
-    /// `.svelte` source.
+    /// Keeping newlines in place means all line numbers in the AST produced by
+    /// the TypeScript parser match positions in the original `.svelte` file.
     fn mask_non_script(source: &str) -> String {
         let ranges = Self::script_content_line_ranges(source);
-        let mut masked = String::with_capacity(source.len());
-        let mut line = 0;
-        // `keep` only changes at line boundaries, so resolve it per line
-        // instead of scanning the range list once per character.
-        let mut keep = ranges
-            .iter()
-            .any(|&(start, end)| line >= start && line < end);
-        for character in source.chars() {
-            if character == '\n' {
-                masked.push(character);
-                line += 1;
-                keep = ranges
-                    .iter()
-                    .any(|&(start, end)| line >= start && line < end);
-            } else if character == '\r' || keep {
-                masked.push(character);
-            } else {
-                masked.extend(std::iter::repeat_n(' ', character.len_utf8()));
-            }
+        if ranges.is_empty() {
+            let blank_lines = source.lines().count().saturating_sub(1);
+            return "\n".repeat(blank_lines);
         }
-        masked
+        source
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                if ranges.iter().any(|&(s, e)| i >= s && i < e) {
+                    line
+                } else {
+                    ""
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Return `(content_start, content_end_exclusive)` line-index pairs for
@@ -115,85 +107,7 @@ impl LanguageExtractor for SvelteExtractor {
         "Svelte"
     }
 
-    fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
-        Cow::Owned(Self::mask_non_script(source))
-    }
-
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_svelte(file_path, source)
-    }
-
-    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || {
-                let masked = Self::mask_non_script(source);
-                TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
-            },
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let masked = Self::mask_non_script(source);
-        TypeScriptExtractor.extract_parsed(file_path, &masked, tree, scope)
-    }
-
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        let masked = Self::mask_non_script(source);
-        TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
-    }
-
-    /// The retained document already holds this extractor's mask as its parse
-    /// text, so reuse it instead of re-masking the whole source per pass.
-    fn extract_parsed_artifact_prepared(
-        &self,
-        file_path: &str,
-        _source: &str,
-        parsed_source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prepared_source_preserves_non_ascii_byte_and_newline_positions() {
-        let source =
-            "<script lang=\"ts\">\r\nconst résumé = \"界\";\r\n</script>\r\n<h1>界</h1>\r\n";
-        let prepared = SvelteExtractor.prepare_parse_source(source);
-
-        assert_eq!(prepared.len(), source.len());
-        assert_eq!(
-            prepared
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\r' || byte == b'\n').then_some(index))
-                .collect::<Vec<_>>(),
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\r' || byte == b'\n').then_some(index))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(prepared.lines().nth(1), Some("const résumé = \"界\";"));
     }
 }

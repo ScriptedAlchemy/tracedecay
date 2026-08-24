@@ -1,6 +1,3 @@
-//! Diagnostic severity + record types — moved to `tracedecay-usecases::diagnose`.
-//!
-//! Thin shim so every `crate::diagnose::…` path in the root crate keeps
-//! resolving after the crate split. See the canonical module for rationale.
+//! Compatibility facade for diagnostic parsing operations.
 
 pub use tracedecay_usecases::diagnose::*;

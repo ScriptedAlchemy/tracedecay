@@ -1,9 +1,13 @@
-//! Canonical memory sanitization, scoring, entity, and trust utilities.
+//! Holographic memory storage, retrieval, scoring, and trust support.
 
 pub mod diff;
-pub mod encoding;
 pub mod entities;
 pub mod hygiene;
-pub mod similarity;
+pub mod retrieval;
+pub mod store;
 pub mod trust;
+pub mod types;
 pub mod user;
+
+pub mod encoding;
+pub mod similarity;

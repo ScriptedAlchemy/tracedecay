@@ -1,7 +1,3 @@
-//! Root shim for the kernel `text` module.
-//!
-//! The implementation moved to `tracedecay_runtime_core::text` in the one-shot
-//! crate split. This glob keeps every historical `crate::text::…` path resolving
-//! from the root crate.
+//! Compatibility facade for shared text utilities.
 
-pub use tracedecay_runtime_core::text::*;
+pub use tracedecay_runtime_core::text::utf8_prefix_at_or_before;

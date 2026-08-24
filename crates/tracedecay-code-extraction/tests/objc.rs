@@ -76,6 +76,7 @@ fn test_objc_extract_ns_enum() {
     assert!(variants.iter().any(|n| n.name == "LogLevelWarning"));
     assert!(variants.iter().any(|n| n.name == "LogLevelError"));
 
+    // Enum should contain its variants via Contains edges
     let enum_id = &enums[0].id;
     let contains: Vec<_> = result
         .edges
@@ -114,6 +115,7 @@ fn test_objc_extract_protocol() {
         protocols[0].docstring
     );
 
+    // Protocol methods
     let methods: Vec<_> = result
         .nodes
         .iter()
@@ -123,6 +125,7 @@ fn test_objc_extract_protocol() {
     assert!(methods.iter().any(|n| n.name == "toJson"));
     assert!(methods.iter().any(|n| n.name == "toJsonString"));
 
+    // Protocol inherits from NSObject
     let implements: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -144,6 +147,7 @@ fn test_objc_extract_class_interface() {
     let result = extractor.extract("sample.m", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
+    // Class
     let classes: Vec<_> = result
         .nodes
         .iter()
@@ -161,6 +165,7 @@ fn test_objc_extract_class_interface() {
         classes[0].docstring
     );
 
+    // Property
     let props: Vec<_> = result
         .nodes
         .iter()
@@ -169,6 +174,7 @@ fn test_objc_extract_class_interface() {
     assert_eq!(props.len(), 1);
     assert_eq!(props[0].name, "name");
 
+    // Extends NSObject
     let extends: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -176,6 +182,7 @@ fn test_objc_extract_class_interface() {
         .collect();
     assert!(extends.iter().any(|r| r.reference_name == "NSObject"));
 
+    // Method declarations
     let methods: Vec<_> = result
         .nodes
         .iter()
@@ -201,6 +208,7 @@ fn test_objc_extract_class_with_protocol_conformance() {
     let result = extractor.extract("sample.m", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
+    // Class
     let classes: Vec<_> = result
         .nodes
         .iter()
@@ -209,6 +217,7 @@ fn test_objc_extract_class_with_protocol_conformance() {
     assert_eq!(classes.len(), 1);
     assert_eq!(classes[0].name, "Connection");
 
+    // Extends Base
     assert!(
         result
             .unresolved_refs
@@ -216,10 +225,12 @@ fn test_objc_extract_class_with_protocol_conformance() {
             .any(|r| { r.reference_kind == EdgeKind::Extends && r.reference_name == "Base" })
     );
 
+    // Implements Serializable
     assert!(result.unresolved_refs.iter().any(|r| {
         r.reference_kind == EdgeKind::Implements && r.reference_name == "Serializable"
     }));
 
+    // Properties
     let props: Vec<_> = result
         .nodes
         .iter()
@@ -229,6 +240,7 @@ fn test_objc_extract_class_with_protocol_conformance() {
     assert!(props.iter().any(|n| n.name == "port"));
     assert!(props.iter().any(|n| n.name == "connected"));
 
+    // Methods (instance and class)
     let methods: Vec<_> = result
         .nodes
         .iter()
@@ -274,6 +286,7 @@ fn test_objc_extract_implementation() {
     let result = extractor.extract("sample.m", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
+    // Impl block
     let impls: Vec<_> = result
         .nodes
         .iter()
@@ -282,6 +295,7 @@ fn test_objc_extract_implementation() {
     assert_eq!(impls.len(), 1);
     assert_eq!(impls[0].name, "Base");
 
+    // Methods inside implementation
     let methods: Vec<_> = result
         .nodes
         .iter()
@@ -297,6 +311,7 @@ fn test_objc_extract_implementation() {
     assert!(methods.iter().any(|n| n.name == "description"));
     assert!(methods.iter().any(|n| n.name == "validate"));
 
+    // Docstring on validate
     let validate = methods.iter().find(|m| m.name == "validate").unwrap();
     assert!(
         validate
@@ -308,6 +323,7 @@ fn test_objc_extract_implementation() {
         validate.docstring
     );
 
+    // Call sites from message expressions
     let calls: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -315,6 +331,7 @@ fn test_objc_extract_implementation() {
         .collect();
     assert!(!calls.is_empty(), "expected call site refs");
 
+    // Contains edges
     let contains: Vec<_> = result
         .edges
         .iter()
@@ -352,6 +369,7 @@ void logMessage(LogLevel level, NSString *message) {
     );
     assert!(fns[0].signature.as_ref().unwrap().contains("logMessage"));
 
+    // Call sites
     let calls: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -426,6 +444,7 @@ fn test_objc_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
+    // File -> Class, Class -> Property, Class -> Method
     assert!(
         contains.len() >= 3,
         "expected >= 3 Contains edges, got {}",
@@ -456,8 +475,11 @@ fn test_objc_class_method_vs_instance_method() {
 
 #[test]
 fn test_objc_full_sample_file() {
-    let source =
-        std::fs::read_to_string("../../tests/fixtures/sample.m").expect("Failed to read sample.m");
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.m"
+    ))
+    .expect("Failed to read sample.m");
     let extractor = ObjcExtractor;
     let result = extractor.extract("sample.m", &source);
 

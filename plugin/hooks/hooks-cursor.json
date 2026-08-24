@@ -22,25 +22,31 @@
     "preCompact": [
       {
         "command": "tracedecay hook-cursor-pre-compact",
+        "timeout": 120
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "tracedecay hook-cursor-before-submit-prompt",
         "timeout": 5
       }
     ],
     "afterFileEdit": [
       {
         "command": "tracedecay hook-cursor-after-file-edit",
-        "timeout": 5
+        "timeout": 30
       }
     ],
     "afterShellExecution": [
       {
         "command": "tracedecay hook-cursor-after-shell",
-        "timeout": 5
+        "timeout": 60
       }
     ],
     "workspaceOpen": [
       {
         "command": "tracedecay hook-cursor-workspace-open",
-        "timeout": 5
+        "timeout": 60
       }
     ],
     "stop": [

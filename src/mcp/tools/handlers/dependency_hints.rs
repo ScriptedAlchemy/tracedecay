@@ -1,18 +1,14 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::{
-    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
-};
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-use tracedecay_usecases::code_index::{
-    CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
-    CodeIndexIgnoredDependencyAdmissionRequestV1,
-};
 
-use crate::errors::{Result, TraceDecayError};
+use crate::dependency_imports::{DependencyImportCandidate, candidates_from_type_only_import};
+use crate::errors::Result;
 use crate::mcp::tools::render::{self, Md};
-use crate::tracedecay::queries::graph::VerifiedGraphQuery;
+use crate::tracedecay::TraceDecay;
 
-pub(super) fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
+pub(super) fn should_check_ignored_dependency_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)
 }
 
@@ -22,189 +18,144 @@ pub(super) fn lazy_indexing_requested(args: &Value) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) async fn external_import_hint(
-    graph: &VerifiedGraphQuery,
+pub(super) async fn ignored_dependency_hint(
+    cg: &TraceDecay,
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Option<Value>> {
-    let candidates =
-        ignored_dependency_candidates(graph, query, limit, scope_prefix, deadline, cancellation)?;
+    let candidates = ignored_dependency_candidates(cg, query, limit, scope_prefix).await?;
     if candidates.is_empty() {
         return Ok(None);
     }
     Ok(Some(json!({
-        "message": "Search results were sparse, and parser-backed imports contain matching external-module specifiers. Module resolution and ignored-source status are not verified by this advisory read.",
-        "evidence": "parser_external_module_specifier",
-        "resolution_status": "unverified",
+        "message": "No indexed symbol matched, but project imports reference matching symbols from an ignored dependency. Keep node_modules ignored for normal sync; use bounded lazy dependency indexing for the listed module if this symbol is needed.",
         "candidates": candidates.into_iter().map(|candidate| json!({
-            "module": candidate.module_specifier,
-            "symbol": candidate.imported_name,
-            "import_file": candidate.logical_path,
-            "line": user_line(candidate.start_line),
+            "module": candidate.module,
+            "symbol": candidate.symbol,
+            "import_file": candidate.import_file,
+            "line": user_line(candidate.line),
         })).collect::<Vec<_>>(),
-        "suggested_action": "verify_external_import_before_lazy_indexing",
+        "suggested_action": "lazy_index_ignored_dependency",
     })))
 }
 
-pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
-    let (reason_code, retryable, detail) =
-        if let Some((reason_code, retryable, detail)) = error.project_route_context() {
-            (reason_code, retryable, detail.to_owned())
-        } else if let Some((_authority, reason)) = error.reset_required_context() {
-            ("code-graph-reset-required", false, reason.to_owned())
-        } else {
-            (
-                "code-graph-import-hint-unavailable",
-                false,
-                error.to_string(),
-            )
-        };
-    PrimitiveUnavailableEvidenceV1 {
-        status: PrimitiveUnavailableStatusV1::Unavailable,
-        reason_code: reason_code.to_owned(),
-        retryable,
-        detail,
-    }
-}
-
-pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
-    json!(unavailable_evidence(error))
-}
-
-pub(super) async fn admit_verified_ignored_dependency(
-    admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
-    graph: &VerifiedGraphQuery,
-    query: &str,
-    scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
-) -> Result<()> {
-    let candidates =
-        ignored_dependency_candidates(graph, query, 1, scope_prefix, deadline, cancellation)?;
-    let Some(import) = candidates.first() else {
-        return Ok(());
-    };
-    let Some(admission) = admission else {
-        return Err(TraceDecayError::project_route(
-            "application.symbol-graph.ignored-dependency-scheduler-unavailable",
-            true,
-            "ignored dependency indexing scheduler is unavailable",
-        ));
-    };
-    let source_generation = graph.generation();
-    match admission
-        .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
-            graph.request_context(),
-            source_generation,
-            std::slice::from_ref(import),
-        ))
-        .await
-    {
-        Ok(active_generation) if &active_generation != source_generation => {
-            Err(generation_advanced())
-        }
-        Ok(_) => Err(TraceDecayError::project_route(
-            "application.symbol-graph.ignored-dependency-generation-not-advanced",
-            true,
-            "ignored dependency indexing did not publish a newer graph generation",
-        )),
-        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Unavailable { detail }) => {
-            Err(TraceDecayError::project_route(
-                "application.symbol-graph.ignored-dependency-scheduler-unavailable",
-                true,
-                detail,
-            ))
-        }
-        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::ReadOnly) => {
-            Err(TraceDecayError::project_route(
-                "application.symbol-graph.ignored-dependency-read-only",
-                false,
-                "ignored dependency indexing is unavailable in read-only mode",
-            ))
-        }
-        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Cancelled) => {
-            Err(TraceDecayError::project_route(
-                "application.symbol-graph.ignored-dependency-cancelled",
-                false,
-                "ignored dependency indexing was cancelled",
-            ))
-        }
-        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::TimedOut) => {
-            Err(TraceDecayError::project_route(
-                "application.symbol-graph.ignored-dependency-timed-out",
-                true,
-                "ignored dependency indexing timed out",
-            ))
-        }
-        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Stale { active_generation }) => {
-            Err(TraceDecayError::project_route(
-                "application.symbol-graph.ignored-dependency-generation-stale",
-                true,
-                format!(
-                    "ignored dependency indexing rejected a stale source generation; active generation is {}",
-                    active_generation.as_str()
-                ),
-            ))
-        }
-    }
-}
-
-fn ignored_dependency_candidates(
-    graph: &VerifiedGraphQuery,
+pub(super) async fn lazy_index_ignored_dependency_candidates(
+    cg: &TraceDecay,
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
-) -> Result<Vec<CodeIndexImportEvidenceV1>> {
-    if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
-        return Err(TraceDecayError::project_route(
-            "code-graph-cancelled",
-            false,
-            "verified dependency import read was cancelled",
-        ));
+) -> Result<Vec<String>> {
+    if cg.is_read_only() {
+        return Ok(Vec::new());
     }
-    if deadline.is_some_and(|deadline| deadline.is_elapsed_at(tracedecay_application::now_micros()))
-    {
-        return Err(TraceDecayError::project_route(
-            "code-graph-timed-out",
-            true,
-            "verified dependency import read exceeded its deadline",
-        ));
+
+    let candidates = ignored_dependency_candidates(cg, query, limit, scope_prefix).await?;
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    for candidate in candidates {
+        if let Some(path) = candidate_entry_paths(cg.project_root(), &candidate.module)
+            .into_iter()
+            .next()
+        {
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
     }
-    graph.external_type_import_candidates(query, scope_prefix, limit.clamp(1, 20))
+    cg.lazy_index_ignored_dependency_files(&paths).await
 }
 
-fn generation_advanced() -> TraceDecayError {
-    TraceDecayError::project_route(
-        "application.symbol-graph.ignored-dependency-generation-advanced",
-        true,
-        "ignored dependency indexing advanced the graph generation; retry the request",
-    )
+async fn ignored_dependency_candidates(
+    cg: &TraceDecay,
+    query: &str,
+    limit: usize,
+    scope_prefix: Option<&str>,
+) -> Result<Vec<DependencyImportCandidate>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let candidate_limit = limit.clamp(1, 20);
+    let db = if cg.is_read_only() {
+        cg.open_project_store_db_read_only().await?
+    } else {
+        cg.open_project_store_db().await?
+    };
+    let query_lower = query.to_ascii_lowercase();
+    let imports = db
+        .dependency_import_uses(query, candidate_limit, scope_prefix)
+        .await?;
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for candidate in imports.into_iter().flat_map(|import_use| {
+        candidates_from_type_only_import(
+            &import_use.signature,
+            &import_use.module,
+            &import_use.file_path,
+            import_use.line,
+        )
+    }) {
+        let haystack = format!("{} {}", candidate.module, candidate.symbol).to_ascii_lowercase();
+        if !haystack.contains(&query_lower) {
+            continue;
+        }
+        if !seen.insert((
+            candidate.module.clone(),
+            candidate.symbol.clone(),
+            candidate.import_file.clone(),
+            candidate.line,
+        )) {
+            continue;
+        }
+        candidates.push(candidate);
+        if candidates.len() >= candidate_limit {
+            break;
+        }
+    }
+    Ok(candidates)
 }
 
-pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {
-    let Some(hint) = value.get("external_import_hint") else {
+fn candidate_entry_paths(project_root: &Path, module: &str) -> Vec<String> {
+    if !safe_module_path(module) {
+        return Vec::new();
+    }
+    let base = format!("node_modules/{module}");
+    [
+        format!("{base}.d.ts"),
+        format!("{base}.ts"),
+        format!("{base}.tsx"),
+        format!("{base}.js"),
+        format!("{base}.jsx"),
+        format!("{base}/index.d.ts"),
+        format!("{base}/index.ts"),
+        format!("{base}/index.tsx"),
+        format!("{base}/index.js"),
+        format!("{base}/index.jsx"),
+    ]
+    .into_iter()
+    .filter(|path| project_root.join(path).is_file())
+    .collect()
+}
+
+fn safe_module_path(module: &str) -> bool {
+    !module.is_empty()
+        && !module.starts_with('/')
+        && !module.contains('\\')
+        && !module
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
+pub(super) fn append_ignored_dependency_hint_md(md: &mut Md, value: &Value) {
+    let Some(hint) = value.get("ignored_dependency_hint") else {
         return;
     };
-    if hint.get("status").and_then(Value::as_str) == Some("unavailable") {
-        let detail = hint
-            .get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("verified import evidence is unavailable");
-        md.blank()
-            .heading(3, "External Import Hint")
-            .line(&format!("Hint unavailable: {detail}"));
-        return;
-    }
     let msg = hint
         .get("message")
         .and_then(Value::as_str)
-        .unwrap_or("Matching parser-backed external import candidates were found.");
-    md.blank().heading(3, "External Import Hint").line(msg);
+        .unwrap_or("Matching ignored dependency candidates were found.");
+    md.blank().heading(3, "Ignored Dependency Hint").line(msg);
     if let Some(candidates) = hint.get("candidates").and_then(Value::as_array) {
         for candidate in candidates {
             let module = render::field_str(candidate, "module");
@@ -212,7 +163,7 @@ pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {
             let file = render::field_str(candidate, "import_file");
             let line = render::field_i64(candidate, "line");
             md.bullet(&format!(
-                "`{symbol}` is imported from external-module specifier `{module}` at {file}:{line}"
+                "`{module}` exports `{symbol}` referenced at {file}:{line}"
             ));
         }
     }

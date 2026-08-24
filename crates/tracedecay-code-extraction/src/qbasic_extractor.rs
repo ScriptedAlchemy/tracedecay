@@ -13,7 +13,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::{ComplexityMetrics, QBASIC_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{
+use tracedecay_domain::code_intelligence::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -52,17 +52,12 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
+        let mut parts = vec![self.file_path.clone()];
+        for (name, _) in &self.node_stack {
+            parts.push(name.clone());
+        }
+        parts.join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -79,35 +74,23 @@ impl ExtractionState {
 }
 
 impl QBasicExtractor {
+    /// Extract code graph nodes and edges from a `QBasic` source file.
+    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
+    /// `source` is the `QBasic` source code to parse.
     pub fn extract_qbasic(file_path: &str, source: &str) -> ExtractionResult {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
 
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
+        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -137,45 +120,55 @@ impl QBasicExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
+        let root = tree.root_node();
+
+        // Walk the top-level children of the program.
+        let mut cursor = root.walk();
         // Collect preceding comments for docstrings.
         let mut pending_comment: Option<String> = None;
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |node| {
-            match node.kind() {
-                "line" => {
-                    // A line can contain: apostrophe_comment, const_statement,
-                    // dim_statement, call_statement, declare_statement, let_statement, etc.
-                    if let Some(comment) = Self::extract_line_comment(&state, node) {
-                        // Accumulate comments as potential docstrings.
-                        pending_comment = Some(comment);
-                    } else {
-                        Self::visit_line(&mut state, node, pending_comment.as_deref());
+        if cursor.goto_first_child() {
+            loop {
+                let node = cursor.node();
+                match node.kind() {
+                    "line" => {
+                        // A line can contain: apostrophe_comment, const_statement,
+                        // dim_statement, call_statement, declare_statement, let_statement, etc.
+                        if let Some(comment) = Self::extract_line_comment(&state, node) {
+                            // Accumulate comments as potential docstrings.
+                            pending_comment = Some(comment);
+                        } else {
+                            Self::visit_line(&mut state, node, pending_comment.as_deref());
+                            pending_comment = None;
+                        }
+                    }
+                    "type_definition" => {
+                        Self::visit_type_definition(&mut state, node, pending_comment.as_deref());
+                        pending_comment = None;
+                    }
+                    "sub_definition" => {
+                        Self::visit_sub_definition(&mut state, node, pending_comment.as_deref());
+                        pending_comment = None;
+                    }
+                    "function_definition" => {
+                        Self::visit_function_definition(
+                            &mut state,
+                            node,
+                            pending_comment.as_deref(),
+                        );
+                        pending_comment = None;
+                    }
+                    _ => {
                         pending_comment = None;
                     }
                 }
-                "type_definition" => {
-                    Self::visit_type_definition(&mut state, node, pending_comment.as_deref());
-                    pending_comment = None;
-                }
-                "sub_definition" => {
-                    Self::visit_sub_definition(&mut state, node, pending_comment.as_deref());
-                    pending_comment = None;
-                }
-                "function_definition" => {
-                    Self::visit_function_definition(&mut state, node, pending_comment.as_deref());
-                    pending_comment = None;
-                }
-                _ => {
-                    pending_comment = None;
+                if !cursor.goto_next_sibling() {
+                    break;
                 }
             }
-        });
+        }
 
         state.node_stack.pop();
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        Self::build_result(state, start)
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -240,6 +233,7 @@ impl QBasicExtractor {
         const_stmt: TsNode<'_>,
         pending_comment: Option<&str>,
     ) {
+        // Find the identifier child of const_statement.
         let Some(id_node) = find_direct_child_by_kind(const_stmt, "identifier") else {
             return;
         };
@@ -303,6 +297,7 @@ impl QBasicExtractor {
             return; // Only extract DIM SHARED at top level
         }
 
+        // Find the dim_variable child, then get its identifier.
         let Some(dim_var) = find_direct_child_by_kind(dim_stmt, "dim_variable") else {
             return;
         };
@@ -547,6 +542,7 @@ impl QBasicExtractor {
             });
         }
 
+        // Extract call sites from within the SUB body.
         state.node_stack.push((name, fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
@@ -615,6 +611,7 @@ impl QBasicExtractor {
             });
         }
 
+        // Extract call sites from within the FUNCTION body.
         state.node_stack.push((name, fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
@@ -643,13 +640,14 @@ impl QBasicExtractor {
         });
     }
 
-    /// Recursively walk AST nodes looking for `call_statement` nodes.
-    ///
-    /// `function_call` nodes (built-ins like `STR$()`) are deliberately not
-    /// extracted — they aren't user-defined.
+    /// Recursively walk AST nodes looking for `call_statement` and `function_call` nodes.
     fn walk_for_calls(state: &mut ExtractionState, node: TsNode<'_>) {
-        if node.kind() == "call_statement" {
+        let kind = node.kind();
+        if kind == "call_statement" {
             Self::extract_call_from_call_statement(state, node);
+        } else if kind == "function_call" {
+            // Built-in function calls like STR$() — extract if they have an identifier.
+            // We skip built-in functions as they aren't user-defined.
         }
 
         // Recurse into children.
@@ -688,15 +686,5 @@ impl crate::LanguageExtractor for QBasicExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_qbasic(file_path, source)
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
     }
 }

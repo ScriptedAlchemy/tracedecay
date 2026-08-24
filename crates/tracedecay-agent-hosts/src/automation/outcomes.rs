@@ -1,50 +1,38 @@
-//! Post-application outcome tracking for automatically curated changes.
+//! Post-approval outcome tracking for automation-applied changes (R10).
 //!
-//! The automation loops validate and apply skills and facts automatically, but
-//! application alone says nothing about whether the change was good. This module
-//! measures what happened *after* automatic application:
+//! The automation loops stage skills and facts that humans approve, but
+//! approval alone says nothing about whether the change was good. This module
+//! measures what happened *after* approval:
 //!
-//! - automatically activated managed skills: adoption derived from the usage ledger
+//! - approved managed skills: adoption derived from the usage ledger
 //!   (`adopted` / `ignored` / `too_early`),
-//! - automatic-fact receipts: terminal application state plus any post-apply
-//!   recall trajectory in the memory store (`recalled_and_helpful` / `recalled`
-//!   / `never_recalled` / `deleted` / `quarantined` / `unavailable`).
+//! - applied fact proposals: post-apply recall trajectory in the memory store
+//!   (`recalled_and_helpful` / `recalled` / `never_recalled` / `deleted`).
 //!
 //! Outcomes are persisted as a snapshot under the dashboard root so the next
 //! automation run for the same task can fold real-quality signal into its
 //! `feedback` and `generated_evals` artifacts, and so the dashboard can render
 //! them read-only.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
 
+use libsql::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_domain::PayloadAccessState;
-use tracedecay_store::{
-    FactReadControl, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
-    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
-};
 
 use super::backend::AgentTaskKind;
 use super::config_error;
+use super::fact_proposals::{FactProposalRecord, FactProposalState, load_fact_proposal_store};
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
 use super::skill_usage::{SkillUsageSummary, summarize_skill_usage};
-use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::store::MemoryStore;
+use crate::memory::types::FactRecord;
 
 const AUTOMATION_OUTCOMES_FILENAME: &str = "automation_outcomes.json";
-/// Outcome refreshes update independent halves of one snapshot. This lock
-/// serializes their read-modify-write critical sections for one dashboard.
-static AUTOMATION_OUTCOMES_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static AUTOMATION_OUTCOMES_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
-/// A skill is `too_early` to judge until this long after activation.
-pub const SKILL_ACTIVATION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+/// A skill is `too_early` to judge until this long after approval.
+pub const SKILL_ADOPTION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SECS_PER_DAY: i64 = 24 * 60 * 60;
 
@@ -73,8 +61,6 @@ pub enum FactOutcomeVerdict {
     Recalled,
     NeverRecalled,
     Deleted,
-    Quarantined,
-    Unavailable,
 }
 
 impl FactOutcomeVerdict {
@@ -84,8 +70,6 @@ impl FactOutcomeVerdict {
             Self::Recalled => "recalled",
             Self::NeverRecalled => "never_recalled",
             Self::Deleted => "deleted",
-            Self::Quarantined => "quarantined",
-            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -95,64 +79,28 @@ pub struct SkillOutcomeRecord {
     pub skill_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    pub activated_at: i64,
-    pub days_since_activation: i64,
-    pub views_since_activation: u64,
-    pub uses_since_activation: u64,
+    pub approved_at: i64,
+    pub days_since_approval: i64,
+    pub views_since_approval: u64,
+    pub uses_since_approval: u64,
     pub verdict: SkillOutcomeVerdict,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactOutcomeRecord {
-    /// Immutable identity of the terminal automatic-fact receipt.
-    pub apply_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub state: ProjectMemoryAutomaticFactStateV1,
-    /// Present only for receipts whose terminal effect applied a canonical fact.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_fact_id: Option<String>,
-    pub recorded_at: i64,
-    pub days_since_recorded: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retrieval_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub helpful_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unhelpful_count: Option<u64>,
+    pub proposal_id: String,
+    pub run_id: String,
+    pub fact_id: i64,
+    pub applied_at: i64,
+    pub days_since_applied: i64,
+    pub retrieval_count: i64,
+    pub access_count: i64,
+    pub helpful_count: i64,
+    pub unhelpful_count: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_recalled_at: Option<i64>,
     pub still_exists: bool,
     pub verdict: FactOutcomeVerdict,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct FactOutcomeTelemetry {
-    retrieval_count: u64,
-    access_count: u64,
-    helpful_count: u64,
-    unhelpful_count: u64,
-    last_recalled_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum FactOutcomeObservation {
-    Available(FactOutcomeTelemetry),
-    Deleted,
-    Quarantined,
-    Unavailable,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct FactOutcomeInput {
-    apply_id: String,
-    run_id: Option<String>,
-    state: ProjectMemoryAutomaticFactStateV1,
-    canonical_fact_id: Option<String>,
-    recorded_at: i64,
-    observation: FactOutcomeObservation,
 }
 
 /// Persisted, per-project snapshot of the most recently computed outcomes.
@@ -172,26 +120,32 @@ pub struct AutomationOutcomesSnapshot {
     pub facts_refreshed_at: Option<i64>,
 }
 
-/// Computes the adoption verdict for one activated skill. `None` when the
-/// skill has never been activated (no post-activation window to measure).
+impl AutomationOutcomesSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty() && self.facts.is_empty()
+    }
+}
+
+/// Computes the adoption verdict for one approved skill. `None` when the
+/// skill has never been approved (no post-approval window to measure).
 pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<SkillOutcomeRecord> {
-    let activated_at = summary.activated_at?;
-    let secs_since_activation = now_unix.saturating_sub(activated_at);
-    let views_since_activation = count_since_activation(
+    let approved_at = summary.approved_at?;
+    let secs_since_approval = now_unix.saturating_sub(approved_at);
+    let views_since_approval = count_since_approval(
         summary.view_count,
-        summary.view_count_at_activation,
+        summary.view_count_at_approval,
         summary.last_viewed_at,
-        activated_at,
+        approved_at,
     );
-    let uses_since_activation = count_since_activation(
+    let uses_since_approval = count_since_approval(
         summary.use_count,
-        summary.use_count_at_activation,
+        summary.use_count_at_approval,
         summary.last_used_at,
-        activated_at,
+        approved_at,
     );
-    let verdict = if uses_since_activation > 0 {
+    let verdict = if uses_since_approval > 0 {
         SkillOutcomeVerdict::Adopted
-    } else if secs_since_activation < SKILL_ACTIVATION_WINDOW_SECS {
+    } else if secs_since_approval < SKILL_ADOPTION_WINDOW_SECS {
         SkillOutcomeVerdict::TooEarly
     } else {
         SkillOutcomeVerdict::Ignored
@@ -199,72 +153,75 @@ pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<Skill
     Some(SkillOutcomeRecord {
         skill_id: summary.skill_id.clone(),
         title: summary.title.clone(),
-        activated_at,
-        days_since_activation: secs_since_activation / SECS_PER_DAY,
-        views_since_activation,
-        uses_since_activation,
+        approved_at,
+        days_since_approval: secs_since_approval / SECS_PER_DAY,
+        views_since_approval,
+        uses_since_approval,
         verdict,
     })
 }
 
-/// Activity since activation, preferring the exact baseline captured at
-/// activation time. Ledgers written before baselines existed fall back to the
-/// last-activity timestamp: activity at or after activation counts the full
+/// Activity since approval, preferring the exact baseline captured at
+/// approval time. Ledgers written before baselines existed fall back to the
+/// last-activity timestamp: activity at or after approval counts the full
 /// total (a conservative over-count is fine for adoption detection).
-fn count_since_activation(
+fn count_since_approval(
     total: u64,
-    baseline_at_activation: Option<u64>,
+    baseline_at_approval: Option<u64>,
     last_activity_at: Option<i64>,
-    activated_at: i64,
+    approved_at: i64,
 ) -> u64 {
-    match baseline_at_activation {
+    match baseline_at_approval {
         Some(baseline) => total.saturating_sub(baseline),
-        None if last_activity_at.is_some_and(|at| at >= activated_at) => total,
+        None if last_activity_at.is_some_and(|at| at >= approved_at) => total,
         None => 0,
     }
 }
 
-/// Computes the current trajectory from one terminal automatic-fact receipt.
-fn fact_outcome(input: FactOutcomeInput, now_unix: i64) -> FactOutcomeRecord {
-    let recorded_at = input.recorded_at;
+/// Computes the post-apply verdict for one applied fact proposal. `None`
+/// when the proposal never produced a stored fact.
+pub fn fact_outcome(
+    proposal: &FactProposalRecord,
+    fact: Option<&FactRecord>,
+    now_unix: i64,
+) -> Option<FactOutcomeRecord> {
+    if proposal.state != FactProposalState::Applied {
+        return None;
+    }
+    let fact_id = proposal.applied_fact_id?;
+    let applied_at = proposal.updated_at;
     let mut record = FactOutcomeRecord {
-        apply_id: input.apply_id,
-        run_id: input.run_id,
-        state: input.state,
-        canonical_fact_id: input.canonical_fact_id,
-        recorded_at,
-        days_since_recorded: now_unix.saturating_sub(recorded_at) / SECS_PER_DAY,
-        retrieval_count: None,
-        access_count: None,
-        helpful_count: None,
-        unhelpful_count: None,
+        proposal_id: proposal.proposal_id.clone(),
+        run_id: proposal.run_id.clone(),
+        fact_id,
+        applied_at,
+        days_since_applied: now_unix.saturating_sub(applied_at) / SECS_PER_DAY,
+        retrieval_count: 0,
+        access_count: 0,
+        helpful_count: 0,
+        unhelpful_count: 0,
         last_recalled_at: None,
         still_exists: false,
-        verdict: match &input.observation {
-            FactOutcomeObservation::Deleted => FactOutcomeVerdict::Deleted,
-            FactOutcomeObservation::Quarantined => FactOutcomeVerdict::Quarantined,
-            FactOutcomeObservation::Unavailable => FactOutcomeVerdict::Unavailable,
-            FactOutcomeObservation::Available(_) => FactOutcomeVerdict::NeverRecalled,
-        },
+        verdict: FactOutcomeVerdict::Deleted,
     };
-    let FactOutcomeObservation::Available(telemetry) = input.observation else {
-        return record;
+    let Some(fact) = fact else {
+        return Some(record);
     };
-    record.retrieval_count = Some(telemetry.retrieval_count);
-    record.access_count = Some(telemetry.access_count);
-    record.helpful_count = Some(telemetry.helpful_count);
-    record.unhelpful_count = Some(telemetry.unhelpful_count);
-    record.last_recalled_at = telemetry.last_recalled_at;
+    record.retrieval_count = fact.retrieval_count;
+    record.access_count = fact.access_count;
+    record.helpful_count = fact.helpful_count;
+    record.unhelpful_count = fact.unhelpful_count;
+    record.last_recalled_at = fact.last_recalled_at;
     record.still_exists = true;
-    let recalled = telemetry.access_count > 0 || telemetry.last_recalled_at.is_some();
-    record.verdict = if recalled && telemetry.helpful_count > 0 {
+    let recalled = fact.access_count > 0 || fact.last_recalled_at.is_some();
+    record.verdict = if recalled && fact.helpful_count > 0 {
         FactOutcomeVerdict::RecalledAndHelpful
     } else if recalled {
         FactOutcomeVerdict::Recalled
     } else {
         FactOutcomeVerdict::NeverRecalled
     };
-    record
+    Some(record)
 }
 
 pub fn automation_outcomes_path(dashboard_root: &Path) -> PathBuf {
@@ -297,15 +254,6 @@ pub async fn save_outcomes_snapshot(
     dashboard_root: &Path,
     snapshot: &AutomationOutcomesSnapshot,
 ) -> Result<()> {
-    let lock = outcomes_snapshot_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    save_outcomes_snapshot_unlocked(dashboard_root, snapshot).await
-}
-
-async fn save_outcomes_snapshot_unlocked(
-    dashboard_root: &Path,
-    snapshot: &AutomationOutcomesSnapshot,
-) -> Result<()> {
     let path = automation_outcomes_path(dashboard_root);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -316,33 +264,12 @@ async fn save_outcomes_snapshot_unlocked(
         })?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot).map_err(TraceDecayError::from)?;
-    let nonce = AUTOMATION_OUTCOMES_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_file_name(format!(
-        ".{AUTOMATION_OUTCOMES_FILENAME}.{}.{}.{}.tmp",
-        std::process::id(),
-        crate::runtime_identity::process_run_id(),
-        nonce
-    ));
-    crate::db::DatabaseAuthority::publish_record_atomically(
-        &temporary,
-        &path,
-        &bytes,
-        "automation outcomes snapshot",
-    )
-}
-
-fn outcomes_snapshot_lock(dashboard_root: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    let key = dashboard_root.to_path_buf();
-    let mut locks = AUTOMATION_OUTCOMES_LOCKS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(key, Arc::downgrade(&lock));
-    lock
+    tokio::fs::write(&path, bytes).await.map_err(|e| {
+        config_error(format!(
+            "failed to write automation outcomes snapshot '{}': {e}",
+            path.display()
+        ))
+    })
 }
 
 /// Recomputes skill outcomes from the managed-skill store plus usage ledger
@@ -355,32 +282,32 @@ pub async fn refresh_skill_outcomes(
     let skills = list_managed_skills(profile_root).await?;
     let summaries = summarize_skill_usage(profile_root, &skills).await?;
     let outcomes = compute_skill_outcomes(&summaries, now_unix);
-    let lock = outcomes_snapshot_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 3;
+    let mut snapshot = load_outcomes_snapshot(dashboard_root)
+        .await
+        .unwrap_or_default();
+    snapshot.schema_version = 1;
     snapshot.skills = outcomes.clone();
     snapshot.skills_refreshed_at = Some(now_unix);
-    save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
+    save_outcomes_snapshot(dashboard_root, &snapshot).await?;
     Ok(outcomes)
 }
 
-/// Recomputes fact outcomes from terminal automatic-fact receipts, then
-/// persists the current telemetry cache (skills half untouched).
-pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
+/// Recomputes fact outcomes for applied fact proposals against the memory
+/// store and persists them into the snapshot (skills half untouched).
+pub async fn refresh_fact_outcomes(
     dashboard_root: &Path,
-    application: &MemoryApplication<A>,
+    conn: &Connection,
     now_unix: i64,
-    read_control: &FactReadControl,
 ) -> Result<Vec<FactOutcomeRecord>> {
-    let outcomes = compute_fact_outcomes(application, now_unix, read_control).await?;
-    let lock = outcomes_snapshot_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 3;
+    let proposals = load_fact_proposal_store(dashboard_root).await?.proposals;
+    let outcomes = compute_fact_outcomes(&proposals, conn, now_unix).await?;
+    let mut snapshot = load_outcomes_snapshot(dashboard_root)
+        .await
+        .unwrap_or_default();
+    snapshot.schema_version = 1;
     snapshot.facts = outcomes.clone();
     snapshot.facts_refreshed_at = Some(now_unix);
-    save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
+    save_outcomes_snapshot(dashboard_root, &snapshot).await?;
     Ok(outcomes)
 }
 
@@ -402,141 +329,30 @@ pub fn compute_skill_outcomes(
         .collect()
 }
 
-pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
-    application: &MemoryApplication<A>,
+pub async fn compute_fact_outcomes(
+    proposals: &[FactProposalRecord],
+    conn: &Connection,
     now_unix: i64,
-    read_control: &FactReadControl,
 ) -> Result<Vec<FactOutcomeRecord>> {
+    let store = MemoryStore::new(conn);
     let mut outcomes = Vec::new();
-    let mut after_apply_id = None;
-
-    loop {
-        let page = application
-            .list_project_memory_automatic_fact_receipts(
-                None,
-                after_apply_id.clone(),
-                MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
-                read_control,
-            )
-            .await
-            .map_err(|error| config_error(format!("list automatic fact receipts: {error}")))?;
-        let next_after_apply_id = page.next_after_apply_id().cloned();
-
-        for receipt in page.receipts() {
-            let projection = if receipt.state() == ProjectMemoryAutomaticFactStateV1::Applied {
-                let canonical_fact_id = receipt.applied_fact_id().ok_or_else(|| {
-                    config_error(format!(
-                        "applied automatic fact receipt '{}' has no canonical fact id",
-                        receipt.apply_id().as_str()
-                    ))
-                })?;
-                let fact_id = ProjectMemoryFactIdV1::new(
-                    application.owner().clone(),
-                    canonical_fact_id.clone(),
-                )
-                .map_err(|error| {
-                    config_error(format!(
-                        "invalid canonical fact id for automatic receipt '{}': {error}",
-                        receipt.apply_id().as_str()
-                    ))
-                })?;
-                application
-                    .get_project_memory_fact(fact_id, read_control)
-                    .await
-                    .map_err(|error| {
-                        config_error(format!(
-                            "read applied automatic fact receipt '{}': {error}",
-                            receipt.apply_id().as_str()
-                        ))
-                    })?
-            } else {
-                None
-            };
-            outcomes.push(fact_outcome(
-                fact_outcome_input(receipt, projection.as_ref())?,
-                now_unix,
-            ));
+    for proposal in proposals {
+        if proposal.state != FactProposalState::Applied {
+            continue;
         }
-
-        let Some(next_after_apply_id) = next_after_apply_id else {
-            break;
+        let Some(fact_id) = proposal.applied_fact_id else {
+            continue;
         };
-        after_apply_id = Some(next_after_apply_id);
+        let fact = store.get_fact(fact_id).await?;
+        if let Some(outcome) = fact_outcome(proposal, fact.as_ref(), now_unix) {
+            outcomes.push(outcome);
+        }
     }
-
     Ok(outcomes)
 }
 
-fn fact_outcome_input(
-    receipt: &ProjectMemoryAutomaticFactReceiptV1,
-    projection: Option<&ProjectMemoryFactProjectionV1>,
-) -> Result<FactOutcomeInput> {
-    let state = receipt.state();
-    let apply_id = receipt.apply_id().as_str().to_owned();
-    let run_id = receipt.automation_run_id().map(ToOwned::to_owned);
-    let recorded_at = receipt.recorded_at().0.div_euclid(1_000_000);
-
-    match state {
-        ProjectMemoryAutomaticFactStateV1::Applied => {
-            let canonical_fact_id = receipt.applied_fact_id().ok_or_else(|| {
-                config_error(format!(
-                    "applied automatic fact receipt '{}' has no canonical fact id",
-                    receipt.apply_id().as_str()
-                ))
-            })?;
-            let observation = match projection {
-                Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
-                    let telemetry = fact.telemetry();
-                    FactOutcomeObservation::Available(FactOutcomeTelemetry {
-                        retrieval_count: telemetry.retrieval_count(),
-                        access_count: telemetry.access_count(),
-                        helpful_count: telemetry.helpful_count(),
-                        unhelpful_count: telemetry.unhelpful_count(),
-                        last_recalled_at: telemetry
-                            .last_recalled_at()
-                            .map(|timestamp| timestamp.0.div_euclid(1_000_000)),
-                    })
-                }
-                Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
-                    match unavailable.payload_access() {
-                        PayloadAccessState::Deleted => FactOutcomeObservation::Deleted,
-                        PayloadAccessState::Quarantined => FactOutcomeObservation::Quarantined,
-                        PayloadAccessState::Unavailable
-                        | PayloadAccessState::Redacted
-                        | PayloadAccessState::RetentionExpired
-                        | PayloadAccessState::Ambiguous => FactOutcomeObservation::Unavailable,
-                        PayloadAccessState::Eligible => {
-                            return Err(config_error(format!(
-                                "unavailable projection for automatic fact receipt '{}' has eligible payload access",
-                                receipt.apply_id().as_str()
-                            )));
-                        }
-                    }
-                }
-                None => FactOutcomeObservation::Unavailable,
-            };
-            Ok(FactOutcomeInput {
-                apply_id,
-                run_id,
-                state,
-                canonical_fact_id: Some(canonical_fact_id.as_str().to_owned()),
-                recorded_at,
-                observation,
-            })
-        }
-        ProjectMemoryAutomaticFactStateV1::Quarantined => Ok(FactOutcomeInput {
-            apply_id,
-            run_id,
-            state,
-            canonical_fact_id: None,
-            recorded_at,
-            observation: FactOutcomeObservation::Quarantined,
-        }),
-    }
-}
-
 /// The outcome records relevant to one automation task: the skill writer is
-/// judged by skill adoption, fact-producing tasks by automatic-fact trajectory.
+/// judged by skill adoption, fact-producing tasks by fact recall.
 fn task_outcomes(
     task: AgentTaskKind,
     snapshot: &AutomationOutcomesSnapshot,
@@ -554,8 +370,8 @@ fn task_outcomes(
     }
 }
 
-/// The automatic change outcome section embedded in the `feedback` artifact
-/// payload.
+/// The "outcomes of previously applied changes" section embedded in the
+/// `feedback` artifact payload.
 pub(super) fn outcome_feedback_section(
     task: AgentTaskKind,
     snapshot: &AutomationOutcomesSnapshot,
@@ -569,7 +385,7 @@ pub(super) fn outcome_feedback_section(
         } else {
             "available"
         },
-        "source": "post_activation_outcome_tracking",
+        "source": "post_approval_outcome_tracking",
         "skills_refreshed_at": snapshot.skills_refreshed_at,
         "facts_refreshed_at": snapshot.facts_refreshed_at,
         "skill_verdicts": skill_verdicts,
@@ -579,7 +395,7 @@ pub(super) fn outcome_feedback_section(
     })
 }
 
-/// Generated-eval entries derived from real post-activation outcomes rather
+/// Generated-eval entries derived from real post-approval outcomes rather
 /// than validation-time signals. Kept separate from the validation-replay
 /// definitions so the replay gate keeps checking only validation examples.
 pub(super) fn outcome_eval_definitions(
@@ -600,10 +416,10 @@ pub(super) fn outcome_eval_definitions(
             "passed": record.verdict == SkillOutcomeVerdict::Adopted,
             "pending": record.verdict == SkillOutcomeVerdict::TooEarly,
             "metrics": {
-                "activated_at": record.activated_at,
-                "days_since_activation": record.days_since_activation,
-                "views_since_activation": record.views_since_activation,
-                "uses_since_activation": record.uses_since_activation,
+                "approved_at": record.approved_at,
+                "days_since_approval": record.days_since_approval,
+                "views_since_approval": record.views_since_approval,
+                "uses_since_approval": record.uses_since_approval,
             },
             "assertions": [{
                 "type": "outcome_equals",
@@ -613,28 +429,26 @@ pub(super) fn outcome_eval_definitions(
         }));
     }
     for record in facts {
-        let passed = record.state == ProjectMemoryAutomaticFactStateV1::Applied
-            && matches!(
-                record.verdict,
-                FactOutcomeVerdict::RecalledAndHelpful | FactOutcomeVerdict::Recalled
-            );
+        let passed = matches!(
+            record.verdict,
+            FactOutcomeVerdict::RecalledAndHelpful | FactOutcomeVerdict::Recalled
+        );
         definitions.push(json!({
             "schema_version": 1,
-            "eval_id": format!("{task_key}:outcome:fact:{}", record.apply_id),
+            "eval_id": format!("{task_key}:outcome:fact:{}", record.proposal_id),
             "kind": "applied_change_outcome",
             "subject": {
-                "type": "automatic_fact_receipt",
-                "apply_id": record.apply_id,
-                "state": record.state,
-                "canonical_fact_id": record.canonical_fact_id,
+                "type": "applied_fact",
+                "proposal_id": record.proposal_id,
+                "fact_id": record.fact_id,
             },
             "observed_outcome": record.verdict.as_str(),
             "expected_outcome": "recalled",
             "passed": passed,
             "pending": false,
             "metrics": {
-                "recorded_at": record.recorded_at,
-                "days_since_recorded": record.days_since_recorded,
+                "applied_at": record.applied_at,
+                "days_since_applied": record.days_since_applied,
                 "retrieval_count": record.retrieval_count,
                 "access_count": record.access_count,
                 "helpful_count": record.helpful_count,
@@ -664,5 +478,314 @@ fn verdict_counts<'a>(verdicts: impl Iterator<Item = &'a str>) -> Value {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[path = "outcomes_test.rs"]
-mod outcomes_test;
+mod tests {
+    use super::super::skill_usage::SkillUsageRecord;
+    use super::*;
+    use crate::memory::types::MemoryCategory;
+
+    const DAY: i64 = SECS_PER_DAY;
+
+    fn summary(skill_id: &str) -> SkillUsageRecord {
+        SkillUsageRecord {
+            schema_version: 1,
+            skill_id: skill_id.to_string(),
+            title: Some(format!("{skill_id} title")),
+            category: Some("maintenance".to_string()),
+            state: None,
+            pinned: false,
+            created_by: None,
+            provenance_source: None,
+            targets: Vec::new(),
+            view_count: 0,
+            use_count: 0,
+            patch_count: 0,
+            first_seen_at: 0,
+            last_activity_at: 0,
+            last_viewed_at: None,
+            last_used_at: None,
+            last_patched_at: None,
+            approved_at: None,
+            view_count_at_approval: None,
+            use_count_at_approval: None,
+        }
+    }
+
+    fn applied_proposal(proposal_id: &str, fact_id: i64, applied_at: i64) -> FactProposalRecord {
+        FactProposalRecord {
+            schema_version: 1,
+            proposal_id: proposal_id.to_string(),
+            run_id: "run_outcomes".to_string(),
+            evidence_hash: None,
+            state: FactProposalState::Applied,
+            add_fact_request: None,
+            proposal: None,
+            validation_reason: None,
+            validation: None,
+            reviewer: Some("dashboard".to_string()),
+            applied_fact_id: Some(fact_id),
+            apply_outcome: None,
+            created_at: applied_at,
+            updated_at: applied_at,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
+            folded_contents: Vec::new(),
+        }
+    }
+
+    fn fact(fact_id: i64) -> FactRecord {
+        FactRecord {
+            fact_id,
+            content: "prefers nextest for rust test runs".to_string(),
+            category: MemoryCategory::Tool,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust_score: 0.6,
+            source: None,
+            retrieval_count: 0,
+            access_count: 0,
+            helpful_count: 0,
+            unhelpful_count: 0,
+            created_at: 0,
+            updated_at: 0,
+            last_retrieved_at: None,
+            last_recalled_at: None,
+            last_feedback_at: None,
+            metadata: json!({}),
+        }
+    }
+
+    #[test]
+    fn skill_outcome_requires_an_approval_timestamp() {
+        assert!(skill_outcome(&summary("draft-skill"), 100 * DAY).is_none());
+    }
+
+    #[test]
+    fn skill_used_after_approval_is_adopted() {
+        let mut record = summary("adopted-skill");
+        record.approved_at = Some(10 * DAY);
+        record.view_count_at_approval = Some(3);
+        record.use_count_at_approval = Some(1);
+        record.view_count = 5;
+        record.use_count = 4;
+        record.last_used_at = Some(11 * DAY);
+
+        let outcome = skill_outcome(&record, 12 * DAY).unwrap();
+        assert_eq!(outcome.verdict, SkillOutcomeVerdict::Adopted);
+        assert_eq!(outcome.views_since_approval, 2);
+        assert_eq!(outcome.uses_since_approval, 3);
+        assert_eq!(outcome.days_since_approval, 2);
+    }
+
+    #[test]
+    fn unused_skill_inside_window_is_too_early() {
+        let mut record = summary("fresh-skill");
+        record.approved_at = Some(10 * DAY);
+        record.view_count_at_approval = Some(0);
+        record.use_count_at_approval = Some(0);
+
+        let outcome = skill_outcome(&record, 10 * DAY + SKILL_ADOPTION_WINDOW_SECS - 1).unwrap();
+        assert_eq!(outcome.verdict, SkillOutcomeVerdict::TooEarly);
+        assert_eq!(outcome.uses_since_approval, 0);
+    }
+
+    #[test]
+    fn unused_skill_past_window_is_ignored() {
+        let mut record = summary("ignored-skill");
+        record.approved_at = Some(10 * DAY);
+        record.view_count_at_approval = Some(2);
+        record.use_count_at_approval = Some(0);
+        record.view_count = 4;
+        record.last_viewed_at = Some(12 * DAY);
+
+        let outcome = skill_outcome(&record, 10 * DAY + SKILL_ADOPTION_WINDOW_SECS).unwrap();
+        assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
+        assert_eq!(outcome.views_since_approval, 2);
+        assert_eq!(outcome.uses_since_approval, 0);
+    }
+
+    #[test]
+    fn legacy_ledger_without_baseline_uses_last_activity_fallback() {
+        let mut record = summary("legacy-skill");
+        record.approved_at = Some(10 * DAY);
+        record.use_count = 2;
+        record.last_used_at = Some(11 * DAY);
+
+        let outcome = skill_outcome(&record, 20 * DAY).unwrap();
+        assert_eq!(outcome.verdict, SkillOutcomeVerdict::Adopted);
+        assert_eq!(outcome.uses_since_approval, 2);
+
+        record.last_used_at = Some(9 * DAY);
+        let outcome = skill_outcome(&record, 20 * DAY).unwrap();
+        assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
+        assert_eq!(outcome.uses_since_approval, 0);
+    }
+
+    #[test]
+    fn deleted_fact_yields_deleted_verdict() {
+        let proposal = applied_proposal("fact_dead", 42, 5 * DAY);
+        let outcome = fact_outcome(&proposal, None, 9 * DAY).unwrap();
+        assert_eq!(outcome.verdict, FactOutcomeVerdict::Deleted);
+        assert!(!outcome.still_exists);
+        assert_eq!(outcome.days_since_applied, 4);
+    }
+
+    #[test]
+    fn never_recalled_fact_yields_never_recalled_verdict() {
+        let proposal = applied_proposal("fact_idle", 42, 5 * DAY);
+        let outcome = fact_outcome(&proposal, Some(&fact(42)), 9 * DAY).unwrap();
+        assert_eq!(outcome.verdict, FactOutcomeVerdict::NeverRecalled);
+        assert!(outcome.still_exists);
+    }
+
+    #[test]
+    fn recalled_fact_yields_recalled_verdict() {
+        let proposal = applied_proposal("fact_recalled", 42, 5 * DAY);
+        let mut record = fact(42);
+        record.access_count = 3;
+        record.last_recalled_at = Some(8 * DAY);
+        let outcome = fact_outcome(&proposal, Some(&record), 9 * DAY).unwrap();
+        assert_eq!(outcome.verdict, FactOutcomeVerdict::Recalled);
+        assert_eq!(outcome.access_count, 3);
+    }
+
+    #[test]
+    fn recalled_and_helpful_fact_yields_top_verdict() {
+        let proposal = applied_proposal("fact_helpful", 42, 5 * DAY);
+        let mut record = fact(42);
+        record.access_count = 2;
+        record.helpful_count = 1;
+        let outcome = fact_outcome(&proposal, Some(&record), 9 * DAY).unwrap();
+        assert_eq!(outcome.verdict, FactOutcomeVerdict::RecalledAndHelpful);
+    }
+
+    #[test]
+    fn helpful_feedback_without_recall_is_not_recalled_and_helpful() {
+        let proposal = applied_proposal("fact_feedback_only", 42, 5 * DAY);
+        let mut record = fact(42);
+        record.helpful_count = 1;
+        let outcome = fact_outcome(&proposal, Some(&record), 9 * DAY).unwrap();
+        assert_eq!(outcome.verdict, FactOutcomeVerdict::NeverRecalled);
+    }
+
+    #[test]
+    fn pending_and_rejected_proposals_produce_no_outcome() {
+        let mut proposal = applied_proposal("fact_pending", 42, 5 * DAY);
+        proposal.state = FactProposalState::PendingApproval;
+        assert!(fact_outcome(&proposal, None, 9 * DAY).is_none());
+
+        let mut proposal = applied_proposal("fact_no_id", 42, 5 * DAY);
+        proposal.applied_fact_id = None;
+        assert!(fact_outcome(&proposal, None, 9 * DAY).is_none());
+    }
+
+    #[test]
+    fn outcome_eval_definitions_reflect_task_scope_and_verdicts() {
+        let mut adopted = summary("adopted-skill");
+        adopted.approved_at = Some(10 * DAY);
+        adopted.use_count_at_approval = Some(0);
+        adopted.use_count = 1;
+        adopted.last_used_at = Some(11 * DAY);
+        let snapshot = AutomationOutcomesSnapshot {
+            schema_version: 1,
+            skills: compute_skill_outcomes(&[adopted], 20 * DAY),
+            facts: vec![
+                fact_outcome(&applied_proposal("fact_dead", 42, 5 * DAY), None, 20 * DAY).unwrap(),
+            ],
+            skills_refreshed_at: Some(20 * DAY),
+            facts_refreshed_at: Some(20 * DAY),
+        };
+
+        let skill_evals =
+            outcome_eval_definitions(AgentTaskKind::SkillWriter, "skill_writer", &snapshot);
+        assert_eq!(skill_evals.len(), 1);
+        assert_eq!(
+            skill_evals[0].get("observed_outcome").unwrap(),
+            &json!("adopted")
+        );
+        assert_eq!(skill_evals[0].get("passed").unwrap(), &json!(true));
+
+        let fact_evals = outcome_eval_definitions(
+            AgentTaskKind::SessionReflector,
+            "session_reflector",
+            &snapshot,
+        );
+        assert_eq!(fact_evals.len(), 1);
+        assert_eq!(
+            fact_evals[0].get("observed_outcome").unwrap(),
+            &json!("deleted")
+        );
+        assert_eq!(fact_evals[0].get("passed").unwrap(), &json!(false));
+    }
+
+    #[test]
+    fn feedback_section_counts_verdicts_per_task() {
+        let mut ignored = summary("ignored-skill");
+        ignored.approved_at = Some(0);
+        ignored.view_count_at_approval = Some(0);
+        ignored.use_count_at_approval = Some(0);
+        let snapshot = AutomationOutcomesSnapshot {
+            schema_version: 1,
+            skills: compute_skill_outcomes(&[ignored], 30 * DAY),
+            facts: Vec::new(),
+            skills_refreshed_at: Some(30 * DAY),
+            facts_refreshed_at: None,
+        };
+
+        let section = outcome_feedback_section(AgentTaskKind::SkillWriter, &snapshot);
+        assert_eq!(section.get("status").unwrap(), &json!("available"));
+        assert_eq!(
+            section.pointer("/skill_verdicts/ignored").unwrap(),
+            &json!(1)
+        );
+
+        let empty = outcome_feedback_section(AgentTaskKind::SessionReflector, &snapshot);
+        assert_eq!(empty.get("status").unwrap(), &json!("no_outcomes_recorded"));
+    }
+
+    #[tokio::test]
+    async fn refresh_skill_outcomes_persists_snapshot() {
+        use super::super::managed_skills::{
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
+            create_managed_skill_draft, default_managed_skill_targets,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let dashboard_root = temp.path().join("dashboard");
+        let skill = create_managed_skill_draft(
+            &profile_root,
+            ManagedSkillDraft {
+                id: "outcome-skill".to_string(),
+                title: "Outcome skill".to_string(),
+                summary: "Outcome tracking fixture.".to_string(),
+                category: "maintenance".to_string(),
+                targets: default_managed_skill_targets(),
+                body_markdown: "Use when checking outcomes.".to_string(),
+                support_files: Vec::new(),
+                provenance: ManagedSkillProvenance {
+                    source: ManagedSkillSource::AutomationRun,
+                    actor: "tracedecay".to_string(),
+                    run_id: Some("run_outcomes".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        approve_managed_skill(&profile_root, &skill.metadata.id)
+            .await
+            .unwrap();
+
+        let now = crate::tracedecay::current_timestamp();
+        let outcomes = refresh_skill_outcomes(&profile_root, &dashboard_root, now)
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].skill_id, "outcome-skill");
+        assert_eq!(outcomes[0].verdict, SkillOutcomeVerdict::TooEarly);
+
+        let snapshot = load_outcomes_snapshot(&dashboard_root).await.unwrap();
+        assert_eq!(snapshot.skills, outcomes);
+        assert_eq!(snapshot.skills_refreshed_at, Some(now));
+        assert!(snapshot.facts.is_empty());
+    }
+}

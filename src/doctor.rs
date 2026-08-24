@@ -3,88 +3,20 @@
 //! Checks the binary, project index, global DB, user config, agent
 //! integrations, and network connectivity.
 
-use std::path::{Path, PathBuf};
-
-use tracedecay_application::{ApplicationOutcome, ResolvedSetting};
-use tracedecay_domain::configuration::{
-    ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
-};
-use tracedecay_tool_catalog::BindingSurface;
+use std::path::{Component, Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
-use crate::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
-    resolve_application_surface_dispatch,
-};
-use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
-use crate::display::format_token_count;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
+use crate::display::{format_bytes, format_token_count};
+#[cfg(test)]
+use crate::storage::StoreLayout;
+#[cfg(test)]
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-// Consumed by the unix-only daemon git-watch maintenance path; on other
-// targets only the module's tests reference it.
-#[cfg_attr(not(unix), allow(dead_code))]
+pub mod heal;
 pub(crate) mod registry_drift;
 
-/// Opens an isolated daemon-registered profile database so Doctor tests can
-/// exercise the read-only session-temporal health adapter against the real
-/// registered reader pool instead of an ad-hoc connection.
-#[cfg(test)]
-pub(crate) struct DoctorTestRuntime {
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
-    _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-    _scope: crate::db::DaemonDatabaseScope,
-}
-
-#[cfg(test)]
-impl DoctorTestRuntime {
-    pub(crate) async fn open(profile_root: &Path, label: &str) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        static NONCE: AtomicU64 = AtomicU64::new(1);
-
-        std::fs::create_dir_all(profile_root).expect("create Doctor test profile root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
-                .expect("secure Doctor test profile root");
-        }
-        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
-            .expect("load Doctor test profile identity");
-        let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
-        let scope = crate::db::enter_daemon_database_scope(profile_root, nonce, label)
-            .expect("enter Doctor test database scope");
-        let registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .expect("open Doctor test runtime registry");
-        // Mount the profile SESSIONS store: every production caller of
-        // `session_temporal_doctor_health` diagnoses a sessions store, which
-        // is the mount that binds the session relation graph the doctor's
-        // relation-health stage requires.
-        let database = registry
-            .profile_sessions()
-            .await
-            .expect("mount Doctor test profile session store");
-        Self {
-            database,
-            _registry: registry,
-            _scope: scope,
-        }
-    }
-
-    pub(crate) fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
-        self.database.as_ref()
-    }
-}
-
 /// Runs a comprehensive health check of the tracedecay installation.
-#[hotpath::measure]
-pub async fn run_doctor() -> crate::errors::Result<()> {
+pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()> {
     let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {
         Ok(lease) => lease,
         Err(error) => {
@@ -93,232 +25,221 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
         }
     };
     debug_assert!(
-        !crate::version::build_version().is_empty(),
-        "the reported build version must not be empty"
+        !env!("CARGO_PKG_VERSION").is_empty(),
+        "CARGO_PKG_VERSION must not be empty"
     );
     let mut dc = DoctorCounters::new();
 
     eprintln!(
         "\n\x1b[1mtracedecay doctor v{}\x1b[0m\n",
-        crate::version::build_version()
+        env!("CARGO_PKG_VERSION")
     );
 
     check_binary(&mut dc);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    check_inert_project_config(&mut dc, &project_path);
     let daemon_status = daemon_project_status(&project_path).await;
-    let storage_health = match daemon_status.as_ref() {
-        Ok(status) => match canonical_daemon_doctor_report(status)? {
-            Some(report) => {
-                let storage_health = database_health_from_canonical_report(&report);
-                render_canonical_doctor_report(&mut dc, &report);
-                storage_health
-            }
-            None => {
-                dc.warn("Canonical Doctor report is unavailable; health remains unknown");
-                DatabaseHealth::unknown("canonical_doctor_report_unavailable")
-            }
-        },
+    let storage_healthy = match daemon_status.as_ref() {
+        Ok(status) => check_database(&mut dc, status),
         Err(error) => {
             report_daemon_diagnostics_unavailable(
                 &mut dc,
                 fallback_database_path(&project_path).as_deref(),
                 error,
             );
-            DatabaseHealth::unknown("canonical_doctor_report_unavailable")
+            false
         }
     };
+
+    check_global_db(&mut dc);
+    check_stale_stores(&mut dc, daemon_status.as_ref().ok());
     check_watcher(&mut dc);
-    let upload_enabled = configured_upload_enabled(&project_path).await;
-    check_user_config(&mut dc, upload_enabled.as_ref());
+    check_user_config(&mut dc);
     check_external_tools(&mut dc);
 
+    // Agent-specific health checks
     if let Some(ref home) = agents::home_dir() {
-        // Host integration health is read-only: every `healthcheck` only reads
-        // the host's own on-disk registration and reports findings. Doctor
-        // never repairs them — remediation stays with `tracedecay install`.
         let hctx = HealthcheckContext {
             home: home.clone(),
             project_path: project_path.clone(),
         };
-        for agent in agents::all_integrations() {
-            if should_run_host_healthcheck(agent.as_ref(), home) {
-                agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
-            } else if let Some(surface) = agent.detected_host_surface(home) {
-                // The host itself is on this machine but carries no tracedecay
-                // integration. Silence here read as "nothing to say", which
-                // hid exactly the hosts an operator most likely wants wired
-                // up — warn uniformly, like the deferred-lifecycle hosts do.
-                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
-                dc.warn(&format!(
-                    "{} detected ({}) but tracedecay is not integrated — run `tracedecay install --agent {}`",
-                    agent.name(),
-                    surface.display(),
-                    agent.id()
-                ));
-            }
+        let agents_to_check: Vec<Box<dyn agents::AgentIntegration>> = match agent_filter {
+            Some(id) => match agents::get_integration(id) {
+                Ok(ag) => vec![ag],
+                Err(e) => {
+                    dc.fail(&format!("{e}"));
+                    vec![]
+                }
+            },
+            None => agents::all_integrations(),
+        };
+        for ag in &agents_to_check {
+            ag.healthcheck(&mut dc, &hctx);
         }
+        let materialization_root =
+            crate::automation::skill_materialization::resolve_project_root(&project_path);
+        check_managed_skill_materialization(&mut dc, home, &materialization_root);
     } else {
         dc.fail("Could not determine home directory");
     }
 
-    check_network(&mut dc, upload_enabled.as_ref());
+    check_network(&mut dc);
     print_summary(&dc);
 
-    doctor_result(&dc, &storage_health)
-}
-
-fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
-    agent.reports_absence_to_doctor() || agent.has_tracedecay(home)
-}
-
-fn render_canonical_doctor_report(
-    dc: &mut DoctorCounters,
-    report: &tracedecay_application::doctor::DoctorReportV1,
-) {
-    eprintln!("\n\x1b[1mCanonical Doctor findings\x1b[0m");
-    for finding in report.findings() {
-        render_doctor_finding(dc, finding);
-    }
-    dc.info(report.coverage().statement().statement());
-}
-
-fn render_doctor_finding(
-    dc: &mut DoctorCounters,
-    finding: &tracedecay_application::doctor::DoctorFindingV1,
-) {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
-
-    let evidence = finding
-        .evidence()
-        .first()
-        .map_or("doctor.evidence.unavailable", |evidence| {
-            evidence.reference().as_str()
-        });
-    let message = format!(
-        "{:?}: {} ({evidence})",
-        finding.family(),
-        finding.coverage().statement()
-    );
-    match finding.state() {
-        State::HealthyCompleteCoverage => dc.pass(&message),
-        State::Degraded => dc.fail(&message),
-        State::Unsupported
-        | State::Absent
-        | State::Stale
-        | State::Partial
-        | State::Unknown
-        | State::Denied => dc.warn(&message),
-    }
-}
-
-fn canonical_daemon_doctor_report(
-    status: &serde_json::Value,
-) -> crate::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>> {
-    let Some(doctor_report) = status.get("doctor_report") else {
-        return Ok(None);
-    };
-    match doctor_report
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-    {
-        Some("observed") => {}
-        Some("unknown" | "unsupported") => return Ok(None),
-        Some(kind) => {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: format!("daemon canonical Doctor report has unknown typed state: {kind}"),
-            });
-        }
-        None => {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: "daemon canonical Doctor report omitted its typed state".to_string(),
-            });
-        }
-    }
-    let report = doctor_report.get("report").cloned().ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
-            message: "observed daemon Doctor response omitted its report".to_string(),
-        }
-    })?;
-    serde_json::from_value(report).map(Some).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
-            message: format!("daemon canonical Doctor report violated its wire contract: {error}"),
-        }
-    })
-}
-
-/// Derive the exit-gating storage verdict from the canonical kernel findings.
-///
-/// A degraded `StorageRuntime` finding is an observed failure. Every other
-/// non-healthy state is unknown evidence, and missing family evidence is also
-/// unknown. Multiple findings retain the strongest state:
-/// `Failed` > `Unknown` > `Healthy`.
-fn database_health_from_canonical_report(
-    report: &tracedecay_application::doctor::DoctorReportV1,
-) -> DatabaseHealth {
-    use tracedecay_application::doctor::DoctorFindingFamilyV1 as Family;
-
-    database_health_from_storage_runtime_findings(
-        report
-            .findings()
-            .filter(|finding| finding.family() == Family::StorageRuntime),
-    )
-}
-
-fn database_health_from_storage_runtime_findings<'a>(
-    findings: impl IntoIterator<Item = &'a tracedecay_application::doctor::DoctorFindingV1>,
-) -> DatabaseHealth {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
-
-    let mut findings = findings.into_iter();
-    let Some(first) = findings.next() else {
-        return DatabaseHealth::unknown("canonical_storage_runtime_missing");
-    };
-    let health = |finding: &tracedecay_application::doctor::DoctorFindingV1| {
-        let evidence = finding
-            .evidence()
-            .first()
-            .map_or("canonical_storage_runtime_evidence_missing", |evidence| {
-                evidence.reference().as_str()
-            });
-        match finding.state() {
-            State::Degraded => DatabaseHealth::failed(evidence),
-            State::HealthyCompleteCoverage => DatabaseHealth::Healthy,
-            State::Unsupported
-            | State::Absent
-            | State::Stale
-            | State::Partial
-            | State::Unknown
-            | State::Denied => DatabaseHealth::unknown(evidence),
-        }
-    };
-    findings.fold(health(first), |combined, finding| {
-        combined.merge(health(finding))
-    })
-}
-
-/// Gates the doctor exit code.
-///
-/// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown` — a
-/// diagnostic that could not run — is reported to the user but never laundered
-/// into a healthy verdict nor turned into a hard failure.
-fn doctor_result(
-    dc: &DoctorCounters,
-    storage_health: &DatabaseHealth,
-) -> crate::errors::Result<()> {
-    match storage_health {
-        DatabaseHealth::Failed { reason } => Err(crate::errors::TraceDecayError::Config {
-            message: format!("doctor storage health check failed [{reason}]"),
+    match daemon_status {
+        Err(error) => Err(error),
+        Ok(_) if !storage_healthy => Err(crate::errors::TraceDecayError::Config {
+            message: "doctor storage health check failed".to_string(),
         }),
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if dc.issues > 0 => {
-            Err(crate::errors::TraceDecayError::Config {
-                message: format!("doctor found {} issue(s)", dc.issues),
-            })
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(()),
+        Ok(_) => Ok(()),
     }
+}
+
+/// Reports drift between the active managed-skill set and the host-loadable
+/// `SKILL.md` files `TraceDecay` automation materializes into detected
+/// `.claude`/`.codex` skills directories: missing (active but not on disk),
+/// forked (user-edited a managed file — the reconciler will not clobber it),
+/// conflict (a foreign file blocks the slot), or orphan (a managed file for a
+/// no-longer-active skill). A clean scope passes silently-ish with an info line.
+fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, project_root: &Path) {
+    use crate::automation::skill_materialization::doctor_detected_scopes;
+
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return;
+    };
+    let scopes = match doctor_detected_scopes(&profile_root, home, project_root) {
+        Ok(scopes) => scopes,
+        Err(err) => {
+            dc.warn(&format!(
+                "Managed skill materialization check failed: {err}"
+            ));
+            return;
+        }
+    };
+    if scopes.is_empty() {
+        return;
+    }
+    eprintln!("\n\x1b[1mManaged skill materialization\x1b[0m");
+    for (scope, drift) in scopes {
+        if drift.is_empty() {
+            dc.pass(&format!(
+                "{}: materialized skills in sync",
+                scope.describe()
+            ));
+            continue;
+        }
+        let scope_desc = scope.describe();
+        for finding in drift {
+            match skill_drift_report(&scope_desc, &finding) {
+                (DriftLevel::Warn, msg) => dc.warn(&msg),
+                (DriftLevel::Info, msg) => dc.info(&msg),
+            }
+        }
+    }
+}
+
+/// Severity of a doctor materialization-drift line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriftLevel {
+    Warn,
+    Info,
+}
+
+/// Pure classifier: maps a materialization drift finding to its doctor severity
+/// and rendered line. Split out from emission so it can be unit-tested — in
+/// particular that `ForeignOrphan` renders as `Info` and never prescribes
+/// `tracedecay update`, a remediation `update` refuses to perform on a foreign
+/// package.
+fn skill_drift_report(
+    scope_desc: &str,
+    finding: &crate::automation::skill_materialization::SkillDrift,
+) -> (DriftLevel, String) {
+    use crate::automation::skill_materialization::SkillDrift;
+    let path = finding.path().display();
+    let skill_id = finding.skill_id();
+    match finding {
+        SkillDrift::Missing { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: '{skill_id}' active but not materialized ({path}); run `tracedecay update`"
+            ),
+        ),
+        SkillDrift::Forked { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: '{skill_id}' materialized file was user-edited (forked); left untouched ({path})"
+            ),
+        ),
+        SkillDrift::Conflict { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: '{skill_id}' cannot materialize — a non-managed file occupies {path}"
+            ),
+        ),
+        SkillDrift::Orphan { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: stale materialized skill '{skill_id}' ({path}); run `tracedecay update` to remove"
+            ),
+        ),
+        SkillDrift::ForeignOrphan { .. } => (
+            DriftLevel::Info,
+            format!(
+                "{scope_desc}: '{skill_id}' project skill from another installation; leave in place, or delete the directory manually if unwanted ({path})"
+            ),
+        ),
+        SkillDrift::Warning { message, .. } => (
+            DriftLevel::Warn,
+            format!("{scope_desc}: '{skill_id}' {message} ({path})"),
+        ),
+    }
+}
+
+/// How the doctor "Current project" check sees the working directory's store.
+#[cfg(test)]
+#[derive(Debug)]
+enum CurrentProjectStore {
+    /// A store resolved through the same registry/alias-aware path the tools
+    /// use (enrollment marker, git-common-dir alias, profile shard, …).
+    Resolved(Box<StoreLayout>),
+    /// No resolvable store, but an old repo-local `.tracedecay/` database exists.
+    LegacyRepoLocal,
+    /// Resolution genuinely found nothing — `tracedecay init` is warranted.
+    Uninitialized,
+}
+
+#[cfg(test)]
+async fn resolve_current_project_store(
+    project_path: &Path,
+    open_options: &TraceDecayOpenOptions,
+) -> crate::errors::Result<CurrentProjectStore> {
+    if let Some(layout) =
+        TraceDecay::try_initialized_store_layout_with_options(project_path, open_options).await?
+    {
+        return Ok(CurrentProjectStore::Resolved(Box::new(layout)));
+    }
+    if crate::config::has_project_database(project_path) {
+        return Ok(CurrentProjectStore::LegacyRepoLocal);
+    }
+    Ok(CurrentProjectStore::Uninitialized)
+}
+
+#[cfg(test)]
+fn describe_resolved_store(layout: &StoreLayout) -> String {
+    let mode = match layout.storage_mode {
+        crate::storage::StorageMode::ProjectLocal => "repo-local",
+        crate::storage::StorageMode::ProfileSharded => "profile-sharded",
+    };
+    let store_id = layout
+        .identity
+        .project_id
+        .as_deref()
+        .map_or_else(String::new, |id| format!(", store {id}"));
+    format!(
+        "Index found: {}/ ({mode}{store_id})",
+        layout.data_root.display()
+    )
 }
 
 async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
@@ -328,40 +249,14 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         false,
         false,
     )?;
-    let result = crate::daemon::call_default_tool_within(
+    let result = crate::daemon::call_default_tool(
         &handshake,
         "tracedecay_runtime",
-        daemon_doctor_runtime_args(),
-        // Diagnostic probe, not a liveness gate. A multi-gigabyte store
-        // cold-opening while agents saturate the daemon can take well over 10s
-        // for its first integrity read; a warm steady-state read returns in well
-        // under a second. Give it headroom so a contended read reports real
-        // status instead of failing the post-update with a spurious timeout.
-        tokio::time::Instant::now() + std::time::Duration::from_secs(90),
+        serde_json::json!({ "format": "json" }),
     )
     .await?;
     daemon_runtime_status(&result)
 }
-
-fn daemon_doctor_runtime_args() -> serde_json::Value {
-    serde_json::json!({
-        "format": "json",
-        "startup_health": false,
-        "authority_audit": true,
-        "doctor_report": true,
-        // `authority_audit` already requests session-temporal health. Keeping
-        // ingest health false avoids the core startup-only interception and
-        // routes comprehensive Doctor through the ready project owner, where
-        // the composed Doctor report reader is mounted.
-        "session_ingest_health": false,
-    })
-}
-
-/// A routed project publishes database telemetry only after it is mounted and
-/// admitted. During startup, an absent `database` block means "not published
-/// yet" and remains a warming state to poll, while telemetry that is present
-/// but malformed remains a terminal contract violation.
-const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
 
 fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
     let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
@@ -370,7 +265,7 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
             .get("database")
             .cloned()
             .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: RUNTIME_TELEMETRY_PENDING.to_string(),
+                message: "daemon runtime response omitted database telemetry".to_string(),
             })?;
     let storage =
         storage
@@ -384,47 +279,67 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
     if let Some(version) = runtime.get("tracedecay_version").cloned() {
         storage.insert("daemon_version".to_string(), version);
     }
-    let mut status = serde_json::json!({ "storage_health": storage });
-    if let Some(value) = runtime.get("doctor_report").cloned() {
-        status["doctor_report"] = value;
-    }
-    Ok(status)
+    Ok(serde_json::json!({ "storage_health": storage }))
 }
 
-/// What Doctor actually observed about the current project's storage.
-///
-/// Deliberately three-state: a diagnostic that could not run (`Unknown`) is not
-/// evidence of a sound store, so it must never collapse into `Healthy`. Only
-/// `Failed` is an observed failure, and only `Failed` gates the exit code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DatabaseHealth {
-    Healthy,
-    Unknown { reason: String },
-    Failed { reason: String },
-}
-
-impl DatabaseHealth {
-    fn unknown(reason: impl Into<String>) -> Self {
-        Self::Unknown {
-            reason: reason.into(),
-        }
+fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
+    let Some(storage) = status.get("storage_health") else {
+        dc.fail("Daemon status omitted storage health; doctor did not open SQLite");
+        return false;
+    };
+    let db_path = storage
+        .get("canonical_db_path")
+        .or_else(|| storage.get("db_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    if let Some(path) = db_path.as_deref() {
+        dc.pass(&format!("Index found: {} (daemon-owned)", path.display()));
     }
-
-    fn failed(reason: impl Into<String>) -> Self {
-        Self::Failed {
-            reason: reason.into(),
-        }
+    if let Some(size) = storage
+        .get("db_size_bytes")
+        .and_then(serde_json::Value::as_u64)
+    {
+        dc.pass(&format!("DB size: {}", format_bytes(size)));
     }
-
-    /// Combines two independent observations, keeping the most severe:
-    /// `Failed` > `Unknown` > `Healthy`.
-    fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (failed @ Self::Failed { .. }, _) | (_, failed @ Self::Failed { .. }) => failed,
-            (unknown @ Self::Unknown { .. }, _) | (_, unknown @ Self::Unknown { .. }) => unknown,
-            (Self::Healthy, Self::Healthy) => Self::Healthy,
+    let healthy = match storage
+        .get("quick_check_ok")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => {
+            dc.pass("DB integrity: ok (checked by daemon owner)");
+            true
         }
+        Some(false) => {
+            dc.fail("Database integrity check failed; offline recovery is required");
+            if let Some(path) = db_path.as_deref() {
+                print_database_recovery_guidance(dc, path);
+            }
+            false
+        }
+        None => {
+            let detail = storage
+                .get("quick_check_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("daemon did not return a quick_check result");
+            dc.fail(&format!("Database diagnostics unavailable: {detail}"));
+            if let Some(path) = db_path.as_deref() {
+                print_database_recovery_guidance(dc, path);
+            }
+            false
+        }
+    };
+    if storage
+        .pointer("/dirty_marker/exists")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        let state = storage
+            .pointer("/dirty_marker/state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unparsed");
+        dc.warn(&format!("Graph dirty marker present (state={state})"));
     }
+    healthy
 }
 
 fn report_daemon_diagnostics_unavailable(
@@ -432,8 +347,8 @@ fn report_daemon_diagnostics_unavailable(
     db_path: Option<&Path>,
     error: &crate::errors::TraceDecayError,
 ) {
-    dc.warn(&format!(
-        "Canonical Doctor report unavailable from the sole daemon owner: {error}. Health remains unknown; Doctor did not open SQLite."
+    dc.fail(&format!(
+        "Database diagnostics unavailable from the sole daemon owner: {error}. Doctor did not open SQLite."
     ));
     if let Some(path) = db_path {
         print_database_recovery_guidance(dc, path);
@@ -443,10 +358,14 @@ fn report_daemon_diagnostics_unavailable(
 }
 
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
-    if let Ok(Some(layout)) =
-        crate::storage::resolve_enrolled_layout_for_current_profile(project_path)
-    {
-        return Some(layout.graph_db_path);
+    if let Ok(Some(marker)) = crate::storage::read_enrollment_marker(project_path) {
+        if let Ok(profile_root) = crate::storage::default_profile_root() {
+            if let Ok(layout) =
+                crate::storage::profile_sharded_layout(project_path, &profile_root, &marker)
+            {
+                return Some(layout.graph_db_path);
+            }
+        }
     }
     let data_root = crate::config::get_tracedecay_dir(project_path);
     let db_path = data_root.join(crate::config::db_filename(&data_root));
@@ -456,7 +375,12 @@ fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
 fn database_recovery_guidance(db_path: &Path) -> String {
     let wal_path = db_path.with_extension("db-wal");
     let shm_path = db_path.with_extension("db-shm");
-    let data_root = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let graph_parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let data_root = if graph_parent.file_name() == Some(std::ffi::OsStr::new("branches")) {
+        graph_parent.parent().unwrap_or(graph_parent)
+    } else {
+        graph_parent
+    };
     let mut graph_dirty = db_path.as_os_str().to_os_string();
     graph_dirty.push(".dirty");
     let graph_dirty = PathBuf::from(graph_dirty);
@@ -473,6 +397,7 @@ fn database_recovery_guidance(db_path: &Path) -> String {
          legacy dirty sentinel (if present): {}\n\
          `sessions.db` is separate and must not be removed: {}\n\
          Facts are stored in the graph database; automatic default-store rebuild is intentionally blocked because it cannot preserve them generically.\n\
+         Derived branch indexes are preserved under `recovery/` and rebuilt automatically from a healthy tracked ancestor.\n\
          Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe` until that recovery set is safely copied.\n\
          Report the preserved set at https://github.com/ScriptedAlchemy/tracedecay/issues for offline recovery.",
         db_path.display(),
@@ -498,7 +423,245 @@ fn check_binary(dc: &mut DoctorCounters) {
     } else {
         dc.fail("Could not determine binary path");
     }
-    dc.pass(&format!("Version: {}", crate::version::build_version()));
+    dc.pass(&format!("Version: {}", env!("CARGO_PKG_VERSION")));
+}
+
+/// Check global database exists.
+fn check_global_db(dc: &mut DoctorCounters) {
+    eprintln!("\n\x1b[1mGlobal database\x1b[0m");
+    if let Some(db_path) = crate::global_db::global_db_path() {
+        if db_path.exists() {
+            dc.pass(&format!("Global DB: {}", db_path.display()));
+        } else {
+            dc.warn("Global DB not yet created (created on first sync)");
+        }
+    } else {
+        dc.fail("Could not determine home directory for global DB");
+    }
+}
+
+/// Registry `SQLite` is owned by the daemon. The external doctor reports that
+/// ownership and leaves stale-row inspection/repair to daemon-backed tools.
+fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
+    eprintln!("\n\x1b[1mStorage registry\x1b[0m");
+    if let Some(storage) = status.and_then(|value| value.get("storage_health")) {
+        let owner = storage
+            .get("daemon_owner_pid")
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
+        let identity = storage
+            .get("daemon_generation")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(
+                || {
+                    storage
+                        .get("daemon_version")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(
+                            || "identity=unknown".to_string(),
+                            |version| format!("version={version}"),
+                        )
+                },
+                |generation| format!("generation={generation}"),
+            );
+        dc.pass(&format!(
+            "Registry/database inspection delegated to daemon owner pid={owner}, {identity}"
+        ));
+    } else {
+        dc.warn("Registry diagnostics unavailable because the daemon owner did not answer; doctor did not open the global DB");
+    }
+    dc.info("Use `tracedecay projects list` for daemon-backed registry inspection and `tracedecay migrate registry-gc --json` to preview explicit offline cleanup.");
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStorageStatus {
+    RepoLocal,
+    ProfileSharded,
+    ManifestReconstructable,
+    Stale,
+}
+
+#[cfg(test)]
+fn classify_project_storage(project_root: &Path) -> DoctorStorageStatus {
+    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) else {
+        return DoctorStorageStatus::Stale;
+    };
+    let graph_exists = layout.graph_db_path.exists();
+    let manifest_exists = layout
+        .manifest_path
+        .as_ref()
+        .is_some_and(|path| path.is_file());
+    match layout.storage_mode {
+        crate::storage::StorageMode::ProjectLocal if graph_exists => DoctorStorageStatus::RepoLocal,
+        crate::storage::StorageMode::ProfileSharded if graph_exists => {
+            DoctorStorageStatus::ProfileSharded
+        }
+        crate::storage::StorageMode::ProfileSharded if manifest_exists => {
+            DoctorStorageStatus::ManifestReconstructable
+        }
+        _ => DoctorStorageStatus::Stale,
+    }
+}
+
+#[cfg(test)]
+async fn classify_project_storage_with_registry(
+    project_root: &Path,
+    global_db: &crate::global_db::GlobalDb,
+    profile_root: Option<&Path>,
+) -> DoctorStorageStatus {
+    let status = classify_project_storage(project_root);
+    if status != DoctorStorageStatus::Stale {
+        return status;
+    }
+    let Some(profile_root) = profile_root else {
+        return status;
+    };
+    let Some(resolution) = global_db.resolve_project_store_by_alias(project_root).await else {
+        return status;
+    };
+    classify_registry_storage(profile_root, &resolution.store).unwrap_or(status)
+}
+
+#[cfg(test)]
+fn classify_registry_storage(
+    profile_root: &Path,
+    store: &crate::global_db::StoreInstanceRecord,
+) -> Option<DoctorStorageStatus> {
+    if store.storage_mode != "profile_sharded" {
+        return None;
+    }
+    let artifacts = registry_store_artifacts(profile_root, store);
+    if artifacts
+        .iter()
+        .any(|artifacts| artifacts.graph_db_path.exists())
+    {
+        Some(DoctorStorageStatus::ProfileSharded)
+    } else if artifacts
+        .iter()
+        .any(|artifacts| artifacts.manifest_path.is_some())
+    {
+        Some(DoctorStorageStatus::ManifestReconstructable)
+    } else if artifacts.is_empty() {
+        None
+    } else {
+        Some(DoctorStorageStatus::Stale)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct RegistryStoreArtifacts {
+    graph_db_path: PathBuf,
+    manifest_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+fn registry_store_artifacts(
+    profile_root: &Path,
+    store: &crate::global_db::StoreInstanceRecord,
+) -> Vec<RegistryStoreArtifacts> {
+    if store.storage_mode != "profile_sharded" {
+        return Vec::new();
+    }
+    let store_relpath = registry_relpath(&store.store_relpath);
+    let manifest_relpath = store
+        .manifest_relpath
+        .as_ref()
+        .map(|relpath| registry_relpath(relpath));
+    let mut artifacts = Vec::new();
+    for profile_root in registry_profile_roots(profile_root) {
+        let Ok(data_root) =
+            crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
+        else {
+            continue;
+        };
+        let data_root = data_root.absolute_path();
+        artifacts.push(RegistryStoreArtifacts {
+            graph_db_path: data_root.join(crate::config::db_filename(&data_root)),
+            manifest_path: registry_manifest_path(
+                &profile_root,
+                &data_root,
+                manifest_relpath.as_deref(),
+            ),
+        });
+    }
+    artifacts
+}
+
+#[cfg(test)]
+fn registry_manifest_path(
+    profile_root: &Path,
+    data_root: &Path,
+    manifest_relpath: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(relpath) = manifest_relpath {
+        return [profile_root, data_root].iter().find_map(|root| {
+            crate::storage::StoreArtifactPath::resolve(root, relpath)
+                .ok()
+                .map(|path| path.absolute_path())
+                .filter(|path| path.is_file())
+        });
+    }
+    let path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    path.is_file().then_some(path)
+}
+
+fn registry_relpath(value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return path.to_path_buf();
+    }
+    value
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![profile_root.to_path_buf()];
+    if let Ok(canonical) = profile_root.canonicalize() {
+        if !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
+/// Counts profile store manifests with no matching registry row, plus any
+/// manifest scan issues. Shared between `doctor` and the post-update health
+/// pass.
+pub(crate) async fn orphan_store_manifest_report(
+    global_db: &crate::global_db::GlobalDb,
+    profile_root: &Path,
+) -> (usize, Vec<String>) {
+    let report = crate::migrate::registry::scan_profile_store_manifests(
+        profile_root,
+        crate::tracedecay::current_timestamp(),
+    );
+    let mut warnings = report.issues.clone();
+    for plan in &report.plans {
+        match plan.status {
+            crate::migrate::registry::RegistryReconstructionStatus::Blocked => {
+                warnings.push(format!(
+                    "blocked store manifest '{}': {}",
+                    plan.manifest_path.display(),
+                    plan.status_reason.as_deref().unwrap_or("not eligible")
+                ));
+            }
+            crate::migrate::registry::RegistryReconstructionStatus::Eligible
+            | crate::migrate::registry::RegistryReconstructionStatus::Stale
+            | crate::migrate::registry::RegistryReconstructionStatus::Retired => {}
+        }
+    }
+    let diff =
+        crate::migrate::registry::diff_registry_reconstruction_report(global_db, &report).await;
+    warnings.extend(diff.issues);
+    (diff.missing_plans, warnings)
 }
 
 /// Reports git-metadata watcher health (design D3/D5).
@@ -506,11 +669,17 @@ fn check_binary(dc: &mut DoctorCounters) {
 /// The watcher lives in the daemon; its per-project state is only in-process, so
 /// this section sources telemetry the read-only way: recent `git_watch_*` events
 /// from the daemon log (systemd journal on Linux, launchd err-log on macOS). It
-/// reports whether an explicitly enabled project watcher is active or using
-/// bounded scheduler reconciliation. Absent telemetry is reported as info, not
-/// a failure — activation comes from each project's pinned configuration.
+/// reports whether the watcher is active vs degraded (mtime-poll fallback) per
+/// project. Absent telemetry is reported as info, not a failure — the watcher is
+/// a best-effort freshness aid backed by the on-read/hook sync paths.
 fn check_watcher(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
+
+    let config = crate::config::SyncConfig::default().with_env_overrides();
+    if !config.auto_watch {
+        dc.info("Git-metadata watcher disabled (`sync.auto_watch = false`)");
+        return;
+    }
 
     if !crate::daemon::daemon_reachable() {
         dc.info("Daemon not running — watcher inactive; sync happens on hook/read events");
@@ -533,7 +702,7 @@ fn check_watcher(dc: &mut DoctorCounters) {
                 "git_watch_degraded" => {
                     degraded += 1;
                     dc.warn(&format!(
-                        "{project}: degraded (bounded scheduler-reconciliation fallback){}",
+                        "{project}: degraded (mtime-poll fallback){}",
                         ev.detail.map(|d| format!(" — {d}")).unwrap_or_default()
                     ));
                 }
@@ -558,124 +727,26 @@ fn check_watcher(dc: &mut DoctorCounters) {
     dc.info("Git-metadata watcher is only available on Unix daemons");
 }
 
-/// Project-local domain symbol rules file described by
-/// `docs/DOMAIN-EXTRACTORS.md`.
-const DOMAIN_SYMBOL_RULES_FILENAME: &str = "domain-symbols.toml";
-
-/// Builds the warning for a domain symbol rules file that nothing reads.
-///
-/// `docs/DOMAIN-EXTRACTORS.md` documents `.tracedecay/domain-symbols.toml` as a
-/// design rather than a shipped feature: no extractor parses it. Without this
-/// check, authoring one is a silent no-op — no error, no warning, and no domain
-/// nodes — so Doctor is where the author finds out. `None` (the normal case)
-/// keeps Doctor silent about a file that is not there.
-fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
-    let rules = crate::config::get_tracedecay_dir(project_path).join(DOMAIN_SYMBOL_RULES_FILENAME);
-    rules.is_file().then(|| {
-        format!(
-            "Domain symbol extraction is unavailable: no extractor reads {}, \
-             so this file contributes no graph nodes. \
-             See docs/DOMAIN-EXTRACTORS.md, which describes the design only.",
-            rules.display()
-        )
-    })
-}
-
-/// Check for project configuration that `TraceDecay` does not act on.
-fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
-    if let Some(warning) = domain_symbol_rules_warning(project_path) {
-        dc.warn(&warning);
-    }
-}
-
-async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result<bool> {
-    let operation = ApplicationSurfaceOperation::ConfigurationGet;
-    let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        }
-    })?;
-    let request_id =
-        mint_global_request_id(GlobalRequestSurface::DaemonDoctor).map_err(|error| {
-            crate::errors::TraceDecayError::Config {
-                message: format!("could not create Doctor configuration request: {error}"),
-            }
-        })?;
-    let handshake = crate::daemon::DaemonHandshake::for_current_client(
-        Some(project_path.to_path_buf()),
-        None,
-        false,
-        false,
-    )?;
-    let client = DaemonInvocationClient::for_current(handshake)?;
-    let dispatched = resolve_application_surface_dispatch(
-        BindingSurface::Cli,
-        operation,
-        request_id.clone(),
-        ApplicationSurfaceRequest::Configuration(ConfigurationWireRequestV1::Get(
-            ConfigurationGetRequestV1 { key: key.clone() },
-        )),
-        RequestedOutputFormat::Json,
-    )
-    .map_err(|error| crate::errors::TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
-    let result = execute_application_surface(operation, dispatched, Some(&client))
-        .await
-        .map_err(|error| crate::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-    let envelope = result
-        .result
-        .map_err(|problem| crate::errors::TraceDecayError::Config {
-            message: format!("{}: {}", problem.problem.code, problem.problem.message),
-        })?;
-    let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
-        return Err(crate::errors::TraceDecayError::Config {
-            message: "configuration get returned a non-evidence outcome".to_owned(),
-        });
-    };
-    let setting: ResolvedSetting = serde_json::from_value(evidence.payload.ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
-            message: "configuration get omitted its payload".to_owned(),
-        }
-    })?)
-    .map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("configuration get returned an invalid setting: {error}"),
-    })?;
-    if setting.key != key {
-        return Err(crate::errors::TraceDecayError::Config {
-            message: "configuration get returned the wrong setting".to_owned(),
-        });
-    }
-    match setting.effective_value {
-        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
-        _ => Err(crate::errors::TraceDecayError::Config {
-            message: "worldwide counter upload setting is not boolean".to_owned(),
-        }),
-    }
-}
-
-/// Check canonical user configuration and pending upload state.
-fn check_user_config(
-    dc: &mut DoctorCounters,
-    upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,
-) {
+/// Check user config file.
+fn check_user_config(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mUser config\x1b[0m");
-    match upload_enabled {
-        Ok(true) => dc.pass("Worldwide counter upload enabled"),
-        Ok(false) => dc.info("Worldwide counter upload disabled (default)"),
-        Err(error) => dc.warn(&format!(
-            "Worldwide counter upload setting unavailable from canonical configuration: {error}"
-        )),
-    }
-    if let Some(config_path) = crate::user_config::config_path()
-        && config_path.exists()
-    {
-        let config = crate::user_config::UserConfig::load();
-        if config.pending_upload > 0 {
-            dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
+    if let Some(config_path) = crate::user_config::config_path() {
+        if config_path.exists() {
+            let config = crate::user_config::UserConfig::load();
+            dc.pass(&format!("Config: {}", config_path.display()));
+            if config.upload_enabled {
+                dc.pass("Worldwide counter upload enabled");
+            } else {
+                dc.info("Worldwide counter upload disabled (default)");
+            }
+            if config.pending_upload > 0 {
+                dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
+            }
+        } else {
+            dc.warn("Config not yet created (created on first sync)");
         }
+    } else {
+        dc.fail("Could not determine home directory for config");
     }
 }
 
@@ -725,26 +796,19 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 }
 
 /// Check network connectivity.
-fn check_network(
-    dc: &mut DoctorCounters,
-    upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,
-) {
+fn check_network(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mNetwork\x1b[0m");
-    match upload_enabled {
-        Ok(true) => {
-            if let Some(total) = crate::cloud::fetch_worldwide_total() {
-                dc.pass(&format!(
-                    "Worldwide counter reachable (total: {})",
-                    format_token_count(total)
-                ));
-            } else {
-                dc.warn("Worldwide counter unreachable (offline or timeout)");
-            }
+    if crate::user_config::UserConfig::load().upload_enabled {
+        if let Some(total) = crate::cloud::fetch_worldwide_total() {
+            dc.pass(&format!(
+                "Worldwide counter reachable (total: {})",
+                format_token_count(total)
+            ));
+        } else {
+            dc.warn("Worldwide counter unreachable (offline or timeout)");
         }
-        Ok(false) => dc.info("Worldwide counter skipped (upload disabled)"),
-        Err(error) => dc.warn(&format!(
-            "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
-        )),
+    } else {
+        dc.info("Worldwide counter skipped (upload disabled)");
     }
     if crate::cloud::fetch_latest_version().is_some() {
         dc.pass("GitHub releases API reachable");
@@ -769,6 +833,5 @@ fn print_summary(dc: &DoctorCounters) {
     }
     eprintln!();
 }
-
 #[cfg(test)]
 mod tests;

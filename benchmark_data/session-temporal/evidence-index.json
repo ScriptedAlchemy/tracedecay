@@ -1,9 +1,0 @@
-{
-  "schema_version": 2,
-  "current_acceptance": null,
-  "blocked": null,
-  "provisional": null,
-  "historical_stale": [
-    "result-provisional.json"
-  ]
-}

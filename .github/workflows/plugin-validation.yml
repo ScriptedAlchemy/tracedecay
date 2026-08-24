@@ -6,19 +6,15 @@
 name: Plugin Validation
 
 on:
-  push:
-    branches: [master]
   pull_request:
     paths:
       - "plugin/**"
-      - "plugin/cursor-native-extension/**"
       - "tests/fixtures/cursor-schemas/**"
       - "tests/agent_suite/*plugin*"
       - "tests/agent_suite/*skill*"
       - "scripts/mcp-conformance-smoke.sh"
-      - "scripts/check-dashboard-bundle.py"
       - "src/serve.rs"
-      - "crates/tracedecay-cli/**"
+      - "src/main.rs"
       - "src/lib.rs"
       - "src/mcp/**"
       - "Cargo.toml"
@@ -28,46 +24,11 @@ on:
 permissions:
   contents: read
 
-env:
-  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  dashboard-assets:
-    name: Build dashboard artifact
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
-
-      - name: Build dashboard
-        working-directory: dashboard
-        run: npm run build
-
-      - name: Validate dashboard bundle
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      - name: Upload dashboard artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-          if-no-files-found: error
-          include-hidden-files: true
-
   manifest-schema:
     name: Manifest schema
     runs-on: ubuntu-latest
@@ -75,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -84,7 +45,6 @@ jobs:
 
       - name: Compile vendored schemas
         run: |
-          set -euo pipefail
           npx --no-install ajv compile --spec=draft7 -c ajv-formats \
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
             -s tests/fixtures/cursor-schemas/marketplace.schema.json \
@@ -93,7 +53,6 @@ jobs:
 
       - name: Validate Cursor plugin manifest
         run: |
-          set -euo pipefail
           npx --no-install ajv validate --spec=draft7 -c ajv-formats --errors=text \
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
             -d plugin/.cursor-plugin/plugin.json
@@ -117,7 +76,6 @@ jobs:
 
       - name: Install Claude Code
         run: |
-          set -euo pipefail
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -128,25 +86,12 @@ jobs:
   # schema compatibility beyond the in-repo Rust MCP tests.
   mcp-conformance-smoke:
     name: MCP conformance smoke
-    needs: dashboard-assets
     runs-on: ubuntu-latest
-    # Cold `cargo build -p tracedecay-cli --bin tracedecay` plus the SDK smoke has been
-    # cancelled at exactly 20m during the compile step. 30 leaves
-    # headroom without hiding a hung linker.
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - name: Validate downloaded dashboard bundle
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -155,7 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build tracedecay
-        run: cargo build -p tracedecay-cli --all-features --bin tracedecay --locked
+        run: cargo build --bin tracedecay --locked
 
       - name: Run MCP conformance smoke
         run: scripts/mcp-conformance-smoke.sh
