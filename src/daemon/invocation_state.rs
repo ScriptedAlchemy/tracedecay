@@ -104,14 +104,52 @@ impl DaemonInvocationState {
         })
     }
 
-    pub(super) async fn retire_remote_deleted_project(
+    pub(super) async fn retire_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
         project_id: &tracedecay_domain::ProjectId,
         project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
     ) -> Result<()> {
+        self.drain_project_runtime_owners(profile_id, project_id, project_roots, false)
+            .await
+            .map(drop)
+    }
+
+    pub(super) async fn quiesce_project_runtime_owners(
+        &self,
+        profile_id: &tracedecay_domain::configuration::UserProfileId,
+        project_id: &tracedecay_domain::ProjectId,
+        project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
+    ) -> Result<crate::daemon::service::project_runtime::ProjectRuntimeRootQuiescenceV1> {
+        self.drain_project_runtime_owners(profile_id, project_id, project_roots, true)
+            .await?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "invocation runtime owners for capacity-retired project '{}' did not enter quiescence",
+                    project_id.as_str()
+                ),
+            })
+    }
+
+    async fn drain_project_runtime_owners(
+        &self,
+        profile_id: &tracedecay_domain::configuration::UserProfileId,
+        project_id: &tracedecay_domain::ProjectId,
+        project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
+        reopenable: bool,
+    ) -> Result<Option<crate::daemon::service::project_runtime::ProjectRuntimeRootQuiescenceV1>>
+    {
+        let retirement_kind = if reopenable {
+            "capacity-retired"
+        } else {
+            "remote-deleted"
+        };
         self.query_authority_provider
             .retire_project(profile_id, project_id);
+        let worktree_ids = project_roots
+            .iter()
+            .filter_map(|root| code_index_scheduler::identity::worktree_id_for(root).ok())
+            .collect::<std::collections::BTreeSet<_>>();
         if !self
             .code_index_schedulers
             .retire_project_roots(project_roots)
@@ -119,27 +157,66 @@ impl DaemonInvocationState {
         {
             return Err(TraceDecayError::Config {
                 message: format!(
-                    "code-index workers for remote-deleted project '{}' did not drain",
+                    "code-index workers for {retirement_kind} project '{}' did not drain",
                     project_id.as_str()
                 ),
             });
         }
-        if !self
-            .service
-            .expire_project(
-                &self.lsp_session_registry,
-                profile_id,
-                project_id,
-                project_roots,
+        let semantic_projection_retirements = worktree_ids
+            .iter()
+            .map(|worktree_id| {
+                self.semantic_projection_scheduler
+                    .begin_worktree_retirement(worktree_id)
+            })
+            .collect::<Vec<_>>();
+        let runtime_quiescence = if reopenable {
+            Some(
+                self.service
+                    .quiesce_project(
+                        &self.lsp_session_registry,
+                        profile_id,
+                        project_id,
+                        project_roots,
+                    )
+                    .await
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: format!(
+                            "invocation runtime owners for {retirement_kind} project '{}' did not drain",
+                            project_id.as_str()
+                        ),
+                    })?,
             )
-            .await
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "invocation runtime owners for remote-deleted project '{}' did not drain",
-                    project_id.as_str()
-                ),
-            });
+        } else {
+            if !self
+                .service
+                .expire_project(
+                    &self.lsp_session_registry,
+                    profile_id,
+                    project_id,
+                    project_roots,
+                )
+                .await
+            {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "invocation runtime owners for {retirement_kind} project '{}' did not drain",
+                        project_id.as_str()
+                    ),
+                });
+            }
+            None
+        };
+        let semantic_projection_deadline =
+            tokio::time::Instant::now() + super::DAEMON_TASK_ABORT_DEADLINE;
+        for retirement in semantic_projection_retirements {
+            if !retirement.wait_until(semantic_projection_deadline).await {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "semantic projection work for {retirement_kind} project '{}' did not drain",
+                        project_id.as_str()
+                    ),
+                });
+            }
         }
         for root in project_roots {
             // Upstream also unregistered the redundancy authority separately.
@@ -148,7 +225,7 @@ impl DaemonInvocationState {
             // activation gate, so one call is the whole teardown.
             tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(root);
         }
-        Ok(())
+        Ok(runtime_quiescence)
     }
 
     pub(super) fn configure_github_read_only_credentials(

@@ -829,6 +829,146 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     );
 }
 
+#[tokio::test]
+async fn graph_pressure_retires_only_fully_published_response_idle_owners() {
+    fn key(name: &str) -> ProjectServerKey {
+        ProjectServerKey {
+            owner: StoreOwnerKey {
+                profile_root: PathBuf::from("/profile"),
+                global_db_path: PathBuf::from("/profile/global.db"),
+                project_id: Some(name.to_owned()),
+                store_root: PathBuf::from(format!("/store/{name}")),
+                graph_db_path: PathBuf::from(format!("/store/{name}/graph.db")),
+            },
+            project_root: PathBuf::from(format!("/project/{name}")),
+            scope_prefix: None,
+        }
+    }
+
+    fn route(name: &str) -> ProjectRouteKey {
+        ProjectRouteKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_path: PathBuf::from(format!("/project/{name}")),
+            scope_prefix: None,
+        }
+    }
+
+    let pending = key("pending");
+    let core = key("core");
+    let idle = key("idle");
+    let active = key("active");
+    let mut registry =
+        DatabaseOwnerRegistry::<Arc<crate::mcp::server::ProjectServerResponseLifecycle>>::default();
+    registry.insert_pending_route(
+        route("pending"),
+        pending.clone(),
+        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default()),
+    );
+    registry.insert_pending_route(
+        route("core"),
+        core.clone(),
+        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default()),
+    );
+    assert!(registry.mark_ready(&core));
+    assert!(
+        registry
+            .retire_lru_ready_under_graph_pressure(|lifecycle| {
+                Arc::strong_count(lifecycle) > 1
+                    ||
+                crate::daemon::project_composition::project_server_response_lifecycle_has_in_flight(
+                    lifecycle,
+                )
+            })
+            .is_err(),
+        "Pending and Core owners must not be retired under graph pressure"
+    );
+    assert!(registry.get(&pending).is_some());
+    assert!(registry.get(&core).is_some());
+
+    let idle_lifecycle = Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    registry.insert_at(idle.clone(), idle_lifecycle, std::time::Instant::now());
+    let active_lifecycle = Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    let active_request = Arc::clone(active_lifecycle.response_gate())
+        .read_owned()
+        .await;
+    registry.insert_at(active.clone(), active_lifecycle, std::time::Instant::now());
+    let (retired_owner, retired) = registry
+        .retire_lru_ready_under_graph_pressure(|lifecycle| {
+            Arc::strong_count(lifecycle) > 1
+                ||
+            crate::daemon::project_composition::project_server_response_lifecycle_has_in_flight(
+                lifecycle,
+            )
+        })
+        .expect("one fully-published idle owner must be eligible")
+        .expect("graph pressure must return its exact idle victim");
+    assert_eq!(retired_owner, idle.owner);
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].0, idle);
+    assert!(registry.get(&active).is_some());
+
+    let linked_idle = key("linked-owner");
+    let mut linked_active = linked_idle.clone();
+    linked_active.project_root = PathBuf::from("/project/linked-owner-worktree");
+    linked_active.scope_prefix = Some("worktree".to_owned());
+    let linked_idle_lifecycle =
+        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    let linked_active_lifecycle =
+        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    let linked_request = Arc::clone(linked_active_lifecycle.response_gate())
+        .read_owned()
+        .await;
+    registry.insert_at(
+        linked_idle.clone(),
+        linked_idle_lifecycle,
+        std::time::Instant::now(),
+    );
+    registry.insert_at(
+        linked_active.clone(),
+        linked_active_lifecycle,
+        std::time::Instant::now(),
+    );
+    assert!(
+        registry
+            .retire_lru_ready_under_graph_pressure(|lifecycle| {
+                Arc::strong_count(lifecycle) > 1
+                    ||
+                crate::daemon::project_composition::project_server_response_lifecycle_has_in_flight(
+                    lifecycle,
+                )
+            })
+            .is_err(),
+        "one active linked-worktree sibling must make the whole project owner non-evictable"
+    );
+    assert!(registry.get(&linked_idle).is_some());
+    assert!(registry.get(&linked_active).is_some());
+    drop(linked_request);
+    drop(active_request);
+
+    let persistent = key("persistent-client");
+    let persistent_lifecycle =
+        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    let persistent_client = Arc::clone(&persistent_lifecycle);
+    let mut persistent_registry = DatabaseOwnerRegistry::default();
+    persistent_registry.insert_at(
+        persistent.clone(),
+        persistent_lifecycle,
+        std::time::Instant::now(),
+    );
+    assert!(
+        persistent_registry
+            .retire_lru_ready_under_graph_pressure(|lifecycle| {
+                Arc::strong_count(lifecycle) > 1
+                    || crate::daemon::project_composition::project_server_response_lifecycle_has_in_flight(lifecycle)
+            })
+            .is_err(),
+        "a response-idle external server holder must keep its project owner non-evictable"
+    );
+    assert!(persistent_registry.get(&persistent).is_some());
+    drop(persistent_client);
+}
+
 #[test]
 fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliases() {
     let key = ProjectServerKey {

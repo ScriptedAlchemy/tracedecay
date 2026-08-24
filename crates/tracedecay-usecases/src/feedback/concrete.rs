@@ -9,12 +9,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::task::JoinHandle;
 use tracedecay_application::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
@@ -73,6 +74,9 @@ const MAX_STORED_OBSERVATIONS: usize = 16_384;
 const MAX_STORED_OBSERVATION_BOOTS: usize = 256;
 const MAX_OBSERVATION_LEDGER_BYTES: usize = 8 * 1_024 * 1_024;
 const OBSERVATION_QUEUE_CAPACITY: usize = 1_024;
+const OBSERVATION_SHUTDOWN_CLEAN: u8 = 0;
+const OBSERVATION_SHUTDOWN_STORE_FAILED: u8 = 1;
+const OBSERVATION_SHUTDOWN_WORKER_FAILED: u8 = 2;
 
 pub type ConcreteFeedbackOwner = DaemonFeedbackReadOwnerV1<
     ProjectFeedbackRequestAuthority,
@@ -92,6 +96,8 @@ pub enum FeedbackRuntimeError {
     Handle,
     #[error("feedback runtime record is corrupt")]
     Corrupt,
+    #[error("feedback observation worker failed")]
+    ObservationWorker,
 }
 
 #[derive(Clone)]
@@ -133,6 +139,7 @@ pub struct FeedbackRuntime {
     access: ProjectSourceAccessSnapshot,
     observations: Arc<dyn FeedbackObservationPort + Send + Sync>,
     source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
+    observation_sink: Arc<ProjectFeedbackObservationSinkV1>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -172,6 +179,9 @@ struct ProjectFeedbackObservationSinkV1 {
     next_sequence: AtomicU64,
     dropped_count: Arc<AtomicU64>,
     admission: Mutex<()>,
+    closed: AtomicBool,
+    shutdown_failure: AtomicU8,
+    worker: AsyncMutex<Option<JoinHandle<Result<(), FeedbackRuntimeError>>>>,
 }
 
 impl ProjectFeedbackObservationSinkV1 {
@@ -187,11 +197,13 @@ impl ProjectFeedbackObservationSinkV1 {
         ))
         .map_err(|_| FeedbackRuntimeError::Corrupt)?;
         persist_feedback_producer_boot(&database, boot_id.clone()).await?;
-        let (sender, mut receiver) = mpsc::channel(OBSERVATION_QUEUE_CAPACITY);
-        let (control_sender, mut control_receiver) = mpsc::channel(1);
+        let (sender, mut receiver) =
+            mpsc::channel::<FeedbackObservationEnvelopeV1>(OBSERVATION_QUEUE_CAPACITY);
+        let (control_sender, mut control_receiver) =
+            mpsc::channel::<FeedbackObservationEnvelopeV1>(1);
         let dropped_count = Arc::new(AtomicU64::new(0));
         let worker_dropped_count = Arc::clone(&dropped_count);
-        runtime.spawn(async move {
+        let worker = runtime.spawn(async move {
             let mut data_open = true;
             let mut control_open = true;
             while data_open || control_open {
@@ -213,6 +225,10 @@ impl ProjectFeedbackObservationSinkV1 {
                 let Some(mut envelope) = envelope else {
                     continue;
                 };
+                let terminal = matches!(
+                    envelope.source_event.as_ref(),
+                    Some(FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
+                );
                 let reported_drops =
                     apply_pending_worker_drops(&mut envelope, &worker_dropped_count);
                 if persist_feedback_observation(&database, envelope)
@@ -220,8 +236,15 @@ impl ProjectFeedbackObservationSinkV1 {
                     .is_err()
                 {
                     saturating_add(&worker_dropped_count, reported_drops.saturating_add(1));
+                    if terminal {
+                        return Err(FeedbackRuntimeError::Store);
+                    }
+                }
+                if terminal {
+                    return Ok(());
                 }
             }
+            Ok(())
         });
         Ok(Self {
             sender,
@@ -230,7 +253,104 @@ impl ProjectFeedbackObservationSinkV1 {
             next_sequence: AtomicU64::new(0),
             dropped_count,
             admission: Mutex::new(()),
+            closed: AtomicBool::new(false),
+            shutdown_failure: AtomicU8::new(OBSERVATION_SHUTDOWN_CLEAN),
+            worker: AsyncMutex::new(Some(worker)),
         })
+    }
+
+    async fn close_and_drain(&self) -> Result<(), FeedbackRuntimeError> {
+        let terminal = {
+            let _admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.closed.load(Ordering::Acquire) {
+                None
+            } else {
+                let terminal = self.prepare_terminal_envelope()?;
+                self.closed.store(true, Ordering::Release);
+                Some(terminal)
+            }
+        };
+        let terminal_outcome = if let Some(terminal) = terminal {
+            self.control_sender
+                .try_send(terminal)
+                .map_err(|_| FeedbackRuntimeError::ObservationWorker)
+        } else {
+            Ok(())
+        };
+
+        let mut worker = self.worker.lock().await;
+        let outcome = match worker.as_mut() {
+            Some(task) => match task.await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(FeedbackRuntimeError::ObservationWorker),
+            },
+            None => Ok(()),
+        };
+        worker.take();
+        let outcome = terminal_outcome.and(outcome);
+        if let Err(error) = &outcome {
+            self.record_shutdown_failure(error);
+        }
+        self.sticky_shutdown_failure().map_or(outcome, Err)
+    }
+
+    fn record_shutdown_failure(&self, error: &FeedbackRuntimeError) {
+        let status = match error {
+            FeedbackRuntimeError::Store => OBSERVATION_SHUTDOWN_STORE_FAILED,
+            _ => OBSERVATION_SHUTDOWN_WORKER_FAILED,
+        };
+        let _ = self.shutdown_failure.compare_exchange(
+            OBSERVATION_SHUTDOWN_CLEAN,
+            status,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn sticky_shutdown_failure(&self) -> Option<FeedbackRuntimeError> {
+        match self.shutdown_failure.load(Ordering::Acquire) {
+            OBSERVATION_SHUTDOWN_CLEAN => None,
+            OBSERVATION_SHUTDOWN_STORE_FAILED => Some(FeedbackRuntimeError::Store),
+            _ => Some(FeedbackRuntimeError::ObservationWorker),
+        }
+    }
+
+    fn prepare_terminal_envelope(
+        &self,
+    ) -> Result<FeedbackObservationEnvelopeV1, FeedbackRuntimeError> {
+        loop {
+            let dropped = self.dropped_count.load(Ordering::Relaxed);
+            let sequence = self.next_sequence.load(Ordering::Relaxed).saturating_add(1);
+            let observed_at = now_micros();
+            let mut envelope = super::observations::feedback_source_event_envelope_for_subject(
+                self.boot_id.clone(),
+                observed_at,
+                FeedbackSourceEventV1::TelemetryDropObserved {
+                    dropped_count: dropped,
+                    last_sequence: sequence.saturating_sub(1),
+                    terminal: true,
+                },
+            )
+            .ok_or(FeedbackRuntimeError::Corrupt)?;
+            envelope
+                .assign_delivery(
+                    self.boot_id.clone(),
+                    sequence,
+                    super::observations::FeedbackObservationDeliveryV1::delivered(dropped),
+                )
+                .ok_or(FeedbackRuntimeError::Corrupt)?;
+            if self
+                .dropped_count
+                .compare_exchange(dropped, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.next_sequence.store(sequence, Ordering::Relaxed);
+                return Ok(envelope);
+            }
+        }
     }
 
     fn next_sequence(&self) -> u64 {
@@ -264,6 +384,9 @@ impl DurableFeedbackObservationSinkV1 for ProjectFeedbackObservationSinkV1 {
             .admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.closed.load(Ordering::Acquire) {
+            return FeedbackObservationSinkOutcome::Dropped;
+        }
         let sequence = self.next_sequence();
         let dropped = self.dropped_count.swap(0, Ordering::Relaxed);
         if envelope
@@ -289,30 +412,22 @@ impl DurableFeedbackObservationSinkV1 for ProjectFeedbackObservationSinkV1 {
     }
 }
 
+impl DurableFeedbackObservationSinkV1 for Arc<ProjectFeedbackObservationSinkV1> {
+    fn enqueue_durable_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        self.as_ref().enqueue_durable_feedback_observation(envelope)
+    }
+}
+
 impl Drop for ProjectFeedbackObservationSinkV1 {
     fn drop(&mut self) {
-        let dropped = self.dropped_count.swap(0, Ordering::Relaxed);
-        let sequence = self.next_sequence();
-        let observed_at = now_micros();
-        let Some(mut envelope) = super::observations::feedback_source_event_envelope_for_subject(
-            self.boot_id.clone(),
-            observed_at,
-            FeedbackSourceEventV1::TelemetryDropObserved {
-                dropped_count: dropped,
-                last_sequence: sequence.saturating_sub(1),
-                terminal: true,
-            },
-        ) else {
+        if self.closed.load(Ordering::Acquire) {
             return;
-        };
-        if envelope
-            .assign_delivery(
-                self.boot_id.clone(),
-                sequence,
-                super::observations::FeedbackObservationDeliveryV1::delivered(dropped),
-            )
-            .is_some()
-        {
+        }
+        if let Ok(envelope) = self.prepare_terminal_envelope() {
+            self.closed.store(true, Ordering::Release);
             let _ = self.control_sender.try_send(envelope);
         }
     }
@@ -371,9 +486,10 @@ impl FeedbackRuntime {
         let route_authorization = ProjectFeedbackRouteAuthorization {
             access: access.clone(),
         };
-        let durable_observations = DurableFeedbackObservationQueueAdapterV1::new(
-            ProjectFeedbackObservationSinkV1::start(publications.database.clone()).await?,
-        );
+        let observation_sink =
+            Arc::new(ProjectFeedbackObservationSinkV1::start(publications.database.clone()).await?);
+        let durable_observations =
+            DurableFeedbackObservationQueueAdapterV1::new(Arc::clone(&observation_sink));
         let observation_adapter = Arc::new(FeedbackObservationAdapter::new(durable_observations));
         publications.source_observations = Some(observation_adapter.clone());
         let service = FeedbackReadService::new(
@@ -389,7 +505,14 @@ impl FeedbackRuntime {
             access,
             observations: observation_adapter.clone(),
             source_observations: observation_adapter,
+            observation_sink,
         })
+    }
+
+    /// Stop observation admission, persist the producer's terminal record, and
+    /// join the worker that owns the project database before store retirement.
+    pub async fn close_and_drain_observations(&self) -> Result<(), FeedbackRuntimeError> {
+        self.observation_sink.close_and_drain().await
     }
 
     pub fn owner(&self) -> Arc<ConcreteFeedbackOwner> {
@@ -1808,6 +1931,7 @@ mod tests {
     use tracedecay_domain::{
         LocatorDigest, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
     };
+    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
     fn id<T: TryFrom<String>>(value: &str) -> T
     where
@@ -1940,6 +2064,9 @@ mod tests {
             next_sequence: AtomicU64::new(0),
             dropped_count: Arc::new(AtomicU64::new(0)),
             admission: Mutex::new(()),
+            closed: AtomicBool::new(false),
+            shutdown_failure: AtomicU8::new(OBSERVATION_SHUTDOWN_CLEAN),
+            worker: AsyncMutex::new(None),
         };
 
         assert_eq!(
@@ -1969,6 +2096,91 @@ mod tests {
                 terminal: true,
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_retains_worker_and_terminal_drain_is_joinable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("feedback-observation-shutdown.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "feedback observation shutdown").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let sink = Arc::new(
+            ProjectFeedbackObservationSinkV1::start(database.clone())
+                .await
+                .unwrap(),
+        );
+        let boot_id = sink.boot_id.clone();
+
+        let worker_guard = sink.worker.lock().await;
+        let closing_sink = Arc::clone(&sink);
+        let close = tokio::spawn(async move { closing_sink.close_and_drain().await });
+        while !sink.closed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        close.abort();
+        assert!(close.await.unwrap_err().is_cancelled());
+        drop(worker_guard);
+
+        sink.close_and_drain().await.unwrap();
+        assert_eq!(
+            sink.enqueue_durable_feedback_observation(source_envelope(&boot_id, 1)),
+            FeedbackObservationSinkOutcome::Dropped
+        );
+        let transaction = database
+            .begin_write_transaction("verify feedback observation shutdown")
+            .await
+            .unwrap();
+        let ledger = load_observation_ledger(&transaction).await.unwrap();
+        transaction.rollback().await.unwrap();
+        let boot = ledger
+            .producer_boots
+            .iter()
+            .find(|boot| boot.boot_id == boot_id)
+            .unwrap();
+        assert!(boot.terminal);
+        assert!(ledger.observations.iter().any(|observation| matches!(
+            observation.source_event,
+            Some(FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
+        )));
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_persistence_remains_sticky_across_close_retries() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let (control_sender, mut control_receiver) = mpsc::channel(1);
+        let worker = tokio::spawn(async move {
+            control_receiver
+                .recv()
+                .await
+                .expect("terminal observation command");
+            Err(FeedbackRuntimeError::Store)
+        });
+        let sink = ProjectFeedbackObservationSinkV1 {
+            sender,
+            control_sender,
+            boot_id: canonical_sha256(&"feedback-terminal-failure").unwrap(),
+            next_sequence: AtomicU64::new(0),
+            dropped_count: Arc::new(AtomicU64::new(3)),
+            admission: Mutex::new(()),
+            closed: AtomicBool::new(false),
+            shutdown_failure: AtomicU8::new(OBSERVATION_SHUTDOWN_CLEAN),
+            worker: AsyncMutex::new(Some(worker)),
+        };
+
+        assert!(matches!(
+            sink.close_and_drain().await,
+            Err(FeedbackRuntimeError::Store)
+        ));
+        assert!(sink.worker.lock().await.is_none());
+        assert!(matches!(
+            sink.close_and_drain().await,
+            Err(FeedbackRuntimeError::Store)
         ));
     }
 

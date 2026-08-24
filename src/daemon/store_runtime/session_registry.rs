@@ -57,6 +57,7 @@ pub(crate) use profile_memory::open_user_memory_db;
 
 const MAX_RETAINED_PROJECT_RUNTIME_OWNERS: usize = 8;
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = 8;
+const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 
 struct SessionGraphOwnerV1 {
     graph: GraphDbOwnerAttachmentV1,
@@ -2424,6 +2425,17 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     /// session maintenance (background historical schema convergence) for the
     /// shards it attaches. Short-lived CLI/hook processes stay `false`.
     long_lived_session_maintenance: bool,
+}
+
+impl DaemonSessionRuntimeRegistryV1 {
+    /// Whether the canonical graph registry can admit the code and session
+    /// relation owners created by one previously unmounted project.
+    pub(crate) fn has_project_graph_admission_capacity(&self) -> Result<bool> {
+        let capacity = self.graph_registry.capacity().map_err(|error| {
+            session_registry_error("read graph runtime capacity", error.to_string())
+        })?;
+        Ok(capacity.available_after_eviction() >= PROJECT_GRAPH_OWNER_ADMISSION_DEMAND)
+    }
 }
 
 impl DaemonSessionRuntimeRegistryV1 {

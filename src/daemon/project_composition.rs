@@ -28,6 +28,166 @@ pub(super) struct ProductionProjectComposition {
     pub(super) semantic_auto_download_enabled: Option<bool>,
 }
 
+pub(super) fn project_server_response_lifecycle_has_in_flight(
+    lifecycle: &crate::mcp::server::ProjectServerResponseLifecycle,
+) -> bool {
+    Arc::clone(lifecycle.response_gate())
+        .try_write_owned()
+        .is_err()
+}
+
+fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) -> bool {
+    let lifecycle = server.project_server_response_lifecycle();
+    Arc::strong_count(server) > 1 || project_server_response_lifecycle_has_in_flight(&lifecycle)
+}
+
+async fn release_one_idle_project_server_before_open(
+    store_administration: &StoreAdministration,
+    invocation: &DaemonInvocationState,
+    capacity_gate: Arc<ProjectOpenGate>,
+    capacity_admission: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    let runtime_registry = store_administration.session_runtime_registry().await?;
+    if runtime_registry.has_project_graph_admission_capacity()? {
+        return Ok(capacity_admission);
+    }
+    if let Some(error) = store_administration
+        .completed_capacity_retirement_failure()
+        .await
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "a prior project server retirement failed before capacity reuse: {error}"
+            ),
+        });
+    }
+    let profile_identity = store_administration.profile_identity()?.clone();
+    let mut retirement_admission = store_administration
+        .acquire_project_server_retirement_admission()
+        .await;
+    let victim = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers.retire_lru_ready_under_graph_pressure(project_server_has_in_flight_response)
+    };
+    let Some((retired_owner, retired_servers)) =
+        victim.map_err(|()| project_server_capacity_error())?
+    else {
+        return Ok(capacity_admission);
+    };
+    let prior_owner_retirements = retirement_admission.prior_completions_for_owner(&retired_owner);
+    for (_, server) in &retired_servers {
+        server.revoke_project_server_responses();
+    }
+    let project_roots = retired_servers
+        .iter()
+        .map(|(key, _)| key.project_root.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut hook_data_roots = std::collections::BTreeSet::new();
+    for (_, server) in &retired_servers {
+        let graph = server.cg().await;
+        hook_data_roots.insert(graph.hook_store_layout().data_root.clone());
+    }
+    let retired_servers = retired_servers
+        .into_iter()
+        .map(|(_, server)| server)
+        .collect::<Vec<_>>();
+    let retired_server_count = retired_servers.len();
+    let retirement_administration = store_administration.clone();
+    let retirement_invocation = invocation.clone();
+    let completion =
+        retirement_admission.spawn_and_track_fallible(retired_owner.clone(), async move {
+            let _capacity_admission = capacity_admission;
+            retirement_administration
+                .session_temporal_refresh_schedulers()
+                .retire_project(&retired_owner)
+                .await;
+            super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
+            for data_root in hook_data_roots {
+                super::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
+            }
+            for prior in prior_owner_retirements {
+                prior.wait().await?;
+            }
+            let project_id =
+                retired_owner
+                    .project_id
+                    .clone()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message:
+                            "retired project server omitted its authoritative project identity"
+                                .to_owned(),
+                    })?;
+            let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("retired project server identity is invalid: {error}"),
+                }
+            })?;
+            let runtime_quiescence = retirement_invocation
+                .quiesce_project_runtime_owners(
+                    profile_identity.profile_id(),
+                    &project_id,
+                    &project_roots,
+                )
+                .await?;
+            let project_sessions_path = retired_owner
+                .store_root
+                .join(crate::storage::SESSIONS_DB_FILENAME);
+            retirement_administration
+                .git_index_transaction_services()
+                .retire_project_database(&project_id, &project_sessions_path)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "could not retire project Git transaction actors before capacity reuse: {error}"
+                    ),
+                })?;
+            retirement_administration
+                .native_integration_services()
+                .retire_project_database(&project_id, &project_sessions_path)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "could not retire project native integration actors before capacity reuse: {error}"
+                    ),
+                })?;
+            retirement_administration
+                .session_sync_service()
+                .retire_project(profile_identity.profile_id(), &project_id)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "could not retire project session sync before capacity reuse: {error}"
+                    ),
+                })?;
+            let telemetry_sampling = retirement_administration.store_telemetry_sampling();
+            telemetry_sampling.release_retained_handle(&project_sessions_path);
+            telemetry_sampling.release_retained_handle(&retired_owner.graph_db_path);
+            runtime_registry
+                .retire_project_session_relation_graph(&project_id)
+                .await?;
+            runtime_registry
+                .retire_project_memory_graph(&project_id)
+                .await?;
+            runtime_registry
+                .drop_project_runtime_caches(&project_id)
+                .await;
+            drop(runtime_quiescence);
+            Ok(())
+        });
+    hotpath::gauge!("project_servers").inc(-(retired_server_count as f64));
+    drop(retirement_admission);
+    completion.wait().await?;
+    let capacity_admission = Arc::clone(&capacity_gate).lock_owned().await;
+    if !store_administration
+        .session_runtime_registry()
+        .await?
+        .has_project_graph_admission_capacity()?
+    {
+        return Err(project_server_capacity_error());
+    }
+    Ok(capacity_admission)
+}
+
 #[cfg(test)]
 pub(super) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
     profile_root.parent().map(Path::to_path_buf)
@@ -91,6 +251,19 @@ pub(super) async fn production_project_server(
             None,
         ));
     }
+    let capacity_gate = project_open_capacity_gate(project_open_gates).await;
+    let capacity_admission = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(project_open_cancellation_error()),
+        admission = Arc::clone(&capacity_gate).lock_owned() => admission,
+    };
+    let _capacity_admission = release_one_idle_project_server_before_open(
+        store_administration,
+        invocation,
+        capacity_gate,
+        capacity_admission,
+    )
+    .await?;
 
     #[cfg(test)]
     if let Some(attempts) = project_open_attempts {
@@ -383,7 +556,7 @@ pub(super) async fn production_project_server(
             key.clone(),
             core_candidate,
             MAX_CACHED_PROJECT_SERVERS,
-            |server| Arc::strong_count(server) > 1,
+            project_server_has_in_flight_response,
         )
     };
     let Some((mut resolved, inserted, retired)) = resolution else {

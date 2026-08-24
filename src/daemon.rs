@@ -325,9 +325,10 @@ use project_routing::portable_database_owner_reconciler;
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
-    project_open_cancellation_checkpoint, project_open_cancellation_error, project_open_gate,
-    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error, resolved_project_server_key,
+    project_open_cancellation_checkpoint, project_open_cancellation_error,
+    project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
+    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
+    project_warming_error, resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

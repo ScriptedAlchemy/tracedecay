@@ -43,6 +43,7 @@ pub(super) type ProjectOpenGate = tokio::sync::Mutex<()>;
 #[derive(Default)]
 pub(super) struct ProjectOpenGates {
     pub(super) gates: HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate>>,
+    pub(super) capacity_gate: Arc<ProjectOpenGate>,
     pub(super) tasks: ProjectOpenTasks,
 }
 #[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths

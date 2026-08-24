@@ -936,3 +936,59 @@ async fn retiring_exact_roots_fences_republication_without_closing_other_project
         .await
         .expect("unrelated project remains open");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let retired = root("semantic-worker-retirement");
+    let semantic = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(1, 1, 4096)
+        .expect("semantic runtime");
+    registry
+        .publish(retired.clone(), semantic.clone())
+        .await
+        .expect("publish semantic runtime");
+
+    let (started, worker_started) = tokio::sync::oneshot::channel();
+    let (cancelled, worker_cancelled) = tokio::sync::oneshot::channel();
+    let (release, worker_release) = tokio::sync::oneshot::channel();
+    assert!(
+        semantic.schedule(crate::semantic_code::SemanticRuntimeWorkV1::new(
+            tracedecay_domain::CodeGenerationId::new("code-generation.targeted-retirement")
+                .expect("code generation"),
+            1,
+            move |cancellation| async move {
+                started.send(()).expect("worker-start receiver");
+                while !cancellation.cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                cancelled.send(()).expect("worker-cancel receiver");
+                worker_release.await.expect("worker-release sender");
+                Err(crate::semantic_code::SemanticRuntimeScheduleFailureV1::Cancelled)
+            },
+        ))
+    );
+    worker_started.await.expect("semantic worker started");
+
+    let retiring_registry = registry.clone();
+    let retirement = tokio::spawn(async move {
+        retiring_registry
+            .retire_roots(&BTreeSet::from([retired]))
+            .await
+    });
+    worker_cancelled
+        .await
+        .expect("targeted retirement cancels the semantic worker");
+    assert!(
+        !retirement.is_finished(),
+        "targeted retirement must join, not merely cancel, the semantic worker"
+    );
+    release.send(()).expect("semantic worker release receiver");
+    assert!(retirement.await.expect("retirement task"));
+    assert!(matches!(
+        semantic.status(),
+        crate::semantic_code::SemanticRuntimeScheduleStatusV1::Failed {
+            reason: crate::semantic_code::SemanticRuntimeScheduleFailureV1::Cancelled,
+            ..
+        }
+    ));
+}

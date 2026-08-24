@@ -52,6 +52,7 @@ pub use fair_scheduler::{
     SemanticProjectionPublicationLeaseV1, SemanticProjectionScheduleErrorV1,
     SemanticProjectionSchedulerConfigErrorV1, SemanticProjectionSchedulerLimitsV1,
     SemanticProjectionSchedulerStatsV1, SemanticProjectionSchedulingPortV1,
+    SemanticProjectionWorktreeRetirementReceiptV1,
 };
 pub use graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphErrorV1,

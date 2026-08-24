@@ -712,7 +712,7 @@ impl StoreAdministration {
         }
         owners
             .invocation
-            .retire_remote_deleted_project(identity.profile_id(), &typed_project_id, &project_roots)
+            .retire_project_runtime_owners(identity.profile_id(), &typed_project_id, &project_roots)
             .await
             .map_err(|error| {
                 cleanup_error(

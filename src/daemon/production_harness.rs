@@ -40,6 +40,7 @@ struct ProductionProjectHarnessResourcesV1 {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
     _project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     servers: HashMap<PathBuf, Arc<crate::mcp::McpServer>>,
     _database_scope: crate::db::DaemonDatabaseScope,
     _lifecycle_lease: crate::lifecycle_lease::LifecycleLease,
@@ -195,6 +196,12 @@ impl ProductionProjectCompositionHarnessV1 {
             StoreAdministration::default().with_profile_identity(profile_identity.clone());
         let invocation = DaemonInvocationState::default();
         invocation.configure_github_read_only_credentials(&profile_identity);
+        let profile_sessions = store_administration
+            .registered_profile_session_database()
+            .await?;
+        invocation
+            .install_profile_worker_plan(profile_sessions, profile_identity.profile_id())
+            .await?;
         let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
         let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
         store_administration.install_remote_recovery_project_lifecycle(
@@ -286,6 +293,7 @@ impl ProductionProjectCompositionHarnessV1 {
                 store_administration,
                 invocation,
                 _project_open_gates: project_open_gates,
+                http_application_registry,
                 servers,
                 _database_scope: database_scope,
                 _lifecycle_lease: lifecycle_lease,
@@ -575,19 +583,18 @@ async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     scope: &tracedecay_application::ResolvedScope,
-) -> Result<()> {
+) -> Result<code_index_scheduler::LatestCompleteCodeIndexV1> {
     timeout(Duration::from_secs(20), async {
         loop {
             // Scope-aware readiness is the authenticated demand boundary that
             // starts the registered route-local activation owner. The root-only
             // probe cannot mount an idle on-demand scheduler.
-            if invocation
+            if let Some(latest) = invocation
                 .code_index_schedulers
                 .latest_complete_ready_for_scope(scope)
                 .await
-                .is_some()
             {
-                return;
+                return latest;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -685,7 +692,7 @@ mod code_index_activation_test {
     use super::*;
 
     #[tokio::test]
-    async fn open_activates_code_index_before_waiting_for_publication() {
+    async fn open_mounts_the_profile_worker_plan_before_code_index_activation() {
         let isolation = TempDir::new().expect("production harness isolation");
         let project = isolation.path().join("project");
         std::fs::create_dir_all(&project).expect("project root");
@@ -720,6 +727,13 @@ mod code_index_activation_test {
             .resources
             .as_ref()
             .expect("production harness resources");
+        let worker_status = tracedecay_code_index::parallelism::installed_worker_status()
+            .expect("production harness worker plan");
+        assert_eq!(
+            worker_status.configured,
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+            "a fresh harness must install the profile-scoped default selection"
+        );
         assert!(
             resources
                 .invocation
@@ -732,6 +746,9 @@ mod code_index_activation_test {
         harness.shutdown().await;
     }
 }
+
+#[cfg(test)]
+mod project_server_capacity_journey_test;
 
 #[cfg(test)]
 mod journey_test_support;

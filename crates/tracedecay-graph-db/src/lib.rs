@@ -77,10 +77,10 @@ pub(crate) use publication::{
 };
 pub use recovery::VerifiedGraphCommit;
 pub use registry::{
-    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
-    GraphDbRegistryStatus, GraphDbRetirementCommit, GraphDbRetirementOutcome,
-    GraphDbRetirementRefusal, GraphDbRetirementReservation, SemanticVectorRetentionAction,
-    SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
+    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
+    GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
+    GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
+    SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
     SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
     VerifiedGenerationBatchCommit,
 };

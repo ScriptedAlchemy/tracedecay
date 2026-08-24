@@ -265,7 +265,10 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             let evict = self
                 .servers
                 .iter()
-                .filter(|(_, entry)| !is_leased(&entry.server))
+                .filter(|(_, entry)| {
+                    entry.publication == ProjectServerPublication::RegisteredHostIngest
+                        && !is_leased(&entry.server)
+                })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone())?;
             let (evicted_key, evicted) = self.servers.remove_entry(&evict)?;
@@ -274,6 +277,64 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         }
         self.insert_pending_route(route, key, candidate.clone());
         Some((candidate, true, retired))
+    }
+
+    /// Removes one fully published least-recently-used idle owner after the
+    /// canonical graph registry reports project-admission pressure. The caller
+    /// must transfer the owner directly to retirement and wait before opening.
+    pub(super) fn retire_lru_ready_under_graph_pressure<F>(
+        &mut self,
+        mut is_leased: F,
+    ) -> std::result::Result<Option<(StoreOwnerKey, Vec<(ProjectServerKey, Server)>)>, ()>
+    where
+        F: FnMut(&Server) -> bool,
+    {
+        let owners = self
+            .servers
+            .iter()
+            .map(|(key, _)| key.owner.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let evict = owners
+            .into_iter()
+            .filter_map(|owner| {
+                let entries = self
+                    .servers
+                    .iter()
+                    .filter(|(key, _)| key.owner == owner)
+                    .collect::<Vec<_>>();
+                entries
+                    .iter()
+                    .all(|(_, entry)| {
+                        entry.publication == ProjectServerPublication::RegisteredHostIngest
+                            && !is_leased(&entry.server)
+                    })
+                    .then(|| {
+                        let last_used = entries
+                            .iter()
+                            .map(|(_, entry)| entry.last_used)
+                            .max()
+                            .unwrap_or_else(Instant::now);
+                        (owner, last_used)
+                    })
+            })
+            .min_by_key(|(_, last_used)| *last_used)
+            .map(|(owner, _)| owner);
+        let Some(evict) = evict else {
+            return Err(());
+        };
+        let keys = self
+            .servers
+            .keys()
+            .filter(|key| key.owner == evict)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut retired = Vec::with_capacity(keys.len());
+        for key in keys {
+            let entry = self.servers.remove(&key).ok_or(())?;
+            retired.push((key, entry.server));
+        }
+        self.aliases.retain(|_, key| key.owner != evict);
+        Ok(Some((evict, retired)))
     }
 
     pub(super) fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {

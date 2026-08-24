@@ -77,6 +77,12 @@ impl ProjectRuntimeRegistryV1 {
         match retired {
             Ok(mut runtimes) => {
                 let mut clean = shut_down_advisory(&runtimes).await;
+                clean &= shut_down_feedback(&runtimes).await;
+                clean &= shut_down_semantic(
+                    &mut runtimes,
+                    tokio::time::Instant::now() + super::super::super::DAEMON_TASK_ABORT_DEADLINE,
+                )
+                .await;
                 clean &= shut_down_observability(&mut runtimes).await;
                 shut_down_runtimes(runtimes);
                 clean
@@ -226,29 +232,39 @@ impl ProjectRuntimeRegistryV1 {
         let deadline =
             tokio::time::Instant::now() + crate::daemon::core_lifecycle::DAEMON_SHUTDOWN_DEADLINE;
         let mut clean = shut_down_advisory(&runtimes).await;
-        for runtime in runtimes.values_mut() {
-            if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
-                reconciler.cancel_and_join().await;
-            }
-            if let Some(configuration) = runtime.configuration.as_ref() {
-                clean &= configuration
-                    .semantic_evaluation_workers()
-                    .cancel_and_join_until(deadline)
-                    .await
-                    .is_clean();
-            }
-            if let Some(semantic) = runtime.semantic.as_ref() {
-                clean &= semantic.cancel_and_join_until(deadline).await.is_clean();
-            }
-        }
+        clean &= shut_down_feedback(&runtimes).await;
+        clean &= shut_down_semantic(&mut runtimes, deadline).await;
         clean &= shut_down_observability(&mut runtimes).await;
-        if !clean {
-            self.lock_runtimes().extend(runtimes);
-            return false;
-        }
         shut_down_runtimes(runtimes);
         clean
     }
+}
+
+/// Cancel and join every semantic owner before its project database can enter
+/// retirement. Targeted project retirement and whole-daemon shutdown share
+/// this exact sequence so neither path can leave a worker holding a counted
+/// database client after the runtime map entry has been removed.
+async fn shut_down_semantic(
+    runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let mut clean = true;
+    for runtime in runtimes.values_mut() {
+        if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
+            reconciler.cancel_and_join().await;
+        }
+        if let Some(configuration) = runtime.configuration.as_ref() {
+            clean &= configuration
+                .semantic_evaluation_workers()
+                .cancel_and_join_until(deadline)
+                .await
+                .is_clean();
+        }
+        if let Some(semantic) = runtime.semantic.as_ref() {
+            clean &= semantic.cancel_and_join_until(deadline).await.is_clean();
+        }
+    }
+    clean
 }
 
 async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> bool {
@@ -256,6 +272,24 @@ async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> boo
     for runtime in runtimes.values() {
         if let Some(advisory) = runtime.advisory.as_ref() {
             clean &= advisory.shutdown().await;
+        }
+    }
+    clean
+}
+
+async fn shut_down_feedback(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> bool {
+    let mut clean = true;
+    for (project_root, runtime) in runtimes {
+        let Some(feedback) = runtime.feedback.as_ref() else {
+            continue;
+        };
+        if let Err(error) = feedback.runtime().close_and_drain_observations().await {
+            tracing::warn!(
+                project = %project_root.display(),
+                %error,
+                "project feedback observation shutdown was incomplete"
+            );
+            clean = false;
         }
     }
     clean

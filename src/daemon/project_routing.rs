@@ -116,6 +116,12 @@ pub(super) async fn project_open_gate(
     gate
 }
 
+pub(super) async fn project_open_capacity_gate(
+    gates: &tokio::sync::Mutex<ProjectOpenGates>,
+) -> Arc<ProjectOpenGate> {
+    Arc::clone(&gates.lock().await.capacity_gate)
+}
+
 pub(super) async fn project_open_tasks(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
 ) -> ProjectOpenTasks {

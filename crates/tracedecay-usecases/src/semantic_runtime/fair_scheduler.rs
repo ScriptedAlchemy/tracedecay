@@ -19,6 +19,7 @@ use std::{
 use std::time::Instant;
 
 use thiserror::Error;
+use tokio::sync::Notify;
 use tracedecay_domain::{CodeGenerationId, WorktreeId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +135,54 @@ pub struct SemanticProjectionSchedulerStatsV1 {
     pub active_publications: usize,
 }
 
+/// Completion authority for one exact worktree's projection retirement.
+///
+/// Queue removal and active cancellation linearize before this receipt is
+/// returned. Waiting observes only that worktree; unrelated projections never
+/// enter its completion boundary.
+pub struct SemanticProjectionWorktreeRetirementReceiptV1 {
+    scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
+    worktree_id: WorktreeId,
+    outcome: SemanticProjectionCancellationOutcomeV1,
+}
+
+impl SemanticProjectionWorktreeRetirementReceiptV1 {
+    #[must_use]
+    pub fn outcome(&self) -> SemanticProjectionCancellationOutcomeV1 {
+        self.outcome
+    }
+
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        let state = self
+            .scheduler
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        !state
+            .active
+            .values()
+            .any(|active| active.worktree_id == self.worktree_id)
+    }
+
+    pub async fn wait_until(self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            let idle = self.scheduler.worktree_idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if self.is_idle() {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, idle.as_mut())
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SemanticProjectionScheduleErrorV1 {
     #[error(
@@ -225,6 +274,7 @@ impl SemanticProjectionSchedulerStateV1 {
 pub struct DaemonGlobalSemanticProjectionSchedulerV1 {
     limits: SemanticProjectionSchedulerLimitsV1,
     state: Arc<Mutex<SemanticProjectionSchedulerStateV1>>,
+    worktree_idle: Arc<Notify>,
 }
 
 impl Default for DaemonGlobalSemanticProjectionSchedulerV1 {
@@ -244,11 +294,63 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         Ok(Self {
             limits: limits.validate()?,
             state: Arc::new(Mutex::new(SemanticProjectionSchedulerStateV1::default())),
+            worktree_idle: Arc::new(Notify::new()),
         })
     }
 
     pub fn limits(&self) -> SemanticProjectionSchedulerLimitsV1 {
         self.limits
+    }
+
+    /// Fence all queued and active semantic projection work for one worktree.
+    ///
+    /// The caller must first stop and join the worktree's code-index producer,
+    /// making this state-lock transition a closed inventory. Queued dispatch
+    /// closures are dropped immediately; active leases are cancelled and the
+    /// returned receipt waits for only those exact leases to release.
+    pub fn begin_worktree_retirement(
+        &self,
+        worktree_id: &WorktreeId,
+    ) -> SemanticProjectionWorktreeRetirementReceiptV1 {
+        let (retired_queue, outcome) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let retired_queue = state.queues.remove(worktree_id).unwrap_or_default();
+            let removed_queued_batches = retired_queue.len();
+            let removed_queued_bytes = retired_queue
+                .iter()
+                .map(|queued| queued.batch.queued_bytes)
+                .sum();
+            state.queued_batches = state.queued_batches.saturating_sub(removed_queued_batches);
+            state.queued_bytes = state.queued_bytes.saturating_sub(removed_queued_bytes);
+            state
+                .ready_worktrees
+                .retain(|queued_worktree| queued_worktree != worktree_id);
+            state.latest_generations.remove(worktree_id);
+            let cancelled_running_batches = state
+                .active
+                .values()
+                .filter(|active| {
+                    &active.worktree_id == worktree_id
+                        && !active.cancellation.swap(true, Ordering::AcqRel)
+                })
+                .count();
+            let outcome = SemanticProjectionCancellationOutcomeV1 {
+                removed_queued_batches,
+                removed_queued_bytes,
+                cancelled_running_batches,
+            };
+            crate::hotpath_observe::semantic_cancelled(
+                removed_queued_batches.saturating_add(cancelled_running_batches),
+            );
+            state.observe_hotpath();
+            (retired_queue, outcome)
+        };
+        drop(retired_queue);
+        SemanticProjectionWorktreeRetirementReceiptV1 {
+            scheduler: self.clone(),
+            worktree_id: worktree_id.clone(),
+            outcome,
+        }
     }
 
     #[hotpath::measure]
@@ -584,6 +686,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
             state.work_drain_requested = true;
             state.observe_hotpath();
         }
+        self.worktree_idle.notify_waiters();
         self.drain_ready_work();
     }
 
@@ -904,6 +1007,63 @@ mod tests {
         let remaining = scheduler.try_dispatch().expect("other worktree remains");
         assert_eq!(remaining.batch().worktree_id(), &worktree("b"));
         assert!(scheduler.try_dispatch().is_none());
+    }
+
+    #[tokio::test]
+    async fn worktree_retirement_releases_queued_resources_and_preserves_siblings() {
+        let scheduler = scheduler();
+        let active = Arc::new(Mutex::new(None));
+        let active_dispatch = Arc::clone(&active);
+        scheduler
+            .enqueue_work(
+                batch("a", "old", 1, 100),
+                Box::new(move |lease| {
+                    *active_dispatch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(lease);
+                }),
+            )
+            .unwrap();
+        let target_resource = Arc::new(());
+        let target_resource_weak = Arc::downgrade(&target_resource);
+        scheduler
+            .enqueue_work(
+                batch("a", "latest", 10, 10),
+                Box::new(move |_lease| drop(target_resource)),
+            )
+            .unwrap();
+        let unrelated_ran = Arc::new(AtomicBool::new(false));
+        let unrelated_dispatch = Arc::clone(&unrelated_ran);
+        scheduler
+            .enqueue_work(
+                batch("b", "other", 10, 10),
+                Box::new(move |_lease| {
+                    unrelated_dispatch.store(true, Ordering::Release);
+                }),
+            )
+            .unwrap();
+
+        let receipt = scheduler.begin_worktree_retirement(&worktree("a"));
+        assert_eq!(receipt.outcome().removed_queued_batches, 1);
+        assert_eq!(receipt.outcome().cancelled_running_batches, 0);
+        assert!(!receipt.is_idle());
+        assert!(target_resource_weak.upgrade().is_none());
+        assert!(!unrelated_ran.load(Ordering::Acquire));
+        assert!(
+            active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(SemanticProjectionLeaseV1::is_cancelled)
+        );
+
+        active.lock().unwrap_or_else(PoisonError::into_inner).take();
+        assert!(
+            receipt
+                .wait_until(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+                .await
+        );
+        assert!(unrelated_ran.load(Ordering::Acquire));
     }
 
     #[test]

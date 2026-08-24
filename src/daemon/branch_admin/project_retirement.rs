@@ -8,6 +8,29 @@ pub(super) struct ProjectServerRetirement {
     completion: tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
     _task: tokio::task::JoinHandle<()>,
     _fence: Option<std::sync::Arc<ProjectRetirementFenceV1>>,
+    capacity_reuse: bool,
+}
+
+pub(crate) struct ProjectServerCapacityRetirementCompletion {
+    completion: tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
+}
+
+impl ProjectServerCapacityRetirementCompletion {
+    pub(crate) async fn wait(self) -> crate::errors::Result<()> {
+        match wait_for_project_server_retirement(self.completion).await {
+            ProjectServerRetirementStatus::Clean => Ok(()),
+            ProjectServerRetirementStatus::Failed(error) => {
+                Err(crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "project server retirement failed before capacity reuse: {error}"
+                    ),
+                })
+            }
+            ProjectServerRetirementStatus::Pending => Err(crate::errors::TraceDecayError::Config {
+                message: "project server retirement returned a non-terminal receipt".to_owned(),
+            }),
+        }
+    }
 }
 
 /// Owned admission to the canonical project-server retirement tracker.
@@ -22,6 +45,28 @@ pub(crate) struct ProjectServerRetirementAdmission<'a> {
 }
 
 impl ProjectServerRetirementAdmission<'_> {
+    /// Snapshot only the already-tracked retirements for this exact physical
+    /// project owner. Capacity reuse awaits these receipts inside its detached
+    /// task, without joining unrelated project retirement work.
+    pub(crate) fn prior_completions_for_owner(
+        &self,
+        owner: &StoreOwnerKey,
+    ) -> Vec<ProjectServerCapacityRetirementCompletion> {
+        self.retirements
+            .iter()
+            .filter(|retirement| {
+                &retirement.owner == owner
+                    && !matches!(
+                        &*retirement.completion.borrow(),
+                        ProjectServerRetirementStatus::Clean
+                    )
+            })
+            .map(|retirement| ProjectServerCapacityRetirementCompletion {
+                completion: retirement.completion.clone(),
+            })
+            .collect()
+    }
+
     /// Spawn and record one retirement with no cancellation point between the
     /// two transitions. Consuming the exact evicted server here means its
     /// shutdown and join ownership cannot be detached from the caller.
@@ -31,6 +76,44 @@ impl ProjectServerRetirementAdmission<'_> {
     {
         let task = tokio::spawn(retirement);
         track_project_server_retirement_after_admission(&mut self.retirements, owner, task, false);
+    }
+
+    pub(crate) fn spawn_and_track_fallible<Task>(
+        &mut self,
+        owner: StoreOwnerKey,
+        retirement: Task,
+    ) -> ProjectServerCapacityRetirementCompletion
+    where
+        Task: std::future::Future<Output = crate::errors::Result<()>> + Send + 'static,
+    {
+        self.retirements.retain(|retirement| {
+            !matches!(
+                &*retirement.completion.borrow(),
+                ProjectServerRetirementStatus::Clean
+            )
+        });
+        let (task_completion, completion) =
+            tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
+        hotpath::gauge!("retirement_pending").inc(1.0);
+        let finalizer = ProjectServerRetirementFinalizer {
+            completion: task_completion,
+            terminal: false,
+        };
+        let task = tokio::spawn(async move {
+            let status = match retirement.await {
+                Ok(()) => ProjectServerRetirementStatus::Clean,
+                Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
+            };
+            finalizer.complete(status);
+        });
+        self.retirements.push(ProjectServerRetirement {
+            owner,
+            completion: completion.clone(),
+            _task: task,
+            _fence: None,
+            capacity_reuse: true,
+        });
+        ProjectServerCapacityRetirementCompletion { completion }
     }
 }
 
@@ -73,6 +156,7 @@ impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
         self.completion.send_replace(status);
         self.terminal = true;
+        hotpath::gauge!("retirement_pending").inc(-1.0);
     }
 }
 
@@ -83,6 +167,7 @@ impl Drop for ProjectServerRetirementFinalizer {
                 .send_replace(ProjectServerRetirementStatus::Failed(
                     "retirement tracking task ended without a terminal receipt".to_owned(),
                 ));
+            hotpath::gauge!("retirement_pending").inc(-1.0);
         }
     }
 }
@@ -124,11 +209,12 @@ fn track_project_server_retirement_after_admission(
     });
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
+    hotpath::gauge!("retirement_pending").inc(1.0);
+    let finalizer = ProjectServerRetirementFinalizer {
+        completion: task_completion,
+        terminal: false,
+    };
     let task = tokio::spawn(async move {
-        let finalizer = ProjectServerRetirementFinalizer {
-            completion: task_completion,
-            terminal: false,
-        };
         let status = match task.await {
             Ok(()) => ProjectServerRetirementStatus::Clean,
             Err(error) if cancelled_is_clean && error.is_cancelled() => {
@@ -143,8 +229,8 @@ fn track_project_server_retirement_after_admission(
         completion,
         _task: task,
         _fence: None,
+        capacity_reuse: false,
     });
-    hotpath::gauge!("retirement_pending").set(retirements.len() as f64);
 }
 
 async fn track_project_server_retirement(
@@ -290,6 +376,20 @@ impl StoreAdministration {
                     ProjectServerRetirementStatus::Clean
                 )
             });
+    }
+
+    pub(crate) async fn completed_capacity_retirement_failure(&self) -> Option<String> {
+        self.project_server_retirements
+            .lock()
+            .await
+            .iter()
+            .filter(|retirement| retirement.capacity_reuse)
+            .find_map(|retirement| match &*retirement.completion.borrow() {
+                ProjectServerRetirementStatus::Failed(error) => Some(error.clone()),
+                ProjectServerRetirementStatus::Pending | ProjectServerRetirementStatus::Clean => {
+                    None
+                }
+            })
     }
 
     /// Bounded retirement join for daemon shutdown: every tracked retirement
@@ -547,6 +647,120 @@ mod tests {
                 .is_empty(),
             "joined retirement ownership must be released after clean completion"
         );
+    }
+
+    #[tokio::test]
+    async fn capacity_retirement_receipt_survives_cancellation_without_global_head_of_line() {
+        let administration = StoreAdministration::default();
+        let capacity_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let capacity_admission = Arc::clone(&capacity_gate).lock_owned().await;
+        let release_capacity = Arc::new(tokio::sync::Notify::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut admission = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        let completion = admission.spawn_and_track_fallible(owner("project-capacity"), {
+            let release_capacity = Arc::clone(&release_capacity);
+            async move {
+                let _capacity_admission = capacity_admission;
+                let _ = started_tx.send(());
+                release_capacity.notified().await;
+                Ok(())
+            }
+        });
+        drop(admission);
+        drop(completion);
+        started_rx.await.expect("capacity retirement started");
+        assert!(
+            Arc::clone(&capacity_gate).try_lock_owned().is_err(),
+            "a cancelled caller cannot release capacity while detached cleanup is pending"
+        );
+        release_capacity.notify_one();
+        let recovered_capacity = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            Arc::clone(&capacity_gate).lock_owned(),
+        )
+        .await
+        .expect("detached cleanup must release capacity after completion");
+
+        let mut admission = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        let second_clean = admission
+            .spawn_and_track_fallible(owner("project-capacity-replacement"), async move { Ok(()) });
+        assert_eq!(
+            admission.retirements.len(),
+            1,
+            "a new fallible capacity retirement must reap prior clean receipts"
+        );
+        drop(admission);
+        second_clean
+            .wait()
+            .await
+            .expect("replacement capacity retirement completes cleanly");
+
+        let release_unrelated = Arc::new(tokio::sync::Notify::new());
+        let release_prior = Arc::new(tokio::sync::Notify::new());
+        let mut admission = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        admission.spawn_and_track(owner("project-unrelated"), {
+            let release_unrelated = Arc::clone(&release_unrelated);
+            async move { release_unrelated.notified().await }
+        });
+        let exact_owner = owner("project-exact");
+        admission.spawn_and_track(exact_owner.clone(), {
+            let release_prior = Arc::clone(&release_prior);
+            async move { release_prior.notified().await }
+        });
+        let prior = admission.prior_completions_for_owner(&exact_owner);
+        let exact = admission.spawn_and_track_fallible(exact_owner, async move {
+            for completion in prior {
+                completion.wait().await?;
+            }
+            drop(recovered_capacity);
+            Ok(())
+        });
+        drop(admission);
+        let mut exact = Box::pin(exact.wait());
+        std::future::poll_fn(|context| {
+            assert!(
+                exact.as_mut().poll(context).is_pending(),
+                "capacity cleanup must await a prior retirement for its exact owner"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release_prior.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), exact)
+            .await
+            .expect("exact capacity receipt must not join unrelated retirement")
+            .expect("exact capacity retirement completes cleanly");
+        release_unrelated.notify_one();
+        administration.join_project_server_retirements().await;
+
+        let mut admission = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        let failed = admission.spawn_and_track_fallible(owner("project-failed"), async move {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "synthetic capacity cleanup failure".to_owned(),
+            })
+        });
+        drop(admission);
+        drop(failed);
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(failure) = administration.completed_capacity_retirement_failure().await
+                {
+                    break failure;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed capacity failure must remain replayable");
+        assert!(failure.contains("synthetic capacity cleanup failure"));
     }
 
     #[tokio::test]

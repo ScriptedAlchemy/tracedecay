@@ -413,6 +413,20 @@ impl StoreTelemetrySamplingRegistry {
         Some((cached.store.clone(), cached.port.for_scope(scope.clone())))
     }
 
+    /// Release the telemetry client's exact database lease before the owning
+    /// project store is retired. Other project and profile sampling ports stay
+    /// mounted.
+    pub(super) fn release_retained_handle(&self, path: &Path) {
+        self.ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
+        self.semantic_vector_retention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
+    }
+
     pub(super) fn release_retained_handles_for_shutdown(&self) {
         self.ports
             .lock()
@@ -1832,6 +1846,7 @@ mod tests {
     async fn shutdown_release_clears_retained_telemetry_handles_and_progress() {
         let temporary = tempfile::tempdir().expect("telemetry registry fixture root");
         let database_path = temporary.path().join("project.db");
+        let other_database_path = temporary.path().join("other.db");
         crate::daemon::store_runtime::register_registered_schema_installer();
         let authority = crate::db::DatabaseAuthority::acquire_test(
             &database_path,
@@ -1860,12 +1875,40 @@ mod tests {
         assert!(registry.register_port(&database_path, &scope, || {
             database.storage_telemetry_handle()
         }));
-        registry.record_semantic_vector_retention_unseated(temporary.path());
+        assert!(registry.register_port(&other_database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        registry.record_semantic_vector_retention_unseated(&database_path);
+        registry.record_semantic_vector_retention_unseated(&other_database_path);
         assert!(registry.registered_port(&database_path, &scope).is_some());
         assert_eq!(
-            registry.semantic_vector_retention_read(temporary.path()),
+            registry.semantic_vector_retention_read(&database_path),
             SemanticVectorRetentionReadV1::SemanticUnseated
         );
+
+        registry.release_retained_handle(&database_path);
+        assert!(
+            registry.registered_port(&database_path, &scope).is_none(),
+            "project retirement must drop the exact maintenance-owned database client"
+        );
+        assert_eq!(
+            registry.semantic_vector_retention_read(&database_path),
+            SemanticVectorRetentionReadV1::Unknown
+        );
+        assert!(
+            registry
+                .registered_port(&other_database_path, &scope)
+                .is_some(),
+            "exact project retirement must preserve unrelated telemetry clients"
+        );
+        assert_eq!(
+            registry.semantic_vector_retention_read(&other_database_path),
+            SemanticVectorRetentionReadV1::SemanticUnseated
+        );
+        assert!(registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        registry.record_semantic_vector_retention_unseated(&database_path);
 
         registry.release_retained_handles_for_shutdown();
 
@@ -1874,7 +1917,7 @@ mod tests {
             "shutdown must drop maintenance-owned database clients"
         );
         assert_eq!(
-            registry.semantic_vector_retention_read(temporary.path()),
+            registry.semantic_vector_retention_read(&database_path),
             SemanticVectorRetentionReadV1::Unknown
         );
     }

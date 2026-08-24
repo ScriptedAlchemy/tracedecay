@@ -128,6 +128,21 @@ pub struct GraphDbRegistryConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphDbRegistryCapacity {
+    pub max_open: usize,
+    pub occupied: usize,
+    pub evictable: usize,
+}
+
+impl GraphDbRegistryCapacity {
+    #[must_use]
+    pub fn available_after_eviction(self) -> usize {
+        self.max_open
+            .saturating_sub(self.occupied.saturating_sub(self.evictable))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphDbRegistryStatus {
     Opening,
     Ready,
@@ -1281,6 +1296,27 @@ impl GraphDbRegistry {
         Ok(Some(status(entry)))
     }
 
+    /// Canonical physical-open headroom, including ready owners the registry
+    /// can close itself before admitting another shard.
+    pub fn capacity(&self) -> Result<GraphDbRegistryCapacity, GraphDbError> {
+        let state = self.state_lock()?;
+        let occupied = state
+            .entries
+            .values()
+            .filter(|entry| entry_consumes_capacity(entry))
+            .count();
+        let evictable = state
+            .entries
+            .values()
+            .filter(|entry| entry_is_capacity_evictable(entry))
+            .count();
+        Ok(GraphDbRegistryCapacity {
+            max_open: self.inner.config.max_open,
+            occupied,
+            evictable,
+        })
+    }
+
     /// Reserves every selected ready runtime before any physical close begins.
     ///
     /// Identity and client-lease checks complete under one registry-state lock,
@@ -1902,19 +1938,7 @@ fn reserve_capacity_eviction(
     let open_count = state
         .entries
         .values()
-        .filter(|entry| match entry {
-            RegistryEntry::Opening { .. }
-            | RegistryEntry::Ready { .. }
-            | RegistryEntry::Closing { .. }
-            | RegistryEntry::Retiring { .. } => true,
-            // A durable uncertainty can still retain native Grafeo state.
-            // A confirmed Closed owner remains recorded for identity truth
-            // but must not consume physical-open capacity.
-            RegistryEntry::Faulted {
-                owner: Some(owner), ..
-            } => owner.runtime_state() != GraphDbRuntimeState::Closed,
-            RegistryEntry::Faulted { owner: None, .. } => false,
-        })
+        .filter(|entry| entry_consumes_capacity(entry))
         .count();
     if open_count < max_open {
         return Ok(None);
@@ -1997,6 +2021,31 @@ fn reserve_capacity_eviction(
         },
     );
     Ok(Some(eviction))
+}
+
+fn entry_consumes_capacity(entry: &RegistryEntry) -> bool {
+    match entry {
+        RegistryEntry::Opening { .. }
+        | RegistryEntry::Ready { .. }
+        | RegistryEntry::Closing { .. }
+        | RegistryEntry::Retiring { .. } => true,
+        // A durable uncertainty can still retain native Grafeo state. A
+        // confirmed Closed owner remains recorded for identity truth but must
+        // not consume physical-open capacity.
+        RegistryEntry::Faulted {
+            owner: Some(owner), ..
+        } => owner.runtime_state() != GraphDbRuntimeState::Closed,
+        RegistryEntry::Faulted { owner: None, .. } => false,
+    }
+}
+
+fn entry_is_capacity_evictable(entry: &RegistryEntry) -> bool {
+    matches!(
+        entry,
+        RegistryEntry::Ready { owner, .. }
+            if owner.is_unleased()
+                && owner.runtime_state() != GraphDbRuntimeState::DurabilityUncertain
+    )
 }
 
 #[cfg(test)]
@@ -2142,6 +2191,26 @@ mod tests {
             operation: registration,
             authority_attachment,
         }
+    }
+
+    #[test]
+    fn capacity_reports_only_ready_unleased_owners_as_evictable_headroom() {
+        let temporary = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let owner = registry
+            .resolve_owner_attachment(owner_registration(registration(temporary.path())))
+            .unwrap();
+        let leased = registry.capacity().unwrap();
+        assert_eq!(leased.max_open, 1);
+        assert_eq!(leased.occupied, 1);
+        assert_eq!(leased.evictable, 0);
+        assert_eq!(leased.available_after_eviction(), 0);
+
+        drop(owner);
+        let idle = registry.capacity().unwrap();
+        assert_eq!(idle.occupied, 1);
+        assert_eq!(idle.evictable, 1);
+        assert_eq!(idle.available_after_eviction(), 1);
     }
 
     #[test]
