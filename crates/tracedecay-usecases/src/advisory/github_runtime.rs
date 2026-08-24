@@ -8,6 +8,7 @@ mod anchors;
 mod decoder;
 mod discovery;
 mod dto;
+mod gh_cli;
 mod network;
 mod owner;
 mod read_requests;

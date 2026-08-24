@@ -203,8 +203,14 @@ pub fn open_project_github_release_read_authority_v1(
         &target.owner,
         &target.repository,
     ) {
+        // A public repository still reads far better authenticated: 5,000
+        // requests per hour instead of 60. Precedence is an already-registered
+        // real credential, then the local `gh` login, then anonymous.
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => (
-            GitHubReadOnlyCredentialV1::anonymous(),
+            super::gh_cli::public_repository_read_credential_v1(
+                &target.owner,
+                &target.repository,
+            ),
             GitHubReleaseAccessV1::Public,
         ),
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {

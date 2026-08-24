@@ -423,10 +423,23 @@ pub fn mount_profile_github_read_only_credential_authority_v1(
         repository_name,
         &authority,
     ) {
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted
-    } else {
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected
+        return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted;
     }
+    // A parked `gh` login occupying this slot must never make a later real
+    // private mount fail closed. Withdraw only that exact retained authority -
+    // the eviction is `Arc::ptr_eq`-exact, so a real credential already in the
+    // slot is untouched - then retry the mount exactly once.
+    if super::gh_cli::withdraw_gh_cli_github_read_only_credential_v1(
+        repository_owner,
+        repository_name,
+    ) && register_github_read_only_credential_authority_v1(
+        repository_owner,
+        repository_name,
+        &authority,
+    ) {
+        return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted;
+    }
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected
 }
 
 /// Revokes the mounted application credential for one exact profile and
