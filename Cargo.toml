@@ -68,7 +68,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup",
 
 [package]
 name = "tracedecay"
-version = "0.1.0-beta.37"
+version = "0.1.0-beta.38"
 publish = false
 edition.workspace = true
 description = "Local semantic code intelligence, project memory, and workflow context for AI coding agents."
