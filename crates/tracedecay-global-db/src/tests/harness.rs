@@ -1,4 +1,6 @@
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
@@ -9,6 +11,10 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
 
 static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
+    Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+> = OnceLock::new();
 
 pub struct RegisteredGlobalDbHarness {
     pub registered: RegisteredGlobalDbLeaseV1,
@@ -420,14 +426,9 @@ impl RegisteredGlobalDbHarness {
     }
 
     pub async fn mount(&self) -> RegisteredGlobalDbLeaseV1 {
-        open_registered_test_database_with(
-            self.registered.db_path(),
-            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
-            RegisteredTestWriteAuthority::DaemonScoped,
-        )
-        .await
-        .expect("remount registered profile-sessions runtime")
-        .0
+        self._database
+            .issue_lease()
+            .expect("issue registered profile-sessions mount client")
     }
 
     pub async fn restart(self) -> Self {
@@ -489,6 +490,53 @@ pub struct HostAdmissionTestRuntimeV1 {
 }
 
 impl HostAdmissionTestRuntimeV1 {
+    /// Opens the registered host-admission fixture after mounting the same
+    /// process-scoped CPU and resident-memory authorities required by the
+    /// production JSONL capture composition.
+    #[cfg(test)]
+    pub(crate) async fn profile_with_session_capture_resources(
+        profile_root: impl AsRef<std::path::Path>,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        use std::num::NonZeroUsize;
+        use tracedecay_runtime_core::background_cpu::{
+            install_process_background_cpu, process_background_cpu,
+        };
+        use tracedecay_runtime_core::resident_memory::{
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+        };
+
+        let memory = Arc::clone(HOST_ADMISSION_TEST_RESIDENT_MEMORY.get_or_init(|| {
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            ))
+        }));
+        let _cpu = if let Some(installed) = process_background_cpu() {
+            installed
+        } else {
+            match install_process_background_cpu(NonZeroUsize::MIN) {
+                Ok(installed) => installed,
+                // Another fixture can win the process-wide installation race
+                // at a different canonical width. Reuse that authority instead
+                // of making test success depend on execution order.
+                Err(error) => process_background_cpu().ok_or_else(|| {
+                    tracedecay_runtime_core::errors::TraceDecayError::Database {
+                        operation: "mount host-admission test background CPU authority".to_owned(),
+                        message: error.to_string(),
+                    }
+                })?,
+            }
+        };
+        tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
+            .configure_preparation_resources(memory)
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "mount host-admission test resident-memory authority".to_owned(),
+                    message: error.to_string(),
+                },
+            )?;
+        Self::open(profile_root.as_ref(), None).await
+    }
+
     /// Wraps databases whose authority is retained by a higher composition
     /// runtime. This constructor grants no authority and owns no runtime scope.
     #[doc(hidden)]

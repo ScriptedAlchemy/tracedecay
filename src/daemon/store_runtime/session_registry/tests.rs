@@ -394,6 +394,41 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
     assert_eq!(registered.db_path(), user_sessions_path);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "concurrent profile sessions mount",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+
+    let (first, second, third, fourth) = tokio::join!(
+        registry.profile_sessions(),
+        registry.profile_sessions(),
+        registry.profile_sessions(),
+        registry.profile_sessions(),
+    );
+    let first = first.expect("first profile sessions mount");
+    for mounted in [second, third, fourth] {
+        let mounted = mounted.expect("concurrent profile sessions mount");
+        assert!(!first.shares_client_with(&mounted));
+        assert_eq!(first.binding(), mounted.binding());
+    }
+    assert_eq!(
+        registry.registered_schema_convergence_schedule_count_for_test(),
+        1,
+        "one retained mount must schedule schema convergence exactly once"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
