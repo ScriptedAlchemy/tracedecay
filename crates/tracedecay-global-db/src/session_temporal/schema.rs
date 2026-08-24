@@ -13,7 +13,8 @@ use admission::{validate_temporal_fts_contracts, validate_temporal_fts_match};
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
 const SESSION_TEMPORAL_AUTHORITY: &str = "session temporal";
-pub(super) const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
+const RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
+pub(super) const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 4;
 
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
@@ -233,9 +234,6 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         frozen_watermarks_json TEXT NOT NULL CHECK(json_valid(frozen_watermarks_json)),
         source_through INTEGER NOT NULL CHECK(source_through >= 0),
         projection_through INTEGER NOT NULL CHECK(projection_through >= 0),
-        batch_item_count INTEGER NOT NULL CHECK(batch_item_count >= 0),
-        committed_item_count INTEGER NOT NULL CHECK(committed_item_count >= 0),
-        committed_copy_count INTEGER NOT NULL CHECK(committed_copy_count >= 0),
         occurrence_count INTEGER NOT NULL CHECK(occurrence_count >= 0),
         occurrence_digest TEXT NOT NULL,
         dimension_count INTEGER NOT NULL CHECK(dimension_count >= 0),
@@ -251,6 +249,9 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         fts_count INTEGER NOT NULL CHECK(fts_count >= 0),
         fts_digest TEXT NOT NULL,
         committed_at INTEGER NOT NULL,
+        batch_item_count INTEGER NOT NULL DEFAULT 0 CHECK(batch_item_count >= 0),
+        committed_item_count INTEGER NOT NULL DEFAULT 0 CHECK(committed_item_count >= 0),
+        committed_copy_count INTEGER NOT NULL DEFAULT 0 CHECK(committed_copy_count >= 0),
         PRIMARY KEY(session_id, generation, batch_ordinal),
         UNIQUE(session_id, generation, batch_digest),
         FOREIGN KEY(session_id, generation)
@@ -714,9 +715,6 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "frozen_watermarks_json",
             "source_through",
             "projection_through",
-            "batch_item_count",
-            "committed_item_count",
-            "committed_copy_count",
             "occurrence_count",
             "occurrence_digest",
             "dimension_count",
@@ -732,6 +730,9 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "fts_count",
             "fts_digest",
             "committed_at",
+            "batch_item_count",
+            "committed_item_count",
+            "committed_copy_count",
         ],
     ),
     (
@@ -894,6 +895,189 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     ("session_occurrences_fts", &["index_text", "snippet_text"]),
     ("session_summary_nodes_fts", &["summary_text", "index_text"]),
 ];
+
+pub(crate) async fn migrate_released_v3_session_temporal_schema(
+    conn: &impl Executor,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    admission::validate_released_v3_session_temporal_schema(conn).await?;
+    conn.execute_batch(
+        "DROP TRIGGER session_temporal_projection_receipts_immutable_update_v1;
+         ALTER TABLE session_temporal_projection_receipts
+             ADD COLUMN batch_item_count INTEGER NOT NULL DEFAULT 0
+             CHECK(batch_item_count >= 0);
+         ALTER TABLE session_temporal_projection_receipts
+             ADD COLUMN committed_item_count INTEGER NOT NULL DEFAULT 0
+             CHECK(committed_item_count >= 0);
+         ALTER TABLE session_temporal_projection_receipts
+             ADD COLUMN committed_copy_count INTEGER NOT NULL DEFAULT 0
+             CHECK(committed_copy_count >= 0);",
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+
+    let mut ambiguous = conn
+        .query(
+            "SELECT receipt.session_id, receipt.generation, receipt.batch_ordinal
+             FROM session_temporal_projection_receipts AS receipt
+             LEFT JOIN session_refresh_batch_bindings AS batch_binding
+               ON batch_binding.session_id = receipt.session_id
+              AND batch_binding.generation = receipt.generation
+              AND batch_binding.batch_ordinal = receipt.batch_ordinal
+             LEFT JOIN session_refresh_progress AS progress
+               ON progress.session_id = batch_binding.session_id
+              AND progress.operation_id = batch_binding.operation_id
+              AND progress.progress_ordinal = batch_binding.progress_ordinal
+             LEFT JOIN session_refresh_bindings AS refresh_binding
+               ON refresh_binding.session_id = batch_binding.session_id
+              AND refresh_binding.operation_id = batch_binding.operation_id
+              AND refresh_binding.generation = batch_binding.generation
+             WHERE json_type(receipt.frozen_watermarks_json, '$.active_generation')
+                       IS NOT 'integer'
+                OR json_extract(receipt.frozen_watermarks_json, '$.active_generation') <= 0
+                OR json_extract(receipt.frozen_watermarks_json, '$.active_generation')
+                       > receipt.generation
+                OR batch_binding.session_id IS NULL
+                OR (
+                    batch_binding.session_id IS NOT NULL
+                    AND (
+                        batch_binding.progress_ordinal <> receipt.batch_ordinal
+                        OR progress.session_id IS NULL
+                        OR refresh_binding.session_id IS NULL
+                        OR refresh_binding.frozen_watermarks_json
+                            <> receipt.frozen_watermarks_json
+                        OR progress.committed_batches <> receipt.batch_ordinal + 1
+                        OR progress.committed_records <>
+                            receipt.occurrence_count + receipt.copy_count
+                                + receipt.assertion_count
+                        OR json_extract(progress.frontier_json, '$.committed_through')
+                            <> receipt.projection_through
+                    )
+                )
+             LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if ambiguous
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .is_some()
+    {
+        return Err(admission::session_temporal_reset_required(
+            "released v3 projection receipt batch accounting is unbound or ambiguous",
+        ));
+    }
+    drop(ambiguous);
+
+    let mut invalid = conn
+        .query(
+            "SELECT current.session_id, current.generation, current.batch_ordinal
+             FROM session_temporal_projection_receipts AS current
+             LEFT JOIN session_temporal_projection_receipts AS previous
+               ON previous.session_id = current.session_id
+              AND previous.generation = current.generation
+              AND previous.batch_ordinal = current.batch_ordinal - 1
+             WHERE (
+                 current.batch_ordinal > 0
+                 AND (
+                   previous.batch_ordinal IS NULL
+                   OR current.occurrence_count + current.copy_count + current.assertion_count
+                      < previous.occurrence_count + previous.copy_count
+                        + previous.assertion_count
+                 )
+               )
+               OR (
+                 current.batch_ordinal = 0
+                 AND json_extract(
+                       current.frozen_watermarks_json, '$.active_generation'
+                     ) <> current.generation
+                 AND current.occurrence_count + current.copy_count + current.assertion_count
+                     < COALESCE((
+                         SELECT baseline.occurrence_count + baseline.copy_count
+                                + baseline.assertion_count
+                         FROM session_temporal_projection_receipts AS baseline
+                         WHERE baseline.session_id = current.session_id
+                           AND baseline.generation = json_extract(
+                               current.frozen_watermarks_json, '$.active_generation'
+                           )
+                         ORDER BY baseline.batch_ordinal DESC
+                         LIMIT 1
+                       ), 0)
+               )
+             LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if invalid
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .is_some()
+    {
+        return Err(admission::session_temporal_reset_required(
+            "released v3 projection receipt progress is non-monotonic or noncontiguous",
+        ));
+    }
+    drop(invalid);
+
+    conn.execute(
+        "UPDATE session_temporal_projection_receipts AS current
+         SET batch_item_count =
+               current.occurrence_count + current.copy_count + current.assertion_count
+               - CASE
+                   WHEN current.batch_ordinal > 0 THEN COALESCE((
+                     SELECT previous.occurrence_count + previous.copy_count
+                            + previous.assertion_count
+                     FROM session_temporal_projection_receipts AS previous
+                     WHERE previous.session_id = current.session_id
+                       AND previous.generation = current.generation
+                       AND previous.batch_ordinal = current.batch_ordinal - 1
+                   ), 0)
+                   WHEN json_extract(
+                          current.frozen_watermarks_json, '$.active_generation'
+                        ) <> current.generation THEN COALESCE((
+                     SELECT baseline.occurrence_count + baseline.copy_count
+                            + baseline.assertion_count
+                     FROM session_temporal_projection_receipts AS baseline
+                     WHERE baseline.session_id = current.session_id
+                       AND baseline.generation = json_extract(
+                           current.frozen_watermarks_json, '$.active_generation'
+                       )
+                     ORDER BY baseline.batch_ordinal DESC
+                     LIMIT 1
+                   ), 0)
+                   ELSE 0
+                 END,
+             committed_item_count =
+               current.occurrence_count + current.copy_count + current.assertion_count,
+             committed_copy_count = current.copy_count",
+        (),
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let updated = conn
+        .execute(
+            "UPDATE session_temporal_schema_migrations
+             SET version = ?1, applied_at = unixepoch()
+             WHERE name = ?2 AND version = ?3",
+            params![
+                SESSION_TEMPORAL_SCHEMA_VERSION,
+                MIGRATION_NAME,
+                RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION,
+            ],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if updated != 1 {
+        return Err(admission::session_temporal_reset_required(
+            "released v3 temporal schema marker changed during migration",
+        ));
+    }
+    validate_temporal_table_shapes(conn).await?;
+    admission::validate_current_session_temporal_schema(conn).await
+}
 
 /// Installs the final schema into a store already proven fresh by admission.
 pub(crate) async fn install_session_temporal_schema(

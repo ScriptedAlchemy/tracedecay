@@ -2784,9 +2784,11 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     let transcript = write_vibe_fixture(&vibe_home, &workspace, "original eof record");
     let source = tracedecay_sessions::runtime::vibe::VibeSource::with_vibe_home(&vibe_home)
         .for_user_scope(Vec::new());
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
-        .await
-        .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile_with_session_capture_resources(
+        tmp.path().join("profile"),
+    )
+    .await
+    .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();

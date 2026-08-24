@@ -142,8 +142,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             graph_manifest_provider,
             graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
             profile_pin: Mutex::new(Some(profile_pin)),
+            profile_database_mount: Mutex::new(()),
             profile_database: std::sync::Mutex::new(None),
             profile_memory: std::sync::Mutex::new(None),
+            profile_sessions_mount: Mutex::new(()),
             profile_sessions: std::sync::Mutex::new(None),
             remote_nodes: std::sync::Mutex::new(BTreeMap::new()),
             remote_credential_authority,
@@ -262,6 +264,24 @@ impl DaemonSessionRuntimeRegistryV1 {
         if let Some(lease) = existing {
             return lease;
         }
+        let _mount = self.profile_database_mount.lock().await;
+        let existing = {
+            let mounted = self
+                .profile_database
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mounted.as_ref().map(|database| {
+                database.issue_lease().map_err(|error| {
+                    session_registry_error(
+                        "issue profile authority database client",
+                        format!("{error:?}"),
+                    )
+                })
+            })
+        };
+        if let Some(lease) = existing {
+            return lease;
+        }
         let shard_id = StoreShardIdV1::profile(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -294,6 +314,22 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     pub(crate) async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
+        let existing = {
+            let mounted = self
+                .profile_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mounted.as_ref().map(|database| {
+                self.issue_session_owner_lease(
+                    database,
+                    SessionRelationScope::profile_sessions(self.identity.profile_id().clone()),
+                )
+            })
+        };
+        if let Some(lease) = existing {
+            return lease;
+        }
+        let _mount = self.profile_sessions_mount.lock().await;
         let existing = {
             let mounted = self
                 .profile_sessions
