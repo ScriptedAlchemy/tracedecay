@@ -398,14 +398,13 @@ pub(super) async fn load_commit_events_tx(
                 .or_insert((fact_id, event_json, sequence));
         }
     }
+    // Replay order is the receipt's own order, never storage order. Callers assert
+    // a strictly increasing `event_sequence` over this vector precisely to catch a
+    // receipt whose ids were reordered; re-sorting the batch rows by
+    // `event_sequence` would manufacture the canonical order that check exists to
+    // find missing, so the receipt is walked as written and each id is looked up.
     let mut events = Vec::with_capacity(event_ids.len());
-    let mut red_storage_order = stored.iter().collect::<Vec<_>>();
-    red_storage_order.sort_by_key(|(_, (_, _, sequence))| *sequence);
-    let red_ids = red_storage_order
-        .into_iter()
-        .map(|(event_id, _)| FactEventId::new(event_id.clone()).expect("red event id"))
-        .collect::<Vec<_>>();
-    for event_id in &red_ids {
+    for event_id in event_ids {
         let (stored_fact_id, event_json, sequence) =
             stored.get(event_id.as_str()).ok_or_else(|| {
                 storage_message(
