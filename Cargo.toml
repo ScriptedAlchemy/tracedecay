@@ -57,8 +57,8 @@ edition = "2024"
 [workspace.dependencies]
 # Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
 # the macros must always resolve, and with no profiling feature selected the
-# crate pulls only `hotpath-macros` and expands every macro to a no-op, so
-# production builds carry no measurable weight.
+# crate pulls only `hotpath-macros` and expands every macro to a no-op, so the
+# explicit feature-off comparison build carries no measurable profiler weight.
 hotpath = { version = "0.24", default-features = false, features = ["threads"] }
 grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.42", default-features = false }
@@ -133,9 +133,9 @@ include = [
 
 [features]
 # Default and explicitly selected production artifacts resolve through the
-# same feature. Release packaging must use `--no-default-features --features
-# production`; `--all-features` is test-only because it includes
-# `test-transport`.
+# same feature. Current release packaging selects `production` plus the
+# supported Hotpath facilities through `resolve-release-source-profile.py`;
+# `--all-features` is test-only because it includes `test-transport`.
 default = ["production"]
 
 # Opt-in profiling. Never in `default` and never in `production`: with no

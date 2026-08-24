@@ -151,6 +151,7 @@ jobs:
         run: |
           python3 .release-automation/scripts/resolve-release-source-profile.py \
             --source . \
+            --target "${{ matrix.target }}" \
             --github-output "$GITHUB_OUTPUT"
           if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
             echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
@@ -220,6 +221,7 @@ jobs:
       # binary (e.g. test-transport) on disk at the shared release output
       # path for later packaging steps to pick up.
       - name: Verify all-feature release build compiles
+        if: runner.os != 'Windows'
         run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
 
       - name: Build release binary for packaging

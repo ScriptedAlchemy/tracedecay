@@ -25,6 +25,10 @@ tracedecay-usecases = { version = "0.1.0" }
 lite = ["tracedecay-code-index/lite"]
 medium = ["tracedecay-code-index/medium"]
 full = ["tracedecay-code-index/full"]
+hotpath = []
+hotpath-alloc = ["hotpath"]
+hotpath-cpu = ["hotpath"]
+hotpath-mcp = ["hotpath"]
 lang-dart = ["tracedecay-code-index/lang-dart"]
 lang-markdown = ["tracedecay-code-index/lang-markdown"]
 token-counting = []
@@ -121,6 +125,39 @@ semantic-fastembed = [
 ]
 """
 
+CLI_MANIFEST = """[package]
+name = "tracedecay-cli"
+version = "0.1.0"
+
+[dependencies]
+hotpath = { version = "0.24", optional = true }
+regex = { version = "1", optional = true }
+tracedecay = { version = "0.1.0" }
+
+[features]
+default = ["production"]
+production = ["tracedecay/production"]
+hotpath = [
+    "dep:regex",
+    "tracedecay/hotpath",
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "hotpath/axum-0-8",
+    "hotpath/ureq-3",
+]
+hotpath-alloc = [
+    "hotpath",
+    "tracedecay/hotpath-alloc",
+    "hotpath/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "tracedecay/hotpath-cpu",
+    "hotpath/hotpath-cpu",
+]
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+"""
+
 
 @dataclass(frozen=True)
 class FixtureResult:
@@ -138,6 +175,8 @@ def run_fixture(
     extraction_packaged: str = EXTRACTION_MANIFEST,
     semantic_source: str = SEMANTIC_MANIFEST,
     semantic_packaged: str = SEMANTIC_MANIFEST,
+    cli_source: str = CLI_MANIFEST,
+    cli_packaged: str = CLI_MANIFEST,
     extraction_build_manifest: str | None = None,
 ) -> FixtureResult:
     with tempfile.TemporaryDirectory() as temporary_directory:
@@ -151,6 +190,8 @@ def run_fixture(
             "extraction-packaged.toml": extraction_packaged,
             "semantic-source.toml": semantic_source,
             "semantic-packaged.toml": semantic_packaged,
+            "cli-source.toml": cli_source,
+            "cli-packaged.toml": cli_packaged,
         }
         for name, contents in manifests.items():
             root.joinpath(name).write_text(contents, encoding="utf-8")
@@ -173,6 +214,10 @@ def run_fixture(
             str(root / "semantic-source.toml"),
             "--semantic-packaged",
             str(root / "semantic-packaged.toml"),
+            "--cli-source",
+            str(root / "cli-source.toml"),
+            "--cli-packaged",
+            str(root / "cli-packaged.toml"),
         ]
         if extraction_build_manifest is not None:
             extraction = root / "extraction-build"
@@ -208,6 +253,32 @@ def main() -> int:
     extracted_owner = run_fixture()
     if extracted_owner.returncode != 0:
         raise SystemExit(extracted_owner.stderr)
+
+    cli_without_cpu = CLI_MANIFEST.replace(
+        'hotpath-cpu = [\n    "hotpath",\n    "tracedecay/hotpath-cpu",\n    "hotpath/hotpath-cpu",\n]\n',
+        "",
+    )
+    missing_cli_cpu = run_fixture(
+        cli_source=cli_without_cpu,
+        cli_packaged=cli_without_cpu,
+    )
+    if missing_cli_cpu.returncode == 0:
+        raise SystemExit("CLI without the Hotpath CPU release feature was accepted")
+    if "tracedecay-cli is missing required features" not in missing_cli_cpu.stderr:
+        raise SystemExit("missing CLI CPU feature failed for an unexpected reason")
+
+    cli_with_miswired_mcp = CLI_MANIFEST.replace(
+        'hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]',
+        'hotpath-mcp = ["hotpath"]',
+    )
+    miswired_cli_mcp = run_fixture(
+        cli_source=cli_with_miswired_mcp,
+        cli_packaged=cli_with_miswired_mcp,
+    )
+    if miswired_cli_mcp.returncode == 0:
+        raise SystemExit("CLI with a mountless Hotpath MCP feature was accepted")
+    if "tracedecay-cli hotpath-mcp must enable" not in miswired_cli_mcp.stderr:
+        raise SystemExit("miswired CLI MCP feature failed for an unexpected reason")
 
     root_with_local_tier_members = ROOT_MANIFEST.replace(
         'full = ["tracedecay-code-index/full"]',

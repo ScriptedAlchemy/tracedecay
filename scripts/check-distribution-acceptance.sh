@@ -205,7 +205,9 @@ verify_feature_wiring() {
   local extraction_packaged_manifest=$6
   local semantic_source_manifest=$7
   local semantic_packaged_manifest=$8
-  local cargo_config=$9
+  local cli_source_manifest=$9
+  local cli_packaged_manifest=${10}
+  local cargo_config=${11}
   python3 "$repo/scripts/check-distribution-feature-wiring.py" \
     --root-source "$source_manifest" \
     --root-packaged "$packaged_manifest" \
@@ -215,6 +217,8 @@ verify_feature_wiring() {
     --extraction-packaged "$extraction_packaged_manifest" \
     --semantic-source "$semantic_source_manifest" \
     --semantic-packaged "$semantic_packaged_manifest" \
+    --cli-source "$cli_source_manifest" \
+    --cli-packaged "$cli_packaged_manifest" \
     --check-extraction-manifest "$extraction_packaged_manifest" \
     --cargo-config "$cargo_config" \
     --offline
@@ -246,6 +250,7 @@ require_command cargo
 require_command cmp
 require_command curl
 require_command python3
+require_command rustc
 require_command tar
 
 repo=$(cd -- "$repo" && pwd -P)
@@ -280,6 +285,36 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+host_target=""
+while IFS= read -r rustc_version_line; do
+  if [[ $rustc_version_line == "host: "* ]]; then
+    host_target=${rustc_version_line#host: }
+    host_target=${host_target%$'\r'}
+  fi
+done < <(rustc -vV)
+[[ -n $host_target ]] || die "rustc did not report its host target"
+release_profile_output="$work/release-profile-output"
+python3 "$repo/scripts/resolve-release-source-profile.py" \
+  --source "$repo" \
+  --target "$host_target" \
+  --github-output "$release_profile_output"
+release_profile=""
+release_cargo_features=""
+while IFS='=' read -r output_name output_value; do
+  case "$output_name" in
+    profile) release_profile=$output_value ;;
+    cargo_features) release_cargo_features=$output_value ;;
+  esac
+done < "$release_profile_output"
+[[ $release_profile == production ]] ||
+  die "distribution acceptance requires a production release profile"
+[[ -n $release_cargo_features ]] ||
+  die "production release profile omitted Cargo features"
+release_cli_cargo_args=(
+  --no-default-features
+  --features "$release_cargo_features"
+)
 
 fastembed_fixture_source="$repo/tests/distribution/fastembed"
 fastembed_fixture="$work/fastembed"
@@ -413,14 +448,15 @@ verify_feature_wiring \
   "$code_extraction_package/Cargo.toml" \
   "$repo/crates/tracedecay-semantic/Cargo.toml" \
   "$semantic_package/Cargo.toml" \
+  "$repo/crates/tracedecay-cli/Cargo.toml" \
+  "$cli_package/Cargo.toml" \
   "$patch_config"
 
-echo "distribution acceptance: compiling packaged CLI with production features"
+echo "distribution acceptance: compiling packaged CLI with release facilities"
 cargo build \
   --manifest-path "$cli_package/Cargo.toml" \
   --release \
-  --no-default-features \
-  --features production \
+  "${release_cli_cargo_args[@]}" \
   --bin tracedecay \
   --config "$patch_config"
 executable_suffix=""
@@ -539,12 +575,11 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   --no-tests=fail
 
 install_root="$work/install"
-echo "distribution acceptance: installing packaged CLI with production features"
+echo "distribution acceptance: installing packaged CLI with release facilities"
 cargo install \
   --path "$cli_package" \
   --root "$install_root" \
-  --no-default-features \
-  --features production \
+  "${release_cli_cargo_args[@]}" \
   --config "$patch_config"
 
 consumer="$work/library-consumer"
