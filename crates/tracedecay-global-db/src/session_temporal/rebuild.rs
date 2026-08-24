@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use tracedecay_domain::{DurableObservationV1, MessageOccurrenceIdV1, ProjectionOutputOrdinalV1};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionGenerationActivationReceiptV1,
@@ -11,14 +10,10 @@ use tracedecay_store::{
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::super::RegisteredGlobalDb;
-use super::super::observation_projection::derive_projection;
-use super::projection::{
-    canonical_parent_message_resolver, observation_envelope_from_payload,
-    validate_final_projection_receipt,
-};
+use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
 use super::query::{
-    ACTIVATE_OPERATION, BEGIN_OPERATION, encode_watermarks, frontier_i64, generation_i64,
-    now_micros, read_generation, require_active_generation, storage, storage_message,
+    ACTIVATE_OPERATION, BEGIN_OPERATION, encode_watermarks, generation_i64, now_micros,
+    read_generation, require_active_generation, storage, storage_message,
 };
 use super::relation_projection::reconstruct_session_relation_projection;
 use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
@@ -151,6 +146,7 @@ impl RegisteredGlobalDb {
             request.generation(),
             request.snapshot().watermarks(),
             &relation_projection,
+            request.execution_control(),
         )
         .await?;
         validate_candidate_frontier(
@@ -159,6 +155,7 @@ impl RegisteredGlobalDb {
             generation,
             request.snapshot().watermarks().source_frontier(),
             &relation_projection,
+            request.execution_control(),
         )
         .await?;
 
@@ -387,13 +384,16 @@ async fn bootstrap_first_active_generation(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) async fn validate_candidate_frontier(
     conn: &impl QueryExecutor,
     session_id: &str,
     generation: i64,
     source_frontier: u64,
     relation_projection: &SessionRelationProjection,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    checkpoint_relation_rebuild_control(control)?;
     if relation_projection.session_id.as_str() != session_id
         || i64::try_from(relation_projection.generation)
             .map_err(|error| storage(ACTIVATE_OPERATION, error))?
@@ -406,63 +406,24 @@ pub(super) async fn validate_candidate_frontier(
     }
     let mut expected = BTreeSet::new();
     let mut expected_copies = BTreeSet::new();
-    let parent_resolver =
-        canonical_parent_message_resolver(conn, session_id, source_frontier, ACTIVATE_OPERATION)
-            .await?;
-    let mut canonical_outputs = Vec::new();
-    let mut rows = conn
-        .query(
-            "SELECT observation_json
-             FROM observations
-             WHERE sequence <= ?1
-             ORDER BY sequence, observation_id",
-            params![frontier_i64(source_frontier, ACTIVATE_OPERATION)?],
-        )
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
-    {
-        let encoded: String = row
-            .get(0)
-            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-        let observation: DurableObservationV1 =
-            serde_json::from_str(&encoded).map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-        let envelope = observation_envelope_from_payload(observation.payload())
-            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-        let projection =
-            derive_projection(&observation).map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-        for output in projection
-            .messages()
-            .filter(|output| output.session().session_id == session_id)
-        {
-            let occurrence_id = MessageOccurrenceIdV1::derive(
-                observation.observation_id(),
-                ProjectionOutputOrdinalV1::new(output.output_ordinal()),
-            )
-            .as_str()
-            .to_owned();
-            // Mirrors `derive_retained_projection_relations`: only a re-emission
-            // of the same logical message is a derived logical copy. A parent
-            // link to a *different* message is conversation threading and must
-            // not be demanded as copy coverage.
-            let parent_message_id = envelope
-                .relations()
-                .parent_message_id()
-                .filter(|parent| parent.as_str() == output.message().message_id)
-                .map(|value| value.as_str().to_owned());
-            canonical_outputs.push((occurrence_id, parent_message_id));
-        }
-    }
-    for (occurrence_id, parent_message_id) in canonical_outputs {
+    let parent_resolver = canonical_parent_message_resolver(
+        conn,
+        session_id,
+        source_frontier,
+        ACTIVATE_OPERATION,
+        Some(control),
+        true,
+    )
+    .await?;
+    checkpoint_relation_rebuild_control(control)?;
+    for (occurrence_id, parent_message_id) in parent_resolver.canonical_outputs() {
+        checkpoint_relation_rebuild_control(control)?;
         if let Some(parent_message_id) = parent_message_id
-            && let Some(parent_occurrence_id) = parent_resolver.resolve(&parent_message_id)
+            && let Some(parent_occurrence_id) = parent_resolver.resolve(parent_message_id)
         {
             expected_copies.insert((occurrence_id.clone(), parent_occurrence_id.to_owned()));
         }
-        expected.insert(occurrence_id);
+        expected.insert(occurrence_id.clone());
     }
     if expected.is_empty() && source_frontier != 0 {
         return Err(storage_message(
@@ -487,6 +448,7 @@ pub(super) async fn validate_candidate_frontier(
         .await
         .map_err(|error| storage(ACTIVATE_OPERATION, error))?
     {
+        checkpoint_relation_rebuild_control(control)?;
         actual.insert(
             row.get::<String>(0)
                 .map_err(|error| storage(ACTIVATE_OPERATION, error))?,

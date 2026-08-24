@@ -167,6 +167,21 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "idx_session_occurrences_message",
         ),
         (
+            "SELECT occurrence.occurrence_id
+             FROM session_occurrences AS occurrence
+             JOIN session_temporal_observation_effects AS effect
+               ON effect.observation_id = occurrence.source_observation_id
+              AND effect.session_id = occurrence.session_id
+             WHERE occurrence.session_id = 'session-one'
+               AND occurrence.generation = 1
+               AND occurrence.message_id = 'message-one'
+             ORDER BY effect.observation_sequence,
+                      occurrence.projection_output_ordinal,
+                      occurrence.occurrence_id
+             LIMIT 1",
+            "idx_session_occurrences_message",
+        ),
+        (
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
