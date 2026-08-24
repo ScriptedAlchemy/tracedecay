@@ -6,7 +6,7 @@
 # the `claude-integration` CI job and runnable locally:
 #
 #   npm install --global @anthropic-ai/claude-code@<pinned>
-#   cargo build --bin tracedecay
+#   cargo build -p tracedecay-cli --bin tracedecay
 #   scripts/claude_stock_integration.sh
 #
 # Environment:

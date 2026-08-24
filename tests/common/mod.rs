@@ -696,8 +696,48 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     detach_from_test_process_group(command);
 }
 
+pub fn tracedecay_bin() -> PathBuf {
+    let binary = std::env::var_os("TRACEDECAY_TEST_BIN")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_tracedecay").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            let test_executable =
+                std::env::current_exe().expect("test executable path should resolve");
+            let profile_dir = test_executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("integration test should run from a Cargo profile directory");
+            profile_dir.join(format!("tracedecay{}", std::env::consts::EXE_SUFFIX))
+        });
+    assert!(
+        binary.is_file(),
+        "workspace tracedecay binary is missing at {}; build it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",
+        binary.display()
+    );
+
+    let output = Command::new(&binary)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {} --version: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "{} --version exited with {}",
+        binary.display(),
+        output.status
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let expected = format!("tracedecay {}", tracedecay::version::build_version());
+    assert_eq!(
+        actual,
+        expected,
+        "{} is not the CLI built from the current checkout; rebuild it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",
+        binary.display()
+    );
+    binary
+}
+
 pub fn tracedecay_command_with_home(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);
     command
 }
@@ -891,7 +931,7 @@ fn spawn_tracedecay_daemon_process(
         authority_path.display()
     );
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);
     command
         .args(["daemon", "run"])

@@ -5,7 +5,7 @@
 #
 #   git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-upstream
 #   git -C /tmp/hermes-upstream checkout <pinned ref>
-#   cargo build --bin tracedecay
+#   cargo build -p tracedecay-cli --bin tracedecay
 #   scripts/hermes_stock_integration.sh
 #
 # Environment:

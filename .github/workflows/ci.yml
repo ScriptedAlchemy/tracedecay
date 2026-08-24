@@ -64,7 +64,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build checked-out TraceDecay CLI
-        run: cargo build --bin tracedecay --locked
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
       - name: Test dogfood output validation
         run: python3 scripts/test-check-pr-dogfood-output.py
@@ -657,7 +657,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build tracedecay binary
-        run: cargo build --bin tracedecay --locked
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
@@ -713,7 +713,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build tracedecay binary
-        run: cargo build --bin tracedecay --locked
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
       - name: Install stock Claude Code and OpenCode at pinned versions
         run: |

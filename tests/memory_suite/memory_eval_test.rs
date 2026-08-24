@@ -107,7 +107,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+        let mut command = Command::new(crate::common::tracedecay_bin());
         command
             .current_dir(&self.project_path)
             .env("HOME", &self.home_path)

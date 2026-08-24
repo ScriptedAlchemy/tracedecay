@@ -1214,7 +1214,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     // retryable state out is the client protocol for this bridge.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let output = loop {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+        let mut command = std::process::Command::new(crate::common::tracedecay_bin());
         common::apply_tracedecay_home_env(&mut command, &home);
         let output = command
             .current_dir(outside_cwd.path())

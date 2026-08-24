@@ -32,6 +32,7 @@
 //! (`ExecutableBindingV1::request_schema`), so no handwritten payload mirror can
 //! drift from the wire contract.
 
+#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]

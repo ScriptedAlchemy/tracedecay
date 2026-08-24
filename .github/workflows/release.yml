@@ -204,6 +204,11 @@ jobs:
           python3 .release-automation/scripts/resolve-release-source-profile.py \
             --source . \
             --github-output "$GITHUB_OUTPUT"
+          if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
+            echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
+          else
+            echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare target release runtime
         id: target-runtime
@@ -269,10 +274,10 @@ jobs:
       # binary (e.g. test-transport) on disk at the shared release output
       # path for later packaging steps to pick up.
       - name: Verify all-feature release build compiles
-        run: cargo build --release --target ${{ matrix.target }} --all-features --locked
+        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
 
       - name: Build release binary for packaging
-        run: cargo build --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
+        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
 
       - name: Install modern Bash for distribution acceptance
         if: runner.os == 'macOS'
@@ -886,7 +891,7 @@ jobs:
           npm run build
 
       - name: Build the real production daemon for conformance
-        run: cargo build --bin tracedecay
+        run: cargo build -p tracedecay-cli --bin tracedecay
 
       - name: Real-daemon conformance against the exact packed tarball
         working-directory: sdks/typescript

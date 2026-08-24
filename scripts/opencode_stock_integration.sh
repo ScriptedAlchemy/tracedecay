@@ -6,7 +6,7 @@
 # runnable locally:
 #
 #   npm install --global opencode-ai@<pinned>
-#   cargo build --bin tracedecay
+#   cargo build -p tracedecay-cli --bin tracedecay
 #   scripts/opencode_stock_integration.sh
 #
 # Environment:
