@@ -47,6 +47,34 @@ model, download models, or start a second daemon against an operator profile.
 The harness does not run Cargo benchmarks. Build or Cargo benchmarking is a
 separate activity and is performed only when separately requested.
 
+Stable and beta release archives compile the Hotpath core, allocation, and MCP
+facilities into the `tracedecay` executable. Linux and macOS archives also
+compile Hotpath's CPU facility; Hotpath 0.24 does not support that facility on
+Windows. Profiler collection services remain opt-in at runtime through
+`TRACEDECAY_HOTPATH`: when it is unset, TraceDecay does not create a Hotpath
+guard or start its report, sampling, metrics, or MCP services. The compiled
+timing call sites still retain Hotpath's inactive guard overhead; this is not a
+claim that the release binary is byte-for-byte equivalent to a feature-off
+build.
+
+When activated, Hotpath's metrics HTTP server defaults to port 6770 and its
+separate MCP server defaults to `http://127.0.0.1:6771/mcp`; override them with
+`HOTPATH_METRICS_PORT` and `HOTPATH_MCP_PORT`. These are profiler endpoints,
+not TraceDecay's product MCP transport.
+
+The CPU feature is not a self-contained sampling executable. On Linux or
+macOS, install both `hotpath-samply` and `samply` on `PATH` before requesting
+CPU profiling. `HOTPATH_SAMPLY_WRAPPER_BIN` and `HOTPATH_SAMPLY_BIN` may point
+to explicit executable paths. Release archives do not bundle either external
+tool, so their absence must be reported as an unavailable CPU profiler rather
+than treated as CPU evidence.
+
+```sh
+cargo install hotpath --version 0.24.0 --locked \
+  --features hotpath-cpu --bin hotpath-samply
+cargo install samply --locked
+```
+
 `prepare` only validates and copies deterministic fixtures. It must not launch
 a daemon. Prepared data includes the checked-in project history and native
 Codex, Claude, and Cursor provider layouts so session ingestion is exercised
