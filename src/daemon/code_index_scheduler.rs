@@ -4106,6 +4106,7 @@ pub(in crate::daemon) mod observability;
 mod privacy;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
+mod reconcile_panic_guard;
 mod registry;
 pub(crate) mod semantic_query_runtime;
 pub(crate) mod semantic_vector_graph;

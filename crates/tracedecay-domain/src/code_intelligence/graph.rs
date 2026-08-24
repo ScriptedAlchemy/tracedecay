@@ -896,11 +896,19 @@ pub struct CodeBlock {
 ///
 /// The ID format is `"kind:32hexchars"` where the hex portion is the first 32
 /// characters of the SHA-256 hash of the input components.
+///
+/// `name` is extractor output derived from arbitrary user source, not a
+/// programmer-supplied invariant, so an empty name is accepted input rather
+/// than a contract violation: legal constructs such as `test.describe("", …)`,
+/// `export default () => {}`, and IIFEs are genuinely unnamed. Identity does
+/// not depend on the name being non-empty — file path, kind, and line already
+/// separate two anonymous constructs — so an empty name hashes like any other
+/// and behaves identically in debug and release builds. A `debug_assert!` here
+/// previously panicked the indexing pool on such files in debug/perf profiles
+/// while release silently produced this same id; callers that want a readable
+/// display name must synthesize one (see the `<anonymous>` convention used
+/// across the extractors) instead of relying on an assertion here.
 pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32) -> String {
-    debug_assert!(
-        !name.is_empty(),
-        "generate_node_id called with empty name for {file_path}:{line}"
-    );
     let input = format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line);
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -923,4 +931,44 @@ pub struct ResolvedRef {
     pub target_node_id: String,
     pub confidence: f64,
     pub resolved_by: String,
+}
+
+#[cfg(test)]
+mod empty_name_node_id_tests {
+    use super::{NodeKind, generate_node_id};
+
+    /// Real source contains anonymous constructs (`test.describe("", …)`,
+    /// `export default () => {}`). Extracted names are parser output, not a
+    /// programmer contract, so an empty name must produce an id in every
+    /// build profile instead of tripping a debug-only assertion.
+    #[test]
+    fn empty_name_yields_a_deterministic_id_in_every_profile() {
+        let first = generate_node_id(
+            "integration/fs-routes-test.ts",
+            &NodeKind::Function,
+            "",
+            286,
+        );
+        let second = generate_node_id(
+            "integration/fs-routes-test.ts",
+            &NodeKind::Function,
+            "",
+            286,
+        );
+        assert_eq!(first, second, "empty-name ids must be deterministic");
+        assert!(
+            first.starts_with("function:"),
+            "unexpected id shape: {first}"
+        );
+    }
+
+    /// Uniqueness of an empty-name id comes from file path, kind, and line,
+    /// so distinct anonymous constructs never collide onto one node.
+    #[test]
+    fn empty_name_ids_stay_distinct_per_file_kind_and_line() {
+        let base = generate_node_id("a.ts", &NodeKind::Function, "", 286);
+        assert_ne!(base, generate_node_id("b.ts", &NodeKind::Function, "", 286));
+        assert_ne!(base, generate_node_id("a.ts", &NodeKind::Class, "", 286));
+        assert_ne!(base, generate_node_id("a.ts", &NodeKind::Function, "", 287));
+    }
 }
