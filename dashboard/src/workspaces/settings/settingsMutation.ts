@@ -6,6 +6,7 @@ import {
   readSettingsEnvelope,
   settingsRevisionConflict,
   settingsRevisionId,
+  type CodeIndexWorkerSettingsChangeSet,
   type ProjectSettingsChangeSet,
   type SettingsScope,
   type SettingsValidationError,
@@ -70,7 +71,10 @@ export interface SettingsMutationRequest {
   readonly idempotencyKey: string;
   readonly readUrl: string;
   readonly patchUrl: string;
-  readonly patch: ProjectSettingsChangeSet | UserSettingsChangeSet;
+  readonly patch:
+    | ProjectSettingsChangeSet
+    | UserSettingsChangeSet
+    | CodeIndexWorkerSettingsChangeSet;
   /** Whether the dashboard scope these routes are addressed in accepts writes.
    * Supplied by the caller rather than read from the store here, so this stays
    * a function of its request and remains directly testable. */

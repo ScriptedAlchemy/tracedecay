@@ -1,5 +1,5 @@
 use super::{
-    hook_output_owner_event_id, hook_route_metadata_from_event, run_with_test_env_lock,
+    hook_output_owner_event_id, hook_route_metadata_from_parsed, run_with_test_env_lock,
     schedule_user_session_review,
 };
 
@@ -34,10 +34,8 @@ fn hook_route_metadata_preserves_camel_case_session_ids() {
     })
     .to_string();
 
-    let Some(route) = hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
-    else {
-        panic!("route metadata should parse");
-    };
+    let parsed: serde_json::Value = serde_json::from_str(&event).expect("event JSON");
+    let route = hook_route_metadata_from_parsed(&parsed, std::path::Path::new("/tmp/project"));
 
     assert_eq!(route.session_id.as_deref(), Some("session-camel"));
 
@@ -47,10 +45,8 @@ fn hook_route_metadata_preserves_camel_case_session_ids() {
     })
     .to_string();
 
-    let Some(route) = hook_route_metadata_from_event(&event, std::path::Path::new("/tmp/project"))
-    else {
-        panic!("route metadata should parse");
-    };
+    let parsed: serde_json::Value = serde_json::from_str(&event).expect("event JSON");
+    let route = hook_route_metadata_from_parsed(&parsed, std::path::Path::new("/tmp/project"));
 
     assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
 }

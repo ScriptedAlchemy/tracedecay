@@ -1,4 +1,13 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+/// `(session_id, generation, provider)` -> the `(state, frozen_watermarks_json)`
+/// rows the join produced for that participant key.
+type FrozenParticipantGenerations = HashMap<(String, i64, String), Vec<(String, String)>>;
+
+/// The largest participant batch one frozen-generation read binds. Each entry
+/// contributes three variables plus the shared project key, so this stays clear of
+/// `SQLite`'s default statement-variable ceiling.
+const FROZEN_PARTICIPANT_BATCH: usize = 300;
 
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
@@ -789,6 +798,12 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .authorized_root()
             .ok_or(TemporalPortError::UnauthorizedSnapshot)?
             .project_key();
+        // The per-participant frozen-generation probe is resolved from one chunked
+        // batch instead of one statement per participant. The batch is filled
+        // lazily, at the exact point the first participant would have issued its
+        // own query, so an unauthorized or unconvertible participant ahead of it
+        // still short-circuits before any read happens.
+        let mut frozen_generations: Option<FrozenParticipantGenerations> = None;
         for participant in snapshot.participant_manifest().entries() {
             control.checkpoint()?;
             if !participant.is_authorized_for_snapshot()
@@ -800,58 +815,36 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             }
             let generation = i64::try_from(participant.generation())
                 .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-            let mut rows = self
-                .read
-                .query(
-                    "SELECT generation.state, generation.frozen_watermarks_json
-                     FROM session_temporal_generations AS generation
-                     JOIN sessions AS source
-                       ON source.session_id = generation.session_id
-                      AND source.provider = ?3
-                      AND source.project_key = ?4
-                     WHERE generation.session_id = ?1
-                       AND generation.generation = ?2
-                     LIMIT 2",
-                    params![
-                        participant.session_id().as_str(),
-                        generation,
-                        participant.source_id(),
-                        project_key
-                    ],
+            let batch = match &frozen_generations {
+                Some(batch) => batch,
+                None => frozen_generations.insert(
+                    self.read_frozen_participant_generations(snapshot, project_key)
+                        .await?,
+                ),
+            };
+            let matched = batch
+                .get(&(
+                    participant.session_id().as_str().to_owned(),
+                    generation,
+                    participant.source_id().to_owned(),
+                ))
+                .map_or(&[][..], Vec::as_slice);
+            let (state, encoded) = matched.first().ok_or_else(|| {
+                read_message(
+                    SNAPSHOT_OPERATION,
+                    "frozen participant generation is missing",
                 )
-                .await
-                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-            let row = rows
-                .next()
-                .await
-                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
-                .ok_or_else(|| {
-                    read_message(
-                        SNAPSHOT_OPERATION,
-                        "frozen participant generation is missing",
-                    )
-                })?;
-            let state: String = row
-                .get(0)
-                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-            let encoded: String = row
-                .get(1)
-                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-            if rows
-                .next()
-                .await
-                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
-                .is_some()
-            {
+            })?;
+            if matched.len() > 1 {
                 return Err(read_message(
                     SNAPSHOT_OPERATION,
                     "frozen participant generation is not unique",
                 ));
             }
-            let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
+            let frozen: FrozenWatermarksWire = serde_json::from_str(encoded)
                 .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
             let watermarks = participant.watermarks();
-            if state != "active"
+            if state.as_str() != "active"
                 || frozen.active_generation > watermarks.generation
                 || frozen.source_frontier != watermarks.source
                 || frozen.projection_frontier != watermarks.projection
@@ -865,6 +858,103 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             }
         }
         control.checkpoint()
+    }
+
+    /// Reads every participant's frozen generation row in chunked batches.
+    ///
+    /// `session_temporal_generations` is keyed by `(session_id, generation)` and
+    /// `sessions` by `(provider, session_id)`, so the inner join yields at most one
+    /// row per `(session_id, generation, provider)` — the same row the replaced
+    /// per-participant `LIMIT 2` probe would have returned. Rows are still kept in
+    /// a vector per key so a schema that ever admitted a duplicate raises the same
+    /// "not unique" error the probe did.
+    async fn read_frozen_participant_generations(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        project_key: &str,
+    ) -> Result<FrozenParticipantGenerations, TemporalPortError> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        for participant in snapshot.participant_manifest().entries() {
+            // Participants whose generation does not fit an `i64` are skipped here;
+            // the validation loop still raises their conversion error in place.
+            let Ok(generation) = i64::try_from(participant.generation()) else {
+                continue;
+            };
+            let key = (
+                participant.session_id().as_str().to_owned(),
+                generation,
+                participant.source_id().to_owned(),
+            );
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+        let mut batch = FrozenParticipantGenerations::new();
+        if keys.is_empty() {
+            return Ok(batch);
+        }
+        for chunk in keys.chunks(FROZEN_PARTICIPANT_BATCH) {
+            let mut values = Vec::with_capacity(chunk.len() * 3 + 1);
+            values.push(Value::Text(project_key.to_owned()));
+            let predicate = chunk
+                .iter()
+                .enumerate()
+                .map(|(offset, (session_id, generation, provider))| {
+                    values.push(Value::Text(session_id.clone()));
+                    values.push(Value::Integer(*generation));
+                    values.push(Value::Text(provider.clone()));
+                    let base = offset * 3 + 2;
+                    format!(
+                        "(generation.session_id = ?{base} AND generation.generation = ?{} \
+                         AND source.provider = ?{})",
+                        base + 1,
+                        base + 2,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let sql = format!(
+                "SELECT generation.session_id, generation.generation, source.provider,
+                        generation.state, generation.frozen_watermarks_json
+                 FROM session_temporal_generations AS generation
+                 JOIN sessions AS source
+                   ON source.session_id = generation.session_id
+                  AND source.project_key = ?1
+                 WHERE {predicate}"
+            );
+            let mut rows = self
+                .read
+                .query(&sql, values)
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
+            {
+                let session_id: String = row
+                    .get(0)
+                    .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+                let generation: i64 = row
+                    .get(1)
+                    .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+                let provider: String = row
+                    .get(2)
+                    .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+                let state: String = row
+                    .get(3)
+                    .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+                let encoded: String = row
+                    .get(4)
+                    .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+                batch
+                    .entry((session_id, generation, provider))
+                    .or_default()
+                    .push((state, encoded));
+            }
+        }
+        Ok(batch)
     }
 
     async fn produce_candidates(

@@ -854,15 +854,6 @@ fn take_test_daemon_hook_action(
 }
 
 // Only the hook tests assert on the derived route metadata.
-#[cfg(test)]
-fn hook_route_metadata_from_event(
-    event_json: &str,
-    project_root: &Path,
-) -> Option<HookRouteMetadata> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    Some(hook_route_metadata_from_parsed(&parsed, project_root))
-}
-
 pub(crate) fn hook_route_metadata_from_parsed(
     parsed: &Value,
     project_root: &Path,

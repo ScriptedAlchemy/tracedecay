@@ -1,10 +1,14 @@
 use std::fs;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+};
 
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
@@ -41,6 +45,106 @@ fn fixture() -> TempDir {
     git(root.path(), &["add", "src/lib.rs"]);
     git(root.path(), &["commit", "-q", "-m", "fixture"]);
     root
+}
+
+fn worker_reservation_bytes() -> u64 {
+    let status = tracedecay_code_index::parallelism::install_worker_plan(
+        CodeIndexWorkerSelectionV1::Automatic,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    )
+    .expect("install automatic worker plan");
+    tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
+        status.effective_workers,
+    ))
+}
+
+#[test]
+fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-source-memory").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let authority = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(1024 * 1024).expect("source memory limit"),
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture source snapshot");
+    let retained_bytes = captured
+        .retained_bytes
+        .iter()
+        .map(|bytes| bytes.len() as u64)
+        .sum::<u64>();
+    assert!(retained_bytes > 0);
+    assert_eq!(authority.snapshot().used_bytes, retained_bytes * 2);
+    drop(captured);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn completed_reconcile_releases_the_captured_file_copy_charge() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-source-build-copy").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let authority = Arc::new(ProcessResidentMemoryV1::new(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+
+    scheduler.reconcile_now().expect("publish generation");
+    let retained_bytes = scheduler
+        .retained_snapshot_bytes
+        .iter()
+        .map(|bytes| bytes.len() as u64)
+        .sum::<u64>();
+    assert!(retained_bytes > 0);
+    assert_eq!(authority.snapshot().used_bytes, retained_bytes);
+
+    assert!(matches!(
+        scheduler
+            .reconcile_now()
+            .expect("reconcile unchanged source"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        retained_bytes,
+        "the no-build path must drop captured Vec copies before retaining only the Arc charge"
+    );
+}
+
+#[test]
+fn source_capture_refuses_before_build_when_retention_cannot_be_charged() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-source-refusal").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let authority = Arc::new(ProcessResidentMemoryV1::new(NonZeroU64::MIN));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+
+    assert!(matches!(
+        scheduler.capture_authoritative_snapshot(None),
+        Err(super::CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable)
+    ));
+    assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
 #[test]
@@ -90,6 +194,54 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
         generation_id,
         "borrowed publication encoding must remain restart-compatible"
     );
+}
+
+#[test]
+fn worker_memory_reservation_is_charged_and_released_by_raii() {
+    let project = fixture();
+    let project_id = ProjectId::new("project.code-index-worker-memory").expect("valid project");
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id,
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let reservation_bytes = worker_reservation_bytes();
+    let authority = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(reservation_bytes).expect("worker reservation is nonzero"),
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+    let reservation = scheduler
+        .reserve_worker_memory()
+        .expect("reserve worker memory");
+    assert_eq!(authority.snapshot().used_bytes, reservation_bytes);
+    drop(reservation);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn worker_memory_reservation_refusal_is_typed() {
+    let project = fixture();
+    let project_id = ProjectId::new("project.code-index-worker-refusal").expect("valid project");
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id,
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let reservation_bytes = worker_reservation_bytes();
+    let authority = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(reservation_bytes - 1).expect("positive test limit"),
+    ));
+    scheduler.bind_resident_memory(authority);
+    assert!(matches!(
+        scheduler.reserve_worker_memory(),
+        Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_))
+    ));
 }
 
 #[tokio::test]

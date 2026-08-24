@@ -1,6 +1,10 @@
 //! Codex rollout observation admission and canonical-envelope normalization.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Notify;
 
 pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
@@ -10,28 +14,50 @@ use tracedecay_capture::codex::{
     normalize_codex_observation_with_location,
 };
 use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, RetentionClass, SessionId,
+    ObservationScopeV1, ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass,
+    SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use super::PROVIDER;
 use super::context::CodexContextState;
-use super::meta::session_meta_with_provenance;
+use super::meta::{CodexMetaWithProvenance, session_meta_with_provenance};
 use crate::admission::HostAdmission;
 use crate::host_ports::unregistered_admission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
-    admit_jsonl_observations,
+    SharedJsonlFileIdentity, admit_jsonl_observations, reserve_shared_jsonl_page,
+    shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
 };
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
+    ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1,
 };
 
 const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
+pub const CODEX_HOOK_MAX_NEW_BYTES: u64 = crate::runtime::source::MAX_JSONL_RECORD_BYTES as u64;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CodexMetaCacheKey {
+    path: PathBuf,
+    identity: SharedJsonlFileIdentity,
+}
+
+struct CachedCodexMeta {
+    key: CodexMetaCacheKey,
+    meta: Arc<CodexMetaWithProvenance>,
+    _memory: Option<tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1>,
+}
+
+#[derive(Default)]
+struct CodexMetaCache {
+    entries: VecDeque<CachedCodexMeta>,
+    in_flight: HashMap<CodexMetaCacheKey, Arc<Notify>>,
+}
+
+static CODEX_META_CACHE: OnceLock<tokio::sync::Mutex<CodexMetaCache>> = OnceLock::new();
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CodexJsonlAdmissionProgress {
@@ -220,6 +246,118 @@ impl CodexObservationAdmission<'_> {
     }
 }
 
+#[derive(Clone)]
+struct CodexAdmissionState {
+    context: CodexContextState,
+    scope_verdict: Option<bool>,
+}
+
+async fn shared_session_meta_with_provenance(
+    path: &Path,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<Arc<CodexMetaWithProvenance>> {
+    let identity_path = path.to_path_buf();
+    let key = tokio::task::spawn_blocking(move || {
+        let canonical = std::fs::canonicalize(&identity_path).map_err(|source| {
+            TranscriptIngestError::ScanIo {
+                operation: "resolve Codex session metadata identity",
+                path: identity_path.clone(),
+                source,
+            }
+        })?;
+        let identity = shared_jsonl_file_identity(&canonical)?;
+        Ok::<_, TranscriptIngestError>(CodexMetaCacheKey {
+            path: canonical,
+            identity,
+        })
+    })
+    .await
+    .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
+    let cache_lock = CODEX_META_CACHE.get_or_init(tokio::sync::Mutex::default);
+    loop {
+        let mut cache = cache_lock.lock().await;
+        if let Some(index) = cache.entries.iter().position(|entry| entry.key == key) {
+            let entry = cache
+                .entries
+                .remove(index)
+                .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+            let meta = Arc::clone(&entry.meta);
+            cache.entries.push_back(entry);
+            hotpath::gauge!("codex_shared_meta_hits").inc(1.0);
+            return Ok(meta);
+        }
+        if let Some(notify) = cache.in_flight.get(&key) {
+            let notified = Arc::clone(notify).notified_owned();
+            drop(cache);
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                    if cancellation.is_cancelled() {
+                        return Err(TranscriptIngestError::Cancelled { provider: PROVIDER });
+                    }
+                }
+            }
+            continue;
+        }
+        cache.in_flight.insert(key.clone(), Arc::new(Notify::new()));
+        hotpath::gauge!("codex_shared_meta_misses").inc(1.0);
+        break;
+    }
+
+    let parse_path = key.path.clone();
+    let error_path = path.to_path_buf();
+    let build_cancellation = cancellation.clone();
+    let build = async move {
+        if build_cancellation.is_cancelled() {
+            return Err(TranscriptIngestError::Cancelled { provider: PROVIDER });
+        }
+        let mut memory = reserve_shared_jsonl_page()?;
+        let background_cpu = shared_jsonl_background_cpu()?;
+        let parsed = tokio::task::spawn_blocking(move || {
+            background_cpu.with_permit(|| session_meta_with_provenance(&parse_path))
+        })
+        .await
+        .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?
+        .ok_or(TranscriptIngestError::InvalidSourceIdentity {
+            provider: PROVIDER,
+            path: error_path,
+        })?;
+        let parsed = Arc::new(parsed);
+        if let Some(reservation) = &mut memory {
+            reservation
+                .shrink_to(parsed.retained_bytes())
+                .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+        }
+        Ok::<_, TranscriptIngestError>((parsed, memory))
+    }
+    .await;
+    let mut cache = cache_lock.lock().await;
+    let notify = cache.in_flight.remove(&key);
+    let (parsed, memory) = match build {
+        Ok(built) => built,
+        Err(error) => {
+            drop(cache);
+            if let Some(notify) = notify {
+                notify.notify_waiters();
+            }
+            return Err(error);
+        }
+    };
+    while cache.entries.len() >= shared_jsonl_preparation_capacity() {
+        cache.entries.pop_front();
+    }
+    cache.entries.push_back(CachedCodexMeta {
+        key,
+        meta: Arc::clone(&parsed),
+        _memory: memory,
+    });
+    drop(cache);
+    if let Some(notify) = notify {
+        notify.notify_waiters();
+    }
+    Ok(parsed)
+}
+
 async fn try_admit_codex_jsonl_observations(
     path: &Path,
     admission_scope: CodexObservationAdmission<'_>,
@@ -234,14 +372,9 @@ async fn try_admit_codex_jsonl_observations(
             ..CodexJsonlAdmissionProgress::default()
         });
     }
-    let parsed_meta = session_meta_with_provenance(path).ok_or_else(|| {
-        TranscriptIngestError::InvalidSourceIdentity {
-            provider: PROVIDER,
-            path: path.to_path_buf(),
-        }
-    })?;
-    let native_thread_id = parsed_meta.native_thread_id;
-    let meta = parsed_meta.meta;
+    let parsed_meta = shared_session_meta_with_provenance(path, cancellation).await?;
+    let native_thread_id = parsed_meta.native_thread_id.clone();
+    let meta = parsed_meta.meta.clone();
     if !admission_scope.accepts_session(&meta.session_id) {
         return Ok(CodexJsonlAdmissionProgress::default());
     }
@@ -266,47 +399,70 @@ async fn try_admit_codex_jsonl_observations(
     )
     .with_max_new_bytes(max_new_bytes)
     .with_persisted_cursor_update(PersistedCursorUpdate::Replace)
+    .with_shared_frame_preparation()
     .with_cancellation(cancellation.clone());
     let progress = admit_jsonl_observations(
         request,
         |scan| {
-            if scan.resumed {
+            let context = if scan.resumed {
                 CodexContextState::scan_prior(path, scan.start_offset, &meta)
             } else {
                 CodexContextState::from_meta(&meta)
+            };
+            CodexAdmissionState {
+                context,
+                scope_verdict: None,
             }
         },
-        |context_state, bytes, range, _| {
+        |state, _bytes, range, _, prepared, hints| {
             let mut stable_record_id = None;
             let mut non_durable_reason = None;
-            let parsed = parse_normalized_observation_record_v1(
-                bytes,
-                range,
-                ObservationOrderingDomainV1::FileBytes,
-                |native| {
-                    context_state.observe_context_record(&native, path, &meta);
-                    if !scope_matcher.accepts(context_state.cwd.as_deref()) {
-                        non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
-                        return Err(ObservationRecordParseErrorV1::NormalizationFailed);
-                    }
-                    if !codex_observation_record_supported(&native) {
-                        non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
-                        return Err(ObservationRecordParseErrorV1::NormalizationFailed);
-                    }
-                    let record_id = codex_native_record_id(&meta.session_id, &native)
-                        .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                    let envelope = normalize_codex_observation_with_location(
-                        &native,
-                        &meta.session_id,
-                        native_thread_id.as_deref(),
-                        record_id.clone(),
-                        range,
-                        source_location,
-                    )?;
-                    stable_record_id = Some(record_id);
-                    Ok(envelope)
-                },
-            );
+            // Scope is consulted before the record is decoded, not after. A
+            // rollout that belongs to another project answers the same verdict
+            // for every one of its frames, and the old order paid a full JSON
+            // decode per frame to reach it.
+            let in_scope = *state
+                .scope_verdict
+                .get_or_insert_with(|| scope_matcher.accepts(state.context.cwd.as_deref()));
+            if !in_scope && !hints.may_change_codex_context {
+                return Ok(JsonlFrameAdmission::non_durable(
+                    ObservationCoverageReason::OutOfScope,
+                ));
+            }
+            let Some(prepared) = prepared else {
+                return Ok(JsonlFrameAdmission::needs_preparation());
+            };
+            let parsed = normalize_prepared_observation_record_v1(prepared, |native| {
+                if state.context.observe_context_record(&native, path, &meta) {
+                    // Only a context record can move the rollout's cwd,
+                    // so the memoized verdict is dropped exactly when it
+                    // can no longer be trusted.
+                    state.scope_verdict = None;
+                }
+                if !*state
+                    .scope_verdict
+                    .get_or_insert_with(|| scope_matcher.accepts(state.context.cwd.as_deref()))
+                {
+                    non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                }
+                if !codex_observation_record_supported(&native) {
+                    non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                }
+                let record_id = codex_native_record_id(&meta.session_id, &native)
+                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                let envelope = normalize_codex_observation_with_location(
+                    &native,
+                    &meta.session_id,
+                    native_thread_id.as_deref(),
+                    record_id.clone(),
+                    range,
+                    source_location,
+                )?;
+                stable_record_id = Some(record_id);
+                Ok(envelope)
+            });
             match parsed {
                 Ok(parsed) => Ok(JsonlFrameAdmission::durable(
                     parsed,
