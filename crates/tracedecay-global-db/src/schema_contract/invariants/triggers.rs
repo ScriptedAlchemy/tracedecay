@@ -811,10 +811,7 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             AND substr(receipt.batch_digest, 8) NOT GLOB '*[^0-9a-f]*'
                             AND receipt.projection_through =
                                 json_extract(NEW.frontier_json, '$.committed_through')
-                            AND NEW.committed_records =
-                                receipt.occurrence_count
-                                + receipt.copy_count
-                                + receipt.assertion_count
+                            AND NEW.committed_records = receipt.committed_item_count
                             AND (
                               (
                                 NEW.progress_ordinal = 0

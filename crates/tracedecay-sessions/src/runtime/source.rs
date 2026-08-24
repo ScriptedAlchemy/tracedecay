@@ -77,10 +77,9 @@ impl HostProviderCoverage {
     }
 }
 
-/// Durable Codex history-rotation cursor (project admission and the
-/// sweep-complete watermark share this key; user ingest keeps its own
-/// profile-store frontier and writes the same packed value).
-pub(super) const CODEX_HISTORY_FRONTIER_KEY: &str = "tracedecay-internal:codex-history-frontier:v1";
+/// Durable typed Codex discovery frontier for project-scoped admission.
+pub(super) const CODEX_HISTORY_FRONTIER_KEY: &str = "tracedecay-internal:codex-history-frontier:v2";
+pub(super) const CODEX_HISTORY_EPOCH_KEY: &str = "tracedecay-internal:codex-history-epoch:v2";
 
 pub(super) async fn read_host_provider_coverage(
     admission: &dyn HostAdmission,
@@ -100,38 +99,41 @@ pub(super) async fn read_host_provider_coverage(
 pub(super) async fn read_codex_history_frontier(
     admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
-) -> TranscriptIngestResult<u64> {
-    Ok(admission
-        .get_parse_offset(scope, CODEX_HISTORY_FRONTIER_KEY)
-        .await
-        .map_err(|outcome| {
-            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
-        })?
-        .map(|offset| offset.byte_offset)
-        .unwrap_or(0))
-}
-
-pub(super) async fn persist_codex_history_frontier(
-    admission: &dyn HostAdmission,
-    scope: &ObservationScopeV1,
-    rotation: u64,
-) -> TranscriptIngestResult<()> {
-    let current = admission
+) -> TranscriptIngestResult<crate::runtime::codex::CodexDiscoveryFrontier> {
+    let stored_frontier = admission
         .get_parse_offset(scope, CODEX_HISTORY_FRONTIER_KEY)
         .await
         .map_err(|outcome| {
             crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
         })?
         .unwrap_or_default();
+    let stored_epoch = admission
+        .get_parse_offset(scope, CODEX_HISTORY_EPOCH_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })?
+        .unwrap_or_default();
+    crate::runtime::codex::CodexDiscoveryFrontier::from_parse_offsets(stored_frontier, stored_epoch)
+}
+
+pub(super) async fn persist_codex_history_frontier(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    expected: crate::runtime::codex::CodexDiscoveryFrontier,
+    frontier: crate::runtime::codex::CodexDiscoveryFrontier,
+) -> TranscriptIngestResult<()> {
+    let (frontier_offset, epoch_offset) = frontier.into_parse_offsets();
+    let (expected_frontier, expected_epoch) = expected.into_parse_offsets();
     admission
-        .advance_parse_offset(
+        .replace_parse_offset_pair(
             scope,
-            CODEX_HISTORY_FRONTIER_KEY,
-            ParseOffset {
-                byte_offset: rotation,
-                mtime: current.mtime.saturating_add(1).max(1),
-                file_id: current.file_id.max(1),
-            },
+            (
+                CODEX_HISTORY_FRONTIER_KEY,
+                expected_frontier,
+                frontier_offset,
+            ),
+            (CODEX_HISTORY_EPOCH_KEY, expected_epoch, epoch_offset),
         )
         .await
         .map_err(|outcome| {
@@ -214,6 +216,13 @@ pub enum TranscriptIngestError {
     InvalidFrameState { provider: &'static str },
     #[error("{provider} blocking source scan did not join successfully")]
     BlockingScanTaskFailed { provider: &'static str },
+    #[error("{provider} background resource is unavailable: {resource}")]
+    BackgroundResourceUnavailable {
+        provider: &'static str,
+        resource: &'static str,
+    },
+    #[error("Codex discovery frontier is invalid: {detail}")]
+    InvalidCodexDiscoveryFrontier { detail: &'static str },
     #[error("{provider} transcript has no injective source identity: {path}")]
     InvalidSourceIdentity {
         provider: &'static str,
@@ -749,8 +758,8 @@ pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 pub use jsonl::try_stream_new_jsonl_raw_strict;
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
-    RawJsonlFrameReader, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,
-    try_stream_new_jsonl_raw_strict_with_resume,
+    RawJsonlFrameReader, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,
+    STRICT_JSONL_BATCH_BYTES, try_stream_new_jsonl_raw_strict_with_resume,
 };
 pub use jsonl::{JsonlLine, NewJsonl, stream_new_jsonl};
 #[cfg(test)]

@@ -642,6 +642,39 @@ export const CodeIndexFreshnessPayloadV1Schema = z.object({
 });
 export type CodeIndexFreshnessPayloadV1 = z.infer<typeof CodeIndexFreshnessPayloadV1Schema>;
 
+export const CodeIndexWorkerLimitingReasonV1Schema = z.enum(["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]);
+export type CodeIndexWorkerLimitingReasonV1 = z.infer<typeof CodeIndexWorkerLimitingReasonV1Schema>;
+
+/** Profile-level worker-count intent for the process-wide code-index pool.
+`Automatic` delegates the concrete count to runtime resource admission;
+`Exact` persists an operator-requested positive worker count. */
+export const CodeIndexWorkerSelectionV1Schema = z.discriminatedUnion("mode", [z.object({
+  mode: z.literal("automatic"),
+}).strict(), z.object({
+  mode: z.literal("exact"),
+  workers: z.number().int().min(0).max(65535),
+}).strict()]);
+export type CodeIndexWorkerSelectionV1 = z.infer<typeof CodeIndexWorkerSelectionV1Schema>;
+
+/** Dedicated profile-session worker patch. Its CAS token is never a project
+configuration revision, so it cannot be mixed with [`UserSettingsPatch`]. */
+export const CodeIndexWorkerSettingsPatchSchema = z.object({
+  code_index_workers: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
+  expected_revision_id: z.string(),
+  idempotency_key: z.string(),
+}).strict();
+export type CodeIndexWorkerSettingsPatch = z.infer<typeof CodeIndexWorkerSettingsPatchSchema>;
+
+export const CodeIndexWorkerStatusV1Schema = z.object({
+  available_logical_cpus: z.number().int().min(0).max(65535),
+  configured: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
+  effective_workers: z.number().int().min(0).max(65535),
+  environment_override_workers: z.number().int().min(0).max(65535).nullable(),
+  limiting_reason: z.lazy(() => CodeIndexWorkerLimitingReasonV1Schema),
+  memory_safe_workers: z.number().int().min(0).max(65535),
+}).strict();
+export type CodeIndexWorkerStatusV1 = z.infer<typeof CodeIndexWorkerStatusV1Schema>;
+
 /** Freshness/generation state for one mounted worktree.
 
 `Deserialize` is part of the wire contract: the CLI status command decodes
@@ -4327,9 +4360,9 @@ export const StorageFindingKindStatusV1Schema = z.object({
 });
 export type StorageFindingKindStatusV1 = z.infer<typeof StorageFindingKindStatusV1Schema>;
 
-/** Whether one Plan 38 producer had enough source evidence to report a real
-result. This is source coverage, not a health grade: `Real` can describe a
-clean observation or a problem finding. */
+/** Whether one storage finding producer had enough source evidence to report
+a real result. This is source coverage, not a health grade: `Real` can
+describe a clean observation or a problem finding. */
 export const StorageFindingSourceStateV1Schema = z.enum(["partial", "real", "unsupported"]);
 export type StorageFindingSourceStateV1 = z.infer<typeof StorageFindingSourceStateV1Schema>;
 
@@ -4772,6 +4805,10 @@ export const UserSettingsPatchSchema = z.object({
 export type UserSettingsPatch = z.infer<typeof UserSettingsPatchSchema>;
 
 export const UserSettingsPayloadV1Schema = z.object({
+  code_index_worker_configuration_revision_id: z.string(),
+  code_index_worker_configuration_snapshot_id: z.string(),
+  code_index_worker_status: z.union([z.lazy(() => CodeIndexWorkerStatusV1Schema), z.null()]),
+  code_index_workers: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
   configuration_revision_id: z.string(),
   configuration_snapshot_id: z.string(),
   extraction_timeout_secs: z.number().int().safe().min(0),
@@ -5075,8 +5112,9 @@ export const WorkAuthoritySchema = z.object({
 }).strict();
 export type WorkAuthority = z.infer<typeof WorkAuthoritySchema>;
 
-/** Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately
-per Plan 06 :84-85; `support_floor` carries the governing floor into the record. */
+/** Calibrated sizing. Emitted ONLY when support >= floor. Every field is
+named separately (Plan 06); `support_floor` carries the governing floor
+into the record. */
 export const WorkCalibratedSizingV1Schema = z.object({
   band: z.lazy(() => WorkOrdinalBandV1Schema),
   cohort: z.string(),
@@ -6123,7 +6161,7 @@ a recorded decision. */
 export const WorkOrdinalBandV1Schema = z.enum(["high", "highest", "low", "lowest", "moderate"]);
 export type WorkOrdinalBandV1 = z.infer<typeof WorkOrdinalBandV1Schema>;
 
-/** Exactly the conditions Plan 32 names as blocking admission or removal. */
+/** Closed set of conditions that block admission or removal. */
 export const WorkPlacementBlockerV1Schema = z.union([z.literal("dirty_tracked_files"), z.literal("untracked_data"), z.literal("unique_commits"), z.literal("active_holder"), z.literal("unresolved_effect"), z.literal("unacknowledged_receipt"), z.literal("uncertain_pull_request"), z.literal("shared_ref"), z.literal("missing_anchor"), z.literal("stale_scope"), z.literal("authorization_lost"), z.literal("target_unreadable"), z.literal("network_required")]);
 export type WorkPlacementBlockerV1 = z.infer<typeof WorkPlacementBlockerV1Schema>;
 
@@ -6465,9 +6503,9 @@ export type WorkProductRevisionPinsV1 = z.infer<typeof WorkProductRevisionPinsV1
 
 /** The exact owner-relative relation set selected for a canonical Work graph.
 
-This identity lives in the domain because Plan 32 attempt admission must
-retain it byte-for-byte through provider settlement. Reconstructing it
-from a project context would conflate explicit no-Git work with a scoped
+This identity lives in the domain because attempt admission must retain
+it byte-for-byte through provider settlement. Reconstructing it from a
+project context would conflate explicit no-Git work with a scoped
 repository relation. */
 export const WorkProductSelectionScopeV1Schema = z.discriminatedUnion("selection", [z.object({
   selection: z.literal("profile_owned_no_git"),
@@ -6779,8 +6817,8 @@ export type WorkRunControlRequestV1 = z.infer<typeof WorkRunControlRequestV1Sche
 /** The published control state of one run.
 
 There is no `Cancelled` here: cancellation is an attempt-level authority
-that Plan 32 already owns through the lease fence, and duplicating it as a
-run state would create a second place a run could be "over". */
+owned through the lease fence, and duplicating it as a run state would
+create a second place a run could be "over". */
 export const WorkRunControlStateV1Schema = z.union([z.literal("running"), z.literal("paused")]);
 export type WorkRunControlStateV1 = z.infer<typeof WorkRunControlStateV1Schema>;
 

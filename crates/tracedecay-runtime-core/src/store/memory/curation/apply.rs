@@ -1,6 +1,6 @@
 //! Canonical tag curation and fact merge commands.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::Value;
 use tracedecay_domain::{
@@ -16,7 +16,7 @@ use tracedecay_store::{
 };
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
+use crate::db::engine::{params, params_from_iter};
 
 use super::super::crud::{
     add_project_memory_fact_tx, commit_batch_tx, remove_project_memory_fact_tx, sanitize_payload,
@@ -338,40 +338,78 @@ async fn verify_curation_replay_events_tx(
     Ok(())
 }
 
-async fn load_commit_events_tx(
+/// The largest `event_id IN (...)` batch one curation commit-receipt event load
+/// binds, kept clear of `SQLite`'s default variable ceiling.
+const COMMIT_EVENT_BATCH: usize = 500;
+
+/// Reads every canonical event a commit receipt names in chunked `IN (...)`
+/// batches instead of one probe per event id.
+///
+/// The returned vector stays in `committed_event_ids()` order: callers destructure
+/// it positionally and assert a strictly increasing `event_sequence`, so the batch
+/// rows are collected into a lookup and then replayed against the receipt's own
+/// ordering rather than the order `SQLite` happens to return them in.
+pub(super) async fn load_commit_events_tx(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     receipt: &FactCommitReceipt,
 ) -> FactStoreResult<Vec<(i64, FactLineageEventV1)>> {
-    let mut events = Vec::with_capacity(receipt.committed_event_ids().len());
-    for event_id in receipt.committed_event_ids() {
+    let event_ids = receipt.committed_event_ids();
+    if event_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `event_id -> (stored fact_id, event_json, event_sequence)`. The per-event
+    // probe this replaces bound `LIMIT 1` with no `ORDER BY`; the table's only
+    // uniqueness is `(event_id, fact_id, owner_kind, project_id)`, so the lowest
+    // `event_sequence` wins here to keep the choice deterministic.
+    let mut stored: HashMap<String, (String, String, i64)> =
+        HashMap::with_capacity(event_ids.len());
+    for chunk in event_ids.chunks(COMMIT_EVENT_BATCH) {
+        let placeholders = (3..=chunk.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT event_id, fact_id, event_json, event_sequence
+             FROM memory_v2_lineage_events
+             WHERE owner_kind = ?1 AND project_id = ?2
+               AND event_id IN ({placeholders})
+             ORDER BY event_sequence"
+        );
+        let mut bindings = Vec::with_capacity(chunk.len() + 2);
+        bindings.push(owner.kind);
+        bindings.push(owner.project_id.as_str());
+        bindings.extend(chunk.iter().map(FactEventId::as_str));
         let mut rows = transaction
-            .query(
-                "SELECT fact_id, event_json, event_sequence
-                 FROM memory_v2_lineage_events
-                 WHERE owner_kind = ?1 AND project_id = ?2 AND event_id = ?3
-                 LIMIT 1",
-                params![owner.kind, owner.project_id.as_str(), event_id.as_str()],
-            )
+            .query(&sql, params_from_iter(bindings))
             .await
             .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        let row = rows
+        while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-            .ok_or_else(|| {
+        {
+            let event_id = row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?;
+            let fact_id = row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?;
+            let event_json = row_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?;
+            let sequence = row_i64(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?;
+            stored
+                .entry(event_id)
+                .or_insert((fact_id, event_json, sequence));
+        }
+    }
+    let mut events = Vec::with_capacity(event_ids.len());
+    for event_id in event_ids {
+        let (stored_fact_id, event_json, sequence) =
+            stored.get(event_id.as_str()).ok_or_else(|| {
                 storage_message(
                     PROJECT_MEMORY_WRITE_OPERATION,
                     "curation receipt references a missing canonical event",
                 )
             })?;
-        let stored_fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)?;
-        let event = serde_json::from_str::<FactLineageEventV1>(&row_string(
-            &row,
-            1,
-            PROJECT_MEMORY_WRITE_OPERATION,
-        )?)
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+        let stored_fact_id = FactId::new(stored_fact_id.clone())?;
+        let event = serde_json::from_str::<FactLineageEventV1>(event_json)
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         if event.event_id() != event_id
             || event.fact_id() != &stored_fact_id
             || event.fact_id() != receipt.fact_id()
@@ -382,7 +420,7 @@ async fn load_commit_events_tx(
                 "curation receipt event does not match canonical storage",
             ));
         }
-        events.push((row_i64(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?, event));
+        events.push((*sequence, event));
     }
     Ok(events)
 }

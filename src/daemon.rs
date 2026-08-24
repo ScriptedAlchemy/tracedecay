@@ -191,7 +191,7 @@ pub(crate) mod privacy_remediation;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_configuration_test_runtime::{
-    dashboard_configuration_runtime_for_test, register_dashboard_test_retained_runtime,
+    dashboard_configuration_authorities_for_test, register_dashboard_test_retained_runtime,
 };
 pub(crate) mod query_authority_provider;
 #[cfg(any(test, feature = "test-transport"))]
@@ -247,7 +247,7 @@ use invocation_executor::{
     unavailable_root_generation,
 };
 mod invocation_state;
-use invocation_state::DaemonInvocationState;
+pub(crate) use invocation_state::DaemonInvocationState;
 pub(crate) mod lcm_authority;
 mod lsp_sessions;
 mod request_cancellation;

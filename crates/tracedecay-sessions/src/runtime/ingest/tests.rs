@@ -234,6 +234,7 @@ fn still_mounting_admission_failures_keep_the_admission_retryability() {
             status: crate::admission::HostAdmissionStatus::Unavailable,
             retryable: true,
             reason_code: Some("authority_write_failed"),
+            recovery: None,
         },
     );
 
@@ -254,6 +255,7 @@ fn permanent_admission_failures_still_classify_permanent() {
             status: crate::admission::HostAdmissionStatus::Degraded,
             retryable: false,
             reason_code: Some("invalid_observation_contract"),
+            recovery: None,
         },
     );
 

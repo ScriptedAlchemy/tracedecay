@@ -30,6 +30,9 @@
 import { z } from 'zod';
 import {
   SettingsPayloadV1Schema,
+  type CodeIndexWorkerSelectionV1,
+  type CodeIndexWorkerStatusV1,
+  type CodeIndexWorkerSettingsPatch,
   type ProjectSettingsPatch,
   type SettingsPayloadV1,
   type UserSettingsPatch,
@@ -118,8 +121,8 @@ export interface SettingsModel {
   readonly activeOverrides: number;
 }
 
-/** The two settings resources, each with its own authority and revision. */
-export type SettingsScope = 'project' | 'user';
+/** Every independently revisioned settings resource this editor can write. */
+export type SettingsScope = 'project' | 'user' | 'code_index_workers';
 
 export interface ProjectSettingsValues {
   readonly include: readonly string[];
@@ -140,11 +143,22 @@ export interface UserSettingsValues {
   readonly extraction_timeout_secs: string;
 }
 
+/**
+ * The ProfileSessions-backed code-index worker resource. It has a distinct
+ * revision so it can never be silently combined with ordinary user settings.
+ */
+export interface CodeIndexWorkerSettingsValues {
+  readonly code_index_workers: CodeIndexWorkerSelectionV1;
+  readonly code_index_worker_status: CodeIndexWorkerStatusV1 | null;
+}
+
 export interface SettingsEditor {
   readonly projectExpectedRevisionId: string;
   readonly userExpectedRevisionId: string;
+  readonly codeIndexWorkerExpectedRevisionId: string;
   readonly project: ProjectSettingsValues;
   readonly user: UserSettingsValues;
+  readonly codeIndexWorkers: CodeIndexWorkerSettingsValues;
 }
 
 export interface SettingsValidationError {
@@ -184,6 +198,11 @@ export interface UserSettingsChangeSet {
   extraction_timeout_secs?: number;
 }
 
+/** The dedicated, non-omissible profile-worker PATCH body. */
+export interface CodeIndexWorkerSettingsChangeSet {
+  code_index_workers: CodeIndexWorkerSelectionV1;
+}
+
 /**
  * The change sets carry omission semantics the generated patch types cannot
  * express — schemars renders every `Option<T>` field as required-and-nullable,
@@ -209,6 +228,12 @@ type _ProjectChangeSetNamesTheContractsFields = Assert<
 >;
 type _UserChangeSetNamesTheContractsFields = Assert<
   SameKeys<UserSettingsChangeSet, WritableFieldsOf<UserSettingsPatch>>
+>;
+type _CodeIndexWorkerChangeSetNamesTheContractsFields = Assert<
+  SameKeys<
+    CodeIndexWorkerSettingsChangeSet,
+    WritableFieldsOf<CodeIndexWorkerSettingsPatch>
+  >
 >;
 
 export type SettingsChangePlan<T> =
@@ -364,12 +389,14 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
 export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor | null {
   const { config, configuration_revision_id: projectRevision } = payload.project;
   const { configuration_revision_id: userRevision } = payload.user;
+  const workerRevision = payload.user.code_index_worker_configuration_revision_id;
   const maxFileSize = unsignedIntegerString(config.max_file_size);
   const pollSecs = unsignedIntegerString(config.sync.auto_track_pr_poll_secs);
   const extractionTimeout = unsignedIntegerString(payload.user.extraction_timeout_secs);
   if (
     projectRevision.length === 0 ||
     userRevision.length === 0 ||
+    workerRevision.length === 0 ||
     maxFileSize == null ||
     pollSecs == null ||
     extractionTimeout == null
@@ -379,6 +406,7 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
   return {
     projectExpectedRevisionId: projectRevision,
     userExpectedRevisionId: userRevision,
+    codeIndexWorkerExpectedRevisionId: workerRevision,
     project: {
       include: [...config.include],
       exclude: [...config.exclude],
@@ -396,6 +424,10 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
       watcher_debounce: payload.user.watcher_debounce,
       extraction_timeout_secs: extractionTimeout,
     },
+    codeIndexWorkers: {
+      code_index_workers: payload.user.code_index_workers,
+      code_index_worker_status: payload.user.code_index_worker_status,
+    },
   };
 }
 
@@ -406,6 +438,8 @@ export function settingsRevisionId(current: SettingsEditor, scope: SettingsScope
       return current.projectExpectedRevisionId;
     case 'user':
       return current.userExpectedRevisionId;
+    case 'code_index_workers':
+      return current.codeIndexWorkerExpectedRevisionId;
     default: {
       const exhaustive: never = scope;
       return exhaustive;
@@ -510,6 +544,33 @@ export function planUserChangeAgainst(
     : { outcome: 'ready', expectedRevisionId: current.userExpectedRevisionId, patch };
 }
 
+/** Plans the ProfileSessions worker-only PATCH against its own CAS token. */
+export function planCodeIndexWorkerChangeAgainst(
+  current: SettingsEditor | null,
+  values: CodeIndexWorkerSettingsValues,
+): SettingsChangePlan<CodeIndexWorkerSettingsChangeSet> {
+  if (!current) {
+    return {
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'code_index_worker_configuration_revision_id',
+          message: 'current code-index worker configuration and revision are unavailable',
+        },
+      ],
+    };
+  }
+  const errors = validateCodeIndexWorkerValues(values);
+  if (errors.length > 0) return { outcome: 'invalid', errors };
+  return sameCodeIndexWorkerSelection(values.code_index_workers, current.codeIndexWorkers.code_index_workers)
+    ? { outcome: 'unchanged', expectedRevisionId: current.codeIndexWorkerExpectedRevisionId }
+    : {
+        outcome: 'ready',
+        expectedRevisionId: current.codeIndexWorkerExpectedRevisionId,
+        patch: { code_index_workers: values.code_index_workers },
+      };
+}
+
 export function settingsRevisionConflict(
   scope: SettingsScope,
   expectedRevisionId: string,
@@ -557,6 +618,52 @@ function validateUserValues(values: UserSettingsValues): SettingsValidationError
     });
   }
   return errors;
+}
+
+function validateCodeIndexWorkerValues(
+  values: CodeIndexWorkerSettingsValues,
+): SettingsValidationError[] {
+  const errors: SettingsValidationError[] = [];
+  if (
+    values.code_index_workers.mode === 'exact' &&
+    !isCodeIndexWorkerCount(values.code_index_workers.workers)
+  ) {
+    errors.push({
+      field: 'code_index_workers',
+      message: 'code_index_workers exact mode must request 1 to 65535 workers',
+    });
+  }
+  if (values.code_index_workers.mode === 'exact' && values.code_index_worker_status) {
+    const { workers } = values.code_index_workers;
+    const { available_logical_cpus, memory_safe_workers } = values.code_index_worker_status;
+    if (workers > available_logical_cpus) {
+      errors.push({
+        field: 'code_index_workers',
+        message: `code_index_workers exact mode must request no more than ${available_logical_cpus} available logical CPUs`,
+      });
+    }
+    if (workers > memory_safe_workers) {
+      errors.push({
+        field: 'code_index_workers',
+        message: `code_index_workers exact mode must request no more than ${memory_safe_workers} memory-safe workers`,
+      });
+    }
+  }
+  return errors;
+}
+
+function sameCodeIndexWorkerSelection(
+  left: CodeIndexWorkerSelectionV1,
+  right: CodeIndexWorkerSelectionV1,
+): boolean {
+  return (
+    left.mode === right.mode &&
+    (left.mode !== 'exact' || (right.mode === 'exact' && left.workers === right.workers))
+  );
+}
+
+function isCodeIndexWorkerCount(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 1 && value <= 65_535;
 }
 
 function validateGlobValues(

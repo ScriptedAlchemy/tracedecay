@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracedecay_store::{
     ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult,
@@ -66,6 +66,15 @@ where
                     actual,
                 }
             }
+            TranscriptPersistenceError::PairConflict {
+                path,
+                expected,
+                actual,
+            } => TranscriptStoreError::Conflict {
+                cursor_path: PathBuf::from(path),
+                expected,
+                actual,
+            },
             TranscriptPersistenceError::Storage { operation, source } => {
                 TranscriptStoreError::Storage { operation, source }
             }
@@ -186,6 +195,24 @@ impl<D> TranscriptIngestStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
+    fn replace_parse_offset_pair(
+        &self,
+        first: (&Path, ParseOffset, ParseOffset),
+        second: (&Path, ParseOffset, ParseOffset),
+    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+        async move {
+            let first_path = Self::path_text(first.0);
+            let second_path = Self::path_text(second.0);
+            self.db()
+                .replace_parse_offset_pair_result(
+                    (&first_path, first.1, first.2),
+                    (&second_path, second.1, second.2),
+                )
+                .await
+                .map_err(|error| Self::persistence_error(first.0, error))
+        }
+    }
+
     fn advance_parse_offset_monotonic(
         &self,
         cursor_path: &Path,
@@ -230,7 +257,8 @@ where
                 TranscriptPersistenceError::Storage { operation, source } => {
                     TranscriptStoreError::Storage { operation, source }
                 }
-                TranscriptPersistenceError::Conflict { .. } => Self::storage_error(
+                TranscriptPersistenceError::Conflict { .. }
+                | TranscriptPersistenceError::PairConflict { .. } => Self::storage_error(
                     "load transcript session",
                     "unexpected cursor conflict while loading a session",
                 ),

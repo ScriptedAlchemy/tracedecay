@@ -16,6 +16,7 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-graph-db/hotpath",
+    "tracedecay-runtime-core/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
@@ -23,6 +24,7 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
@@ -30,6 +32,7 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
 ]
 default = [
     "lite",
@@ -100,6 +103,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

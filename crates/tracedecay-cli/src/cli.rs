@@ -191,6 +191,18 @@ pub enum Commands {
     Init {
         /// Project path (default: current directory)
         path: Option<String>,
+        /// Project path, as an explicit flag. Equivalent to the positional
+        /// PATH argument above; accepted for consistency with `-p`/`--path`
+        /// on other project-scoped commands (e.g. `dashboard`, `gitignore`,
+        /// `bench`). Conflicts with the positional PATH — pass one or the
+        /// other, not both.
+        #[arg(
+            short = 'p',
+            long = "path",
+            value_name = "PATH",
+            conflicts_with = "path"
+        )]
+        path_flag: Option<String>,
         /// Folders to skip during indexing (can be repeated)
         #[arg(long = "skip-folder", num_args = 1..)]
         skip_folders: Vec<String>,

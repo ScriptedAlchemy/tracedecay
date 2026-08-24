@@ -74,11 +74,19 @@ pub struct UserSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_index_workers: Option<CodeIndexWorkerSelectionV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_debounce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_timeout_secs: Option<u64>,
+}
+
+/// Dedicated profile-session worker patch. Its CAS token is never a project
+/// configuration revision, so it cannot be mixed with [`UserSettingsPatch`].
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexWorkerSettingsPatch {
+    pub expected_revision_id: String,
+    pub idempotency_key: String,
+    pub code_index_workers: CodeIndexWorkerSelectionV1,
 }
 
 /// Axum-compatible typed error used by dashboard configuration handlers.
@@ -98,6 +106,13 @@ pub fn parse_user_settings_patch(
     patch: Value,
 ) -> Result<UserSettingsPatch, DashboardConfigurationRouteErrorV1> {
     serde_json::from_value(patch).map_err(|error| patch_shape_error("user settings", &error))
+}
+
+pub fn parse_code_index_worker_settings_patch(
+    patch: Value,
+) -> Result<CodeIndexWorkerSettingsPatch, DashboardConfigurationRouteErrorV1> {
+    serde_json::from_value(patch)
+        .map_err(|error| patch_shape_error("code index worker settings", &error))
 }
 
 /// Validate the transport-owned user patch invariants. The executable supplies
@@ -121,20 +136,22 @@ pub fn validate_user_settings_patch(
             "extraction_timeout_secs must be at least 1 second",
         ));
     }
-    if matches!(
-        patch.code_index_workers,
-        Some(CodeIndexWorkerSelectionV1::Exact { workers: 0 })
-    ) {
-        errors.push(validation_error(
-            "code_index_workers",
-            "code_index_workers exact mode must request at least 1 worker",
-        ));
-    }
     if errors.is_empty() {
         Ok(())
     } else {
         Err(settings_validation_error(errors))
     }
+}
+
+pub fn validate_code_index_worker_settings_patch(
+    patch: &CodeIndexWorkerSettingsPatch,
+) -> Result<(), DashboardConfigurationRouteErrorV1> {
+    patch.code_index_workers.validate().map_err(|_| {
+        settings_validation_error([validation_error(
+            "code_index_workers",
+            "code_index_workers exact mode must request at least 1 worker",
+        )])
+    })
 }
 
 /// Render validation failures using the generated dashboard wire shape.
@@ -231,11 +248,10 @@ fn serde_error_field(message: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 
     #[test]
     fn user_worker_patch_round_trips_the_tagged_contract() {
-        let automatic = parse_user_settings_patch(json!({
+        let automatic = parse_code_index_worker_settings_patch(json!({
             "expected_revision_id": "configuration.revision.fixture",
             "idempotency_key": "configuration.idempotency.fixture",
             "code_index_workers": { "mode": "automatic" }
@@ -243,10 +259,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             automatic.code_index_workers,
-            Some(CodeIndexWorkerSelectionV1::Automatic)
+            CodeIndexWorkerSelectionV1::Automatic
         );
 
-        let exact = parse_user_settings_patch(json!({
+        let exact = parse_code_index_worker_settings_patch(json!({
             "expected_revision_id": "configuration.revision.fixture",
             "idempotency_key": "configuration.idempotency.fixture",
             "code_index_workers": { "mode": "exact", "workers": 64 }
@@ -254,13 +270,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             exact.code_index_workers,
-            Some(CodeIndexWorkerSelectionV1::Exact { workers: 64 })
+            CodeIndexWorkerSelectionV1::Exact { workers: 64 }
         );
     }
 
     #[test]
     fn user_worker_patch_denies_zero_exact_workers() {
-        let patch = parse_user_settings_patch(json!({
+        let patch = parse_code_index_worker_settings_patch(json!({
             "expected_revision_id": "configuration.revision.fixture",
             "idempotency_key": "configuration.idempotency.fixture",
             "code_index_workers": { "mode": "exact", "workers": 0 }
@@ -268,7 +284,21 @@ mod tests {
         .unwrap();
 
         let (status, Json(body)) =
-            validate_user_settings_patch(&patch, |_| true).expect_err("zero must be denied");
+            validate_code_index_worker_settings_patch(&patch).expect_err("zero must be denied");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
+    }
+
+    #[test]
+    fn project_backed_user_patch_rejects_mixed_profile_worker_mutation() {
+        let result = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.project",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "upload_enabled": true,
+            "code_index_workers": { "mode": "automatic" }
+        }));
+
+        let (status, Json(body)) = result.expect_err("mixed authority must be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
     }
