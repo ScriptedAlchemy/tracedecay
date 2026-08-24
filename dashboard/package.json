@@ -15,6 +15,7 @@
     "visual:audit": "tsx stories/audit.ts",
     "visual:topography": "tsx stories/topography-audit.ts",
     "live:sweep": "tsx stories/live-sweep.ts",
+    "live:multiproject": "tsx stories/live-multiproject.ts",
     "axe:audit": "tsx e2e/axe-audit.ts",
     "axe:explorer": "tsx e2e/axe-explorer.ts"
   },
