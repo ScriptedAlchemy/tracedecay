@@ -4,11 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_perl_extract_functions() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -18,7 +14,6 @@ fn test_perl_extract_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // Top-level functions: log_message, validate_config
     assert_eq!(
         fns.len(),
         2,
@@ -32,11 +27,7 @@ fn test_perl_extract_functions() {
 
 #[test]
 fn test_perl_extract_packages_as_modules() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -60,11 +51,7 @@ fn test_perl_extract_packages_as_modules() {
 
 #[test]
 fn test_perl_extract_methods() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -74,8 +61,6 @@ fn test_perl_extract_methods() {
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
-    // Methods inside packages: Connection::new, connect, disconnect, is_connected,
-    //                          Pool::new, acquire, release
     assert_eq!(
         methods.len(),
         7,
@@ -93,11 +78,7 @@ fn test_perl_extract_methods() {
 
 #[test]
 fn test_perl_extract_use_imports() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -107,7 +88,6 @@ fn test_perl_extract_use_imports() {
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
-    // use strict, use warnings, use File::Path, use Carp
     assert_eq!(
         uses.len(),
         4,
@@ -123,11 +103,7 @@ fn test_perl_extract_use_imports() {
 
 #[test]
 fn test_perl_extract_consts() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -150,11 +126,7 @@ fn test_perl_extract_consts() {
 
 #[test]
 fn test_perl_call_sites() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -178,7 +150,6 @@ fn test_perl_call_sites() {
             .collect::<Vec<_>>()
     );
 
-    // acquire calls Connection->new
     assert!(
         call_refs
             .iter()
@@ -190,7 +161,6 @@ fn test_perl_call_sites() {
             .collect::<Vec<_>>()
     );
 
-    // acquire calls $conn->connect
     assert!(
         call_refs
             .iter()
@@ -202,7 +172,6 @@ fn test_perl_call_sites() {
             .collect::<Vec<_>>()
     );
 
-    // validate_config calls croak
     assert!(
         call_refs.iter().any(|r| r.reference_name == "croak"),
         "should find croak call, got: {:?}",
@@ -215,11 +184,7 @@ fn test_perl_call_sites() {
 
 #[test]
 fn test_perl_docstrings() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -240,7 +205,6 @@ fn test_perl_docstrings() {
         doc
     );
 
-    // MAX_RETRIES should have docstring
     let max_retries = result
         .nodes
         .iter()
@@ -256,7 +220,6 @@ fn test_perl_docstrings() {
         max_retries.docstring
     );
 
-    // connect method should have docstring
     let connect = result
         .nodes
         .iter()
@@ -275,11 +238,7 @@ fn test_perl_docstrings() {
 
 #[test]
 fn test_perl_file_node() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     let files: Vec<_> = result
@@ -293,11 +252,7 @@ fn test_perl_file_node() {
 
 #[test]
 fn test_perl_contains_edges() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     let contains: Vec<_> = result
@@ -305,10 +260,6 @@ fn test_perl_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 4 Use + 2 Const + 2 Function + 2 Module = 10
-    // Connection module contains: new, connect, disconnect, is_connected = 4
-    // Pool module contains: new, acquire, release = 3
-    // Total: 10 + 4 + 3 = 17
     assert!(
         contains.len() >= 15,
         "should have >= 15 Contains edges, got {}",
@@ -318,11 +269,7 @@ fn test_perl_contains_edges() {
 
 #[test]
 fn test_perl_signatures() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.pl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

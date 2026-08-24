@@ -106,9 +106,9 @@ a throwaway `HOME` and config directory. Only its auth file is copied in, mode
 `0400`; the copy is deleted on runner exit. The real Claude/Codex profile is
 never loaded or mutated.
 
-Live runs build a debug `tracedecay` binary from the checked-out candidate branch
-in the configured Cargo target (the machine-local `/fast/cargo-target` when
-available) and use it for fixture setup, MCP, hooks, and the throwaway Codex plugin install.
+Live runs build a debug `tracedecay` binary from the checked-out candidate
+branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
+throwaway Codex plugin install.
 `TRACEDECAY_BIN` is an explicit override for release-binary comparisons. Every
 Claude condition, including `full`, loads the candidate `plugin/` via
 `--plugin-dir`; Codex `full` installs candidate assets into its throwaway
@@ -165,13 +165,13 @@ enriches the copied fixture at setup so more scenario tiers are gradable:
 ### Seeding prior sessions — a gap
 
 Scenarios like `session_recovery` want prior host sessions bound to the fixture
-path (for `message_search` / `sessions_for`). The `tracedecay sessions ingest`
+path (for `message_search` / `sessions_for`). The `tracedecay sessions import`
 CLI **sweeps provider directories under `HOME`** (`~/.claude/projects/...`,
 `~/.codex/...`); it has **no file-input mode**. Seeding a hermetic session would
 mean writing a synthetic transcript into the operator's real `~/.claude` (which
 the harness deliberately leaves untouched for auth) at the exact cwd-encoded
 path, then ingesting — not hermetic and not cheap. So session-recovery packs stay
-**deferred**. The clean fix is a `tracedecay sessions ingest --from-file <jsonl>`
+**deferred**. A future `tracedecay sessions import --from-file <jsonl>`
 affordance; until then this tier is a documented gap.
 
 ## Scenario schema

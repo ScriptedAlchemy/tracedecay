@@ -1,0 +1,114 @@
+{
+  "availability": {
+    "detail": "daemon socket intentionally absent",
+    "state": "unavailable"
+  },
+  "latency_ns": {
+    "p50": {
+      "available": true,
+      "minimum_samples": 2,
+      "value": 217367569
+    },
+    "p95": {
+      "available": true,
+      "minimum_samples": 40,
+      "value": 348228365
+    },
+    "p99": {
+      "available": false,
+      "minimum_samples": 100,
+      "value": null
+    }
+  },
+  "outcome": {
+    "command_failure_count": 0,
+    "expected_unavailable_count": 40,
+    "process_leak_count": 0
+  },
+  "policy": {
+    "journey_margins": {
+      "p50_regression_margin_pct": 20,
+      "p95_regression_margin_pct": 25,
+      "resource_regression_margin_pct": 20
+    },
+    "journey_policy_id": "runtime-journey-margins-v1",
+    "journey_policy_sha256": "6db22e48d7e45a6cc751baaf1ae40e67905aafb5b315157f646a94cf57695d45",
+    "policy_id": "runtime-acceptance-v1",
+    "policy_sha256": "7c74637ac91439e8d04870d322c7e9c9d1d4dc926958c01c475c3c7f37651878"
+  },
+  "report_id": "incident-8e46dd6db3dd4c5484025ffe5b198968",
+  "sample_count": 40,
+  "samples_sha256": "232305933996ad5810c5198b33e693984a348bc80c1516f31fdaeabc50834e29",
+  "schema_version": 1,
+  "stages_ns": {
+    "direct_hook_wall": {
+      "p50": {
+        "available": true,
+        "minimum_samples": 2,
+        "value": 27121588
+      },
+      "p95": {
+        "available": true,
+        "minimum_samples": 40,
+        "value": 35299570
+      },
+      "p99": {
+        "available": false,
+        "minimum_samples": 100,
+        "value": null
+      }
+    },
+    "hook_residual": {
+      "p50": {
+        "available": true,
+        "minimum_samples": 2,
+        "value": 12017110
+      },
+      "p95": {
+        "available": true,
+        "minimum_samples": 40,
+        "value": 15796178
+      },
+      "p99": {
+        "available": false,
+        "minimum_samples": 100,
+        "value": null
+      }
+    },
+    "lifecycle_wrapper_overhead": {
+      "p50": {
+        "available": true,
+        "minimum_samples": 2,
+        "value": 189602521
+      },
+      "p95": {
+        "available": true,
+        "minimum_samples": 40,
+        "value": 311366796
+      },
+      "p99": {
+        "available": false,
+        "minimum_samples": 100,
+        "value": null
+      }
+    },
+    "process_startup_control": {
+      "p50": {
+        "available": true,
+        "minimum_samples": 2,
+        "value": 15857897
+      },
+      "p95": {
+        "available": true,
+        "minimum_samples": 40,
+        "value": 20975093
+      },
+      "p99": {
+        "available": false,
+        "minimum_samples": 100,
+        "value": null
+      }
+    }
+  },
+  "workload_id": "missing-daemon-after-shell"
+}

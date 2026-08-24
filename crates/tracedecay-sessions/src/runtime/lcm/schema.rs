@@ -1,13 +1,17 @@
-use libsql::{Connection, params};
+#[cfg(test)]
+use crate::retrieval_content::projected_content_hash;
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
+use super::{LcmError, LcmRawMessage, raw};
 
+#[cfg(test)]
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 5;
+pub const LCM_SCHEMA_VERSION: i64 = 8;
 
 const MIGRATION_NAME: &str = "lcm";
-const TRUNCATION_MARKER: &str = "\n[truncated by tracedecay]";
 
 /// Raw-message FTS structure (schema v3): index only `index_text`, matching
 /// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
@@ -38,33 +42,91 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
             VALUES (NEW.store_id, NEW.index_text);
         END;";
 
-/// Returns whether the raw-message FTS table and triggers already use the
-/// v3 content-only structure. Pre-v3 objects mention `metadata_json` in
-/// their DDL; a missing table counts as current here because presence is
-/// checked separately (doctor) or guaranteed (migration runs the DDL).
-pub async fn raw_fts_structure_is_current(conn: &Connection) -> Option<bool> {
-    let stale = util::fetch_i64(
-        conn,
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE name IN ('lcm_raw_messages_fts',
-                        'lcm_raw_messages_fts_insert',
-                        'lcm_raw_messages_fts_delete',
-                        'lcm_raw_messages_fts_update')
-           AND sql LIKE '%metadata_json%'",
-        (),
-        "raw FTS structure query returned no rows",
-    )
-    .await
-    .ok()?;
-    Some(stale == 0)
+/// Returns whether the raw-message FTS table and all three synchronization
+/// triggers use the v3 content-only contracts.
+pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) -> Option<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name IN ('lcm_raw_messages_fts',
+                            'lcm_raw_messages_fts_insert',
+                            'lcm_raw_messages_fts_delete',
+                            'lcm_raw_messages_fts_update')",
+            (),
+        )
+        .await
+        .ok()?;
+    let mut table_current = false;
+    let mut insert_current = false;
+    let mut delete_current = false;
+    let mut update_current = false;
+    while let Some(row) = rows.next().await.ok()? {
+        let object_type: String = row.get(0).ok()?;
+        let name: String = row.get(1).ok()?;
+        let table_name: String = row.get(2).ok()?;
+        let sql: String = row.get(3).ok()?;
+        let sql = compact_sql(&sql);
+        match name.as_str() {
+            "lcm_raw_messages_fts" => {
+                table_current = object_type == "table"
+                    && sql.contains(
+                        "usingfts5(index_text,content='lcm_raw_messages',content_rowid='store_id')",
+                    );
+            }
+            "lcm_raw_messages_fts_insert" => {
+                insert_current = object_type == "trigger"
+                    && table_name == "lcm_raw_messages"
+                    && sql.contains("afterinsertonlcm_raw_messagesbegin")
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts(rowid,index_text)\
+                         values(new.store_id,new.index_text)",
+                    );
+            }
+            "lcm_raw_messages_fts_delete" => {
+                delete_current = object_type == "trigger"
+                    && table_name == "lcm_raw_messages"
+                    && sql.contains("afterdeleteonlcm_raw_messagesbegin")
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts\
+                         (lcm_raw_messages_fts,rowid,index_text)\
+                         values('delete',old.store_id,old.index_text)",
+                    );
+            }
+            "lcm_raw_messages_fts_update" => {
+                update_current = object_type == "trigger"
+                    && table_name == "lcm_raw_messages"
+                    && sql.contains("afterupdateonlcm_raw_messagesbegin")
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts\
+                         (lcm_raw_messages_fts,rowid,index_text)\
+                         values('delete',old.store_id,old.index_text)",
+                    )
+                    && sql.contains(
+                        "insertintolcm_raw_messages_fts(rowid,index_text)\
+                         values(new.store_id,new.index_text)",
+                    );
+            }
+            _ => {}
+        }
+    }
+    Some(table_current && insert_current && delete_current && update_current)
+}
+
+fn compact_sql(sql: &str) -> String {
+    sql.chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Drops any existing raw-message FTS table/triggers (old or new shape),
 /// recreates the v3 content-only structure, and repopulates the index from
 /// `lcm_raw_messages` via the FTS5 `'rebuild'` command. Used by the schema
-/// migration and the doctor repair path; idempotent and data-preserving
-/// because the index is derived entirely from the content table.
-pub async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
+/// explicit schema initialization/rebuild owner; idempotent and data-preserving
+/// because the index is derived entirely from the content table. Doctor never
+/// invokes this mutation.
+pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
          DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
@@ -83,15 +145,68 @@ pub async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
     Some(())
 }
 
+/// Test-only convenience wrapper: production schema creation runs through
+/// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions.
+#[cfg(test)]
 pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
-    // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
-    // monotonic, so a database written by a newer release is left untouched
-    // (no marker downgrade, no carry-forward re-run against newer data).
-    if schema_version(conn)
-        .await
-        .is_some_and(|version| version >= LCM_SCHEMA_VERSION)
-    {
-        return Ok(());
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    match ensure_lcm_schema_in_transaction(&transaction).await {
+        Ok(()) => transaction.commit().await.map_err(Into::into),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(LcmError::Db(format!(
+                "{error}; rollback after LCM schema migration failed: {rollback_error}"
+            ))),
+        },
+    }
+}
+
+/// LCM schema state of a profile store that may be admitted without a reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LcmSchemaAdmission {
+    /// The store already carries the exact current LCM schema.
+    Current,
+    /// The store carries no LCM schema and no legacy session content, so the
+    /// current schema may be installed.
+    Fresh,
+}
+
+/// Read-only classification of a profile store's LCM schema state.
+///
+/// A store whose persisted marker is not the current version, or that carries
+/// LCM objects or legacy session content without a marker, requires an
+/// explicit profile reset. Admission callers run this before other schema
+/// authorities so the truthful LCM state is surfaced rather than masked by a
+/// coarser authority's reset.
+pub async fn require_admissible_lcm_schema(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<LcmSchemaAdmission, LcmError> {
+    match stored_schema_version(conn).await? {
+        Some(LCM_SCHEMA_VERSION) => Ok(LcmSchemaAdmission::Current),
+        Some(found_version) => Err(LcmError::ProfileResetRequired {
+            found_version: Some(found_version),
+            required_version: LCM_SCHEMA_VERSION,
+        }),
+        None if lcm_schema_objects_exist(conn).await?
+            || legacy_session_content_exists(conn).await? =>
+        {
+            Err(LcmError::ProfileResetRequired {
+                found_version: None,
+                required_version: LCM_SCHEMA_VERSION,
+            })
+        }
+        None => Ok(LcmSchemaAdmission::Fresh),
+    }
+}
+
+pub async fn ensure_lcm_schema_in_transaction(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    match require_admissible_lcm_schema(conn).await? {
+        LcmSchemaAdmission::Current => return Ok(()),
+        LcmSchemaAdmission::Fresh => {}
     }
 
     conn.execute_batch(
@@ -123,10 +238,6 @@ pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_order
             ON lcm_raw_messages(provider, session_id, store_id);
-        -- Schema v4: the dashboard session view filters by session_id alone
-        -- (no provider), which the (provider, session_id, …) index cannot
-        -- serve; without this index every session click full-scans the
-        -- text-heavy table three times (count, token estimate, page).
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_id
             ON lcm_raw_messages(session_id);
         CREATE TABLE IF NOT EXISTS lcm_external_payloads (
@@ -186,6 +297,40 @@ pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
             ON lcm_summary_nodes(
                 provider, session_id, depth, source_time_start, source_time_end, created_at
             );
+        CREATE INDEX idx_lcm_summary_nodes_codex_pending_session_order
+            ON lcm_summary_nodes(
+                session_id,
+                (CASE
+                    WHEN json_valid(metadata_json) THEN
+                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                        AND COALESCE(
+                              json_extract(metadata_json, '$.tracedecay_summary_source'),
+                              ''
+                            ) <> 'codex_app_server'
+                    ELSE 0
+                 END),
+                depth DESC,
+                created_at DESC,
+                node_id
+            )
+            WHERE provider = 'codex';
+        CREATE INDEX idx_lcm_summary_nodes_codex_pending_root_order
+            ON lcm_summary_nodes(
+                (CASE
+                    WHEN json_valid(metadata_json) THEN
+                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                        AND COALESCE(
+                              json_extract(metadata_json, '$.tracedecay_summary_source'),
+                              ''
+                            ) <> 'codex_app_server'
+                    ELSE 0
+                 END),
+                created_at DESC,
+                depth DESC,
+                node_id,
+                session_id
+            )
+            WHERE provider = 'codex';
         CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
             ON lcm_summary_sources(source_kind, source_id);
         CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (
@@ -245,70 +390,93 @@ pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
             END;",
     )
     .await?;
+    conn.execute_batch(RAW_FTS_DDL).await?;
 
-    // Schema v3: the raw-message FTS index dropped the role and
-    // metadata_json columns (see RAW_FTS_DDL). The rebuild is gated on the
-    // stored structure so later version bumps (e.g. the v4 index above)
-    // don't re-pay a full FTS rebuild; a retry after a partially applied
-    // earlier run still converges because the index is fully derived from
-    // lcm_raw_messages. A fresh store has no FTS objects at all (they are
-    // created by the rebuild, not the DDL batch above), so presence is
-    // checked too — `raw_fts_structure_is_current` deliberately counts a
-    // missing table as current.
-    let fts_exists = util::fetch_i64(
-        conn,
-        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lcm_raw_messages_fts'",
-        (),
-        "raw FTS presence query returned no rows",
-    )
-    .await?
-        > 0;
-    if !fts_exists
-        || !raw_fts_structure_is_current(conn)
-            .await
-            .ok_or_else(|| LcmError::Db("raw FTS structure check failed".to_string()))?
-    {
-        rebuild_raw_fts(conn)
-            .await
-            .ok_or_else(|| LcmError::Db("raw FTS rebuild failed".to_string()))?;
-    }
-
-    // Schema v2: lifecycle rows gained the compression-boundary cooldown
-    // marker. Databases created before the column existed need the ALTER;
-    // the error is ignored when the column is already present.
-    let _ = conn
-        .execute(
-            "ALTER TABLE lcm_lifecycle_state ADD COLUMN boundary_skip_at INTEGER",
-            (),
-        )
-        .await;
-
-    carry_forward_legacy_messages(conn).await?;
     conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version,
-            applied_at = unixepoch()",
+        "INSERT INTO session_schema_migrations(name, version) VALUES (?1, ?2)",
         params![MIGRATION_NAME, LCM_SCHEMA_VERSION],
     )
     .await?;
     Ok(())
 }
 
-pub async fn schema_version(conn: &Connection) -> Option<i64> {
+pub async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
+    stored_schema_version(conn).await.ok().flatten()
+}
+
+async fn stored_schema_version(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Option<i64>, LcmError> {
+    if !schema_object_exists(conn, "session_schema_migrations").await? {
+        return Ok(None);
+    }
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
             params![MIGRATION_NAME],
         )
-        .await
-        .ok()?;
-    rows.next().await.ok()??.get(0).ok()
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
 }
 
-#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
-pub async fn get_gc_meta(conn: &Connection, key: &str) -> Result<Option<String>, LcmError> {
+async fn lcm_schema_objects_exist(conn: &(impl QueryExecutor + ?Sized)) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM sqlite_master
+                WHERE name LIKE 'lcm\\_%' ESCAPE '\\'
+            )",
+            (),
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("LCM schema object probe returned no rows".to_owned()))?;
+    Ok(row.get::<i64>(0)? != 0)
+}
+
+async fn legacy_session_content_exists(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<bool, LcmError> {
+    if !schema_object_exists(conn, "session_messages").await? {
+        return Ok(false);
+    }
+    let mut rows = conn
+        .query("SELECT EXISTS(SELECT 1 FROM session_messages)", ())
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("legacy session content probe returned no rows".to_owned()))?;
+    Ok(row.get::<i64>(0)? != 0)
+}
+
+async fn schema_object_exists(
+    conn: &(impl QueryExecutor + ?Sized),
+    name: &str,
+) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+            params![name],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("schema object probe returned no rows".to_owned()))?;
+    Ok(row.get::<i64>(0)? != 0)
+}
+
+pub async fn get_gc_meta(
+    conn: &(impl QueryExecutor + ?Sized),
+    key: &str,
+) -> Result<Option<String>, LcmError> {
     let mut rows = conn
         .query("SELECT value FROM lcm_gc_meta WHERE key = ?1", params![key])
         .await?;
@@ -318,8 +486,11 @@ pub async fn get_gc_meta(conn: &Connection, key: &str) -> Result<Option<String>,
     }
 }
 
-#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
-pub async fn set_gc_meta(conn: &Connection, key: &str, value: &str) -> Result<(), LcmError> {
+pub async fn set_gc_meta(
+    conn: &(impl Executor + ?Sized),
+    key: &str,
+    value: &str,
+) -> Result<(), LcmError> {
     conn.execute(
         "INSERT OR REPLACE INTO lcm_gc_meta (key, value) VALUES (?1, ?2)",
         params![key, value],
@@ -328,137 +499,238 @@ pub async fn set_gc_meta(conn: &Connection, key: &str, value: &str) -> Result<()
     Ok(())
 }
 
-#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
-pub async fn clear_gc_meta(conn: &Connection, key: &str) -> Result<(), LcmError> {
+pub async fn clear_gc_meta(conn: &(impl Executor + ?Sized), key: &str) -> Result<(), LcmError> {
     conn.execute("DELETE FROM lcm_gc_meta WHERE key = ?1", params![key])
         .await?;
     Ok(())
 }
 
 pub async fn load_raw_message(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     message_id: &str,
-) -> Option<LcmRawMessage> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, content, content_hash, storage_kind, payload_ref,
-                    legacy_source, legacy_truncated, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2",
-            params![provider, message_id],
-        )
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    let storage_kind_text: String = row.get(9).ok()?;
-    let content: Option<String> = row.get(7).ok()?;
-    Some(LcmRawMessage {
-        provider: row.get(0).ok()?,
-        message_id: row.get(1).ok()?,
-        session_id: row.get(2).ok()?,
-        store_id: row.get(3).ok()?,
-        role: row.get(4).ok()?,
-        ordinal: row.get(5).ok()?,
-        timestamp: row.get(6).ok()?,
-        content: content.unwrap_or_default(),
-        content_hash: row.get(8).ok()?,
-        storage_kind: LcmStorageKind::from_db(&storage_kind_text)?,
-        payload_ref: row.get(10).ok()?,
-        legacy_source: row.get::<i64>(11).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(12).unwrap_or(0) != 0,
-        metadata_json: row.get(13).ok()?,
-    })
-}
-
-async fn carry_forward_legacy_messages(conn: &Connection) -> Result<(), LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let carry_forward = carry_forward_legacy_messages_in_transaction(conn).await;
-    match carry_forward {
-        Ok(()) => {
-            if let Err(err) = conn.execute("COMMIT", ()).await {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err.into())
-            } else {
-                Ok(())
-            }
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
+) -> Result<Option<LcmRawMessage>, LcmError> {
+    let sql = format!(
+        "SELECT {}
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND message_id = ?2
+         ORDER BY store_id
+         LIMIT 2",
+        raw::RAW_MESSAGE_SELECT_COLUMNS
+    );
+    let mut rows = conn.query(&sql, params![provider, message_id]).await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let message = raw::verified_raw_message_from_row(&row)?;
+    if rows.next().await?.is_some() {
+        return Err(LcmError::Db(
+            "duplicate raw messages for provider/message identity".to_string(),
+        ));
     }
-}
-
-async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Result<(), LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, role, timestamp, ordinal,
-                    text, metadata_json
-             FROM session_messages
-             ORDER BY provider, session_id, ordinal, message_id",
-            (),
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let provider: String = row.get(0)?;
-        let message_id: String = row.get(1)?;
-        let session_id: String = row.get(2)?;
-        let role: String = row.get(3)?;
-        let timestamp: Option<i64> = row.get(4)?;
-        let ordinal: i64 = row.get(5)?;
-        let content: String = row.get(6)?;
-        let metadata_json: Option<String> = row.get(7)?;
-        let legacy_truncated = content.contains(TRUNCATION_MARKER);
-        let content_hash = raw::sha256_hex(&content);
-        let snippet_text = raw::derived_text_for_snippet(&content);
-        let index_text = raw::derived_text_for_index(&content);
-
-        conn.execute(
-            "INSERT OR IGNORE INTO lcm_raw_messages (
-                provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, 1, ?12, ?13)",
-            params![
-                provider.as_str(),
-                message_id.as_str(),
-                session_id.as_str(),
-                role.as_str(),
-                ordinal,
-                util::opt_i64(timestamp),
-                content.as_str(),
-                content_hash.as_str(),
-                LcmStorageKind::Inline.as_str(),
-                snippet_text.as_str(),
-                index_text.as_str(),
-                i64::from(legacy_truncated),
-                util::opt_text(metadata_json.as_deref()),
-            ],
-        )
-        .await?;
-    }
-    Ok(())
+    Ok(Some(message))
 }
 
 #[cfg(test)]
 mod tests {
-    use libsql::Builder;
-
     use super::*;
+    use tracedecay_runtime_core::db::engine::TestConnection;
+    use tracedecay_runtime_core::privacy::sanitize_lcm_payload_text;
+
+    async fn lcm_reader_test_connection() -> Result<(tempfile::TempDir, TestConnection), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE lcm_raw_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                timestamp INTEGER,
+                content TEXT,
+                content_hash TEXT NOT NULL,
+                storage_kind TEXT NOT NULL,
+                payload_ref TEXT,
+                snippet_text TEXT NOT NULL,
+                index_text TEXT NOT NULL,
+                legacy_source INTEGER NOT NULL DEFAULT 0,
+                legacy_truncated INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                UNIQUE(provider, message_id)
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok((temp, conn))
+    }
+
+    async fn insert_reader_test_message(
+        conn: &TestConnection,
+        content: &str,
+        storage_kind: &str,
+        metadata_json: Option<&str>,
+    ) -> Result<(), String> {
+        let content_hash = projected_content_hash(content);
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, content,
+                content_hash, storage_kind, snippet_text, index_text, metadata_json
+             ) VALUES (
+                'cursor', 'message-1', 'session-1', 'user', 1, ?1,
+                ?2, ?3, ?1, ?1, ?4
+             )",
+            params![content, content_hash, storage_kind, metadata_json],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 
     #[tokio::test]
-    async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward()
-    -> Result<(), String> {
-        // In-memory DB: the rollback behavior under test is purely
-        // transactional, so skip the on-disk sqlite file churn.
-        let db = Builder::new_local(":memory:")
-            .build()
+    async fn raw_fts_currency_requires_table_and_every_trigger_contract() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE lcm_raw_messages (
+                store_id INTEGER PRIMARY KEY,
+                index_text TEXT NOT NULL
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        rebuild_raw_fts(&*conn)
             .await
-            .map_err(|err| err.to_string())?;
-        let conn = db.connect().map_err(|err| err.to_string())?;
+            .ok_or_else(|| "initial raw FTS rebuild failed".to_string())?;
+        assert_eq!(raw_fts_structure_is_current(&*conn).await, Some(true));
+
+        for trigger in [
+            "lcm_raw_messages_fts_insert",
+            "lcm_raw_messages_fts_delete",
+            "lcm_raw_messages_fts_update",
+        ] {
+            conn.execute_batch(&format!("DROP TRIGGER {trigger}"))
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                raw_fts_structure_is_current(&*conn).await,
+                Some(false),
+                "missing {trigger} was accepted as current"
+            );
+            rebuild_raw_fts(&*conn)
+                .await
+                .ok_or_else(|| format!("raw FTS rebuild failed after dropping {trigger}"))?;
+            assert_eq!(raw_fts_structure_is_current(&*conn).await, Some(true));
+        }
+
+        conn.execute_batch(
+            "DROP TRIGGER lcm_raw_messages_fts_update;
+             CREATE TRIGGER lcm_raw_messages_fts_update
+                 AFTER UPDATE ON lcm_raw_messages BEGIN
+                     SELECT 1;
+                 END;",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            raw_fts_structure_is_current(&*conn).await,
+            Some(false),
+            "malformed update trigger was accepted as current"
+        );
+
+        conn.execute_batch("DROP TABLE lcm_raw_messages_fts")
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            raw_fts_structure_is_current(&*conn).await,
+            Some(false),
+            "missing raw FTS table was accepted as current"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incompatible_profile_requires_reset_without_mutating_schema() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );
+            CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 6, 123);
+            CREATE VIRTUAL TABLE lcm_lifecycle_state USING fts5(
+                provider,
+                conversation_id,
+                current_session_id
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let schema_before = sqlite_schema_fingerprint(&conn).await?;
+        let error = ensure_lcm_schema(&conn)
+            .await
+            .expect_err("an incompatible profile must require an explicit reset");
+        assert!(matches!(
+            error,
+            LcmError::ProfileResetRequired {
+                found_version: Some(6),
+                required_version: LCM_SCHEMA_VERSION,
+            }
+        ));
+        assert_eq!(sqlite_schema_fingerprint(&conn).await?, schema_before);
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+                "migration marker version",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            6
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT COUNT(*) FROM pragma_table_xinfo('lcm_lifecycle_state')
+                 WHERE name = 'boundary_skip_at'",
+                (),
+                "boundary column count",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_schema_never_carries_forward_legacy_session_content() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(
             "CREATE TABLE sessions (
                 provider TEXT NOT NULL,
@@ -488,48 +760,34 @@ mod tests {
                 metadata_json TEXT,
                 PRIMARY KEY(provider, message_id)
             );
-            CREATE TABLE lcm_raw_messages (
-                provider TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL,
-                ordinal INTEGER NOT NULL,
-                timestamp INTEGER,
-                content TEXT,
-                content_hash TEXT NOT NULL,
-                storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'external')),
-                payload_ref TEXT,
-                snippet_text TEXT NOT NULL,
-                index_text TEXT NOT NULL,
-                legacy_source INTEGER NOT NULL DEFAULT 0,
-                legacy_truncated INTEGER NOT NULL DEFAULT 0,
-                metadata_json TEXT,
-                UNIQUE(provider, message_id)
-            );
-            CREATE TRIGGER lcm_raw_messages_fail_second
-            BEFORE INSERT ON lcm_raw_messages
-            WHEN NEW.message_id = 'legacy-message-2'
-            BEGIN
-                SELECT RAISE(ABORT, 'legacy carry-forward insert failed');
-            END;
-            INSERT INTO sessions(provider, session_id, project_key, project_path)
-            VALUES ('cursor', 'legacy-session', '/tmp/project', '/tmp/project');
-            INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
-            VALUES
-              ('cursor', 'legacy-message-1', 'legacy-session', 'assistant', 1, 'legacy one'),
-              ('cursor', 'legacy-message-2', 'legacy-session', 'assistant', 2, 'legacy two');",
+            CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );",
         )
         .await
         .map_err(|err| err.to_string())?;
 
-        let Err(err) = ensure_lcm_schema(&conn).await else {
-            return Err("failed carry-forward insert should propagate".to_string());
-        };
-        assert!(matches!(err, LcmError::Db(_)));
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        conn.execute_batch(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'legacy-session', '/tmp/project', '/tmp/project');
+             INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
+             VALUES
+               ('cursor', 'legacy-message-1', 'legacy-session', 'assistant', 1, 'legacy one'),
+               ('cursor', 'legacy-message-2', 'legacy-session', 'assistant', 2, 'legacy two');",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
         assert_eq!(
             util::fetch_i64(
-                &conn,
+                &*conn,
                 "SELECT COUNT(*) FROM lcm_raw_messages",
                 (),
                 "raw count",
@@ -540,15 +798,100 @@ mod tests {
         );
         assert_eq!(
             util::fetch_i64(
-                &conn,
-                "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
+                &*conn,
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
                 (),
-                "migration marker count",
+                "migration marker version",
             )
             .await
             .map_err(|err| err.to_string())?,
-            0
+            LCM_SCHEMA_VERSION
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT COUNT(*) FROM session_messages",
+                (),
+                "legacy message count",
+            )
+            .await
+            .map_err(|err| err.to_string())?,
+            2
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_message_load_propagates_poisoned_storage_kind() -> Result<(), String> {
+        let (_temp, conn) = lcm_reader_test_connection().await?;
+        insert_reader_test_message(&conn, "safe content", "poisoned", None).await?;
+
+        let error = load_raw_message(&*conn, "cursor", "message-1")
+            .await
+            .expect_err("poisoned storage kind must not collapse to absence");
+
+        assert!(matches!(error, LcmError::Db(message) if message.contains("invalid storage_kind")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_message_load_rejects_mismatched_sanitization_receipt() -> Result<(), String> {
+        let (_temp, conn) = lcm_reader_test_connection().await?;
+        let sanitization = sanitize_lcm_payload_text("receipt-bound content")
+            .map_err(|error| error.to_string())?;
+        let metadata = serde_json::json!({
+            "ingest_protection": {
+                "sanitization_receipt": sanitization.receipt()
+            }
+        })
+        .to_string();
+        insert_reader_test_message(&conn, "tampered content", "inline", Some(&metadata)).await?;
+
+        let error = load_raw_message(&*conn, "cursor", "message-1")
+            .await
+            .expect_err("receipt mismatch must not return a raw row");
+
+        assert!(matches!(error, LcmError::Db(message) if message.contains("does not match")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_message_load_propagates_database_failure() -> Result<(), String> {
+        let (_temp, conn) = lcm_reader_test_connection().await?;
+        conn.execute_batch("DROP TABLE lcm_raw_messages")
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let error = load_raw_message(&*conn, "cursor", "message-1")
+            .await
+            .expect_err("database failure must not collapse to absence");
+
+        assert!(matches!(error, LcmError::Db(_)));
+        Ok(())
+    }
+
+    async fn sqlite_schema_fingerprint(
+        conn: &Connection,
+    ) -> Result<Vec<(String, String, String)>, String> {
+        let mut rows = conn
+            .query(
+                "SELECT type, name, COALESCE(sql, '')
+                 FROM sqlite_master
+                 WHERE name = 'session_schema_migrations'
+                    OR name LIKE 'lcm_%'
+                 ORDER BY type, name",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut fingerprint = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| error.to_string())? {
+            fingerprint.push((
+                row.get(0).map_err(|error| error.to_string())?,
+                row.get(1).map_err(|error| error.to_string())?,
+                row.get(2).map_err(|error| error.to_string())?,
+            ));
+        }
+        Ok(fingerprint)
     }
 }

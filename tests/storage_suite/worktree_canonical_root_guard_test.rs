@@ -1,8 +1,8 @@
 //! End-to-end coverage for the registry canonical_root worktree guard.
 //!
 //! A tracedecay project id is shared across every linked worktree of a
-//! repository (see `crate::global_db::GlobalDb::upsert_code_project`'s
-//! `git-common-dir:<common dir>` alias). Before the guard in
+//! repository through the registered profile registry's
+//! `git-common-dir:<common dir>` alias. Before the guard in
 //! `tracedecay::project_registry::primary_checkout_root`, opening a session
 //! from *any* linked worktree would re-register the shared project with
 //! `canonical_root`/`display_root` pinned to that worktree's own (often
@@ -17,14 +17,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-use crate::support::HOME_ENV_LOCK;
-
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
+use crate::common::canonical_existing_path as canonical_temp_path;
+use crate::home_env_lock::HOME_ENV_LOCK;
 
 fn git_cli_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -121,10 +118,6 @@ async fn init_primary(fx: &Fixture) -> String {
     let primary = TraceDecay::init_with_options(&fx.main, fx.open_options.clone())
         .await
         .expect("primary init should succeed");
-    primary
-        .index_all()
-        .await
-        .expect("primary index should succeed");
     primary.db().checkpoint().await.expect("primary checkpoint");
     let project_id = primary
         .store_layout()
@@ -132,8 +125,58 @@ async fn init_primary(fx: &Fixture) -> String {
         .project_id
         .clone()
         .expect("profile-sharded store must have a project id");
-    drop(primary);
+    primary.close();
     project_id
+}
+
+#[tokio::test]
+async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let fx = build_fixture();
+    let project_id = init_primary(&fx).await;
+    let store_root = fx.profile_root.join(format!("projects/{project_id}"));
+    let database_path = store_root.join("sessions.db");
+    if !database_path.exists() {
+        let (database, _) = crate::common::initialize_test_database(&database_path)
+            .await
+            .unwrap();
+        drop(database);
+    }
+    let marker_path = tracedecay::storage::repository_identity_path(&fx.main)
+        .expect("primary checkout should have a repository identity path");
+    std::fs::remove_file(&marker_path).unwrap();
+
+    let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
+        .await
+        .expect("global db should open");
+    assert!(
+        db.project_registry_context_by_alias(&fx.worktree)
+            .await
+            .unwrap()
+            .is_none(),
+        "the linked worktree must resolve through git common-dir, not a preexisting path alias"
+    );
+
+    let primary = db
+        .resolve_project_observation_store(&fx.main.join("."))
+        .await
+        .expect("the primary checkout should resolve through its canonical path alias");
+    let linked = db
+        .resolve_project_observation_store(&fx.worktree)
+        .await
+        .expect("the linked worktree should resolve through its git common-dir alias");
+
+    assert_eq!(primary.project().project_id, project_id);
+    assert_eq!(linked.project().project_id, project_id);
+    assert_eq!(linked.store(), primary.store());
+    assert_eq!(linked.store_root(), primary.store_root());
+    assert_eq!(linked.database_path(), primary.database_path());
+    assert_eq!(primary.store_root(), store_root.canonicalize().unwrap());
+    assert_eq!(
+        primary.database_path(),
+        database_path.canonicalize().unwrap()
+    );
+    drop(db);
 }
 
 #[tokio::test]
@@ -152,18 +195,19 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         Some(project_id.as_str()),
         "a linked worktree session must resolve the primary's shared project id"
     );
-    drop(from_worktree);
+    from_worktree.close();
 
-    let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
         .expect("global db should open");
     let record = db
         .get_code_project(&project_id)
         .await
+        .expect("registry read should not fault")
         .expect("project should be registered");
     assert_eq!(
         record.canonical_root,
-        GlobalDb::canonical_project_key(&fx.main),
+        HostAdmissionTestRuntimeV1::canonical_project_key(&fx.main),
         "canonical_root must stay pinned to the primary checkout, not the worktree that just touched it"
     );
     assert_eq!(
@@ -172,20 +216,25 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         "display_root must stay pinned to the primary checkout"
     );
 
-    // The worktree's own path must still resolve (as an alias) to the same
-    // shared project id, so future sessions opened from the worktree keep
-    // working.
+    // Linked-worktree identity is the git-common-dir alias, not a second
+    // path pin. The open above already resolved this worktree to the same
+    // project id; keep that alias on the registry row.
     let context = db
         .project_registry_context_by_id(&project_id)
         .await
         .expect("registry context should exist");
-    let worktree_key = GlobalDb::canonical_project_key(&fx.worktree);
+    let git_common_dir = tracedecay::worktree::git_common_dir(&fx.worktree)
+        .expect("linked worktree must expose a git common dir");
+    let expected_alias = format!(
+        "git-common-dir:{}",
+        HostAdmissionTestRuntimeV1::canonical_project_key(&git_common_dir)
+    );
     assert!(
         context
             .aliases
             .iter()
-            .any(|alias| alias.alias_path == worktree_key),
-        "the worktree path must remain a resolvable alias: {:?}",
+            .any(|alias| alias.alias_path == expected_alias),
+        "the worktree must remain resolvable via git-common-dir: {:?}",
         context.aliases
     );
 }
@@ -199,7 +248,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
     // Simulate the pre-guard bug: some earlier session registered straight
     // from the worktree and pinned canonical_root/display_root to it.
     {
-        let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+        let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
             .await
             .expect("global db should open");
         let git_common_dir = tracedecay::worktree::git_common_dir(&fx.worktree);
@@ -212,41 +261,56 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         )
         .await
         .expect("seeding the stale row should succeed");
-        db.checkpoint().await;
-        db.close();
+        db.checkpoint_profile_database_for_test().await;
+        drop(db);
 
-        let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+        let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
             .await
             .expect("global db should reopen");
         let stale = db
             .get_code_project(&project_id)
             .await
+            .expect("registry read should not fault")
             .expect("stale row should exist");
         assert_eq!(
             stale.canonical_root,
-            GlobalDb::canonical_project_key(&fx.worktree),
+            HostAdmissionTestRuntimeV1::canonical_project_key(&fx.worktree),
             "fixture setup should have produced the stale (bug) state"
         );
-        db.close();
+        drop(db);
     }
+
+    // The in-process registration digest otherwise treats this as the same
+    // primary registration and skips the stale-root repair. Bump an artifact
+    // mtime so the next open re-registers and heals.
+    let store_root = fx.profile_root.join(format!("projects/{project_id}"));
+    let artifact = std::fs::read_dir(&store_root)
+        .expect("list project store")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("db"))
+        .unwrap_or_else(|| panic!("project store artifact under {}", store_root.display()));
+    let artifact_bytes = std::fs::read(&artifact).expect("read store artifact");
+    std::fs::write(&artifact, artifact_bytes).expect("bump store artifact mtime");
 
     // Any subsequent touch — even one opened from the same worktree — must
     // self-heal canonical_root/display_root back to the primary checkout.
     let reopened = TraceDecay::open_with_options(&fx.worktree, fx.open_options.clone())
         .await
         .expect("reopen from worktree should succeed");
-    drop(reopened);
+    reopened.close();
 
-    let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
         .expect("global db should open");
     let healed = db
         .get_code_project(&project_id)
         .await
+        .expect("registry read should not fault")
         .expect("project should still be registered");
     assert_eq!(
         healed.canonical_root,
-        GlobalDb::canonical_project_key(&fx.main),
+        HostAdmissionTestRuntimeV1::canonical_project_key(&fx.main),
         "a stale worktree-pinned canonical_root must heal back to the primary checkout on touch"
     );
     assert_eq!(healed.display_root, fx.main.to_string_lossy());

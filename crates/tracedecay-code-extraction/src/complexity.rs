@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Generic complexity counting for tree-sitter AST nodes.
 //!
 //! Walks descendants of a function/method node and counts branches,
@@ -118,26 +117,28 @@ pub fn count_complexity(
         }
 
         // Name-based detection for call expressions (unchecked methods + assertions).
-        if !source.is_empty() && config.call_expression_types.contains(&kind) {
-            if let Some(name) = extract_call_name(current, config.call_method_field, source) {
-                if config.unchecked_methods.contains(&name.as_str()) {
-                    metrics.unchecked_calls += 1;
-                }
-                if config.assertion_names.contains(&name.as_str()) {
-                    metrics.assertions += 1;
-                }
+        if !source.is_empty()
+            && config.call_expression_types.contains(&kind)
+            && let Some(name) = extract_call_name(current, config.call_method_field, source)
+        {
+            if config.unchecked_methods.contains(&name) {
+                metrics.unchecked_calls += 1;
+            }
+            if config.assertion_names.contains(&name) {
+                metrics.assertions += 1;
             }
         }
 
         // Name-based detection for macro invocations (Rust assert!, debug_assert!, etc.).
-        if !source.is_empty() && config.macro_invocation_types.contains(&kind) {
-            if let Some(name) = extract_macro_name(current, source) {
-                if config.assertion_names.contains(&name.as_str()) {
-                    metrics.assertions += 1;
-                }
-                if config.unchecked_methods.contains(&name.as_str()) {
-                    metrics.unchecked_calls += 1;
-                }
+        if !source.is_empty()
+            && config.macro_invocation_types.contains(&kind)
+            && let Some(name) = extract_macro_name(current, source)
+        {
+            if config.assertion_names.contains(&name) {
+                metrics.assertions += 1;
+            }
+            if config.unchecked_methods.contains(&name) {
+                metrics.unchecked_calls += 1;
             }
         }
 
@@ -195,16 +196,23 @@ fn push_children<'a>(stack: &mut Vec<(TsNode<'a>, u32)>, parent: TsNode<'a>, dep
 /// Tries the configured `method_field` first (e.g. "function", "method"),
 /// then falls back to common child patterns: last identifier before `(`,
 /// or a `field_expression`/`member_expression` selector.
-fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Option<String> {
+///
+/// Returns a `&str` borrowed from `source`: this runs for every call
+/// expression in the per-node loop, so it must not allocate.
+fn extract_call_name<'s>(
+    node: TsNode<'_>,
+    method_field: &str,
+    source: &'s [u8],
+) -> Option<&'s str> {
     // Try the configured field name first.
-    if !method_field.is_empty() {
-        if let Some(field_node) = node.child_by_field_name(method_field) {
-            // For chained calls like `x.unwrap()`, the field may be a
-            // field_expression / member_expression — grab the rightmost identifier.
-            let text = rightmost_identifier(field_node, source);
-            if !text.is_empty() {
-                return Some(text);
-            }
+    if !method_field.is_empty()
+        && let Some(field_node) = node.child_by_field_name(method_field)
+    {
+        // For chained calls like `x.unwrap()`, the field may be a
+        // field_expression / member_expression — grab the rightmost identifier.
+        let text = rightmost_identifier(field_node, source);
+        if !text.is_empty() {
+            return Some(text);
         }
     }
 
@@ -214,10 +222,10 @@ fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Opt
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "field_identifier" || ck == "property_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.to_string());
-                }
+            if (ck == "identifier" || ck == "field_identifier" || ck == "property_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                return Some(text);
             }
             // member_expression / field_expression: grab the property/field child.
             if ck.contains("member_expression") || ck.contains("field_expression") {
@@ -237,16 +245,17 @@ fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Opt
 /// Extracts the macro name from a macro invocation node (e.g. `assert!`).
 ///
 /// Looks for the first identifier child, stripping a trailing `!` if present.
-fn extract_macro_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
+/// Returns a `&str` borrowed from `source` — see `extract_call_name`.
+fn extract_macro_name<'s>(node: TsNode<'_>, source: &'s [u8]) -> Option<&'s str> {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "scoped_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.trim_end_matches('!').to_string());
-                }
+            if (ck == "identifier" || ck == "scoped_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                return Some(text.trim_end_matches('!'));
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -256,25 +265,26 @@ fn extract_macro_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
     None
 }
 
-/// Returns the text of the rightmost identifier-like child of `node`.
-fn rightmost_identifier(node: TsNode<'_>, source: &[u8]) -> String {
+/// Returns the text of the rightmost identifier-like child of `node`,
+/// borrowed from `source` (empty when no identifier child exists).
+fn rightmost_identifier<'s>(node: TsNode<'_>, source: &'s [u8]) -> &'s str {
     // If node itself is a simple identifier, return it.
     let nk = node.kind();
     if nk == "identifier" || nk == "field_identifier" || nk == "property_identifier" {
-        return node.utf8_text(source).unwrap_or("").to_string();
+        return node.utf8_text(source).unwrap_or("");
     }
     // Walk children via cursor and remember the rightmost match — `node.child(i)`
     // would be O(N²) for the right-to-left scan the previous revision did.
     let mut cursor = node.walk();
-    let mut found = String::new();
+    let mut found = "";
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "field_identifier" || ck == "property_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    found = text.to_string();
-                }
+            if (ck == "identifier" || ck == "field_identifier" || ck == "property_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                found = text;
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -283,10 +293,6 @@ fn rightmost_identifier(node: TsNode<'_>, source: &[u8]) -> String {
     }
     found
 }
-
-// ---------------------------------------------------------------------------
-// Per-language configurations
-// ---------------------------------------------------------------------------
 
 pub static RUST_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["if_expression", "match_arm", "else_clause"],
@@ -812,40 +818,6 @@ pub static NIX_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-vbnet")]
-pub static VBNET_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &[
-        "if_statement",
-        "elseif_clause",
-        "else_clause",
-        "select_case_statement",
-        "catch_clause",
-    ],
-    loop_types: &[
-        "for_statement",
-        "for_each_statement",
-        "while_statement",
-        "do_loop_statement",
-    ],
-    return_types: &["return_statement", "exit_statement", "throw_statement"],
-    nesting_types: &["block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["invocation_expression"],
-    call_method_field: "",
-    assertion_names: &[
-        "Assert",
-        "AreEqual",
-        "AreNotEqual",
-        "IsTrue",
-        "IsFalse",
-        "IsNull",
-        "IsNotNull",
-    ],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-powershell")]
 pub static POWERSHELL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &[
@@ -964,51 +936,6 @@ pub static FORTRAN_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-cobol")]
-pub static COBOL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_header", "evaluate_statement", "when_phrase"],
-    loop_types: &["perform_statement_loop"],
-    return_types: &["stop_statement", "goback_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["perform_statement_call_proc"],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-msbasic2")]
-pub static MSBASIC2_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_statement"],
-    loop_types: &["for_statement"],
-    return_types: &["return_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &[],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-gwbasic")]
-pub static GWBASIC_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_statement"],
-    loop_types: &["for_statement", "while_statement"],
-    return_types: &["return_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &[],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-qbasic")]
 pub static QBASIC_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["block_if_statement"],
@@ -1045,21 +972,6 @@ pub static R_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-sql")]
-pub static SQL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if", "when_clause"],
-    loop_types: &["loop"],
-    return_types: &["return"],
-    nesting_types: &["block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["invocation"],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-julia")]
 pub static JULIA_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["if_statement", "elseif_clause", "ternary_expression"],
@@ -1073,28 +985,6 @@ pub static JULIA_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     call_method_field: "",
     assertion_names: &["@assert", "assert", "@test", "@test_throws"],
     macro_invocation_types: &["macro_expression"],
-};
-
-#[cfg(feature = "lang-haskell")]
-pub static HASKELL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["alternative", "guard"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["where"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &["fromJust", "head"],
-    call_expression_types: &["apply"],
-    call_method_field: "",
-    assertion_names: &[
-        "assertBool",
-        "assertEqual",
-        "assertTrue",
-        "assertFailure",
-        "shouldBe",
-        "shouldSatisfy",
-    ],
-    macro_invocation_types: &[],
 };
 
 #[cfg(feature = "lang-ocaml")]
@@ -1115,51 +1005,6 @@ pub static OCAML_COMPLEXITY: ComplexityConfig = ComplexityConfig {
         "assert_bool",
         "check_bool",
     ],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-clojure")]
-pub static CLOJURE_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["list_lit"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["list_lit"],
-    call_method_field: "",
-    assertion_names: &["assert", "is", "are", "testing"],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-erlang")]
-pub static ERLANG_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["cr_clause", "if_clause"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["clause_body"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["call"],
-    call_method_field: "",
-    assertion_names: &["assertEqual", "assert", "assertMatch", "assertError"],
-    macro_invocation_types: &["macro_application"],
-};
-
-#[cfg(feature = "lang-elixir")]
-pub static ELIXIR_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["stab_clause"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["do_block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["call"],
-    call_method_field: "",
-    assertion_names: &["assert", "assert_raise", "assert_receive", "refute"],
     macro_invocation_types: &[],
 };
 

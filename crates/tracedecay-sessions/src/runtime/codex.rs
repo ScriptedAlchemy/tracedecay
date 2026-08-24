@@ -13,9 +13,8 @@
 //!   (`payload.message`).
 //! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
 //!   (`payload.message`).
-//! * `event_msg` with `payload.type == "token_count"` — per-API-call usage; a
-//!   turn's tool loop emits one per call, so a turn's true cost is the *sum*
-//!   (see [`CodexTurnUsage`]).
+//! * `event_msg` with `payload.type == "token_count"` — provider usage captured
+//!   by the canonical observation path, not conversational message metadata.
 //! * `event_msg` with `payload.type == "thread_goal_updated"` — the structured
 //!   session goal and its lifecycle (`payload.goal.{objective,status,tokensUsed,
 //!   timeUsedSeconds,createdAt,updatedAt}`). `TraceDecay` records each state as a
@@ -47,71 +46,1468 @@
 
 mod context;
 mod events;
+mod goals;
+mod meta;
+mod observation;
+mod records;
+#[cfg(test)]
+mod tests;
 
-use std::io::BufRead;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::ops::Bound;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
-use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
+};
+use tracedecay_store::ParseOffset;
 
-use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
+use context::CodexContextState;
+use goals::{codex_goal_event_from_line, goal_context_from_line, goal_event_message};
+use meta::session_meta;
+use records::{
+    compacted_summary_from_line, message_from_line, response_item_goal_context_from_line,
+    response_item_tool_event_from_line, timestamp_from_record,
+};
 
-use crate::SessionMessageRecord;
+use crate::runtime::jsonl_observation_admission::{
+    SharedJsonlPathPin, install_shared_jsonl_preparation_authority,
+    namespace_replacement_message_ids, pin_shared_jsonl_paths, preflight_and_parse_new,
+    reserve_shared_jsonl_bytes, shared_jsonl_preparation_capacity,
+};
 use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, append_tool_calls_metadata,
-    content_storage_text_and_tools, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
+    title_from_messages,
 };
 use crate::runtime::source::{
-    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
+    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
+    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    stream_new_jsonl,
 };
-use context::CodexContextState;
+#[cfg(test)]
+pub(crate) use meta::session_meta_read_count_for_test;
+pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
+pub use observation::{
+    CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
+    try_admit_codex_jsonl_observations_for_profile,
+    try_admit_codex_jsonl_observations_for_profile_with_admission,
+    try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation,
+    try_admit_codex_jsonl_observations_for_project,
+    try_admit_codex_jsonl_observations_for_project_with_admission,
+    try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
+};
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
 const MAX_SCAN_DEPTH: u8 = 6;
-/// Threshold above which a tool call's arguments / a tool output is flagged as
-/// truncated in metadata. Raw tool-call arguments and tool outputs are never
-/// embedded in the FTS-searchable message text (they can carry secrets); only
-/// byte counts and this truncation flag are recorded. The lossless body already
-/// lives in the Codex rollout itself, recoverable via `source_path`/
-/// `source_offset`.
-const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
+/// Bound on enumerated transcript directories (a decade of daily Codex
+/// directories is ~3700; this cap only guards against pathological trees).
+const MAX_BUCKET_DIRS: usize = 8192;
+/// Unchanged idle probes use cheap retained identities on every scheduler
+/// tick. A full emit-suppressed sweep is intentionally much less frequent so
+/// old-file rewrites are eventually detected without continuously rereading
+/// the entire corpus while idle.
+const IDLE_FULL_VALIDATION_CYCLES: u16 = 256;
 
-fn parse_timestamp(value: &str) -> Option<u64> {
-    u64::try_from(parse_rfc3339_timestamp(value)?).ok()
+/// Process-retained bounded directory traversal for Codex discovery.
+///
+/// Durable frontiers are committed only after a whole sweep. This state keeps
+/// open `ReadDir` iterators between scheduler ticks, so an oversized directory
+/// continues at the next entry without rescanning its prefix. Losing the state
+/// on restart merely repeats the unfinished sweep at least once.
+#[derive(Default)]
+pub struct CodexDiscoveryState {
+    scan: Option<CodexRetainedScan>,
+    pending: Option<CodexPendingPass>,
+    idle: Option<CodexIdleProbe>,
 }
 
-/// Session metadata read from a rollout's leading `session_meta` line.
-struct CodexMeta {
-    cwd: PathBuf,
-    session_id: String,
-    model: Option<String>,
-    git: Option<Value>,
-    parent_session_id: Option<String>,
-    is_subagent: bool,
-    agent_id: Option<String>,
-    agent_nickname: Option<String>,
-    agent_role: Option<String>,
-    thread_source: Option<String>,
+#[derive(Clone, Default)]
+pub struct CodexDiscoveryHub {
+    inner: std::sync::Arc<Mutex<CodexDiscoveryHubState>>,
 }
 
-/// Codex CLI transcript locator + parser.
+#[derive(Default)]
+struct CodexDiscoveryHubState {
+    discovery: CodexDiscoveryState,
+    discovery_scanning: bool,
+    source_key: Option<CodexDiscoverySourceKey>,
+    frontier: Option<CodexDiscoveryFrontier>,
+    consumers: HashMap<String, CodexDiscoveryConsumerState>,
+    replay_indexes: HashMap<CodexDiscoverySourceKey, CodexReplayIndex>,
+}
+
+struct CodexDiscoveryConsumerState {
+    registrations: usize,
+    source_key: Option<CodexDiscoverySourceKey>,
+    mode: CodexDiscoveryConsumerMode,
+    awaiting_ack: Option<CodexQueuedDiscoveryPass>,
+    _memory: Option<ProcessSharedMemoryReservationV1>,
+}
+
+enum CodexDiscoveryConsumerMode {
+    Shared {
+        queue: VecDeque<CodexQueuedDiscoveryPass>,
+    },
+    Replay {
+        generation: u128,
+        position: Option<CodexIndexedPath>,
+        observed_probe_revision: u128,
+    },
+}
+
+#[derive(Clone)]
+struct CodexQueuedDiscoveryPass {
+    base: CodexDiscoveryFrontier,
+    pass: std::sync::Arc<CodexDiscoveryPass>,
+    indexed_ack: Option<(u128, Option<CodexIndexedPath>, u128)>,
+}
+
+enum CodexDiscoveryWork {
+    Shared {
+        state: CodexDiscoveryState,
+        frontier: CodexDiscoveryFrontier,
+    },
+    Replay {
+        source_key: CodexDiscoverySourceKey,
+        state: CodexDiscoveryState,
+        frontier: CodexDiscoveryFrontier,
+        generation: u128,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodexIndexedPath {
+    root_order: u8,
+    path: PathBuf,
+}
+
+impl Ord for CodexIndexedPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.root_order
+            .cmp(&other.root_order)
+            .then_with(|| match self.root_order {
+                0 => other.path.cmp(&self.path),
+                _ => self.path.cmp(&other.path),
+            })
+    }
+}
+
+impl PartialOrd for CodexIndexedPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct CodexReplayIndex {
+    generation: u128,
+    building_generation: u128,
+    discovery: Option<CodexDiscoveryState>,
+    frontier: CodexDiscoveryFrontier,
+    scanning: bool,
+    retire_when_idle: bool,
+    complete: bool,
+    rebuilding: bool,
+    probe_revision: u128,
+    paths: BTreeSet<CodexIndexedPath>,
+    building_paths: BTreeSet<CodexIndexedPath>,
+    _memory: Vec<ProcessSharedMemoryReservationV1>,
+    _building_memory: Vec<ProcessSharedMemoryReservationV1>,
+    _scanner_memory: Option<ProcessSharedMemoryReservationV1>,
+    completed_enumerations: u64,
+    files_considered: u64,
+}
+
+impl Default for CodexReplayIndex {
+    fn default() -> Self {
+        Self {
+            generation: 1,
+            building_generation: 1,
+            discovery: Some(CodexDiscoveryState::default()),
+            frontier: CodexDiscoveryFrontier::initial(),
+            scanning: false,
+            retire_when_idle: false,
+            complete: false,
+            rebuilding: true,
+            probe_revision: 0,
+            paths: BTreeSet::new(),
+            building_paths: BTreeSet::new(),
+            _memory: Vec::new(),
+            _building_memory: Vec::new(),
+            _scanner_memory: None,
+            completed_enumerations: 0,
+            files_considered: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn reset_replay_index_entries_visited_for_test() {
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.store(0, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+fn replay_index_entries_visited_for_test() -> u64 {
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn indexed_replay_pass(
+    index: &CodexReplayIndex,
+    bounds: TranscriptDiscoveryBounds,
+    frontier: CodexDiscoveryFrontier,
+    position: Option<&CodexIndexedPath>,
+) -> TranscriptIngestResult<(CodexDiscoveryPass, Option<CodexIndexedPath>)> {
+    let mut paths = Vec::new();
+    let mut bytes_charged = 0_u64;
+    let mut more = false;
+    let mut next_position = position.cloned();
+    let lower = position.map_or(Bound::Unbounded, Bound::Excluded);
+    for indexed in index.paths.range((lower, Bound::Unbounded)) {
+        #[cfg(test)]
+        CODEX_REPLAY_INDEX_ENTRIES_VISITED.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let path_bytes =
+            u64::try_from(crate::runtime::source::path_byte_len(&indexed.path)).unwrap_or(u64::MAX);
+        if paths.len() >= bounds.max_files.max(1)
+            || (!paths.is_empty()
+                && bytes_charged.saturating_add(path_bytes) > bounds.max_discovery_bytes)
+        {
+            more = true;
+            break;
+        }
+        bytes_charged = bytes_charged.saturating_add(path_bytes);
+        paths.push(indexed.path.clone());
+        next_position = Some(indexed.clone());
+    }
+    let complete = index.complete && !more;
+    let next_frontier = if complete {
+        index.frontier
+    } else {
+        frontier.for_coverage(false)
+    };
+    let pin = std::sync::Arc::new(pin_shared_jsonl_paths(&paths));
+    Ok((
+        CodexDiscoveryPass {
+            report: FileDiscoveryReport {
+                paths,
+                truncated: (!complete).then_some(FileDiscoveryLimit::FileCount),
+                skipped_oversized_entries: 0,
+                bytes_charged,
+                files_considered: 0,
+            },
+            next_frontier,
+            selected_sources: Vec::new(),
+            _shared_page_pin: Some(pin),
+        },
+        next_position,
+    ))
+}
+
+const MAX_CONSUMER_DISCOVERY_BACKLOG: usize = 1;
+
+pub(crate) enum CodexDiscoveryDelivery {
+    Ready(std::sync::Arc<CodexDiscoveryPass>),
+    Waiting,
+}
+
+impl CodexDiscoveryHub {
+    pub fn configure_preparation_resources(
+        &self,
+        memory: std::sync::Arc<ProcessResidentMemoryV1>,
+    ) -> TranscriptIngestResult<()> {
+        install_shared_jsonl_preparation_authority(memory)
+    }
+
+    pub fn register(&self, consumer: &str, source_home: Option<&Path>) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let source_key = source_home
+            .map(CodexSource::with_home)
+            .or_else(CodexSource::new)
+            .map(|source| source.discovery_key());
+        if let Some(source_key) = &source_key
+            && let Some(index) = inner.replay_indexes.get_mut(source_key)
+        {
+            index.retire_when_idle = false;
+        }
+        if let Some(existing) = inner.consumers.get_mut(consumer) {
+            existing.registrations = existing.registrations.saturating_add(1);
+            return;
+        }
+        let mode = if inner.frontier.is_none() {
+            CodexDiscoveryConsumerMode::Shared {
+                queue: VecDeque::new(),
+            }
+        } else {
+            // A consumer joining after shared discovery began must replay from
+            // its own durable frontier; inheriting the hub's idle Complete
+            // watermark would silently skip its historical corpus.
+            CodexDiscoveryConsumerMode::Replay {
+                generation: 0,
+                position: None,
+                observed_probe_revision: 0,
+            }
+        };
+        inner.consumers.insert(
+            consumer.to_owned(),
+            CodexDiscoveryConsumerState {
+                registrations: 1,
+                source_key,
+                mode,
+                awaiting_ack: None,
+                _memory: None,
+            },
+        );
+        hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
+    }
+
+    pub fn deregister(&self, consumer: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let remove = match inner.consumers.get_mut(consumer) {
+            Some(state) if state.registrations > 1 => {
+                state.registrations -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if !remove {
+            return;
+        }
+        let source_key = inner
+            .consumers
+            .remove(consumer)
+            .and_then(|state| state.source_key);
+        if let Some(source_key) = source_key {
+            let source_is_live = inner
+                .consumers
+                .values()
+                .any(|state| state.source_key.as_ref() == Some(&source_key));
+            if !source_is_live {
+                let scanning = inner
+                    .replay_indexes
+                    .get(&source_key)
+                    .is_some_and(|index| index.scanning);
+                if scanning {
+                    if let Some(index) = inner.replay_indexes.get_mut(&source_key) {
+                        index.retire_when_idle = true;
+                    }
+                } else {
+                    inner.replay_indexes.remove(&source_key);
+                }
+            }
+        }
+        hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
+    }
+
+    pub(crate) async fn discover(
+        &self,
+        consumer: &str,
+        source: &CodexSource,
+        bounds: TranscriptDiscoveryBounds,
+        frontier: CodexDiscoveryFrontier,
+    ) -> TranscriptIngestResult<CodexDiscoveryDelivery> {
+        let hub = self.clone();
+        let consumer = consumer.to_owned();
+        let source = source.clone();
+        let delivery = tokio::task::spawn_blocking(move || {
+            hub.discover_blocking(&consumer, &source, bounds, frontier)
+        })
+        .await
+        .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+            detail: "Codex discovery blocking task failed",
+        })??;
+        if let CodexDiscoveryDelivery::Ready(pass) = &delivery
+            && let Some(pin) = &pass._shared_page_pin
+        {
+            pin.start_prefetches(&pass.report.paths);
+        }
+        Ok(delivery)
+    }
+
+    fn discover_blocking(
+        &self,
+        consumer: &str,
+        source: &CodexSource,
+        bounds: TranscriptDiscoveryBounds,
+        frontier: CodexDiscoveryFrontier,
+    ) -> TranscriptIngestResult<CodexDiscoveryDelivery> {
+        loop {
+            let work = {
+                let mut inner = self.inner.lock().map_err(|_| {
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "Codex discovery hub lock is poisoned",
+                    }
+                })?;
+                let source_key = source.discovery_key();
+                let replay = {
+                    let consumer_state = inner.consumers.get_mut(consumer).ok_or(
+                        TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                            detail: "Codex discovery consumer is not registered",
+                        },
+                    )?;
+                    match &consumer_state.source_key {
+                        Some(registered) if registered != &source_key => {
+                            return Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                detail: "Codex discovery consumer changed source authority",
+                            });
+                        }
+                        Some(_) => {}
+                        None => consumer_state.source_key = Some(source_key.clone()),
+                    }
+                    if let Some(awaiting) = &consumer_state.awaiting_ack {
+                        hotpath::gauge!("codex_discovery_generation_retries").inc(1.0);
+                        return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
+                            &awaiting.pass,
+                        )));
+                    }
+                    let replay = matches!(
+                        consumer_state.mode,
+                        CodexDiscoveryConsumerMode::Replay { .. }
+                    );
+                    if replay && consumer_state._memory.is_none() {
+                        consumer_state._memory = reserve_shared_jsonl_bytes(
+                            u64::try_from(std::mem::size_of::<CodexDiscoveryConsumerState>())
+                                .unwrap_or(u64::MAX)
+                                .saturating_add(4096),
+                            "Codex replay consumer state capacity",
+                        )?;
+                    }
+                    replay
+                };
+                if replay {
+                    let ready = inner
+                        .replay_indexes
+                        .get(&source_key)
+                        .is_some_and(|index| index.complete && !index.rebuilding);
+                    let mut start_probe = false;
+                    if ready {
+                        let (consumer_generation, consumer_position, observed_probe_revision) =
+                            inner
+                                .consumers
+                                .get(consumer)
+                                .and_then(|state| match &state.mode {
+                                    CodexDiscoveryConsumerMode::Replay {
+                                        generation,
+                                        position,
+                                        observed_probe_revision,
+                                    } => Some((
+                                        *generation,
+                                        position.clone(),
+                                        *observed_probe_revision,
+                                    )),
+                                    CodexDiscoveryConsumerMode::Shared { .. } => None,
+                                })
+                                .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                    detail: "Codex replay consumer registration disappeared",
+                                })?;
+                        let index = inner.replay_indexes.get(&source_key).ok_or(
+                            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                detail: "Codex replay index disappeared before delivery",
+                            },
+                        )?;
+                        let effective_position = (consumer_generation == index.generation)
+                            .then_some(consumer_position)
+                            .flatten();
+                        let index_generation = index.generation;
+                        let lower = effective_position
+                            .as_ref()
+                            .map_or(Bound::Unbounded, Bound::Excluded);
+                        let has_remaining = index
+                            .paths
+                            .range((lower, Bound::Unbounded))
+                            .next()
+                            .is_some();
+                        start_probe = !has_remaining
+                            && frontier.is_complete()
+                            && observed_probe_revision == index.probe_revision;
+                        if !start_probe {
+                            let index_probe_revision = index.probe_revision;
+                            let (pass, next_position) = indexed_replay_pass(
+                                index,
+                                bounds,
+                                frontier,
+                                effective_position.as_ref(),
+                            )?;
+                            let state = inner.consumers.get_mut(consumer).ok_or(
+                                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                    detail: "Codex replay consumer registration disappeared",
+                                },
+                            )?;
+                            let CodexDiscoveryConsumerMode::Replay {
+                                generation,
+                                position,
+                                observed_probe_revision: _,
+                            } = &mut state.mode
+                            else {
+                                continue;
+                            };
+                            if *generation != index_generation {
+                                *generation = index_generation;
+                                *position = None;
+                            }
+                            let pass = std::sync::Arc::new(pass);
+                            state.awaiting_ack = Some(CodexQueuedDiscoveryPass {
+                                base: frontier,
+                                pass: std::sync::Arc::clone(&pass),
+                                indexed_ack: Some((
+                                    index_generation,
+                                    next_position,
+                                    index_probe_revision,
+                                )),
+                            });
+                            return Ok(CodexDiscoveryDelivery::Ready(pass));
+                        }
+                    }
+                    let index = inner.replay_indexes.entry(source_key.clone()).or_default();
+                    if index.scanning {
+                        hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        return Ok(CodexDiscoveryDelivery::Waiting);
+                    }
+                    if index._scanner_memory.is_none() {
+                        index._scanner_memory = reserve_shared_jsonl_bytes(
+                            bounds.max_discovery_bytes.saturating_mul(2).saturating_add(
+                                u64::try_from(std::mem::size_of::<CodexReplayIndex>())
+                                    .unwrap_or(u64::MAX),
+                            ),
+                            "Codex shared replay scanner state capacity",
+                        )?;
+                    }
+                    let Some(state) = index.discovery.take() else {
+                        return Ok(CodexDiscoveryDelivery::Waiting);
+                    };
+                    index.scanning = true;
+                    if start_probe {
+                        hotpath::gauge!("codex_discovery_validation_passes").inc(1.0);
+                    }
+                    CodexDiscoveryWork::Replay {
+                        source_key,
+                        state,
+                        frontier: index.frontier,
+                        generation: index.generation,
+                    }
+                } else {
+                    let consumer_state = inner.consumers.get_mut(consumer).ok_or(
+                        TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                            detail: "Codex discovery consumer registration disappeared",
+                        },
+                    )?;
+                    let queued = match &mut consumer_state.mode {
+                        CodexDiscoveryConsumerMode::Shared { queue } => queue.pop_front(),
+                        CodexDiscoveryConsumerMode::Replay { .. } => None,
+                    };
+                    if let Some(queued) = queued {
+                        if queued.base == frontier {
+                            consumer_state.awaiting_ack = Some(queued.clone());
+                            return Ok(CodexDiscoveryDelivery::Ready(queued.pass));
+                        }
+                        consumer_state.mode = CodexDiscoveryConsumerMode::Replay {
+                            generation: 0,
+                            position: None,
+                            observed_probe_revision: 0,
+                        };
+                        continue;
+                    }
+                    let shared_frontier = *inner.frontier.get_or_insert(frontier);
+                    let shared_source = inner.source_key.get_or_insert(source_key.clone());
+                    if shared_frontier != frontier || *shared_source != source_key {
+                        let consumer_state = inner.consumers.get_mut(consumer).ok_or(
+                            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                detail: "Codex discovery consumer registration disappeared",
+                            },
+                        )?;
+                        consumer_state.mode = CodexDiscoveryConsumerMode::Replay {
+                            generation: 0,
+                            position: None,
+                            observed_probe_revision: 0,
+                        };
+                        continue;
+                    }
+                    if inner.discovery_scanning {
+                        hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        return Ok(CodexDiscoveryDelivery::Waiting);
+                    }
+                    inner.discovery_scanning = true;
+                    CodexDiscoveryWork::Shared {
+                        state: std::mem::take(&mut inner.discovery),
+                        frontier: shared_frontier,
+                    }
+                }
+            };
+
+            let (mut discovery, base, replay_generation, replay_source) = match work {
+                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None, None),
+                CodexDiscoveryWork::Replay {
+                    source_key,
+                    state,
+                    frontier,
+                    generation,
+                } => (state, frontier, Some(generation), Some(source_key)),
+            };
+            let shared = replay_generation.is_none();
+            let bounds = if shared {
+                TranscriptDiscoveryBounds {
+                    max_files: bounds.max_files.min(shared_jsonl_preparation_capacity()),
+                    ..bounds
+                }
+            } else {
+                bounds
+            };
+            let result = source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            let mut inner = self.inner.lock().map_err(|_| {
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex discovery hub lock is poisoned",
+                }
+            })?;
+            if shared {
+                inner.discovery_scanning = false;
+                inner.discovery = discovery;
+                let mut pass = result?;
+                inner.discovery.acknowledge();
+                inner.frontier = Some(pass.next_frontier);
+                pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
+                    &pass.report.paths,
+                )));
+                hotpath::gauge!("codex_discovery_pending_paths")
+                    .set(pass.report.paths.len() as f64);
+                hotpath::gauge!("codex_discovery_pending_bytes")
+                    .set(pass.report.bytes_charged as f64);
+                let pass = std::sync::Arc::new(pass);
+                let queued = CodexQueuedDiscoveryPass {
+                    base,
+                    pass: std::sync::Arc::clone(&pass),
+                    indexed_ack: None,
+                };
+                let shared_source_key = inner.source_key.clone();
+                for state in inner.consumers.values_mut() {
+                    let CodexDiscoveryConsumerMode::Shared { queue } = &mut state.mode else {
+                        continue;
+                    };
+                    if state.source_key.as_ref() != shared_source_key.as_ref() {
+                        continue;
+                    }
+                    if queue.len() >= MAX_CONSUMER_DISCOVERY_BACKLOG {
+                        state.mode = CodexDiscoveryConsumerMode::Replay {
+                            generation: 0,
+                            position: None,
+                            observed_probe_revision: 0,
+                        };
+                        state.awaiting_ack = None;
+                    } else {
+                        queue.push_back(queued.clone());
+                    }
+                }
+                drop(inner);
+                continue;
+            }
+
+            let source_key =
+                replay_source.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex replay source authority is missing",
+                })?;
+            let generation =
+                replay_generation.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex replay generation authority is missing",
+                })?;
+            let retire_source = inner
+                .replay_indexes
+                .get(&source_key)
+                .is_some_and(|index| index.retire_when_idle)
+                && !inner
+                    .consumers
+                    .values()
+                    .any(|state| state.source_key.as_ref() == Some(&source_key));
+            if retire_source {
+                inner.replay_indexes.remove(&source_key);
+                return Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex replay source retired while scanning",
+                });
+            }
+            let index = inner.replay_indexes.get_mut(&source_key).ok_or(
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex replay index disappeared while scanning",
+                },
+            )?;
+            if index.generation != generation {
+                return Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex replay index generation changed while scanning",
+                });
+            }
+            index.scanning = false;
+            index.discovery = Some(discovery);
+            let pass = result?;
+            let changed = pass.next_frontier != index.frontier;
+            let emitting_changed_corpus = index
+                .discovery
+                .as_ref()
+                .and_then(|state| state.scan.as_ref())
+                .is_some_and(|scan| !scan.validation);
+            if !index.rebuilding && (changed || emitting_changed_corpus) {
+                index.building_generation = index.generation.checked_add(1).ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "Codex replay index generation exhausted",
+                    },
+                )?;
+                index.rebuilding = true;
+                index.building_paths.clear();
+                index._building_memory.clear();
+            }
+            let additions = pass
+                .report
+                .paths
+                .iter()
+                .map(|path| CodexIndexedPath {
+                    root_order: if path.starts_with(&source.sessions_dir) {
+                        0
+                    } else {
+                        1
+                    },
+                    path: path.clone(),
+                })
+                .filter(|path| index.rebuilding && !index.building_paths.contains(path))
+                .collect::<Vec<_>>();
+            let retained_bytes = additions.iter().fold(0_u64, |total, path| {
+                total.saturating_add(
+                    u64::try_from(crate::runtime::source::path_byte_len(&path.path))
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(
+                            u64::try_from(std::mem::size_of::<CodexIndexedPath>())
+                                .unwrap_or(u64::MAX),
+                        ),
+                )
+            });
+            if retained_bytes != 0 {
+                let reservation = reserve_shared_jsonl_bytes(
+                    retained_bytes,
+                    "Codex shared replay path index capacity",
+                )?
+                .ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
+                    provider: PROVIDER,
+                    resource: "Codex shared replay path index capacity",
+                })?;
+                index._building_memory.push(reservation);
+            }
+            index.building_paths.extend(additions);
+            index
+                .discovery
+                .as_mut()
+                .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "Codex replay discovery state disappeared before acknowledgement",
+                })?
+                .acknowledge();
+            let completed_probe_cycle = index
+                .discovery
+                .as_ref()
+                .and_then(|state| state.idle.as_ref())
+                .is_some_and(|idle| idle.next == 0);
+            let completed_sweep = index
+                .discovery
+                .as_ref()
+                .is_some_and(|state| state.scan.is_none() && state.idle.is_some());
+            index.frontier = pass.next_frontier;
+            if pass.next_frontier.is_complete() && completed_sweep {
+                if index.rebuilding {
+                    std::mem::swap(&mut index.paths, &mut index.building_paths);
+                    std::mem::swap(&mut index._memory, &mut index._building_memory);
+                    index.building_paths.clear();
+                    index._building_memory.clear();
+                    index.generation = index.building_generation;
+                    index.rebuilding = false;
+                    index.complete = true;
+                    index.completed_enumerations = index
+                        .completed_enumerations
+                        .checked_add(1)
+                        .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                            detail: "Codex replay enumeration count exhausted",
+                        })?;
+                    index.files_considered = pass.report.files_considered;
+                } else if completed_probe_cycle {
+                    index.probe_revision = index.probe_revision.checked_add(1).ok_or(
+                        TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                            detail: "Codex replay probe revision exhausted",
+                        },
+                    )?;
+                }
+            }
+            return Ok(CodexDiscoveryDelivery::Waiting);
+        }
+    }
+
+    pub(crate) fn acknowledge(&self, consumer: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let shared_frontier = inner.frontier;
+        let shared_source_key = inner.source_key.clone();
+        let Some(state) = inner.consumers.get_mut(consumer) else {
+            return;
+        };
+        let Some(acknowledged) = state.awaiting_ack.take() else {
+            return;
+        };
+        if let Some((generation, position, probe_revision)) = acknowledged.indexed_ack
+            && let CodexDiscoveryConsumerMode::Replay {
+                generation: consumer_generation,
+                position: consumer_position,
+                observed_probe_revision,
+            } = &mut state.mode
+            && *consumer_generation == generation
+        {
+            *consumer_position = position;
+            *observed_probe_revision = probe_revision;
+            if acknowledged.pass.next_frontier.is_complete()
+                && shared_frontier == Some(acknowledged.pass.next_frontier)
+                && state.source_key == shared_source_key
+            {
+                state.mode = CodexDiscoveryConsumerMode::Shared {
+                    queue: VecDeque::new(),
+                };
+            }
+        }
+    }
+}
+
+struct CodexPendingPass {
+    pass: CodexDiscoveryPass,
+    sources: Vec<CodexFileIdentity>,
+}
+
+struct CodexIdleProbe {
+    directories: Vec<CodexDirectoryIdentity>,
+    active_files: Vec<CodexFileIdentity>,
+    next: usize,
+    epoch: CodexCorpusEpoch,
+    complete: bool,
+    completed_probe_cycles: u16,
+}
+
+struct CodexRetainedScan {
+    phase: CodexScanPhase,
+    directories: Vec<CodexDirectoryIdentity>,
+    epoch: CodexCorpusEpoch,
+    complete: bool,
+    skipped_oversized_entries: u64,
+    files_considered: u64,
+    active_files: BinaryHeap<Reverse<CodexFileIdentity>>,
+    directory_bytes: u64,
+    validation: bool,
+}
+
+enum CodexScanPhase {
+    Directories {
+        queued: VecDeque<(PathBuf, u8, u8, u64)>,
+        current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
+    },
+    Files {
+        next_directory: usize,
+        current: Option<(usize, std::fs::ReadDir)>,
+        deferred: Option<(PathBuf, std::fs::Metadata)>,
+        resume_directories: Option<CodexDirectoryResume>,
+    },
+}
+
+struct CodexDirectoryResume {
+    queued: VecDeque<(PathBuf, u8, u8, u64)>,
+    current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
+}
+
+#[derive(Clone)]
+struct CodexDirectoryIdentity {
+    path: PathBuf,
+    root_order: u8,
+    identity: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodexFileIdentity {
+    path: PathBuf,
+    identity: [u8; 32],
+}
+
+impl Ord for CodexFileIdentity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path.cmp(&other.path)
+    }
+}
+
+impl PartialOrd for CodexFileIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl CodexDiscoveryState {
+    pub fn acknowledge(&mut self) {
+        self.pending = None;
+    }
+
+    fn reset(&mut self, source: &CodexSource) {
+        self.reset_for(source, false);
+    }
+
+    fn reset_for(&mut self, source: &CodexSource, validation: bool) {
+        self.scan = Some(CodexRetainedScan::new(source, validation));
+        self.pending = None;
+        self.idle = None;
+    }
+}
+
+impl CodexRetainedScan {
+    fn new(source: &CodexSource, validation: bool) -> Self {
+        Self {
+            phase: CodexScanPhase::Directories {
+                queued: VecDeque::from([
+                    (source.sessions_dir.clone(), 0, 0, 0),
+                    (source.archived_sessions_dir.clone(), 0, 1, 0),
+                ]),
+                current: None,
+            },
+            directories: Vec::new(),
+            epoch: CodexCorpusEpoch::initial(),
+            complete: true,
+            skipped_oversized_entries: 0,
+            files_considered: 0,
+            active_files: BinaryHeap::new(),
+            directory_bytes: 0,
+            validation,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
     user_scope: Option<UserCodexScope>,
+    /// Source-lifetime cache of project-root matchers and cwd worktree
+    /// resolutions, so one scan pass runs git identity discovery once per
+    /// root/cwd instead of once per transcript record.
     project_matchers: ProjectRootMatcherCache,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CodexDiscoverySourceKey {
+    sessions_dir: PathBuf,
+    archived_sessions_dir: PathBuf,
+}
+
+const EXACT_HOOK_DISCOVERY_UNITS_PER_CALL: usize = 64;
+const MAX_EXACT_HOOK_SOURCE_AUTHORITIES: usize = 8;
+const MAX_EXACT_HOOK_SESSION_REQUESTS: usize = 64;
+
+pub(crate) struct CodexExactSessionLookupOutcome {
+    pub paths: Vec<PathBuf>,
+    pub source_deferred: bool,
+    #[cfg(test)]
+    pub files_considered: u64,
+}
+
+struct CodexExactSessionPathAuthority {
+    sources: VecDeque<CodexExactSessionSourceState>,
+    next_lease: u128,
+}
+
+struct CodexExactSessionSourceState {
+    key: CodexDiscoverySourceKey,
+    lease: u128,
+    discovery: Option<CodexDiscoveryState>,
+    frontier: CodexDiscoveryFrontier,
+    indexed_targets: HashSet<PathBuf>,
+    indexed_by_session: HashMap<String, Vec<PathBuf>>,
+    indexed_path_bytes: u64,
+    requested: VecDeque<CodexExactSessionRequest>,
+    _memory: Option<ProcessSharedMemoryReservationV1>,
+}
+
+struct CodexExactSessionRequest {
+    session_id: String,
+    lease: u128,
+    paths: Vec<PathBuf>,
+    completed: bool,
+    _memory: Option<ProcessSharedMemoryReservationV1>,
+}
+
+static CODEX_EXACT_SESSION_PATH_AUTHORITY: OnceLock<Mutex<CodexExactSessionPathAuthority>> =
+    OnceLock::new();
+
+impl Default for CodexExactSessionPathAuthority {
+    fn default() -> Self {
+        Self {
+            sources: VecDeque::new(),
+            next_lease: 1,
+        }
+    }
+}
+
+impl CodexExactSessionPathAuthority {
+    fn issue_lease(&mut self) -> TranscriptIngestResult<u128> {
+        let lease = self.next_lease;
+        self.next_lease = self.next_lease.checked_add(1).ok_or(
+            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "exact Codex lookup lease authority exhausted",
+            },
+        )?;
+        Ok(lease)
+    }
+
+    fn source_for_lease_mut(
+        &mut self,
+        key: &CodexDiscoverySourceKey,
+        lease: u128,
+        detail: &'static str,
+    ) -> TranscriptIngestResult<&mut CodexExactSessionSourceState> {
+        self.sources
+            .iter_mut()
+            .find(|entry| &entry.key == key && entry.lease == lease)
+            .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier { detail })
+    }
+
+    fn source_index_or_admit(
+        &mut self,
+        key: CodexDiscoverySourceKey,
+    ) -> TranscriptIngestResult<usize> {
+        if let Some(index) = self.sources.iter().position(|entry| entry.key == key) {
+            return Ok(index);
+        }
+        if self.sources.len() >= MAX_EXACT_HOOK_SOURCE_AUTHORITIES {
+            let Some(completed) = self.sources.iter().position(|source| {
+                !source.requested.is_empty()
+                    && source.requested.iter().all(|request| request.completed)
+            }) else {
+                return Err(TranscriptIngestError::BackgroundResourceUnavailable {
+                    provider: PROVIDER,
+                    resource: "exact-session source lookup capacity",
+                });
+            };
+            self.sources.remove(completed);
+        }
+        let source_bytes =
+            TranscriptDiscoveryBounds::from_discovered_units(EXACT_HOOK_DISCOVERY_UNITS_PER_CALL)
+                .max_discovery_bytes
+                .saturating_mul(2)
+                .saturating_add(
+                    u64::try_from(std::mem::size_of::<CodexExactSessionSourceState>())
+                        .unwrap_or(u64::MAX),
+                );
+        let memory = reserve_shared_jsonl_bytes(
+            source_bytes,
+            "exact-session source lookup resident-memory capacity",
+        )?;
+        let lease = self.issue_lease()?;
+        self.sources.push_back(CodexExactSessionSourceState {
+            key,
+            lease,
+            discovery: Some(CodexDiscoveryState::default()),
+            frontier: CodexDiscoveryFrontier::initial(),
+            indexed_targets: HashSet::new(),
+            indexed_by_session: HashMap::new(),
+            indexed_path_bytes: 0,
+            requested: VecDeque::new(),
+            _memory: memory,
+        });
+        Ok(self.sources.len().saturating_sub(1))
+    }
+
+    fn request_index_or_admit(
+        &mut self,
+        source_index: usize,
+        session_id: String,
+    ) -> TranscriptIngestResult<usize> {
+        let source = self.sources.get_mut(source_index).ok_or(
+            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "exact Codex source authority disappeared",
+            },
+        )?;
+        if let Some(index) = source
+            .requested
+            .iter()
+            .position(|request| request.session_id == session_id)
+        {
+            return Ok(index);
+        }
+        if source.requested.len() >= MAX_EXACT_HOOK_SESSION_REQUESTS {
+            let Some(completed) = source
+                .requested
+                .iter()
+                .position(|request| request.completed)
+            else {
+                return Err(TranscriptIngestError::BackgroundResourceUnavailable {
+                    provider: PROVIDER,
+                    resource: "exact-session request lookup capacity",
+                });
+            };
+            source.requested.remove(completed);
+        }
+        let request_bytes =
+            TranscriptDiscoveryBounds::from_discovered_units(EXACT_HOOK_DISCOVERY_UNITS_PER_CALL)
+                .max_discovery_bytes
+                .saturating_add(u64::try_from(session_id.capacity()).unwrap_or(u64::MAX))
+                .saturating_add(
+                    u64::try_from(std::mem::size_of::<CodexExactSessionRequest>())
+                        .unwrap_or(u64::MAX),
+                );
+        let memory = reserve_shared_jsonl_bytes(
+            request_bytes,
+            "exact-session request lookup resident-memory capacity",
+        )?;
+        let lease = self.issue_lease()?;
+        let source = self.sources.get_mut(source_index).ok_or(
+            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "exact Codex source authority disappeared",
+            },
+        )?;
+        let paths = source
+            .indexed_by_session
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
+        source.requested.push_back(CodexExactSessionRequest {
+            session_id,
+            lease,
+            completed: !paths.is_empty() || source.frontier.is_complete(),
+            paths,
+            _memory: memory,
+        });
+        Ok(source.requested.len().saturating_sub(1))
+    }
+}
+
+#[derive(Clone)]
 struct UserCodexScope {
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
 }
 
 impl CodexSource {
+    fn discovery_key(&self) -> CodexDiscoverySourceKey {
+        CodexDiscoverySourceKey {
+            sessions_dir: self.sessions_dir.clone(),
+            archived_sessions_dir: self.archived_sessions_dir.clone(),
+        }
+    }
+
+    /// Advances one bounded retained discovery slice and resolves the exact
+    /// rollout filename used by a Codex hook event. Repeated calls continue the
+    /// same iterator instead of rereading the corpus prefix.
+    #[hotpath::measure]
+    pub(crate) fn find_session_transcript_paths_bounded(
+        &self,
+        session_id: &str,
+    ) -> TranscriptIngestResult<CodexExactSessionLookupOutcome> {
+        let authority = CODEX_EXACT_SESSION_PATH_AUTHORITY
+            .get_or_init(|| Mutex::new(CodexExactSessionPathAuthority::default()));
+        let key = self.discovery_key();
+        let (source_lease, request_lease, cached_paths) = {
+            let mut authority = authority.lock().map_err(|_| {
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex session path authority lock is poisoned",
+                }
+            })?;
+            let index = authority.source_index_or_admit(key.clone())?;
+            let request_index = authority.request_index_or_admit(index, session_id.to_owned())?;
+            let state = authority.sources.get_mut(index).ok_or(
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex source authority disappeared",
+                },
+            )?;
+            let request = state.requested.get_mut(request_index).ok_or(
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex request authority disappeared",
+                },
+            )?;
+            (state.lease, request.lease, request.paths.clone())
+        };
+        if !cached_paths.is_empty() {
+            let existing = cached_paths
+                .iter()
+                .filter(|path| path.exists())
+                .cloned()
+                .collect::<HashSet<_>>();
+            let cached = cached_paths.into_iter().collect::<HashSet<_>>();
+            let mut authority = authority.lock().map_err(|_| {
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex session path authority lock is poisoned",
+                }
+            })?;
+            let state = authority.source_for_lease_mut(
+                &key,
+                source_lease,
+                "exact Codex source lease expired during cached-path validation",
+            )?;
+            let request = state
+                .requested
+                .iter_mut()
+                .find(|request| request.session_id == session_id && request.lease == request_lease)
+                .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex request lease expired during cached-path validation",
+                })?;
+            request
+                .paths
+                .retain(|path| !cached.contains(path) || existing.contains(path));
+            if !request.paths.is_empty() {
+                return Ok(CodexExactSessionLookupOutcome {
+                    paths: request.paths.clone(),
+                    source_deferred: false,
+                    #[cfg(test)]
+                    files_considered: 0,
+                });
+            }
+            request.completed = false;
+        }
+        let (mut discovery, frontier) = {
+            let mut authority = authority.lock().map_err(|_| {
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex session path authority lock is poisoned",
+                }
+            })?;
+            let state = authority.source_for_lease_mut(
+                &key,
+                source_lease,
+                "exact Codex source lease expired before scanning",
+            )?;
+            let request = state
+                .requested
+                .iter_mut()
+                .find(|request| request.session_id == session_id && request.lease == request_lease)
+                .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex request lease expired before scanning",
+                })?;
+            request.completed = false;
+            let Some(discovery) = state.discovery.take() else {
+                return Ok(CodexExactSessionLookupOutcome {
+                    paths: Vec::new(),
+                    source_deferred: true,
+                    #[cfg(test)]
+                    files_considered: 0,
+                });
+            };
+            (discovery, state.frontier)
+        };
+
+        let bounds =
+            TranscriptDiscoveryBounds::from_discovered_units(EXACT_HOOK_DISCOVERY_UNITS_PER_CALL);
+        #[cfg(test)]
+        let files_considered_before = discovery
+            .scan
+            .as_ref()
+            .map_or(0, |scan| scan.files_considered);
+        let result = self.discover_transcript_paths_with_state(bounds, frontier, &mut discovery);
+        let pass = match result {
+            Ok(pass) => pass,
+            Err(error) => {
+                let mut authority = authority.lock().map_err(|_| {
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "exact Codex session path authority lock is poisoned",
+                    }
+                })?;
+                if let Ok(state) = authority.source_for_lease_mut(
+                    &key,
+                    source_lease,
+                    "exact Codex source lease expired while restoring failed scan",
+                ) {
+                    state.discovery = Some(discovery);
+                }
+                return Err(error);
+            }
+        };
+        let canonical_candidates = pass
+            .report
+            .paths
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .map(|name| (name.to_owned(), path))
+            })
+            .map(|(name, path)| {
+                std::fs::canonicalize(path)
+                    .map(|canonical| (name, canonical))
+                    .map_err(|source| TranscriptIngestError::ScanIo {
+                        operation: "resolve exact Codex session candidate",
+                        path: path.clone(),
+                        source,
+                    })
+            })
+            .collect::<TranscriptIngestResult<Vec<_>>>();
+        let canonical_candidates = match canonical_candidates {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let mut authority = authority.lock().map_err(|_| {
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "exact Codex session path authority lock is poisoned",
+                    }
+                })?;
+                if let Ok(state) = authority.source_for_lease_mut(
+                    &key,
+                    source_lease,
+                    "exact Codex source lease expired while restoring canonicalization failure",
+                ) {
+                    state.discovery = Some(discovery);
+                }
+                return Err(error);
+            }
+        };
+        let mut authority =
+            authority
+                .lock()
+                .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex session path authority lock is poisoned",
+                })?;
+        let state = authority.source_for_lease_mut(
+            &key,
+            source_lease,
+            "exact Codex source lease expired while scanning",
+        )?;
+        let request_bounds =
+            TranscriptDiscoveryBounds::from_discovered_units(EXACT_HOOK_DISCOVERY_UNITS_PER_CALL);
+        let mut indexed_additions: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        let mut indexed_addition_targets = HashSet::new();
+        let mut indexed_path_bytes = state.indexed_path_bytes;
+        let mut additions: Vec<(usize, PathBuf)> = Vec::new();
+        for (name, canonical) in canonical_candidates {
+            if !state.indexed_targets.contains(&canonical)
+                && indexed_addition_targets.insert(canonical.clone())
+            {
+                let path_bytes = u64::try_from(crate::runtime::source::path_byte_len(&canonical))
+                    .unwrap_or(u64::MAX);
+                let next_indexed_path_bytes = indexed_path_bytes.saturating_add(path_bytes);
+                if next_indexed_path_bytes > request_bounds.max_discovery_bytes {
+                    state.discovery = Some(discovery);
+                    return Err(TranscriptIngestError::BackgroundResourceUnavailable {
+                        provider: PROVIDER,
+                        resource: "exact-session source path index capacity",
+                    });
+                }
+                indexed_path_bytes = next_indexed_path_bytes;
+                let mut session_keys = Vec::new();
+                if let Some(stem) = name
+                    .strip_prefix("rollout-")
+                    .and_then(|value| value.strip_suffix(".jsonl"))
+                {
+                    session_keys.push(stem.to_owned());
+                    if stem.len() >= 36 {
+                        let candidate = &stem[stem.len() - 36..];
+                        if candidate.as_bytes().get(8) == Some(&b'-')
+                            && candidate.as_bytes().get(13) == Some(&b'-')
+                            && candidate.as_bytes().get(18) == Some(&b'-')
+                            && candidate.as_bytes().get(23) == Some(&b'-')
+                            && candidate != stem
+                        {
+                            session_keys.push(candidate.to_owned());
+                        }
+                    }
+                }
+                indexed_additions.push((canonical.clone(), session_keys));
+            }
+            let matching = state
+                .requested
+                .iter()
+                .enumerate()
+                .filter_map(|(index, request)| name.contains(&request.session_id).then_some(index))
+                .collect::<Vec<_>>();
+            for request_index in matching {
+                let request = state.requested.get(request_index).ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "exact Codex request authority disappeared while matching",
+                    },
+                )?;
+                if request.paths.contains(&canonical)
+                    || additions
+                        .iter()
+                        .any(|(index, path)| *index == request_index && path == &canonical)
+                {
+                    continue;
+                }
+                let retained_paths = request
+                    .paths
+                    .iter()
+                    .map(|path| crate::runtime::source::path_byte_len(path))
+                    .chain(additions.iter().filter_map(|(index, path)| {
+                        (*index == request_index)
+                            .then_some(crate::runtime::source::path_byte_len(path))
+                    }))
+                    .fold(0_usize, usize::saturating_add);
+                let next_path_bytes = retained_paths
+                    .saturating_add(crate::runtime::source::path_byte_len(&canonical));
+                let retained_count = request.paths.len().saturating_add(
+                    additions
+                        .iter()
+                        .filter(|(index, _)| *index == request_index)
+                        .count(),
+                );
+                if retained_count >= request_bounds.max_files
+                    || u64::try_from(next_path_bytes).unwrap_or(u64::MAX)
+                        > request_bounds.max_discovery_bytes
+                {
+                    state.discovery = Some(discovery);
+                    return Err(TranscriptIngestError::BackgroundResourceUnavailable {
+                        provider: PROVIDER,
+                        resource: "exact-session retained path capacity",
+                    });
+                }
+                additions.push((request_index, canonical.clone()));
+            }
+        }
+        for (canonical, session_keys) in indexed_additions {
+            state.indexed_targets.insert(canonical.clone());
+            for session_key in session_keys {
+                let paths = state.indexed_by_session.entry(session_key).or_default();
+                if let Err(index) = paths.binary_search(&canonical) {
+                    paths.insert(index, canonical.clone());
+                }
+            }
+        }
+        state.indexed_path_bytes = indexed_path_bytes;
+        for (request_index, canonical) in additions {
+            let request = state.requested.get_mut(request_index).ok_or(
+                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                    detail: "exact Codex request authority disappeared while publishing",
+                },
+            )?;
+            if let Err(index) = request.paths.binary_search(&canonical) {
+                request.paths.insert(index, canonical);
+            }
+            request.completed = true;
+        }
+        discovery.acknowledge();
+        state.frontier = pass.next_frontier;
+        state.discovery = Some(discovery);
+        if pass.next_frontier.is_complete() {
+            for request in &mut state.requested {
+                request.completed = true;
+            }
+        }
+        let paths = state
+            .requested
+            .iter()
+            .find(|request| request.session_id == session_id && request.lease == request_lease)
+            .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "exact Codex request lease expired while publishing",
+            })?
+            .paths
+            .clone();
+        Ok(CodexExactSessionLookupOutcome {
+            source_deferred: paths.is_empty() && !pass.next_frontier.is_complete(),
+            paths,
+            #[cfg(test)]
+            files_considered: pass
+                .report
+                .files_considered
+                .saturating_sub(files_considered_before),
+        })
+    }
+
     /// Source rooted at the real `~/.codex`. Returns `None` when the
     /// home directory cannot be resolved.
     pub fn new() -> Option<Self> {
-        let home = super::home_dir()?;
+        let home = crate::runtime::home_dir()?;
         Some(Self::with_home(&home))
     }
 
@@ -139,6 +1535,914 @@ impl CodexSource {
         });
         self
     }
+
+    /// Bounded discovery for long-lived schedulers. The caller must
+    /// acknowledge only after every returned path was dispositioned and any
+    /// advanced durable frontier was persisted.
+    #[hotpath::measure]
+    pub(crate) fn discover_transcript_paths_with_state(
+        &self,
+        bounds: TranscriptDiscoveryBounds,
+        frontier: CodexDiscoveryFrontier,
+        state: &mut CodexDiscoveryState,
+    ) -> TranscriptIngestResult<CodexDiscoveryPass> {
+        if let Some(pending) = &state.pending {
+            let mut valid = true;
+            for source in &pending.sources {
+                hotpath::gauge!("codex_discovery_pending_revalidations").inc(1.0);
+                let metadata = match std::fs::metadata(&source.path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        valid = false;
+                        break;
+                    }
+                    Err(source_error) => {
+                        return Err(TranscriptIngestError::ScanIo {
+                            operation: "revalidate pending Codex transcript",
+                            path: source.path.clone(),
+                            source: source_error,
+                        });
+                    }
+                };
+                if !metadata.is_file()
+                    || codex_corpus_identity(&source.path, &metadata)? != source.identity
+                {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                let mut pass = pending.pass.clone();
+                if !pass.next_frontier.is_complete() {
+                    pass.next_frontier = frontier.for_coverage(false);
+                }
+                return Ok(pass);
+            }
+            hotpath::gauge!("codex_discovery_pending_revalidation_misses").inc(1.0);
+            state.reset(self);
+        }
+        let work_limit = bounds.max_files.max(1);
+        let mut restart_idle = None;
+        if let Some(idle) = &mut state.idle {
+            let mut changed = false;
+            let mut completed_cycle = false;
+            let authority_len = idle
+                .directories
+                .len()
+                .saturating_add(idle.active_files.len());
+            let probes = work_limit.min(authority_len.max(1));
+            for _ in 0..probes {
+                if authority_len == 0 {
+                    break;
+                }
+                let index = idle.next % authority_len;
+                idle.next = if index + 1 == authority_len {
+                    completed_cycle = true;
+                    0
+                } else {
+                    index + 1
+                };
+                if let Some(directory) = idle.directories.get(index) {
+                    if codex_directory_identity(&directory.path)? != directory.identity {
+                        changed = true;
+                        break;
+                    }
+                } else {
+                    let file = &idle.active_files[index - idle.directories.len()];
+                    let metadata = match std::fs::metadata(&file.path) {
+                        Ok(metadata) => metadata,
+                        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                            changed = true;
+                            break;
+                        }
+                        Err(source) => {
+                            return Err(TranscriptIngestError::ScanIo {
+                                operation: "stat retained Codex active transcript",
+                                path: file.path.clone(),
+                                source,
+                            });
+                        }
+                    };
+                    if !metadata.is_file()
+                        || codex_corpus_identity(&file.path, &metadata)? != file.identity
+                    {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if !changed {
+                if completed_cycle {
+                    idle.completed_probe_cycles = idle.completed_probe_cycles.saturating_add(1);
+                    if idle.completed_probe_cycles >= IDLE_FULL_VALIDATION_CYCLES {
+                        restart_idle = Some(true);
+                    } else {
+                        let next_frontier = if idle.complete {
+                            CodexDiscoveryFrontier::complete(idle.epoch)
+                        } else {
+                            CodexDiscoveryFrontier::in_progress(idle.epoch)
+                        };
+                        return Ok(CodexDiscoveryPass {
+                            report: FileDiscoveryReport {
+                                paths: Vec::new(),
+                                truncated: (!idle.complete)
+                                    .then_some(FileDiscoveryLimit::FileCount),
+                                skipped_oversized_entries: 0,
+                                bytes_charged: 0,
+                                files_considered: 0,
+                            },
+                            next_frontier,
+                            selected_sources: Vec::new(),
+                            _shared_page_pin: None,
+                        });
+                    }
+                } else {
+                    let next_frontier = if idle.complete {
+                        CodexDiscoveryFrontier::complete(idle.epoch)
+                    } else {
+                        CodexDiscoveryFrontier::in_progress(idle.epoch)
+                    };
+                    return Ok(CodexDiscoveryPass {
+                        report: FileDiscoveryReport {
+                            paths: Vec::new(),
+                            truncated: (!idle.complete).then_some(FileDiscoveryLimit::FileCount),
+                            skipped_oversized_entries: 0,
+                            bytes_charged: 0,
+                            files_considered: 0,
+                        },
+                        next_frontier,
+                        selected_sources: Vec::new(),
+                        _shared_page_pin: None,
+                    });
+                }
+            } else {
+                restart_idle = Some(false);
+            }
+        }
+        if let Some(validation) = restart_idle {
+            state.reset_for(self, validation);
+        }
+        if state.scan.is_none() {
+            state.reset_for(self, frontier.is_complete());
+        }
+        if state.scan.as_ref().is_some_and(|scan| scan.validation) {
+            hotpath::gauge!("codex_discovery_validation_passes").inc(1.0);
+        } else {
+            hotpath::gauge!("codex_discovery_emit_passes").inc(1.0);
+        }
+        let pass = retained_scan_step(self, state, bounds, frontier)?;
+        let sources = pass.selected_sources.clone();
+        state.pending = Some(CodexPendingPass {
+            pass: pass.clone(),
+            sources,
+        });
+        Ok(pass)
+    }
+
+    /// One bounded standalone discovery pass.
+    ///
+    /// Standalone callers intentionally do not claim durable completion when a
+    /// tree exceeds one pass. Long-lived schedulers use
+    /// [`Self::discover_transcript_paths_with_state`] to retain the directory
+    /// iterators and converge without rescanning a prefix.
+    pub(crate) fn discover_transcript_paths_with_frontier(
+        &self,
+        bounds: TranscriptDiscoveryBounds,
+        frontier: CodexDiscoveryFrontier,
+    ) -> TranscriptIngestResult<CodexDiscoveryPass> {
+        let mut state = CodexDiscoveryState::default();
+        self.discover_transcript_paths_with_state(bounds, frontier, &mut state)
+    }
+}
+
+const CODEX_FRONTIER_SWEEPING_V2: u64 = 2;
+const CODEX_FRONTIER_COMPLETE_V2: u64 = 3;
+
+/// Versioned durable Codex discovery authority.
+///
+/// The frontier and epoch use separate `ParseOffset` records. The frontier's
+/// numeric fields are zero and `file_id` is the V2 sweep discriminant. The
+/// epoch record is an independent 128-bit commutative corpus digest plus exact
+/// file count. No authority field is packed, wrapped, masked, or clamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CodexDiscoveryFrontier {
+    epoch: CodexCorpusEpoch,
+    state: CodexDiscoverySweep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexDiscoverySweep {
+    InProgress,
+    Complete,
+}
+
+impl CodexDiscoveryFrontier {
+    pub(crate) const fn initial() -> Self {
+        Self {
+            epoch: CodexCorpusEpoch::initial(),
+            state: CodexDiscoverySweep::InProgress,
+        }
+    }
+
+    const fn in_progress(epoch: CodexCorpusEpoch) -> Self {
+        Self {
+            epoch,
+            state: CodexDiscoverySweep::InProgress,
+        }
+    }
+
+    const fn complete(epoch: CodexCorpusEpoch) -> Self {
+        Self {
+            epoch,
+            state: CodexDiscoverySweep::Complete,
+        }
+    }
+
+    pub(crate) const fn is_complete(self) -> bool {
+        matches!(self.state, CodexDiscoverySweep::Complete)
+    }
+
+    pub(crate) const fn for_coverage(self, coverage_complete: bool) -> Self {
+        if self.is_complete() && !coverage_complete {
+            Self::in_progress(self.epoch)
+        } else {
+            self
+        }
+    }
+
+    pub(crate) fn from_parse_offsets(
+        frontier: ParseOffset,
+        epoch: ParseOffset,
+    ) -> TranscriptIngestResult<Self> {
+        let epoch = CodexCorpusEpoch::from_parse_offset(epoch);
+        let decoded = match frontier.file_id {
+            0 if frontier == ParseOffset::default() => Ok(Self::initial()),
+            CODEX_FRONTIER_SWEEPING_V2 if frontier.byte_offset == 0 && frontier.mtime == 0 => {
+                Ok(Self::in_progress(epoch))
+            }
+            CODEX_FRONTIER_COMPLETE_V2 if frontier.byte_offset == 0 && frontier.mtime == 0 => {
+                Ok(Self::complete(epoch))
+            }
+            _ => Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "unknown durable frontier version or state",
+            }),
+        }?;
+        Ok(decoded)
+    }
+
+    pub(crate) const fn into_parse_offsets(self) -> (ParseOffset, ParseOffset) {
+        if self.epoch.is_initial() && matches!(self.state, CodexDiscoverySweep::InProgress) {
+            return (
+                ParseOffset {
+                    byte_offset: 0,
+                    mtime: 0,
+                    file_id: 0,
+                },
+                ParseOffset {
+                    byte_offset: 0,
+                    mtime: 0,
+                    file_id: 0,
+                },
+            );
+        }
+        let state = match self.state {
+            CodexDiscoverySweep::InProgress => CODEX_FRONTIER_SWEEPING_V2,
+            CodexDiscoverySweep::Complete => CODEX_FRONTIER_COMPLETE_V2,
+        };
+        (
+            ParseOffset {
+                byte_offset: 0,
+                mtime: 0,
+                file_id: state,
+            },
+            self.epoch.into_parse_offset(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodexCorpusEpoch {
+    high: u64,
+    low: u64,
+    files: u64,
+}
+
+impl CodexCorpusEpoch {
+    const fn initial() -> Self {
+        Self {
+            high: 0,
+            low: 0,
+            files: 0,
+        }
+    }
+
+    const fn is_initial(self) -> bool {
+        self.high == 0 && self.low == 0 && self.files == 0
+    }
+
+    const fn from_parse_offset(offset: ParseOffset) -> Self {
+        Self {
+            high: offset.byte_offset,
+            low: offset.mtime,
+            files: offset.file_id,
+        }
+    }
+
+    const fn into_parse_offset(self) -> ParseOffset {
+        ParseOffset {
+            byte_offset: self.high,
+            mtime: self.low,
+            file_id: self.files,
+        }
+    }
+
+    fn observe(&mut self, digest: [u8; 32]) -> TranscriptIngestResult<()> {
+        let mut high = [0u8; 8];
+        let mut low = [0u8; 8];
+        high.copy_from_slice(&digest[..8]);
+        low.copy_from_slice(&digest[8..16]);
+        self.high ^= u64::from_be_bytes(high);
+        self.low ^= u64::from_be_bytes(low);
+        self.files = self.files.checked_add(1).ok_or(
+            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "Codex corpus file count overflowed",
+            },
+        )?;
+        Ok(())
+    }
+}
+
+/// Outcome of one recent-first Codex discovery pass.
+#[derive(Clone, Debug)]
+pub struct CodexDiscoveryPass {
+    pub report: FileDiscoveryReport,
+    pub(crate) next_frontier: CodexDiscoveryFrontier,
+    selected_sources: Vec<CodexFileIdentity>,
+    _shared_page_pin: Option<std::sync::Arc<SharedJsonlPathPin>>,
+}
+
+fn retained_scan_step(
+    source: &CodexSource,
+    state: &mut CodexDiscoveryState,
+    bounds: TranscriptDiscoveryBounds,
+    frontier: CodexDiscoveryFrontier,
+) -> TranscriptIngestResult<CodexDiscoveryPass> {
+    let scan = state
+        .scan
+        .as_mut()
+        .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+            detail: "retained Codex scan state is missing",
+        })?;
+    let work_limit = bounds.max_files.max(1);
+    let mut work = 0usize;
+    let mut paths = Vec::new();
+    let mut selected_sources = Vec::new();
+    let mut bytes_charged = 0u64;
+    let metadata_charge = std::mem::size_of::<std::fs::Metadata>() as u64;
+    let mut discovery_limit = None;
+
+    loop {
+        match &mut scan.phase {
+            CodexScanPhase::Directories { queued, current } => {
+                if work >= work_limit {
+                    break;
+                }
+                if !scan.directories.is_empty()
+                    && (scan.directories.len().saturating_add(queued.len()) >= MAX_BUCKET_DIRS
+                        || scan.directory_bytes >= bounds.max_discovery_bytes)
+                {
+                    let resume_directories = CodexDirectoryResume {
+                        queued: std::mem::take(queued),
+                        current: current.take(),
+                    };
+                    scan.phase = CodexScanPhase::Files {
+                        next_directory: 0,
+                        current: None,
+                        deferred: None,
+                        resume_directories: Some(resume_directories),
+                    };
+                    continue;
+                }
+                if current.is_none() {
+                    let Some((path, depth, root_order, retained_charge)) = queued.pop_front()
+                    else {
+                        scan.directories.sort_unstable_by(|left, right| {
+                            left.root_order.cmp(&right.root_order).then_with(|| {
+                                if left.root_order == 0 {
+                                    right.path.cmp(&left.path)
+                                } else {
+                                    left.path.cmp(&right.path)
+                                }
+                            })
+                        });
+                        scan.phase = CodexScanPhase::Files {
+                            next_directory: 0,
+                            current: None,
+                            deferred: None,
+                            resume_directories: None,
+                        };
+                        continue;
+                    };
+                    work += 1;
+                    let charge = if retained_charge == 0 {
+                        candidate_charge(&path, metadata_charge)?
+                    } else {
+                        retained_charge
+                    };
+                    if path_byte_len(&path) > bounds.max_path_bytes
+                        || metadata_charge > bounds.max_metadata_bytes
+                        || (retained_charge == 0
+                            && scan
+                                .directory_bytes
+                                .checked_add(charge)
+                                .is_none_or(|total| total > bounds.max_discovery_bytes))
+                    {
+                        scan.complete = false;
+                        discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
+                        continue;
+                    }
+                    if retained_charge == 0 {
+                        scan.directory_bytes = scan.directory_bytes.checked_add(charge).ok_or(
+                            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                detail: "Codex retained-directory charge overflowed",
+                            },
+                        )?;
+                    }
+                    let identity = codex_directory_identity(&path)?;
+                    scan.directories.push(CodexDirectoryIdentity {
+                        path: path.clone(),
+                        root_order,
+                        identity,
+                    });
+                    if identity.is_none() {
+                        continue;
+                    }
+                    let listed = std::fs::read_dir(&path).map_err(|source| {
+                        TranscriptIngestError::ScanIo {
+                            operation: "enumerate Codex transcript directories",
+                            path: path.clone(),
+                            source,
+                        }
+                    })?;
+                    *current = Some((path, depth, root_order, listed));
+                    continue;
+                }
+                let (dir, depth, root_order, listed) = current.as_mut().ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "retained Codex directory iterator disappeared",
+                    },
+                )?;
+                match listed.next() {
+                    Some(entry) => {
+                        work += 1;
+                        let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
+                            operation: "read Codex transcript directory entry",
+                            path: dir.clone(),
+                            source,
+                        })?;
+                        let file_type =
+                            entry
+                                .file_type()
+                                .map_err(|source| TranscriptIngestError::ScanIo {
+                                    operation: "read Codex transcript entry type",
+                                    path: entry.path(),
+                                    source,
+                                })?;
+                        if file_type.is_dir() && !file_type.is_symlink() {
+                            if *depth >= MAX_SCAN_DEPTH {
+                                return Err(TranscriptIngestError::ScanIo {
+                                    operation: "traverse Codex transcript directory depth",
+                                    path: entry.path(),
+                                    source: std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "Codex transcript directory exceeds maximum depth",
+                                    ),
+                                });
+                            } else {
+                                let child = entry.path();
+                                let charge = candidate_charge(&child, metadata_charge)?;
+                                if path_byte_len(&child) > bounds.max_path_bytes
+                                    || metadata_charge > bounds.max_metadata_bytes
+                                {
+                                    return Err(TranscriptIngestError::ScanIo {
+                                        operation: "retain Codex transcript directory authority",
+                                        path: child,
+                                        source: std::io::Error::new(
+                                            std::io::ErrorKind::InvalidInput,
+                                            "Codex discovery bounds cannot represent directory",
+                                        ),
+                                    });
+                                }
+                                let charged = scan.directory_bytes.checked_add(charge).ok_or(
+                                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                        detail: "Codex retained-directory charge overflowed",
+                                    },
+                                )?;
+                                if charged > bounds.max_discovery_bytes {
+                                    if scan.directories.is_empty() {
+                                        return Err(TranscriptIngestError::ScanIo {
+                                            operation: "retain Codex transcript directory authority",
+                                            path: child,
+                                            source: std::io::Error::new(
+                                                std::io::ErrorKind::InvalidInput,
+                                                "Codex discovery byte budget cannot retain one directory",
+                                            ),
+                                        });
+                                    }
+                                    queued.push_front((
+                                        child,
+                                        depth.checked_add(1).ok_or(
+                                            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                                detail: "Codex transcript directory depth overflowed",
+                                            },
+                                        )?,
+                                        *root_order,
+                                        0,
+                                    ));
+                                    let resume_directories = CodexDirectoryResume {
+                                        queued: std::mem::take(queued),
+                                        current: current.take(),
+                                    };
+                                    scan.phase = CodexScanPhase::Files {
+                                        next_directory: 0,
+                                        current: None,
+                                        deferred: None,
+                                        resume_directories: Some(resume_directories),
+                                    };
+                                    continue;
+                                }
+                                scan.directory_bytes = charged;
+                                queued.push_front((
+                                    child,
+                                    depth.checked_add(1).ok_or(
+                                        TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                            detail: "Codex transcript directory depth overflowed",
+                                        },
+                                    )?,
+                                    *root_order,
+                                    charge,
+                                ));
+                            }
+                        }
+                    }
+                    None => *current = None,
+                }
+            }
+            CodexScanPhase::Files {
+                next_directory,
+                current,
+                deferred,
+                resume_directories,
+            } => {
+                if paths.len() >= bounds.max_files || work >= work_limit {
+                    break;
+                }
+                let candidate = if let Some(candidate) = deferred.take() {
+                    Some(candidate)
+                } else {
+                    loop {
+                        if current.is_none() {
+                            let Some(directory) = scan.directories.get(*next_directory) else {
+                                break None;
+                            };
+                            *next_directory += 1;
+                            if directory.identity.is_none() {
+                                continue;
+                            }
+                            let listed = std::fs::read_dir(&directory.path).map_err(|source| {
+                                TranscriptIngestError::ScanIo {
+                                    operation: "enumerate Codex transcript bucket",
+                                    path: directory.path.clone(),
+                                    source,
+                                }
+                            })?;
+                            *current = Some((*next_directory - 1, listed));
+                        }
+                        let (directory_index, listed) = current.as_mut().ok_or(
+                            TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                detail: "retained Codex file iterator disappeared",
+                            },
+                        )?;
+                        if work >= work_limit {
+                            break None;
+                        }
+                        match listed.next() {
+                            Some(entry) => {
+                                work += 1;
+                                let entry =
+                                    entry.map_err(|source| TranscriptIngestError::ScanIo {
+                                        operation: "read Codex transcript directory entry",
+                                        path: scan.directories[*directory_index].path.clone(),
+                                        source,
+                                    })?;
+                                let path = entry.path();
+                                if path.extension().and_then(|value| value.to_str())
+                                    != Some("jsonl")
+                                {
+                                    continue;
+                                }
+                                let metadata = std::fs::metadata(&path).map_err(|source| {
+                                    TranscriptIngestError::ScanIo {
+                                        operation: "stat Codex transcript candidate",
+                                        path: path.clone(),
+                                        source,
+                                    }
+                                })?;
+                                if metadata.is_file() {
+                                    break Some((path, metadata));
+                                }
+                            }
+                            None => *current = None,
+                        }
+                    }
+                };
+                let Some((path, metadata)) = candidate else {
+                    if *next_directory >= scan.directories.len() && current.is_none() {
+                        if let Some(resume) = resume_directories.take() {
+                            scan.directories.clear();
+                            scan.directory_bytes = 0;
+                            scan.phase = CodexScanPhase::Directories {
+                                queued: resume.queued,
+                                current: resume.current,
+                            };
+                            continue;
+                        }
+                        if scan.validation && scan.epoch != frontier.epoch {
+                            let report = FileDiscoveryReport {
+                                paths,
+                                truncated: Some(FileDiscoveryLimit::FileCount),
+                                skipped_oversized_entries: scan.skipped_oversized_entries,
+                                bytes_charged,
+                                files_considered: scan.files_considered,
+                            };
+                            *scan = CodexRetainedScan::new(source, false);
+                            return Ok(CodexDiscoveryPass {
+                                report,
+                                next_frontier: frontier.for_coverage(false),
+                                selected_sources,
+                                _shared_page_pin: None,
+                            });
+                        }
+                        let next_frontier = if scan.complete {
+                            CodexDiscoveryFrontier::complete(scan.epoch)
+                        } else {
+                            CodexDiscoveryFrontier::in_progress(scan.epoch)
+                        };
+                        let idle = CodexIdleProbe {
+                            directories: scan.directories.clone(),
+                            active_files: scan
+                                .active_files
+                                .iter()
+                                .map(|Reverse(file)| file.clone())
+                                .collect(),
+                            next: 0,
+                            epoch: scan.epoch,
+                            complete: scan.complete,
+                            completed_probe_cycles: 0,
+                        };
+                        let skipped_oversized_entries = scan.skipped_oversized_entries;
+                        let files_considered = scan.files_considered;
+                        let pass = CodexDiscoveryPass {
+                            report: FileDiscoveryReport {
+                                paths,
+                                truncated: (!next_frontier.is_complete()).then_some(
+                                    discovery_limit.unwrap_or(FileDiscoveryLimit::FileCount),
+                                ),
+                                skipped_oversized_entries,
+                                bytes_charged,
+                                files_considered,
+                            },
+                            next_frontier,
+                            selected_sources,
+                            _shared_page_pin: None,
+                        };
+                        state.idle = Some(idle);
+                        state.scan = None;
+                        return Ok(pass);
+                    }
+                    break;
+                };
+                scan.files_considered = scan.files_considered.checked_add(1).ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "Codex considered-file count overflowed",
+                    },
+                )?;
+                let path_bytes = path_byte_len(&path);
+                if path_bytes > bounds.max_path_bytes || metadata_charge > bounds.max_metadata_bytes
+                {
+                    scan.complete = false;
+                    scan.skipped_oversized_entries = scan
+                        .skipped_oversized_entries
+                        .checked_add(1)
+                        .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                            detail: "Codex oversized-entry count overflowed",
+                        })?;
+                    discovery_limit = Some(if path_bytes > bounds.max_path_bytes {
+                        FileDiscoveryLimit::PathBytes
+                    } else {
+                        FileDiscoveryLimit::MetadataBytes
+                    });
+                    continue;
+                }
+                let charge = candidate_charge(&path, metadata_charge)?;
+                let charged = bytes_charged.checked_add(charge).ok_or(
+                    TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                        detail: "selected discovery charge overflowed",
+                    },
+                )?;
+                if !scan.validation && charged > bounds.max_discovery_bytes {
+                    *deferred = Some((path, metadata));
+                    discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
+                    break;
+                }
+                let identity = codex_corpus_identity(&path, &metadata)?;
+                scan.epoch.observe(identity)?;
+                retain_active_file(
+                    &mut scan.active_files,
+                    CodexFileIdentity {
+                        path: path.clone(),
+                        identity,
+                    },
+                    bounds.max_files,
+                );
+                if !scan.validation {
+                    bytes_charged = charged;
+                    paths.push(path.clone());
+                    selected_sources.push(CodexFileIdentity { path, identity });
+                }
+            }
+        }
+    }
+
+    Ok(CodexDiscoveryPass {
+        report: FileDiscoveryReport {
+            paths,
+            truncated: Some(discovery_limit.unwrap_or(FileDiscoveryLimit::FileCount)),
+            skipped_oversized_entries: scan.skipped_oversized_entries,
+            bytes_charged,
+            files_considered: scan.files_considered,
+        },
+        next_frontier: frontier,
+        selected_sources,
+        _shared_page_pin: None,
+    })
+}
+
+fn retain_active_file(
+    files: &mut BinaryHeap<Reverse<CodexFileIdentity>>,
+    candidate: CodexFileIdentity,
+    limit: usize,
+) {
+    if limit == 0 {
+        return;
+    }
+    if files.len() < limit {
+        files.push(Reverse(candidate));
+        return;
+    }
+    if files
+        .peek()
+        .is_some_and(|Reverse(oldest)| candidate.path > oldest.path)
+    {
+        files.pop();
+        files.push(Reverse(candidate));
+    }
+}
+
+fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 32]>> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(TranscriptIngestError::ScanIo {
+                operation: "stat Codex transcript directory",
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.is_dir() {
+        return Err(TranscriptIngestError::ScanIo {
+            operation: "open Codex transcript root as a directory",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "Codex transcript root is not a directory",
+            ),
+        });
+    }
+    Ok(Some(codex_corpus_identity(path, &metadata)?))
+}
+
+fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
+    u64::try_from(path_byte_len(path))
+        .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+            detail: "candidate path size exceeds discovery accounting range",
+        })?
+        .checked_add(metadata_charge)
+        .ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+            detail: "candidate discovery charge overflowed",
+        })
+}
+
+fn codex_corpus_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> TranscriptIngestResult<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-codex-discovery-identity-v2");
+    hash_path(&mut hasher, path);
+    hasher.update(metadata.len().to_le_bytes());
+    #[cfg(unix)]
+    {
+        hasher.update(metadata.dev().to_le_bytes());
+        hasher.update(metadata.ino().to_le_bytes());
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
+        hasher.update(metadata.mtime().to_le_bytes());
+        hasher.update(metadata.mtime_nsec().to_le_bytes());
+    }
+    #[cfg(windows)]
+    {
+        hasher.update(metadata.file_attributes().to_le_bytes());
+        hasher.update(metadata.creation_time().to_le_bytes());
+        hasher.update(metadata.last_write_time().to_le_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        hash_system_time(
+            &mut hasher,
+            path,
+            "read Codex transcript modification time",
+            metadata.modified(),
+        )?;
+        hash_system_time(
+            &mut hasher,
+            path,
+            "read Codex transcript creation time",
+            metadata.created(),
+        )?;
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hash_system_time(
+    hasher: &mut Sha256,
+    path: &Path,
+    operation: &'static str,
+    time: std::io::Result<std::time::SystemTime>,
+) -> TranscriptIngestResult<()> {
+    let duration = time
+        .and_then(|time| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
+        .map_err(|source| TranscriptIngestError::ScanIo {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        })?;
+    hasher.update(duration.as_nanos().to_le_bytes());
+    Ok(())
+}
+
+fn path_byte_len(path: &Path) -> usize {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().len()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .count()
+            .saturating_mul(std::mem::size_of::<u16>())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.as_os_str().len()
+    }
+}
+
+fn hash_path(hasher: &mut Sha256, path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hasher.update(path.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in path.as_os_str().encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    hasher.update([0]);
 }
 
 impl TranscriptSource for CodexSource {
@@ -146,16 +2450,31 @@ impl TranscriptSource for CodexSource {
         PROVIDER
     }
 
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        // Archiving a session moves its rollout out of the dated tree; both
-        // locations are real transcripts and must be ingested.
-        let mut paths = collect_files_with_ext(&self.sessions_dir, "jsonl", MAX_SCAN_DEPTH);
-        paths.extend(collect_files_with_ext(
-            &self.archived_sessions_dir,
-            "jsonl",
-            MAX_SCAN_DEPTH,
-        ));
-        paths
+    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        self.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+            .paths
+    }
+
+    fn discover_transcript_paths(
+        &self,
+        _project_root: &Path,
+        bounds: TranscriptDiscoveryBounds,
+    ) -> FileDiscoveryReport {
+        match self
+            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
+        {
+            Ok(pass) => pass.report,
+            Err(error) => {
+                tracing::warn!(error = %error, "Codex transcript discovery failed");
+                FileDiscoveryReport {
+                    paths: Vec::new(),
+                    truncated: Some(FileDiscoveryLimit::FileCount),
+                    skipped_oversized_entries: 0,
+                    bytes_charged: 0,
+                    files_considered: 0,
+                }
+            }
+        }
     }
 
     fn parse_new(
@@ -179,58 +2498,46 @@ impl TranscriptSource for CodexSource {
 
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let mut messages = Vec::new();
-        let mut turn_usage = CodexTurnUsage::default();
         // Collapses identical consecutive goal states within this parse pass:
         // `thread_goal_updated` fires on every token/time tick, so only an
         // objective- or status-change opens a new `goal` row.
         let mut last_goal_key: Option<(String, Option<String>)> = None;
         let mut structured = events::CodexStructuredState::new();
-        let replayed_from_start =
-            prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
-        let mut context_state = if prev.position > 0 && !replayed_from_start {
-            CodexContextState::scan_prior(path, prev.position, &meta)
+        // Namespacing follows the stored cursor generation, so every batch of a
+        // rewritten file is namespaced; prior-context recovery follows this
+        // batch's own resume point, which is zero only at the file head.
+        let namespace_replacement = new.replacement_generation;
+        let mut context_state = if new.start_offset > 0 {
+            CodexContextState::scan_prior(path, new.start_offset, &meta)
         } else {
             CodexContextState::from_meta(&meta)
         };
-        let project_matcher = self
-            .user_scope
-            .is_none()
-            .then(|| self.project_matchers.get(project_root));
-        let registered_root_matchers = self
-            .user_scope
-            .as_ref()
-            .map(|scope| {
-                scope
-                    .registered_roots
-                    .iter()
-                    .map(|root| self.project_matchers.get(root))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let scope_matcher = TranscriptScopeMatcher::for_scope_cached(
+            project_root,
+            self.user_scope
+                .as_ref()
+                .map(|scope| scope.registered_roots.as_slice()),
+            &self.project_matchers,
+        );
         let mut last_in_scope_cwd = None;
         let mut last_in_scope_git = None;
+        let push_annotated = |messages: &mut Vec<_>,
+                              mut message,
+                              cwd: Option<&Path>,
+                              git: Option<&serde_json::Value>| {
+            context::annotate_message(&mut message, cwd, git, &self.project_matchers);
+            messages.push(message);
+        };
         for line in &new.lines {
             let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            let in_scope = if self.user_scope.is_none() {
-                context_state.cwd.as_deref().map_or(Some(false), |cwd| {
-                    project_matcher
-                        .as_ref()
-                        .map(|matcher| matcher.contains_status(cwd).definitive())
-                        .unwrap_or(Some(false))
-                })
-            } else {
-                context_state.cwd.as_deref().map_or(Some(true), |cwd| {
-                    let mut unknown = false;
-                    for matcher in &registered_root_matchers {
-                        match matcher.contains_status(cwd) {
-                            ProjectMembership::Match => return Some(false),
-                            ProjectMembership::NoMatch => {}
-                            ProjectMembership::Unknown => unknown = true,
-                        }
-                    }
-                    (!unknown).then_some(true)
-                })
-            }?;
+            // `Unknown` means a bounded git timeout left this record's scope
+            // undecided: abort before any cursor can be persisted so the same
+            // bytes are re-parsed (and re-resolved) on the next scan pass.
+            let in_scope = match scope_matcher.membership(context_state.cwd.as_deref()) {
+                ProjectMembership::Match => true,
+                ProjectMembership::NoMatch => false,
+                ProjectMembership::Unknown => return None,
+            };
             if !in_scope {
                 if compacted_summary_from_line(
                     &line.value,
@@ -248,13 +2555,12 @@ impl TranscriptSource for CodexSource {
             }
             last_in_scope_cwd.clone_from(&context_state.cwd);
             last_in_scope_git.clone_from(&context_state.git);
+            let cwd = context_state.cwd.as_deref();
+            let git = context_state.git.as_ref();
             // Non-consuming: harvest session-level policy/effort/rate-limit
             // summary before the line is routed to its owning handler below.
             structured.observe_summary(&line.value);
             if is_context_record {
-                continue;
-            }
-            if turn_usage.observe(&line.value) {
                 continue;
             }
             if let Some(rows) = structured.event_from_line(
@@ -264,14 +2570,8 @@ impl TranscriptSource for CodexSource {
                 path,
                 line.offset,
             ) {
-                for mut message in rows {
-                    context::annotate_message(
-                        &mut message,
-                        context_state.cwd.as_deref(),
-                        context_state.git.as_ref(),
-                        &self.project_matchers,
-                    );
-                    messages.push(message);
+                for message in rows {
+                    push_annotated(&mut messages, message, cwd, git);
                 }
                 continue;
             }
@@ -281,56 +2581,42 @@ impl TranscriptSource for CodexSource {
                     continue;
                 }
                 last_goal_key = Some(key);
-                let mut message = goal_event_message(
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    timestamp_from_record(&line.value),
-                    &event,
+                push_annotated(
+                    &mut messages,
+                    goal_event_message(
+                        &meta,
+                        context_state.model.as_deref(),
+                        path,
+                        line.offset,
+                        timestamp_from_record(&line.value),
+                        &event,
+                    ),
+                    cwd,
+                    git,
                 );
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
                 continue;
             }
-            if let Some(mut message) = response_item_goal_context_from_line(
+            if let Some(message) = response_item_goal_context_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
                 continue;
             }
-            if let Some(mut message) = response_item_tool_event_from_line(
+            if let Some(message) = response_item_tool_event_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
                 continue;
             }
-            if let Some(mut message) = compacted_summary_from_line(
+            if let Some(message) = compacted_summary_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
@@ -338,67 +2624,46 @@ impl TranscriptSource for CodexSource {
                 line.offset,
                 context_state.compaction_depth + 1,
             ) {
-                flush_turn_usage(&mut messages, &mut turn_usage);
+                push_annotated(&mut messages, message, cwd, git);
                 context_state.compaction_depth += 1;
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
                 continue;
             }
-            if let Some(mut message) = goal_context_from_line(
+            if let Some(message) = goal_context_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
                 continue;
             }
-            if let Some(mut message) = message_from_line(
+            if let Some(message) = message_from_line(
                 &line.value,
                 &meta,
                 context_state.model.as_deref(),
                 path,
                 line.offset,
             ) {
-                // A new user prompt closes the previous turn: attach that
-                // turn's summed API-call usage to its assistant reply.
-                if message.role == "user" {
-                    flush_turn_usage(&mut messages, &mut turn_usage);
-                }
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                    &self.project_matchers,
-                );
-                messages.push(message);
+                push_annotated(&mut messages, message, cwd, git);
             }
         }
-        // The final turn's trailing token_count(s) arrive after its
-        // agent_message; flush them onto it.
-        flush_turn_usage(&mut messages, &mut turn_usage);
         // Emit any `exec_command` calls whose paired output never arrived in
         // this pass so the tool call is not silently dropped.
-        for mut message in structured.flush_pending(&meta, path) {
-            context::annotate_message(
-                &mut message,
+        for message in structured.flush_pending(&meta, path) {
+            push_annotated(
+                &mut messages,
+                message,
                 last_in_scope_cwd.as_deref(),
                 last_in_scope_git.as_ref(),
-                &self.project_matchers,
             );
-            messages.push(message);
+        }
+
+        // A truncate-and-rewrite can reuse every byte offset from the previous
+        // file generation. Legacy projection keys are offset-based, so keep
+        // replacement rows distinct instead of overwriting retained history.
+        if namespace_replacement {
+            namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
         }
 
         let project = self.user_scope.as_ref().map_or_else(
@@ -430,1309 +2695,16 @@ impl TranscriptSource for CodexSource {
             new_cursor: new.new_cursor,
         })
     }
-}
 
-/// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
-fn session_meta(path: &Path) -> Option<CodexMeta> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines().take(4).map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        if let Some(meta) = session_meta_from_record(&value, path) {
-            return Some(meta);
-        }
-    }
-    None
-}
-
-fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
-    if record.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    let payload = record.get("payload").unwrap_or(record);
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.is_empty())
-        .map(PathBuf::from)?;
-    let session_id = payload
-        .get("id")
-        .or_else(|| payload.get("session_id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map_or_else(
-            || {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            },
-            ToString::to_string,
-        );
-    // Note: real rollouts have no `model` in session_meta — only
-    // `model_provider` (e.g. "openai"), which is *not* a model and must
-    // not be stored as one; `turn_context` lines carry the actual model.
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let git = payload.get("git").filter(|git| git.is_object()).cloned();
-    let parent_session_id = string_field(payload, "forked_from_id")
-        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"));
-    let thread_source = string_field(payload, "thread_source");
-    let agent_nickname = string_field(payload, "agent_nickname")
-        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_nickname"));
-    let agent_role = string_field(payload, "agent_role")
-        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_role"));
-    let is_subagent = thread_source.as_deref() == Some("subagent")
-        || parent_session_id.is_some()
-        || payload.pointer("/source/subagent").is_some();
-    let agent_id = is_subagent.then(|| {
-        agent_nickname
-            .clone()
-            .or_else(|| agent_role.clone())
-            .unwrap_or_else(|| session_id.clone())
-    });
-    Some(CodexMeta {
-        cwd,
-        session_id,
-        model,
-        git,
-        parent_session_id,
-        is_subagent,
-        agent_id,
-        agent_nickname,
-        agent_role,
-        thread_source,
-    })
-}
-
-fn string_field(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
-    payload
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-struct CodexTurnContext {
-    model: Option<String>,
-    cwd: Option<PathBuf>,
-}
-
-/// Context recorded on a `turn_context` line. Real rollouts use this for the
-/// active model and current cwd; both can change mid-session.
-fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
-    if record.get("type").and_then(Value::as_str) != Some("turn_context") {
-        return None;
-    }
-    let payload = record.get("payload").unwrap_or(record);
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|model| !model.is_empty())
-        .map(str::to_string);
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.is_empty())
-        .map(PathBuf::from);
-    Some(CodexTurnContext { model, cwd })
-}
-
-/// Map one rollout line to a provider-neutral message, or `None` for non-message
-/// events (`response_item`, tool calls, token counts, …).
-fn message_from_line(
-    record: &Value,
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-) -> Option<SessionMessageRecord> {
-    if record.get("type").and_then(Value::as_str) != Some("event_msg") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    let role = match payload.get("type").and_then(Value::as_str)? {
-        "user_message" => "user",
-        "agent_message" => "assistant",
-        _ => return None,
-    };
-    let content = payload.get("message")?;
-    let (text, tool_names) = content_storage_text_and_tools(content, payload.get("tool_calls"));
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    let timestamp = timestamp_from_record(record);
-    if let Some(goal_context) = codex_goal_context_from_text(&text) {
-        return Some(goal_context_message(
-            meta,
-            model,
-            path,
-            offset,
-            timestamp,
-            &goal_context,
-            &message_metadata(payload, Some(&goal_context)),
-        ));
-    }
-
-    Some(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: role.to_string(),
-        timestamp,
-        ordinal: offset,
-        text,
-        kind: Some("message".to_string()),
-        model: model.map(str::to_string),
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(payload, None)).ok(),
-    })
-}
-
-fn response_item_goal_context_from_line(
-    record: &Value,
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-) -> Option<SessionMessageRecord> {
-    if record.get("type").and_then(Value::as_str) != Some("response_item") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("message") {
-        return None;
-    }
-    let text = collect_response_item_text(payload.get("content").unwrap_or(payload));
-    let goal_context = codex_goal_context_from_text(&text)?;
-    let mut metadata = message_metadata(payload, Some(&goal_context));
-    if let Value::Object(map) = &mut metadata {
-        map.insert(
-            "source_event".to_string(),
-            Value::String("response_item".to_string()),
-        );
-        if let Some(role) = payload.get("role").and_then(Value::as_str) {
-            map.insert("source_role".to_string(), Value::String(role.to_string()));
-        }
-    }
-
-    Some(goal_context_message(
-        meta,
-        model,
-        path,
-        offset,
-        timestamp_from_record(record),
-        &goal_context,
-        &metadata,
-    ))
-}
-
-fn response_item_tool_event_from_line(
-    record: &Value,
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-) -> Option<SessionMessageRecord> {
-    if record.get("type").and_then(Value::as_str) != Some("response_item") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    let response_item_type = payload.get("type").and_then(Value::as_str)?;
-    // Serialize the output payload once and share it with both helpers below.
-    let output = payload.get("output").map(compact_response_item_value);
-    let (role, text, metadata) = match response_item_type {
-        "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
-            let tool_name = response_item_tool_name(payload, response_item_type);
-            let text =
-                response_item_tool_call_text(response_item_type, tool_name.as_deref(), payload);
-            (
-                "tool",
-                text,
-                response_item_tool_metadata(
-                    response_item_type,
-                    payload,
-                    tool_name,
-                    output.as_deref(),
-                ),
-            )
-        }
-        "function_call_output" | "custom_tool_call_output" => {
-            let text = response_item_tool_output_text(payload, output.as_deref())?;
-            (
-                "tool",
-                text,
-                response_item_tool_metadata(response_item_type, payload, None, output.as_deref()),
-            )
-        }
-        "reasoning" => {
-            let text = response_item_reasoning_summary_text(payload)?;
-            (
-                "assistant",
-                text,
-                response_item_tool_metadata(response_item_type, payload, None, output.as_deref()),
-            )
-        }
-        _ => return None,
-    };
-    if text.trim().is_empty() {
-        return None;
-    }
-    Some(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: role.to_string(),
-        timestamp: timestamp_from_record(record),
-        ordinal: offset,
-        text,
-        kind: Some(if response_item_type == "reasoning" {
-            "reasoning".to_string()
-        } else {
-            "tool_event".to_string()
-        }),
-        model: model.map(str::to_string),
-        tool_names: response_item_tool_name(payload, response_item_type),
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&metadata).ok(),
-    })
-}
-
-fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {
-    payload
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| match response_item_type {
-            "tool_search_call" => Some("tool_search".to_string()),
-            "web_search_call" => Some("web_search".to_string()),
-            _ => None,
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        preflight_and_parse_new(PROVIDER, path, prev, max_new_bytes, || {
+            self.parse_new(path, prev, project_root, max_new_bytes)
         })
-}
-
-fn response_item_tool_call_text(
-    response_item_type: &str,
-    tool_name: Option<&str>,
-    payload: &Value,
-) -> String {
-    let label = tool_name.unwrap_or(response_item_type);
-    let mut parts = vec![format!("Codex tool call: {label}")];
-    if let Some(namespace) = payload.get("namespace").and_then(Value::as_str) {
-        parts.push(format!("namespace: {namespace}"));
-    }
-    if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
-        parts.push(format!("call_id: {call_id}"));
-    }
-    // Never embed raw arguments in the FTS-searchable text — they can carry
-    // secrets (tokens, credentials, private paths). Record only the byte count;
-    // the lossless arguments remain in the rollout at `source_offset`.
-    if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
-        parts.push(format!("arguments_bytes: {arguments_bytes}"));
-    }
-    parts.join("\n")
-}
-
-/// Byte length of a tool call's arguments payload (`arguments`/`input`/`action`,
-/// whichever is present) after compact serialization. Returns `None` when the
-/// item carries no argument payload.
-fn response_item_arguments_bytes(payload: &Value) -> Option<usize> {
-    payload
-        .get("arguments")
-        .or_else(|| payload.get("input"))
-        .or_else(|| payload.get("action"))
-        .map(compact_response_item_value)
-        .map(|arguments| arguments.len())
-}
-
-fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Option<String> {
-    let call_id = payload
-        .get("call_id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let output = output?;
-    let output_bytes = output.len();
-    // Record only the byte count — the raw tool output can carry secrets and
-    // must not land in the FTS-searchable text. The full body stays in the
-    // rollout, recoverable via `source_path`/`source_offset`.
-    Some(format!(
-        "Codex tool output: {call_id}\noutput_bytes: {output_bytes}"
-    ))
-}
-
-fn response_item_reasoning_summary_text(payload: &Value) -> Option<String> {
-    let summary = payload.get("summary")?;
-    let text = collect_response_item_text(summary);
-    (!text.trim().is_empty()).then(|| format!("Codex reasoning summary:\n{text}"))
-}
-
-fn compact_response_item_value(value: &Value) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
-}
-
-fn response_item_tool_metadata(
-    response_item_type: &str,
-    payload: &Value,
-    tool_name: Option<String>,
-    output: Option<&str>,
-) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_response_item".to_string()),
-    );
-    metadata.insert(
-        "response_item_type".to_string(),
-        Value::String(response_item_type.to_string()),
-    );
-    for key in ["call_id", "id", "status", "namespace"] {
-        if let Some(value) = payload.get(key) {
-            metadata.insert(key.to_string(), value.clone());
-        }
-    }
-    if let Some(tool_name) = tool_name {
-        metadata.insert("tool_name".to_string(), Value::String(tool_name));
-    }
-    // Byte counts + truncation flags only — never the raw argument/output bytes.
-    if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
-        metadata.insert(
-            "arguments_bytes".to_string(),
-            Value::from(arguments_bytes as i64),
-        );
-        metadata.insert(
-            "arguments_truncated".to_string(),
-            Value::Bool(arguments_bytes > TOOL_EVENT_PREVIEW_BYTES),
-        );
-    }
-    if let Some(output) = output {
-        metadata.insert("output_bytes".to_string(), Value::from(output.len() as i64));
-        metadata.insert(
-            "output_truncated".to_string(),
-            Value::Bool(output.len() > TOOL_EVENT_PREVIEW_BYTES),
-        );
-    }
-    Value::Object(metadata)
-}
-
-fn goal_context_message(
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-    timestamp: Option<i64>,
-    goal_context: &CodexGoalContext,
-    metadata: &Value,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: "system".to_string(),
-        timestamp,
-        ordinal: offset,
-        text: goal_context.storage_text(),
-        kind: Some("goal_context".to_string()),
-        model: model.map(str::to_string),
-        tool_names: None,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&metadata).ok(),
-    }
-}
-
-/// Codex's structured session goal, parsed from a `thread_goal_updated`
-/// `event_msg`. `status` is stored verbatim; the parser deliberately does not
-/// map it to a fixed enum so an unrecognized future value survives round-trip.
-struct CodexGoalEvent {
-    objective: String,
-    status: Option<String>,
-    thread_id: Option<String>,
-    tokens_used: Option<i64>,
-    time_used_seconds: Option<i64>,
-    created_at: Option<i64>,
-    updated_at: Option<i64>,
-}
-
-impl CodexGoalEvent {
-    /// Key used to collapse identical consecutive lifecycle states within one
-    /// parse pass. Token/time drift on the same `(objective, status)` is
-    /// progress within a state, not a transition, so it does not open a new row.
-    fn dedup_key(&self) -> (String, Option<String>) {
-        (self.objective.clone(), self.status.clone())
-    }
-
-    fn metadata(&self) -> Value {
-        let mut goal = serde_json::Map::new();
-        goal.insert(
-            "source".to_string(),
-            Value::String("codex_thread_goal".to_string()),
-        );
-        goal.insert(
-            "source_event".to_string(),
-            Value::String("thread_goal_updated".to_string()),
-        );
-        goal.insert(
-            "objective".to_string(),
-            Value::String(self.objective.clone()),
-        );
-        if let Some(status) = &self.status {
-            goal.insert("status".to_string(), Value::String(status.clone()));
-        }
-        if let Some(thread_id) = &self.thread_id {
-            goal.insert("thread_id".to_string(), Value::String(thread_id.clone()));
-        }
-        if let Some(tokens_used) = self.tokens_used {
-            goal.insert("tokens_used".to_string(), Value::from(tokens_used));
-        }
-        if let Some(time_used_seconds) = self.time_used_seconds {
-            goal.insert(
-                "time_used_seconds".to_string(),
-                Value::from(time_used_seconds),
-            );
-        }
-        if let Some(created_at) = self.created_at {
-            goal.insert("created_at".to_string(), Value::from(created_at));
-        }
-        if let Some(updated_at) = self.updated_at {
-            goal.insert("updated_at".to_string(), Value::from(updated_at));
-        }
-        Value::Object(goal)
-    }
-}
-
-/// Parse a `thread_goal_updated` `event_msg` into a [`CodexGoalEvent`], or
-/// `None` for any other line. A goal with an empty/absent objective is skipped
-/// (there is nothing to catalog or search).
-fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEvent> {
-    if record.get("type").and_then(Value::as_str) != Some("event_msg") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("thread_goal_updated") {
-        return None;
-    }
-    let goal = payload.get("goal")?;
-    let objective = goal
-        .get("objective")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|objective| !objective.is_empty())?
-        .to_string();
-    Some(CodexGoalEvent {
-        objective,
-        status: goal
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|status| !status.is_empty())
-            .map(str::to_string),
-        thread_id: goal
-            .get("threadId")
-            .and_then(Value::as_str)
-            .or_else(|| payload.get("threadId").and_then(Value::as_str))
-            .filter(|thread_id| !thread_id.is_empty())
-            .map(str::to_string),
-        tokens_used: goal.get("tokensUsed").and_then(Value::as_i64),
-        time_used_seconds: goal.get("timeUsedSeconds").and_then(Value::as_i64),
-        created_at: goal.get("createdAt").and_then(Value::as_i64),
-        updated_at: goal.get("updatedAt").and_then(Value::as_i64),
-    })
-}
-
-/// Build the compact `goal` session row: the objective as searchable text, the
-/// lifecycle fields in `metadata_json`. Role `system` matches the other
-/// non-conversational Codex rows (goal context, compaction summaries).
-fn goal_event_message(
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-    timestamp: Option<i64>,
-    event: &CodexGoalEvent,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: "system".to_string(),
-        timestamp,
-        ordinal: offset,
-        text: event.objective.clone(),
-        kind: Some("goal".to_string()),
-        model: model.map(str::to_string),
-        tool_names: None,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&event.metadata()).ok(),
-    }
-}
-
-fn collect_response_item_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(collect_response_item_text)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-            ["content", "message", "item"]
-                .iter()
-                .filter_map(|key| map.get(*key))
-                .map(collect_response_item_text)
-                .find(|text| !text.is_empty())
-                .unwrap_or_default()
-        }
-        _ => String::new(),
-    }
-}
-
-fn timestamp_from_record(record: &Value) -> Option<i64> {
-    record
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-        .map(|secs| secs as i64)
-}
-
-fn compacted_summary_from_line(
-    record: &Value,
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-    depth: i64,
-) -> Option<SessionMessageRecord> {
-    if record.get("type").and_then(Value::as_str) != Some("compacted") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    let replacement_history_count = payload
-        .get("replacement_history")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let compaction = payload
-        .get("replacement_history")
-        .and_then(Value::as_array)
-        .and_then(|history| {
-            history
-                .iter()
-                .rev()
-                .find(|entry| entry.get("type").and_then(Value::as_str) == Some("compaction"))
-        });
-    let plaintext = payload
-        .get("message")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|message| !message.is_empty());
-    let encrypted = compaction
-        .and_then(|entry| entry.get("encrypted_content"))
-        .and_then(Value::as_str)
-        .is_some_and(|content| !content.is_empty());
-    let summary_body = if plaintext.is_some() {
-        "plaintext"
-    } else if encrypted {
-        "encrypted"
-    } else {
-        "unavailable"
-    };
-    let timestamp_text = record
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown time");
-    let text = plaintext.map_or_else(
-        || {
-            format!(
-                "Codex context compaction at {timestamp_text}. Summary body is {summary_body} in the rollout; replacement history entries: {replacement_history_count}."
-            )
-        },
-        str::to_string,
-    );
-
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_context_compacted".to_string()),
-    );
-    metadata.insert(
-        "source_event".to_string(),
-        Value::String("compacted".to_string()),
-    );
-    metadata.insert(
-        "summary_body".to_string(),
-        Value::String(summary_body.to_string()),
-    );
-    metadata.insert(
-        "replacement_history_count".to_string(),
-        Value::from(replacement_history_count as i64),
-    );
-    metadata.insert(
-        "codex_compaction_depth".to_string(),
-        Value::from(depth.max(1)),
-    );
-    metadata.insert("source_offset".to_string(), Value::from(offset));
-    metadata.insert("encrypted".to_string(), Value::from(encrypted));
-
-    Some(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: "assistant".to_string(),
-        timestamp: timestamp_from_record(record),
-        ordinal: offset,
-        text,
-        kind: Some("summary".to_string()),
-        model: model.map(str::to_string),
-        tool_names: None,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
-    })
-}
-
-struct CodexGoalContext {
-    objective: String,
-    tokens_used: Option<i64>,
-    token_budget: Option<i64>,
-    token_budget_unbounded: bool,
-    tokens_remaining: Option<i64>,
-    tokens_remaining_unbounded: bool,
-}
-
-impl CodexGoalContext {
-    fn storage_text(&self) -> String {
-        format!("Codex active goal: {}", self.objective)
-    }
-
-    fn metadata(&self) -> Value {
-        let mut goal = serde_json::Map::new();
-        goal.insert("source".to_string(), Value::String("goal".to_string()));
-        goal.insert(
-            "objective".to_string(),
-            Value::String(self.objective.clone()),
-        );
-        if let Some(tokens_used) = self.tokens_used {
-            goal.insert("tokens_used".to_string(), Value::from(tokens_used));
-        }
-        if let Some(token_budget) = self.token_budget {
-            goal.insert("token_budget".to_string(), Value::from(token_budget));
-        }
-        if self.token_budget_unbounded {
-            goal.insert("token_budget_unbounded".to_string(), Value::from(true));
-        }
-        if let Some(tokens_remaining) = self.tokens_remaining {
-            goal.insert(
-                "tokens_remaining".to_string(),
-                Value::from(tokens_remaining),
-            );
-        }
-        if self.tokens_remaining_unbounded {
-            goal.insert("tokens_remaining_unbounded".to_string(), Value::from(true));
-        }
-        Value::Object(goal)
-    }
-}
-
-fn codex_goal_context_from_text(text: &str) -> Option<CodexGoalContext> {
-    const START: &str = "<codex_internal_context source=\"goal\">";
-    const END: &str = "</codex_internal_context>";
-    let start = text.find(START)?;
-    if !text[..start].trim().is_empty() {
-        return None;
-    }
-    let after_start = &text[start + START.len()..];
-    let end = after_start.find(END)?;
-    if !after_start[end + END.len()..].trim().is_empty() {
-        return None;
-    }
-    let body = &after_start[..end];
-    let objective = tag_body(body, "objective")?.trim();
-    if objective.is_empty() {
-        return None;
-    }
-    let token_budget_line = budget_line_value(body, "Token budget:");
-    let tokens_remaining_line = budget_line_value(body, "Tokens remaining:");
-    Some(CodexGoalContext {
-        objective: objective.to_string(),
-        tokens_used: budget_line_value(body, "Tokens used:").and_then(parse_budget_count),
-        token_budget: token_budget_line.and_then(parse_budget_count),
-        token_budget_unbounded: token_budget_line.is_some_and(is_unbounded_budget_value),
-        tokens_remaining: tokens_remaining_line.and_then(parse_budget_count),
-        tokens_remaining_unbounded: tokens_remaining_line.is_some_and(is_unbounded_budget_value),
-    })
-}
-
-fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
-    let start_tag = format!("<{tag}>");
-    let end_tag = format!("</{tag}>");
-    let after_start = text.split_once(&start_tag)?.1;
-    let body = after_start.split_once(&end_tag)?.0;
-    Some(body)
-}
-
-fn budget_line_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    text.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("- ")?.trim().strip_prefix(prefix))
-        .or_else(|| {
-            text.lines()
-                .map(str::trim)
-                .find_map(|line| line.strip_prefix(prefix))
-        })
-        .map(str::trim)
-}
-
-fn parse_budget_count(value: &str) -> Option<i64> {
-    let digits = value
-        .chars()
-        .filter(char::is_ascii_digit)
-        .collect::<String>();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse::<i64>().ok()
-    }
-}
-
-fn is_unbounded_budget_value(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "none" | "unbounded"
-    )
-}
-
-fn goal_context_from_line(
-    record: &Value,
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
-    offset: i64,
-) -> Option<SessionMessageRecord> {
-    if record.get("type").and_then(Value::as_str) != Some("response_item") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("message")
-        || payload.get("role").and_then(Value::as_str) != Some("user")
-    {
-        return None;
-    }
-    let text = collect_response_item_text(payload.get("content").unwrap_or(payload));
-    if !is_goal_context_text(&text) {
-        return None;
-    }
-
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_goal_context".to_string()),
-    );
-    metadata.insert(
-        "source_event".to_string(),
-        Value::String("response_item".to_string()),
-    );
-    metadata.insert("source_offset".to_string(), Value::from(offset));
-
-    Some(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: "system".to_string(),
-        timestamp: timestamp_from_record(record),
-        ordinal: offset,
-        text,
-        kind: Some("context".to_string()),
-        model: model.map(str::to_string),
-        tool_names: None,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
-    })
-}
-
-fn is_goal_context_text(text: &str) -> bool {
-    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    let Some(header) = lines.next() else {
-        return false;
-    };
-    let header = header.trim_end_matches(':').to_ascii_lowercase();
-    if header != "current goal for this thread" && header != "active goal for this thread" {
-        return false;
-    }
-
-    let mut has_objective = false;
-    let mut has_budget = false;
-    for line in lines {
-        let lower = line.to_ascii_lowercase();
-        has_objective |= lower.starts_with("objective:");
-        has_budget |=
-            lower.starts_with("remaining token budget:") || lower.starts_with("token budget:");
-    }
-    has_objective && has_budget
-}
-
-fn message_metadata(payload: &Value, goal_context: Option<&CodexGoalContext>) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_rollout".to_string()),
-    );
-    if let Some(goal_context) = goal_context {
-        metadata.insert(
-            "codex_internal_context".to_string(),
-            Value::String("goal".to_string()),
-        );
-        metadata.insert("codex_goal".to_string(), goal_context.metadata());
-    }
-    append_tool_calls_metadata(&mut metadata, payload);
-    Value::Object(metadata)
-}
-
-/// Accumulates per-API-call `token_count` usage across one turn's tool loop.
-///
-/// Codex emits one `token_count` event per API call: the tool-loop calls
-/// report *during* the turn (before the final `agent_message`) and the final
-/// call reports right after it. Real rollouts on this machine showed ~64% of
-/// input spend in those mid-turn reports, so honest cost accounting must sum
-/// every call rather than keep only the one following the assistant reply.
-/// Consecutive events whose cumulative `total_token_usage.total_tokens` did
-/// not advance are duplicate reports of the same call and are skipped.
-///
-/// Counters are normalized for the savings dashboard's additive pricing
-/// (Anthropic semantics): `OpenAI` `input_tokens` *includes*
-/// `cached_input_tokens`, so the cached portion is split out into
-/// `cache_read_input_tokens` and `input_tokens` keeps only the uncached
-/// remainder.
-#[derive(Default)]
-pub(crate) struct CodexTurnUsage {
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    reasoning: i64,
-    total: i64,
-    seen: bool,
-    last_cumulative: Option<i64>,
-}
-
-impl CodexTurnUsage {
-    /// Consume a rollout line when it is a `token_count` event, adding its
-    /// per-call counters to the running turn sums. Returns `true` for every
-    /// `token_count` line (even malformed or duplicate ones, which add
-    /// nothing) and `false` for any other line kind.
-    pub(crate) fn observe(&mut self, record: &Value) -> bool {
-        if record.get("type").and_then(Value::as_str) != Some("event_msg") {
-            return false;
-        }
-        let Some(payload) = record.get("payload") else {
-            return false;
-        };
-        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-            return false;
-        }
-        let Some(info) = payload.get("info") else {
-            return true;
-        };
-        let cumulative = info
-            .pointer("/total_token_usage/total_tokens")
-            .and_then(Value::as_i64);
-        if cumulative.is_some() && cumulative == self.last_cumulative {
-            return true;
-        }
-        if cumulative.is_some() {
-            self.last_cumulative = cumulative;
-        }
-        let Some(last) = info
-            .get("last_token_usage")
-            .or_else(|| info.get("total_token_usage"))
-        else {
-            return true;
-        };
-        let input = last
-            .get("input_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let output = last
-            .get("output_tokens")
-            .or_else(|| last.get("completion_tokens"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let cached = last
-            .get("cached_input_tokens")
-            .or_else(|| last.get("cache_read_input_tokens"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .max(0);
-        let reasoning = last
-            .get("reasoning_output_tokens")
-            .or_else(|| last.get("reasoning_tokens"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .max(0);
-        let total = last
-            .get("total_tokens")
-            .and_then(Value::as_i64)
-            .or(cumulative)
-            .unwrap_or_else(|| input.saturating_add(output).saturating_add(reasoning));
-        if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 {
-            return true;
-        }
-        self.input = self
-            .input
-            .saturating_add((input.saturating_sub(cached)).max(0));
-        self.cache_read = self.cache_read.saturating_add(cached);
-        self.reasoning = self.reasoning.saturating_add(reasoning);
-        self.output = self
-            .output
-            .saturating_add(output.max(0).saturating_add(reasoning));
-        self.total = self.total.saturating_add(total.max(0));
-        self.seen = true;
-        true
-    }
-
-    /// The summed counters as a dashboard-shaped usage object, resetting the
-    /// turn sums (the cumulative-total dedup guard survives across turns).
-    pub(crate) fn take(&mut self) -> Option<Value> {
-        if !self.seen {
-            return None;
-        }
-        let mut usage = serde_json::Map::new();
-        usage.insert("input_tokens".to_string(), Value::from(self.input));
-        usage.insert("output_tokens".to_string(), Value::from(self.output));
-        if self.cache_read > 0 {
-            usage.insert(
-                "cache_read_input_tokens".to_string(),
-                Value::from(self.cache_read),
-            );
-        }
-        if self.reasoning > 0 {
-            usage.insert("reasoning_tokens".to_string(), Value::from(self.reasoning));
-        }
-        if self.total > 0 {
-            usage.insert("total_tokens".to_string(), Value::from(self.total));
-        }
-        self.input = 0;
-        self.output = 0;
-        self.cache_read = 0;
-        self.reasoning = 0;
-        self.total = 0;
-        self.seen = false;
-        Some(Value::Object(usage))
-    }
-}
-
-/// Add `add`'s numeric counters field-wise into `existing` (both are usage
-/// objects). Used when several flushes land on the same assistant message
-/// (e.g. an aborted turn with no reply of its own).
-pub(crate) fn merge_usage_counters(existing: &mut Value, add: &Value) {
-    let (Some(map), Some(add_map)) = (existing.as_object_mut(), add.as_object()) else {
-        return;
-    };
-    for (key, value) in add_map {
-        if let Some(count) = value.as_i64() {
-            let current = map.get(key).and_then(Value::as_i64).unwrap_or(0);
-            map.insert(key.clone(), Value::from(current.saturating_add(count)));
-        }
-    }
-}
-
-/// Attach the finished turn's summed usage to the most recent assistant
-/// message of the batch (the reply the turn's `token_count` events report
-/// on), merging additively when that message already carries usage.
-fn flush_turn_usage(messages: &mut [SessionMessageRecord], turn_usage: &mut CodexTurnUsage) {
-    let Some(usage) = turn_usage.take() else {
-        return;
-    };
-    let Some(message) = messages
-        .iter_mut()
-        .rev()
-        .find(|message| message.role == "assistant")
-    else {
-        return;
-    };
-    let mut metadata = message
-        .metadata_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    match metadata.get_mut("usage") {
-        Some(existing) => merge_usage_counters(existing, &usage),
-        None => {
-            metadata.insert("usage".to_string(), usage);
-        }
-    }
-    if let Ok(serialized) = serde_json::to_string(&Value::Object(metadata)) {
-        message.metadata_json = Some(serialized);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod goal_event_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn goal_event_line(objective: &str, status: &str) -> Value {
-        json!({
-            "timestamp": "2026-07-08T08:49:29.711Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "thread_goal_updated",
-                "threadId": "thread-1",
-                "goal": {
-                    "threadId": "thread-1",
-                    "objective": objective,
-                    "status": status,
-                    "tokensUsed": 42,
-                    "timeUsedSeconds": 7,
-                    "createdAt": 1_783_500_569i64,
-                    "updatedAt": 1_783_500_600i64
-                }
-            }
-        })
-    }
-
-    #[test]
-    fn parses_goal_event_into_row_with_metadata() {
-        let event =
-            codex_goal_event_from_line(&goal_event_line("ship the parser", "active")).unwrap();
-        let meta = CodexMeta {
-            cwd: std::path::PathBuf::from("/tmp/project"),
-            session_id: "sess-1".to_string(),
-            model: None,
-            git: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            agent_nickname: None,
-            agent_role: None,
-            thread_source: None,
-        };
-        let message = goal_event_message(
-            &meta,
-            Some("gpt-5.5"),
-            std::path::Path::new("/tmp/rollout.jsonl"),
-            128,
-            Some(1_783_500_600),
-            &event,
-        );
-        assert_eq!(message.role, "system");
-        assert_eq!(message.kind.as_deref(), Some("goal"));
-        assert_eq!(message.text, "ship the parser");
-        assert_eq!(message.ordinal, 128);
-        let metadata: Value =
-            serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(metadata["source"], "codex_thread_goal");
-        assert_eq!(metadata["source_event"], "thread_goal_updated");
-        assert_eq!(metadata["status"], "active");
-        assert_eq!(metadata["thread_id"], "thread-1");
-        assert_eq!(metadata["tokens_used"], 42);
-        assert_eq!(metadata["time_used_seconds"], 7);
-        assert_eq!(metadata["created_at"], 1_783_500_569i64);
-        assert_eq!(metadata["updated_at"], 1_783_500_600i64);
-    }
-
-    #[test]
-    fn consecutive_identical_states_share_a_dedup_key() {
-        let a = codex_goal_event_from_line(&goal_event_line("same goal", "active")).unwrap();
-        // Same objective+status, only token/time drift -> same dedup key (skipped).
-        let mut drift = goal_event_line("same goal", "active");
-        drift["payload"]["goal"]["tokensUsed"] = json!(9999);
-        drift["payload"]["goal"]["timeUsedSeconds"] = json!(321);
-        let b = codex_goal_event_from_line(&drift).unwrap();
-        assert_eq!(a.dedup_key(), b.dedup_key());
-        // A status transition is a distinct key (new row).
-        let c = codex_goal_event_from_line(&goal_event_line("same goal", "paused")).unwrap();
-        assert_ne!(a.dedup_key(), c.dedup_key());
-    }
-
-    #[test]
-    fn unknown_status_is_carried_through_verbatim() {
-        let event =
-            codex_goal_event_from_line(&goal_event_line("do the thing", "completed")).unwrap();
-        assert_eq!(event.status.as_deref(), Some("completed"));
-        let metadata = event.metadata();
-        assert_eq!(metadata["status"], "completed");
-    }
-
-    #[test]
-    fn missing_status_and_objective_are_handled_gracefully() {
-        // No status key at all -> status None, still a valid goal row.
-        let mut no_status = goal_event_line("objective only", "active");
-        no_status["payload"]["goal"]
-            .as_object_mut()
-            .unwrap()
-            .remove("status");
-        let event = codex_goal_event_from_line(&no_status).unwrap();
-        assert!(event.status.is_none());
-        assert!(!event.metadata().as_object().unwrap().contains_key("status"));
-        // Empty objective -> no goal row (nothing to catalog).
-        let empty = goal_event_line("   ", "active");
-        assert!(codex_goal_event_from_line(&empty).is_none());
-    }
-
-    #[test]
-    fn non_goal_event_lines_are_ignored() {
-        let token_count = json!({
-            "type": "event_msg",
-            "payload": {"type": "token_count", "info": {}}
-        });
-        assert!(codex_goal_event_from_line(&token_count).is_none());
-        let user = json!({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "hi"}
-        });
-        assert!(codex_goal_event_from_line(&user).is_none());
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod source_matcher_cache_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-    use serde_json::json;
-    use tempfile::TempDir;
-
-    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-
-    fn retrying_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
-        let root = path
-            .ancestors()
-            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
-            .unwrap_or(path);
-        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
-            return crate::worktree::GitRepoIdentityOutcome::Unknown;
-        }
-        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
-            worktree_root: root.to_path_buf(),
-            common_dir: root.join(".git"),
-        })
-    }
-
-    fn write_rollout(path: &Path, session_id: &str, cwd: &Path) {
-        let lines = [
-            json!({
-                "timestamp": "2026-01-01T00:00:00.000Z",
-                "type": "session_meta",
-                "payload": {
-                    "id": session_id,
-                    "cwd": cwd,
-                    "model": "gpt-5.5"
-                }
-            }),
-            json!({
-                "timestamp": "2026-01-01T00:00:01.000Z",
-                "type": "event_msg",
-                "payload": {
-                    "type": "user_message",
-                    "message": format!("message from {session_id}")
-                }
-            }),
-        ];
-        std::fs::write(
-            path,
-            lines
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn codex_source_reuses_project_matcher_across_parse_calls() {
-        let temp = TempDir::new().unwrap();
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&project_root)
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let first_path = temp.path().join("first.jsonl");
-        let second_path = temp.path().join("second.jsonl");
-        write_rollout(&first_path, "first-session", &nested_cwd);
-        write_rollout(&second_path, "second-session", &nested_cwd);
-        let source = CodexSource::with_home(temp.path());
-
-        let first = source
-            .parse_new(&first_path, StoredCursor::default(), &project_root, None)
-            .unwrap();
-        assert_eq!(first.messages.len(), 1);
-        let first_metadata: Value =
-            serde_json::from_str(first.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-        let first_worktree = first_metadata["codex_turn_worktree"].clone();
-        assert!(first_worktree.is_string());
-
-        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden")).unwrap();
-        let second = source
-            .parse_new(&second_path, StoredCursor::default(), &project_root, None)
-            .unwrap();
-        assert_eq!(second.messages.len(), 1);
-        let second_metadata: Value =
-            serde_json::from_str(second.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(second_metadata["codex_turn_worktree"], first_worktree);
-    }
-
-    #[test]
-    fn codex_unknown_membership_retries_without_advancing_cursor() {
-        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
-        let temp = TempDir::new().unwrap();
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).unwrap();
-        let transcript = temp.path().join("retry.jsonl");
-        write_rollout(&transcript, "retry-session", &nested_cwd);
-        let mut source = CodexSource::with_home(temp.path());
-        source.project_matchers =
-            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
-
-        let previous = StoredCursor::default();
-        assert!(
-            source
-                .parse_new(&transcript, previous, &project_root, None)
-                .is_none(),
-            "unknown membership must abort before a new cursor can be persisted"
-        );
-
-        let retried = source
-            .parse_new(&transcript, previous, &project_root, None)
-            .expect("unknown membership must be resolved again on retry");
-        assert_eq!(retried.messages.len(), 1);
-        assert!(retried.new_cursor.position > previous.position);
-        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
 }

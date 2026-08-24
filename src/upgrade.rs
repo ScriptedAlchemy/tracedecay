@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
+
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
 use crate::user_config::UserConfig;
@@ -20,9 +24,9 @@ const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 // Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use crate::cloud::asset_name_candidates;
+use crate::cloud::asset_name;
 #[cfg(test)]
-use crate::cloud::{asset_name, current_platform};
+use crate::cloud::current_platform;
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {
@@ -35,9 +39,16 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
     }
 }
 
-/// Fetches the `browser_download_url` for the first matching asset name in a
-/// GitHub release.
-fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
+#[derive(Debug)]
+struct ReleaseDownload {
+    asset_name: String,
+    asset_url: String,
+    checksums_url: String,
+}
+
+/// Resolves both the platform archive and its checksum manifest from one
+/// GitHub release. An archive without `SHA256SUMS` is not installable.
+fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
@@ -67,24 +78,94 @@ fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
             message: format!("failed to parse release info: {e}"),
         })?;
 
-    for candidate in candidates {
-        if let Some(asset) = release.assets.iter().find(|a| a.name == *candidate) {
-            return Ok(asset.browser_download_url.clone());
-        }
-    }
-    let expected = candidates.join("' or '");
-    Err(TraceDecayError::Config {
-        message: format!(
-            "release {tag} exists but asset '{expected}' is not yet available.\n  \
-             CI build may still be in progress — try again in a few minutes.\n  \
-             https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-        ),
+    let archive = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "release {tag} exists but asset '{asset_name}' is not yet available.\n  \
+                 CI build may still be in progress — try again in a few minutes.\n  \
+                 https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+            ),
+        })?;
+    let checksums = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS")
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "release {tag} has asset '{}' but no SHA256SUMS; refusing an unverified upgrade",
+                archive.name
+            ),
+        })?;
+    Ok(ReleaseDownload {
+        asset_name: archive.name.clone(),
+        asset_url: archive.browser_download_url.clone(),
+        checksums_url: checksums.browser_download_url.clone(),
     })
 }
 
-/// Downloads the archive from `url` into memory, then extracts the first
-/// entry matching any of `bin_names` to a temp path. Returns the temp path.
-fn download_and_extract(url: &str, bin_names: &[&str]) -> Result<std::path::PathBuf> {
+fn download_bytes(agent: &ureq::Agent, url: &str, description: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    agent
+        .get(url)
+        .header("User-Agent", "tracedecay")
+        .call()
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("{description} download failed: {e}"),
+        })?
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("{description} download read failed: {error}"),
+        })?;
+    Ok(bytes)
+}
+
+fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
+    let text = std::str::from_utf8(manifest).map_err(|e| TraceDecayError::Config {
+        message: format!("SHA256SUMS is not valid UTF-8: {e}"),
+    })?;
+    let mut matches = text.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let digest = fields.next()?;
+        let name = fields.next()?.trim_start_matches('*');
+        (fields.next().is_none() && name == asset_name).then_some(digest)
+    });
+    let digest = matches.next().ok_or_else(|| TraceDecayError::Config {
+        message: format!("SHA256SUMS has no entry for {asset_name}"),
+    })?;
+    if matches.next().is_some() {
+        return Err(TraceDecayError::Config {
+            message: format!("SHA256SUMS has duplicate entries for {asset_name}"),
+        });
+    }
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TraceDecayError::Config {
+            message: format!("SHA256SUMS has an invalid digest for {asset_name}"),
+        });
+    }
+    Ok(digest.to_ascii_lowercase())
+}
+
+fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
+    let actual = sha256_hex(bytes);
+    if actual == expected {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!("checksum mismatch for {asset_name}: expected {expected}, got {actual}"),
+    })
+}
+
+/// Downloads and verifies the archive, then extracts the first entry matching
+/// any of `bin_names` to a temp path. Returns the temp path.
+fn download_and_extract(
+    download: &ReleaseDownload,
+    bin_names: &[&str],
+) -> Result<std::path::PathBuf> {
     let tmp_path = std::env::temp_dir().join(format!(
         "tracedecay_upgrade_{}{}",
         std::process::id(),
@@ -98,26 +179,15 @@ fn download_and_extract(url: &str, bin_names: &[&str]) -> Result<std::path::Path
 
     eprint!("  Downloading...");
 
-    // Buffer the entire archive so the reader type is concrete (Cursor<Vec<u8>>),
-    // which makes type inference for tar::Entry and zip::ZipArchive unambiguous.
-    let raw: Vec<u8> = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        agent
-            .get(url)
-            .header("User-Agent", "tracedecay")
-            .call()
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("download failed: {e}"),
-            })?
-            .body_mut()
-            .as_reader()
-            .read_to_end(&mut buf)
-            .map_err(io_err("download read failed"))?;
-        buf
-    };
+    let manifest = download_bytes(&agent, &download.checksums_url, "checksum manifest")?;
+    let expected = expected_sha256(&manifest, &download.asset_name)?;
+    // Buffer the entire archive so the reader type is concrete
+    // (Cursor<Vec<u8>>), which keeps archive extraction platform-neutral.
+    let raw = download_bytes(&agent, &download.asset_url, "release archive")?;
 
     eprintln!(" ({:.1} MiB)", raw.len() as f64 / 1_048_576.0);
+    verify_sha256(&raw, &expected, &download.asset_name)?;
+    eprintln!("  Checksum verified");
     eprint!("  Extracting...");
 
     #[cfg(not(windows))]
@@ -230,11 +300,11 @@ fn replace_default(new_exe: &Path) -> Result<Option<PathBuf>> {
     #[cfg(unix)]
     {
         let canonical = exe.as_ref().and_then(|e| e.canonicalize().ok());
-        if let (Some(exe), Some(canonical)) = (&exe, canonical) {
-            if exe.as_path() != canonical.as_path() {
-                install_binary(new_exe, &canonical)?;
-                return Ok(Some(canonical));
-            }
+        if let (Some(exe), Some(canonical)) = (&exe, canonical)
+            && exe.as_path() != canonical.as_path()
+        {
+            install_binary(new_exe, &canonical)?;
+            return Ok(Some(canonical));
         }
     }
 
@@ -319,8 +389,8 @@ fn install_upgrade_version(
     is_beta: bool,
     method: &InstallMethod,
 ) -> Result<Option<PathBuf>> {
-    let asset_url = preflight_asset_check(latest, is_beta)?;
-    perform_upgrade(latest, &asset_url, method)
+    let download = preflight_asset_check(latest, is_beta)?;
+    perform_upgrade(latest, &download, method)
 }
 
 fn run_versioned_upgrade(
@@ -404,6 +474,7 @@ fn rewrite_homebrew_install_receipt(
     Ok(())
 }
 
+#[cfg(unix)]
 fn warn_best_effort(step: &str, error: &TraceDecayError) {
     eprintln!("\n  \x1b[33mwarning:\x1b[0m {step}: {error}");
 }
@@ -466,25 +537,24 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>
 
                 // Step 3: update the symlink at <prefix>/bin/<binary>.
                 let symlink_path = prefix.join("bin").join(bin_name);
-                if let Ok(meta) = std::fs::symlink_metadata(&symlink_path) {
-                    if meta.file_type().is_symlink() {
-                        match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
-                            Ok(()) => installed_at = symlink_path,
-                            Err(error) => {
-                                warn_best_effort("could not update Homebrew symlink", &error);
-                            }
+                if let Ok(meta) = std::fs::symlink_metadata(&symlink_path)
+                    && meta.file_type().is_symlink()
+                {
+                    match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
+                        Ok(()) => installed_at = symlink_path,
+                        Err(error) => {
+                            warn_best_effort("could not update Homebrew symlink", &error);
                         }
                     }
                 }
 
                 // Step 4: patch INSTALL_RECEIPT.json so `brew info` is accurate.
                 let receipt = new_version_dir.join("INSTALL_RECEIPT.json");
-                if receipt.exists() {
-                    if let Err(error) =
+                if receipt.exists()
+                    && let Err(error) =
                         rewrite_homebrew_install_receipt(&receipt, &old_version, new_version)
-                    {
-                        warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
-                    }
+                {
+                    warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
                 }
             }
             Err(e) => {
@@ -573,7 +643,7 @@ fn update_scoop_metadata(new_version: &str) {
     match std::fs::read_dir(&version_dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
-                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
                     continue;
                 }
                 let name = entry.file_name();
@@ -633,7 +703,6 @@ fn update_scoop_metadata(new_version: &str) {
         return;
     }
 
-    // Update the `current` directory junction.
     let current = app_dir.join("current");
     if let Err(err) = std::fs::remove_dir(&current) {
         eprintln!(
@@ -651,7 +720,7 @@ fn update_scoop_metadata(new_version: &str) {
             &current.to_string_lossy(),
             &new_version_dir.to_string_lossy(),
         ])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .status()
     {
         Ok(status) if status.success() => {}
@@ -685,10 +754,10 @@ fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
             if depth_after_apps == 2 {
                 return Some(result);
             }
-        } else if let std::path::Component::Normal(name) = comp {
-            if name.to_string_lossy().eq_ignore_ascii_case("apps") {
-                found_apps = true;
-            }
+        } else if let std::path::Component::Normal(name) = comp
+            && name.to_string_lossy().eq_ignore_ascii_case("apps")
+        {
+            found_apps = true;
         }
     }
     None
@@ -705,12 +774,11 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBu
 /// Verifies the release asset exists on GitHub and returns the download URL.
 /// Call this early so we fail fast when CI hasn't finished building the
 /// release yet.
-fn preflight_asset_check(version: &str, is_beta: bool) -> Result<String> {
+fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload> {
     let tag = release_tag(version);
-    let candidates = asset_name_candidates(version, is_beta);
-    let [primary_candidate] = &candidates;
-    eprintln!("  Asset: {primary_candidate}");
-    fetch_asset_url(&tag, &candidates)
+    let asset = asset_name(version, is_beta);
+    eprintln!("  Asset: {asset}");
+    fetch_release_download(&tag, &asset)
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -736,7 +804,7 @@ fn record_previous_version() {
 /// Returns the path the new binary was installed at, when known.
 fn perform_upgrade(
     version: &str,
-    asset_url: &str,
+    download: &ReleaseDownload,
     method: &InstallMethod,
 ) -> Result<Option<PathBuf>> {
     let bin_names: &[&str] = if cfg!(windows) {
@@ -745,7 +813,7 @@ fn perform_upgrade(
         &["tracedecay"]
     };
 
-    let tmp = download_and_extract(asset_url, bin_names)?;
+    let tmp = download_and_extract(download, bin_names)?;
 
     let label = match method {
         InstallMethod::Brew => " (Homebrew Cellar)",
@@ -933,11 +1001,11 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
 
     eprintln!("  Target: v{latest}");
 
-    let asset_url = preflight_asset_check(&latest, target_is_beta)?;
+    let download = preflight_asset_check(&latest, target_is_beta)?;
 
     // Channel switches do not yet run the post-update refresh chain, so the
-    // installed path is unused here (tracked as a follow-up on PR #193).
-    let _ = perform_upgrade(&latest, &asset_url, &method)?;
+    // installed path is unused here.
+    let _ = perform_upgrade(&latest, &download, &method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
     Ok(latest)
@@ -955,6 +1023,39 @@ mod tests {
     // All remaining unwrap/expect usage in this module is test-only fixture or
     // assertion setup; production upgrade code above is kept panic-free.
     use super::*;
+
+    #[test]
+    fn checksum_manifest_selects_the_exact_release_asset() {
+        let digest = "a".repeat(64);
+        let manifest = format!(
+            "{digest}  tracedecay-v1.2.3-x86_64-linux.tar.gz\n{} *other.tar.gz\n",
+            "b".repeat(64)
+        );
+
+        assert_eq!(
+            expected_sha256(manifest.as_bytes(), "tracedecay-v1.2.3-x86_64-linux.tar.gz").unwrap(),
+            digest
+        );
+    }
+
+    #[test]
+    fn checksum_manifest_fails_closed_on_missing_duplicate_or_invalid_entries() {
+        let asset = "tracedecay-v1.2.3-x86_64-linux.tar.gz";
+        assert!(expected_sha256(b"", asset).is_err());
+        let duplicate = format!("{0}  {asset}\n{0}  {asset}\n", "a".repeat(64));
+        assert!(expected_sha256(duplicate.as_bytes(), asset).is_err());
+        let invalid = format!("not-a-digest  {asset}\n");
+        assert!(expected_sha256(invalid.as_bytes(), asset).is_err());
+    }
+
+    #[test]
+    fn release_archive_checksum_must_match_before_extraction() {
+        let bytes = b"verified archive bytes";
+        let digest = hex::encode(Sha256::digest(bytes));
+
+        assert!(verify_sha256(bytes, &digest, "archive.tar.gz").is_ok());
+        assert!(verify_sha256(b"tampered", &digest, "archive.tar.gz").is_err());
+    }
 
     #[test]
     fn test_asset_name_stable() {
@@ -980,9 +1081,8 @@ mod tests {
     }
 
     #[test]
-    fn test_asset_name_candidates_use_current_name() {
-        let candidates = asset_name_candidates("3.3.3", false);
-        assert!(candidates[0].starts_with("tracedecay-v3.3.3-"));
+    fn test_asset_name_uses_current_name() {
+        assert!(asset_name("3.3.3", false).starts_with("tracedecay-v3.3.3-"));
     }
 
     #[test]
@@ -1128,9 +1228,8 @@ mod tests {
     // operations resolve that relative path from CWD instead of the
     // symlink's parent, causing ENOENT.
     //
-    // Our fix: canonicalize the exe path before passing it to self_update.
-    // These tests verify the canonicalization works correctly for every
-    // symlink layout we've seen in the wild.
+    // Canonicalize the exe path before passing it to self_update. These
+    // tests cover every symlink layout we've seen in the wild.
 
     #[cfg(unix)]
     mod symlink_upgrade_regression {
@@ -1138,8 +1237,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         use std::path::PathBuf;
 
-        /// Helper: create a fake binary file in a Homebrew-style Cellar layout.
-        /// Returns (cellar_binary_path, symlink_path, tmp_guard).
+        /// Homebrew-style Cellar layout: `(cellar_binary, symlink, tmp_guard)`.
         fn homebrew_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
             let tmp = tempfile::tempdir().unwrap();
             // Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
@@ -1177,8 +1275,8 @@ mod tests {
 
         #[test]
         fn relative_read_link_fails_from_wrong_cwd() {
-            // This is the exact bug: read_link returns a relative path, and
-            // metadata() resolves it from CWD rather than the symlink's parent.
+            // read_link returns a relative path, and metadata() resolves it
+            // from CWD rather than the symlink's parent.
             let (_real, link, _tmp) = homebrew_layout();
             let target = fs::read_link(&link).unwrap();
 
@@ -1206,9 +1304,8 @@ mod tests {
 
         #[test]
         fn canonical_path_differs_from_symlink_path() {
-            // This is the key property our fix relies on: after canonicalization,
-            // the path differs from the symlink path, which makes self_update
-            // choose the Move code path instead of the buggy self_replace path.
+            // After canonicalization the path differs from the symlink path,
+            // so self_update chooses Move instead of self_replace.
             let (_real, link, _tmp) = homebrew_layout();
             let canonical = link.canonicalize().unwrap();
             assert_ne!(

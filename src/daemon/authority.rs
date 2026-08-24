@@ -1,17 +1,30 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Deserializer, Serialize};
+use tracedecay_domain::{BrainId, UserProfileId};
+use tracedecay_runtime_core::path_safety::{
+    canonicalize_existing_prefix, collapse_relative_components,
+};
 
 use crate::errors::{Result, TraceDecayError};
 
+use super::profile_identity::LocalProfileIdentityAuthorityV1;
 use super::transport::DaemonEndpoint;
+
+#[cfg(windows)]
+mod windows_acl;
 
 const LOCK_FILE: &str = "daemon-authority.lock";
 const RECORD_FILE: &str = "daemon-authority.json";
+#[cfg(windows)]
+const AUTHORITY_DIRECTORY: &str = "daemon-authority";
 
 fn deserialize_endpoint<'de, D>(deserializer: D) -> std::result::Result<DaemonEndpoint, D::Error>
 where
@@ -51,8 +64,16 @@ pub(super) struct DaemonAuthorityRecord {
     pub(super) version: String,
     #[serde(alias = "socket_path", deserialize_with = "deserialize_endpoint")]
     pub(super) endpoint: DaemonEndpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) http_application_endpoint: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) remote_brain_tls_endpoint: Option<SocketAddr>,
     pub(super) auth_token: String,
     pub(super) profile_root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) brain_id: Option<BrainId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) profile_id: Option<UserProfileId>,
 }
 
 #[derive(Debug)]
@@ -60,6 +81,7 @@ pub(super) struct DaemonAuthority {
     _lock: File,
     record_path: PathBuf,
     record: DaemonAuthorityRecord,
+    profile_identity: LocalProfileIdentityAuthorityV1,
     endpoint_bound: bool,
 }
 
@@ -69,24 +91,24 @@ impl DaemonAuthority {
         endpoint: &DaemonEndpoint,
         version: &str,
     ) -> Result<Self> {
+        #[cfg(windows)]
+        let _ = validate_existing_profile_root(profile_root)?;
         let profile_root = canonical_identity_path(profile_root)?;
         std::fs::create_dir_all(&profile_root)
             .map_err(|error| config_io("create", &profile_root, &error))?;
-        restrict_directory(&profile_root)?;
+        let authority_root = authority_state_root(&profile_root);
+        #[cfg(windows)]
+        windows_acl::create_private_directory(&authority_root)
+            .map_err(|error| config_io("create private", &authority_root, &error))?;
+        restrict_directory(&authority_root)?;
 
-        let lock_path = profile_root.join(LOCK_FILE);
-        let mut lock_options = OpenOptions::new();
-        lock_options.create(true).read(true).write(true);
-        configure_private_create(&mut lock_options, 0o600);
-        let mut lock = lock_options
-            .open(&lock_path)
-            .map_err(|error| config_io("open", &lock_path, &error))?;
-        restrict_file(&lock_path)?;
+        let lock_path = authority_root.join(LOCK_FILE);
+        let mut lock = open_private_lock(&lock_path)?;
         if let Err(error) = lock.try_lock_exclusive() {
             if !is_lock_contended(&error) {
                 return Err(config_io("lock", &lock_path, &error));
             }
-            let record = read_record_if_present(&profile_root.join(RECORD_FILE))
+            let record = read_record_if_present(&authority_root.join(RECORD_FILE))
                 .ok()
                 .flatten()
                 .map(|record| {
@@ -104,12 +126,26 @@ impl DaemonAuthority {
             });
         }
 
-        let record_path = profile_root.join(RECORD_FILE);
-        let prior_epoch = read_record_if_present(&record_path)
-            .ok()
-            .flatten()
-            .map(|record| record.epoch)
-            .unwrap_or(0);
+        let record_path = authority_root.join(RECORD_FILE);
+        let prior_record = read_record_if_present(&record_path)?;
+        let pinned_identity = match prior_record.as_ref() {
+            Some(record) => match (&record.brain_id, &record.profile_id) {
+                (Some(brain_id), Some(profile_id)) => Some((brain_id, profile_id)),
+                (None, None) => None,
+                _ => {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "daemon authority record '{}' has an incomplete pinned profile identity",
+                            record_path.display()
+                        ),
+                    });
+                }
+            },
+            None => None,
+        };
+        let profile_identity =
+            super::profile_identity::load_or_create_pinned(&profile_root, pinned_identity)?;
+        let prior_epoch = prior_record.as_ref().map_or(0, |record| record.epoch);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -120,8 +156,12 @@ impl DaemonAuthority {
             epoch: prior_epoch.saturating_add(1),
             version: version.to_string(),
             endpoint: canonical_endpoint(endpoint)?,
+            http_application_endpoint: None,
+            remote_brain_tls_endpoint: None,
             auth_token: new_auth_token()?,
             profile_root,
+            brain_id: Some(profile_identity.brain_id().clone()),
+            profile_id: Some(profile_identity.profile_id().clone()),
         };
         write_record(&record_path, &record)?;
         lock.set_len(0)
@@ -141,6 +181,7 @@ impl DaemonAuthority {
             _lock: lock,
             record_path,
             record,
+            profile_identity,
             endpoint_bound: false,
         })
     }
@@ -157,11 +198,39 @@ impl DaemonAuthority {
         &self.record.auth_token
     }
 
+    pub(super) fn profile_identity(&self) -> &LocalProfileIdentityAuthorityV1 {
+        &self.profile_identity
+    }
+
     pub(super) fn publish_endpoint(&mut self, endpoint: &DaemonEndpoint) -> Result<()> {
         self.record.endpoint = canonical_endpoint(endpoint)?;
         write_record(&self.record_path, &self.record)?;
         self.endpoint_bound = true;
         Ok(())
+    }
+
+    pub(super) fn publish_http_application_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
+        if !endpoint.ip().is_loopback() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon HTTP application endpoint must be loopback (got '{endpoint}')"
+                ),
+            });
+        }
+        self.record.http_application_endpoint = Some(endpoint);
+        write_record(&self.record_path, &self.record)
+    }
+
+    pub(super) fn publish_remote_brain_tls_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
+        if endpoint.ip().is_unspecified() || endpoint.port() == 0 {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon Remote Brain TLS endpoint must be an actual bound address (got '{endpoint}')"
+                ),
+            });
+        }
+        self.record.remote_brain_tls_endpoint = Some(endpoint);
+        write_record(&self.record_path, &self.record)
     }
 
     pub(super) fn ensure_current(&self) -> Result<()> {
@@ -171,6 +240,8 @@ impl DaemonAuthority {
                 && record.process_run_id == self.record.process_run_id
                 && record.profile_root == self.record.profile_root
                 && record.endpoint == self.record.endpoint
+                && record.http_application_endpoint == self.record.http_application_endpoint
+                && record.remote_brain_tls_endpoint == self.record.remote_brain_tls_endpoint
                 && record.auth_token == self.record.auth_token
         }) {
             return Ok(());
@@ -184,15 +255,20 @@ impl DaemonAuthority {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn mark_endpoint_bound(&mut self) {
         self.endpoint_bound = true;
     }
 
+    // Preserve the fallible cross-platform cleanup contract; Unix removal can fail.
+    #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
     pub(super) fn cleanup_owned_endpoint(&mut self) -> Result<()> {
         if !self.endpoint_bound || self.ensure_current().is_err() {
             return Ok(());
         }
+        self.record.http_application_endpoint = None;
+        self.record.remote_brain_tls_endpoint = None;
+        write_record(&self.record_path, &self.record)?;
         match &self.record.endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => remove_if_present(path)?,
@@ -210,10 +286,44 @@ impl Drop for DaemonAuthority {
 }
 
 pub(super) fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+    #[cfg(windows)]
+    if !validate_existing_profile_root(profile_root)? {
+        return Ok(None);
+    }
     let profile_root = canonical_identity_path(profile_root)?;
-    read_record_if_present(&profile_root.join(RECORD_FILE))
+    let authority_root = authority_state_root(&profile_root);
+    #[cfg(windows)]
+    match windows_acl::validate_private_directory(&authority_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(config_io("validate private", &authority_root, &error)),
+    }
+    read_record_if_present(&authority_root.join(RECORD_FILE))
 }
 
+#[cfg(windows)]
+fn validate_existing_profile_root(path: &Path) -> Result<bool> {
+    match windows_acl::validate_directory_path(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(config_io("validate existing profile root", path, &error)),
+    }
+}
+
+fn authority_state_root(profile_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        profile_root.join(AUTHORITY_DIRECTORY)
+    }
+    #[cfg(not(windows))]
+    {
+        profile_root.to_path_buf()
+    }
+}
+
+/// Absolutizes `path`, canonicalizes through its deepest existing ancestor,
+/// then collapses `.`/`..` so the daemon's recorded identity paths are
+/// comparable byte-for-byte.
 pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -222,30 +332,11 @@ pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
             .map_err(|error| config_io("resolve", path, &error))?
             .join(path)
     };
-    if let Ok(canonical) = absolute.canonicalize() {
-        return Ok(canonical);
-    }
-
-    let mut suffix = Vec::new();
-    let mut existing = absolute.as_path();
-    while !existing.exists() {
-        let Some(name) = existing.file_name() else {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to resolve identity path '{}'", path.display()),
-            });
-        };
-        suffix.push(name.to_os_string());
-        existing = existing.parent().ok_or_else(|| TraceDecayError::Config {
+    let canonical =
+        canonicalize_existing_prefix(&absolute).ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to resolve identity path '{}'", path.display()),
         })?;
-    }
-    let mut canonical = existing
-        .canonicalize()
-        .map_err(|error| config_io("canonicalize", existing, &error))?;
-    for component in suffix.iter().rev() {
-        canonical.push(component);
-    }
-    Ok(normalize_path(&canonical))
+    Ok(collapse_relative_components(&canonical))
 }
 
 fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
@@ -264,21 +355,14 @@ fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
     }
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
-
 fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+    #[cfg(windows)]
+    let mut file = match windows_acl::open_private_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(config_io("secure before reading", path, &error)),
+    };
+    #[cfg(not(windows))]
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -307,18 +391,33 @@ fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
         path,
         &bytes,
         "daemon authority record",
-    )
+    )?;
+    restrict_file(path)
 }
 
-#[cfg(unix)]
-fn configure_private_create(options: &mut OpenOptions, mode: u32) {
-    use std::os::unix::fs::OpenOptionsExt;
+fn open_private_lock(path: &Path) -> Result<File> {
+    #[cfg(windows)]
+    {
+        windows_acl::open_or_create_private_lock_file(path)
+            .map_err(|error| config_io("open private lock", path, &error))
+    }
 
-    options.mode(mode);
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(path)
+            .map_err(|error| config_io("open", path, &error))?;
+        restrict_file(path)?;
+        Ok(file)
+    }
 }
-
-#[cfg(not(unix))]
-fn configure_private_create(_options: &mut OpenOptions, _mode: u32) {}
 
 #[cfg(unix)]
 fn restrict_directory(path: &Path) -> Result<()> {
@@ -328,7 +427,14 @@ fn restrict_directory(path: &Path) -> Result<()> {
         .map_err(|error| config_io("restrict", path, &error))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn restrict_directory(path: &Path) -> Result<()> {
+    windows_acl::validate_private_directory(path)
+        .map_err(|error| config_io("validate private", path, &error))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+#[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -341,7 +447,14 @@ fn restrict_file(path: &Path) -> Result<()> {
         .map_err(|error| config_io("restrict", path, &error))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn restrict_file(path: &Path) -> Result<()> {
+    windows_acl::validate_private_file(path)
+        .map_err(|error| config_io("validate private", path, &error))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+#[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -352,7 +465,7 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     }
     #[cfg(windows)]
     {
-        return error.raw_os_error() == Some(33);
+        error.raw_os_error() == Some(33)
     }
     #[cfg(not(windows))]
     false
@@ -385,15 +498,14 @@ fn config_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecay
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn test_endpoint(profile: &Path) -> DaemonEndpoint {
-        #[cfg(unix)]
-        {
-            DaemonEndpoint::Unix(profile.join("daemon.sock"))
-        }
-        #[cfg(not(unix))]
-        {
-            super::super::transport::default_loopback_endpoint()
-        }
+        DaemonEndpoint::Unix(profile.join("daemon.sock"))
+    }
+
+    #[cfg(not(unix))]
+    fn test_endpoint(_profile: &Path) -> DaemonEndpoint {
+        super::super::transport::default_loopback_endpoint()
     }
 
     #[test]
@@ -403,11 +515,21 @@ mod tests {
         let endpoint = test_endpoint(&profile);
         let mut first = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
         let first_epoch = first.record().epoch;
+        let first_profile_identity = first.profile_identity().clone();
+        assert_eq!(
+            first.record().brain_id.as_ref(),
+            Some(first_profile_identity.brain_id())
+        );
+        assert_eq!(
+            first.record().profile_id.as_ref(),
+            Some(first_profile_identity.profile_id())
+        );
         first.endpoint_bound = false;
         drop(first);
 
         let second = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
         assert_eq!(second.record().epoch, first_epoch + 1);
+        assert_eq!(second.profile_identity(), &first_profile_identity);
         assert_eq!(second.auth_token().len(), 64);
         assert!(
             second
@@ -418,17 +540,37 @@ mod tests {
     }
 
     #[test]
+    fn pinned_profile_identity_loss_blocks_daemon_reelection() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let first = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        drop(first);
+        std::fs::remove_file(profile.join(crate::storage::PROFILE_IDENTITY_FILENAME)).unwrap();
+
+        let error = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing after its identity was pinned")
+        );
+    }
+
+    #[test]
     fn contended_lease_does_not_replace_the_live_record() {
         let temp = tempfile::tempdir().unwrap();
         let profile = temp.path().join("profile");
         let endpoint = test_endpoint(&profile);
         let first = DaemonAuthority::acquire(&profile, &endpoint, "first").unwrap();
-        let record_path = profile.join(RECORD_FILE);
+        let record_path = first.record_path.clone();
         let live = read_record_if_present(&record_path).unwrap().unwrap();
 
         let contender = DaemonAuthority::acquire(&profile, &endpoint, "contender");
 
         assert!(contender.is_err());
+        #[cfg(windows)]
+        assert!(contender.unwrap_err().to_string().contains("already held"));
         assert_eq!(read_record_if_present(&record_path).unwrap(), Some(live));
         drop(first);
     }
@@ -470,6 +612,48 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn acl_failure_prevents_authority_record_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let authority_root = authority_state_root(&profile);
+        windows_acl::create_private_directory(&authority_root).unwrap();
+        std::fs::create_dir(authority_root.join(LOCK_FILE)).unwrap();
+        let endpoint = test_endpoint(&profile);
+
+        let error = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap_err();
+
+        assert!(error.to_string().contains(LOCK_FILE));
+        assert!(!authority_root.join(RECORD_FILE).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authority_state_isolated_without_rewriting_profile_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let sentinel = profile.join("unrelated.txt");
+        std::fs::write(&sentinel, b"preserve").unwrap();
+        assert!(windows_acl::validate_private_directory(&profile).is_err());
+        let endpoint = test_endpoint(&profile);
+
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        assert!(windows_acl::validate_private_directory(&profile).is_err());
+        let authority_root = authority_state_root(&profile.canonicalize().unwrap());
+        windows_acl::validate_private_directory(&authority_root).unwrap();
+        windows_acl::validate_private_file(&authority.record_path).unwrap();
+        assert_eq!(
+            authority.record_path.parent(),
+            Some(authority_root.as_path())
+        );
+        assert!(!profile.join(RECORD_FILE).exists());
+    }
+
     #[test]
     fn published_loopback_endpoint_preserves_the_elected_secret() {
         let temp = tempfile::tempdir().unwrap();
@@ -484,6 +668,70 @@ mod tests {
         let published = current_record(&profile).unwrap().unwrap();
         assert_eq!(published.endpoint, concrete);
         assert_eq!(published.auth_token, auth_token);
+        assert!(authority.ensure_current().is_ok());
+    }
+
+    #[test]
+    fn published_http_application_endpoint_is_private_discovery_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let requested = test_endpoint(&profile);
+        let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
+        let auth_token = authority.auth_token().to_string();
+        let endpoint = "127.0.0.1:43124".parse().unwrap();
+
+        authority
+            .publish_http_application_endpoint(endpoint)
+            .unwrap();
+
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(published.http_application_endpoint, Some(endpoint));
+        assert_eq!(published.auth_token, auth_token);
+        assert!(authority.ensure_current().is_ok());
+    }
+
+    #[test]
+    fn published_remote_brain_tls_endpoint_is_the_actual_bound_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let requested = test_endpoint(&profile);
+        let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
+        let endpoint = "192.0.2.44:43125".parse().unwrap();
+
+        authority
+            .publish_remote_brain_tls_endpoint(endpoint)
+            .unwrap();
+
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(published.remote_brain_tls_endpoint, Some(endpoint));
+        assert!(authority.ensure_current().is_ok());
+        assert!(
+            authority
+                .publish_remote_brain_tls_endpoint("127.0.0.1:0".parse().unwrap())
+                .is_err(),
+            "requested port zero is not a bound endpoint"
+        );
+    }
+
+    #[test]
+    fn endpoint_cleanup_withdraws_bound_http_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let requested = test_endpoint(&profile);
+        let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
+        authority.publish_endpoint(&requested).unwrap();
+        authority
+            .publish_http_application_endpoint("127.0.0.1:43124".parse().unwrap())
+            .unwrap();
+        authority
+            .publish_remote_brain_tls_endpoint("192.0.2.44:43125".parse().unwrap())
+            .unwrap();
+
+        authority.cleanup_owned_endpoint().unwrap();
+
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(published.http_application_endpoint, None);
+        assert_eq!(published.remote_brain_tls_endpoint, None);
         assert!(authority.ensure_current().is_ok());
     }
 
@@ -594,6 +842,14 @@ mod tests {
                 .unwrap();
         std::fs::write(&socket, b"successor").unwrap();
         authority.mark_endpoint_bound();
+        let local_http_endpoint = "127.0.0.1:43124".parse().unwrap();
+        let remote_tls_endpoint = "192.0.2.44:43125".parse().unwrap();
+        authority
+            .publish_http_application_endpoint(local_http_endpoint)
+            .unwrap();
+        authority
+            .publish_remote_brain_tls_endpoint(remote_tls_endpoint)
+            .unwrap();
         let mut successor = authority.record().clone();
         successor.epoch += 1;
         successor.process_run_id.push_str("-successor");
@@ -601,6 +857,15 @@ mod tests {
 
         authority.cleanup_owned_endpoint().unwrap();
         assert!(socket.exists());
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(
+            published.http_application_endpoint,
+            Some(local_http_endpoint)
+        );
+        assert_eq!(
+            published.remote_brain_tls_endpoint,
+            Some(remote_tls_endpoint)
+        );
     }
 
     #[cfg(unix)]

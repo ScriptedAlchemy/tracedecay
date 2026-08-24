@@ -18,8 +18,8 @@ All `file:line` references are against the current tree.
 
 | Artifact | Path | Owner | Notes |
 |---|---|---|---|
-| Project data dir | `<root>/.tracedecay/` (legacy `<root>/.tracedecay/`) | `config::get_tracedecay_dir` (`config.rs:87`) | Prefer `.tracedecay`; fall back to an *existing* legacy dir read+write. Brand-aware everywhere via `db_filename` (`config.rs:115`). |
-| Default-branch DB | `<data_dir>/tracedecay.db` (legacy `tracedecay.db`) | `init`/`resolve_db_for_branch` | `DB_FILENAME` for new dirs; `LEGACY_DB_FILENAME` inside legacy dirs. |
+| Project data dir | `<root>/.tracedecay/` | `config::get_tracedecay_dir` | Canonical project store directory. |
+| Default-branch DB | `<data_dir>/tracedecay.db` | `init`/`resolve_db_for_branch` | `DB_FILENAME` for the default-branch graph. |
 | Branch DBs | `<data_dir>/branches/<stem>.db` (+ `.db-wal`/`.db-shm`) | `branch_meta::ensure_branches_dir` (`branch_meta.rs:148`), created in `add_branch_tracking`/CLI `branch add` | One SQLite file per non-default tracked branch. |
 | Branch metadata | `<data_dir>/branch-meta.json` | `branch_meta::{load,save}_branch_meta` (`branch_meta.rs:125,141`) | Source of truth for `default_branch`, tracked branches, `db_file`, `parent`, timestamps. |
 | In-memory state | `TraceDecay { active_branch, serving_branch, fallback_warning }` | `tracedecay.rs` (struct ~line 298-306) | Resolved at `open()` time; see §3. |
@@ -198,13 +198,15 @@ variants: `List | Add | Remove | Removeall | Gc`.
 > subsystem uses gix; this one command shells out to raw paths. Untested for
 > worktree/bare layouts.
 
-Auto-tracking entry points (library, safe path): Cursor `afterShellExecution`
-classifies the command into `CursorShellSyncPlan` (`hooks.rs:567`) —
-`BranchAdd` for detected branch switches, `CurrentBranchSync` for state-changing
-commands with a known current branch, else `IncrementalSync`/`Noop`. Cursor
-`workspaceOpen` calls `workspace_open_for_cursor_event` (`hooks.rs:1119`) which
-`add_branch_tracking`s the current branch (and skips the catch-up sync since
-add already syncs). Codex has a parallel path (`hooks.rs:1376`).
+Auto-tracking entry points (library, safe path): Cursor hooks no longer
+classify shell commands host-side. `hook_cursor_after_shell`
+(`src/hooks/cursor.rs`) only notifies the daemon that a shell action
+completed — command text is not forwarded and cannot become Git or
+synchronization authority. Cursor `workspaceOpen` runs
+`hook_cursor_workspace_open` → `notify_cursor_workspace_open`
+(`src/hooks/cursor.rs`), a fail-open one-shot daemon catch-up notification;
+branch tracking and admission are daemon-owned (`src/daemon/branch_add.rs`).
+Codex has a parallel path (`src/hooks/codex.rs`).
 
 ---
 

@@ -1,5 +1,44 @@
 use crate::support::*;
 
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
+    let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retained = tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+        &cg,
+        &enabled_skill_writer_config(),
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Dashboard,
+            run_id: Some("retained-skill-writer".to_owned()),
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await;
+    let (result, guard) = retained.into_parts();
+    let run = result.unwrap();
+
+    assert_eq!(run.run_id, "retained-skill-writer");
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an admitted retained run must not publish ahead of outer settlement"
+    );
+    drop(guard);
+}
+
 #[test]
 fn skill_writer_options_have_no_storage_selector() {
     let options = serde_json::to_value(SkillWriterAutomationOptions::default()).unwrap();
@@ -22,6 +61,13 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            skill_writer: AutomationTaskConfig {
+                enabled: false,
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
         ..AutomationConfig::default()
     };
 
@@ -30,6 +76,7 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
         &config,
         &backend,
         SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
             profile_root: Some(temp.path().join("profile")),
             ..SkillWriterAutomationOptions::default()
         },
@@ -46,18 +93,65 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
     );
 }
 
+#[tokio::test]
+async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_denied");
+
+    let run =
+        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+            &cg,
+            &enabled_skill_writer_config(),
+            &test_configuration_revision(),
+            &backend,
+            &retrieval,
+            SkillWriterAutomationOptions {
+                profile_root: Some(profile_root.clone()),
+                ..SkillWriterAutomationOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("session_evidence_denied")
+    );
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "denied evidence must not write a ledger record"
+    );
+    assert!(
+        !profile_root.exists(),
+        "denied evidence must not create the managed-skill profile"
+    );
+    assert!(
+        !cg.store_layout()
+            .dashboard_root
+            .join("automation_outcomes.json")
+            .exists(),
+        "denied evidence must not refresh skill outcomes"
+    );
+}
+
 // Every test below that reaches evidence building holds `ENV_LOCK` and pins
-// `TRACEDECAY_GLOBAL_DB` at its own session store via `isolate_global_db`:
-// see that helper's docs for why (Windows CI global-DB contention).
+// its profile database override at the isolated session store.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_default_provider_searches_all_providers() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
         &db,
         cg.project_root(),
@@ -92,15 +186,14 @@ async fn skill_writer_default_provider_searches_all_providers() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(&cg).await;
     // Deliberately avoids every keyword in the default skill writer query so
     // the grep channel returns nothing and only session replay surfaces it.
     seed_session_message_in_db(
@@ -120,18 +213,26 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
     let _global_db = isolate_global_db(&cg);
     let backend = SkillWriterReplayEvidenceBackend::new("skill-writer-replay-1");
     let config = enabled_skill_writer_config();
+    let retrieval = StaticAutomationSessionRetrieval::message(
+        "skill-writer-replay-1",
+        "skill-writer-replay-1-message-001",
+        "Ran the dashboard build twice before every release cut.",
+    );
 
-    let run = run_skill_writer_with_backend(
-        &cg,
-        &config,
-        &backend,
-        SkillWriterAutomationOptions {
-            profile_root: Some(profile_root),
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
+    let run =
+        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &test_configuration_revision(),
+            &backend,
+            &retrieval,
+            SkillWriterAutomationOptions {
+                profile_root: Some(profile_root),
+                ..SkillWriterAutomationOptions::default()
+            },
+        )
+        .await
+        .unwrap();
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
@@ -142,31 +243,17 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
-    seed_session_message_in_db(
-        &db,
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "skill-writer-replay-2",
-            message_id: "skill-writer-replay-2-message-001",
-            role: "assistant",
-            timestamp: 1_715_000_080,
-            text: "Ran the dashboard build twice before every release cut.",
-            source: None,
-        },
-    )
-    .await;
     let _global_db = isolate_global_db(&cg);
     let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retrieval = EmptyAutomationSessionRetrieval::new();
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
+        &retrieval,
         SkillWriterAutomationOptions {
             include_recent_sessions: false,
             profile_root: Some(profile_root),
@@ -184,15 +271,14 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let project_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("project session db open");
+    let project_db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
         &project_db,
         cg.project_root(),
@@ -249,47 +335,73 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     assert_eq!(backend.calls(), 1);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
+async fn skill_writer_runner_repairs_then_activates_validated_create() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
-    let backend = SkillJsonBackend::new(json!({
-        "skills": [
-            {
+    let backend = SequentialJsonBackend::new(vec![
+        json!({
+            "skills": [
+                {
+                    "id": "automation-run-review",
+                    "title": "Automation run review",
+                    "summary": "Review self-improvement automation run ledgers and validation outcomes.",
+                    "category": "workflow",
+                    "targets": ["codex", "opencode"],
+                    "body_markdown": "Use when reviewing TraceDecay self-improvement runs. Check evidence, rejected ops, and validation outcomes before applying changes.",
+                    "support_files": [
+                        {
+                            "path": "references/checklist.md",
+                            "text": "- Check ledger counts\n- Check validation outcomes\n"
+                        }
+                    ],
+                    "reason": "Session evidence repeats automation workflow outcome review."
+                },
+                {
+                    "id": "automation-run-review",
+                    "title": "Duplicate",
+                    "summary": "Duplicate id should be rejected.",
+                    "category": "workflow",
+                    "body_markdown": "Duplicate body."
+                },
+                {
+                    "id": "bad/skill",
+                    "title": "Unsafe",
+                    "summary": "Unsafe id should be rejected.",
+                    "category": "workflow",
+                    "body_markdown": "Unsafe body."
+                },
+                {
+                    "action": "draft",
+                    "id": "retired-draft-action",
+                    "title": "Retired draft action",
+                    "summary": "Draft is not a lifecycle state or compatibility alias.",
+                    "category": "workflow",
+                    "body_markdown": "This proposal must be repaired to an explicit create."
+                }
+            ]
+        }),
+        json!({
+            "skills": [{
                 "id": "automation-run-review",
                 "title": "Automation run review",
-                "summary": "Review self-improvement automation run ledgers and approval gates.",
+                "summary": "Review self-improvement automation run ledgers and validation outcomes.",
                 "category": "workflow",
                 "targets": ["codex", "opencode"],
-                "body_markdown": "Use when reviewing TraceDecay self-improvement runs. Check evidence, rejected ops, and pending approval state before applying changes.",
-                "support_files": [
-                    {
-                        "path": "references/checklist.md",
-                        "text": "- Check ledger counts\n- Check pending approval state\n"
-                    }
-                ],
+                "body_markdown": "Use when reviewing TraceDecay self-improvement runs. Check evidence, rejected ops, and validation outcomes before applying changes.",
+                "support_files": [{
+                    "path": "references/checklist.md",
+                    "text": "- Check ledger counts\n- Check validation outcomes\n"
+                }],
                 "reason": "Session evidence repeats automation workflow outcome review."
-            },
-            {
-                "id": "automation-run-review",
-                "title": "Duplicate",
-                "summary": "Duplicate id should be rejected.",
-                "category": "workflow",
-                "body_markdown": "Duplicate body."
-            },
-            {
-                "id": "bad/skill",
-                "title": "Unsafe",
-                "summary": "Unsafe id should be rejected.",
-                "category": "workflow",
-                "body_markdown": "Unsafe body."
-            }
-        ]
-    }));
+            }]
+        }),
+    ]);
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
@@ -301,18 +413,43 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
+    assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.task, AgentTaskKind::SkillWriter);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(run.ledger_record.backend_attempt_count, 2);
     assert_eq!(run.ledger_record.accepted_count, 1);
-    assert_eq!(run.ledger_record.rejected_count, 2);
+    assert_eq!(run.ledger_record.rejected_count, 0);
+    assert_eq!(run.report["status"], json!("applied"));
+    assert_eq!(
+        run.report["curation_policy"]["decision"]["authority"]["actor_id"],
+        json!("automation:skill-writer")
+    );
+    assert_eq!(
+        run.report["curation_policy"]["decision"]["authority"]["configuration_revision_id"],
+        json!(test_configuration_revision())
+    );
+    assert_eq!(run.report["validation_repairs"][0]["attempt"], json!(1));
+    assert!(
+        run.report["validation_repairs"][0]["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["proposal"]["id"] == json!("retired-draft-action")
+                    && error["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("unsupported skill proposal action"))
+            }))
+    );
+    assert_eq!(
+        run.report["activation_policy"],
+        json!("validate_then_activate")
+    );
     assert_eq!(
         run.report["created_skills"][0]["metadata"]["id"],
         json!("automation-run-review")
     );
     assert_eq!(
         run.report["created_skills"][0]["metadata"]["state"],
-        json!("pending_approval")
+        json!("active")
     );
     assert_eq!(
         run.report["created_skills"][0]["proposal_action"],
@@ -328,8 +465,8 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
         json!("Session evidence repeats automation workflow outcome review.")
     );
     assert_eq!(
-        run.report["created_skills"][0]["approval_status"],
-        json!("pending_approval")
+        run.report["created_skills"][0]["activation_status"],
+        json!("active")
     );
     assert!(
         run.report["created_skills"][0]["target_checksum"]
@@ -359,7 +496,7 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("skill_writer"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(3));
+    assert_eq!(eval_payload["summary"]["eval_count"], json!(1));
     assert!(
         eval_payload["eval_definitions"]
             .as_array()
@@ -372,7 +509,7 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     assert_eq!(
         eval_payload["runner"]["commands"][0],
         json!(
-            "cargo test --test automation_runner_test skill_writer_runner_creates_pending_skill_drafts_for_approval -- --nocapture"
+            "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture"
         )
     );
     let handoff_payload =
@@ -380,16 +517,16 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     assert_eq!(handoff_payload["task"], json!("skill_writer"));
     assert_eq!(
         handoff_payload["next_actions"][0],
-        json!("review managed skill drafts or auto-enabled changes")
+        json!("inspect automatically activated managed skill changes")
     );
     assert_eq!(
         handoff_payload["eval_replay"]["commands"][0],
         json!(
-            "cargo test --test automation_runner_test skill_writer_runner_creates_pending_skill_drafts_for_approval -- --nocapture"
+            "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture"
         )
     );
 
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "automation-run-review",
     )
@@ -397,11 +534,11 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     .unwrap();
     assert_eq!(
         skill.metadata.state,
-        tracedecay::automation::managed_skills::ManagedSkillState::PendingApproval
+        tracedecay_agent_hosts::automation::managed_skills::ManagedSkillState::Active
     );
     assert_eq!(
         skill.metadata.provenance.source,
-        tracedecay::automation::managed_skills::ManagedSkillSource::AutomationRun
+        tracedecay_agent_hosts::automation::managed_skills::ManagedSkillSource::AutomationRun
     );
     assert_eq!(
         skill.metadata.provenance.run_id.as_deref(),
@@ -410,8 +547,8 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     assert_eq!(
         skill.metadata.targets,
         vec![
-            tracedecay::automation::managed_skills::SkillInstallTarget::Codex,
-            tracedecay::automation::managed_skills::SkillInstallTarget::OpenCode,
+            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::Codex,
+            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::OpenCode,
         ]
     );
     assert!(
@@ -426,13 +563,54 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 1);
-    assert_eq!(records[0].rejected_count, 2);
+    assert_eq!(records[0].rejected_count, 0);
     assert_eq!(
         records[0].applied_ops.as_ref().unwrap()["created_skills"][0]["action"],
         json!("create")
     );
 }
 
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn skill_writer_quarantines_output_after_bounded_repair_exhaustion() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
+    let invalid = json!({"skills": [{"id": "bad/skill"}]});
+    let backend = SequentialJsonBackend::new(vec![invalid.clone(), invalid]);
+
+    let error = run_skill_writer_with_backend(
+        &cg,
+        &enabled_skill_writer_config(),
+        &backend,
+        manual_skill_writer_options(&profile_root),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(backend.calls(), 2);
+    assert!(error.to_string().contains("repair budget exhausted"));
+    assert!(
+        !profile_root.join("agent_managed/skills/bad/skill").exists(),
+        "quarantined validation failures must not materialize"
+    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, AutomationRunStatus::Failed);
+    assert!(
+        records[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("output quarantined"))
+    );
+}
+
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summarizing() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -442,18 +620,19 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     seed_session_evidence(&cg).await;
     seed_search_underuse_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
-    create_managed_skill_draft(
+    let active = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
-            body_markdown: "Check the run ledger before approving changes.".to_string(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "Check the run ledger before applying changes.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
+                source: ManagedSkillSource::User,
                 actor: "test".to_string(),
                 run_id: None,
             },
@@ -461,19 +640,17 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
-    let global_db = GlobalDb::open().await.expect("global db should open");
+    assert_eq!(active.metadata.id, "automation-run-review");
+    let global_db = project_session_runtime(&cg).await;
     global_db
-        .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+        .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
             provider: "codex".to_string(),
-            project_id: GlobalDb::canonical_project_key(cg.project_root()),
+            project_id: HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root()),
             session_id: Some("skill-writer-analytics".to_string()),
             timestamp: 1_715_000_111,
-            event_kind: "mcp_tool_call".to_string(),
+            event_kind: "tool".to_string(),
             hook_name: None,
-            tool_name: Some("tracedecay_skill_view".to_string()),
+            tool_name: Some("skill_view".to_string()),
             tool_category: None,
             skill_name: None,
             hint_category: None,
@@ -482,8 +659,8 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
             metadata_json: Some(
                 json!({
                     "function": {
-                        "name": "tracedecay_skill_view",
-                        "arguments": { "id": "automation-run-review" }
+                        "name": "skill_view",
+                        "arguments": { "name": "skill:automation-run-review" }
                     }
                 })
                 .to_string(),
@@ -494,10 +671,12 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let backend = InspectSkillWriterUsageBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
         manual_skill_writer_options(&profile_root),
     )
     .await
@@ -516,6 +695,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -527,10 +707,12 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let backend = InspectSkillWriterUnderusedBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
         SkillWriterAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
             provider: "cursor".to_string(),
@@ -546,23 +728,25 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
+async fn skill_writer_runner_activates_validated_skills() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
-    create_managed_skill_draft(
+    let active = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
-            body_markdown: "Check the run ledger before approving changes.".to_string(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "Check the run ledger before applying changes.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
                 source: ManagedSkillSource::AutomationRun,
@@ -573,37 +757,45 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
     )
     .await
     .unwrap();
-    let active = approve_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
     let base_checksum = active.metadata.checksum.clone();
-    let backend = SkillJsonBackend::with_activation_policy(
+    let backend = SequentialJsonBackend::new(vec![
         json!({
             "skills": [
-                {
-                    "id": "scheduler-review",
-                    "title": "Scheduler review",
-                    "summary": "Review scheduler decisions before enabling automation.",
-                    "category": "workflow",
-                    "body_markdown": "Check interval gates, cooldowns, locks, and run ledgers before changing schedules.",
-                    "reason": "Session evidence repeats scheduler review."
-                },
-                {
-                    "action": "update",
-                    "id": "automation-run-review",
-                    "base_checksum": base_checksum,
-                    "summary": "Review self-improvement automation runs and activation policy.",
-                    "body_markdown": "Check the run ledger, activation policy, and approval state before applying changes.",
-                    "reason": "Session evidence repeats automation workflow outcome review."
-                }
+            {
+                "id": "scheduler-review",
+                "title": "Scheduler review",
+                "summary": "Review scheduler decisions before enabling automation.",
+                "category": "workflow",
+                "body_markdown": "Check interval gates, cooldowns, locks, and run ledgers before changing schedules.",
+                "reason": "Session evidence repeats scheduler review."
+            },
+            {
+                "action": "update",
+                "id": "automation-run-review",
+                "base_checksum": base_checksum.clone(),
+                "summary": "Review self-improvement automation runs and activation policy.",
+                "body_markdown": "Check the run ledger, activation policy, and validation outcomes before applying changes.",
+                "reason": "Session evidence repeats automation workflow outcome review."
+            }
             ]
         }),
-        "auto_enable_after_validation",
-    );
-    let config = AutomationConfig {
-        auto_enable_skills: true,
-        ..enabled_skill_writer_config()
-    };
+        json!({
+            "skills": [{
+                "action": "update",
+                "id": "automation-run-review",
+                "base_checksum": base_checksum.clone(),
+                "summary": "Review automation runs, rejected proposals, and validation gates.",
+                "targets": ["claude", "kimi"],
+                "body_markdown": "Check the run ledger, rejected proposals, and validation outcomes before applying changes.",
+                "support_files": [{
+                    "path": "references/checklist.md",
+                    "text": "- Check ledger counts\n- Check rejected proposals\n"
+                }],
+                "reason": "Session evidence repeats automation workflow outcome review."
+            }]
+        }),
+    ]);
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
@@ -618,10 +810,10 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 2);
     assert_eq!(run.ledger_record.rejected_count, 0);
-    assert_eq!(run.report["status"], json!("auto_enabled"));
+    assert_eq!(run.report["status"], json!("applied"));
     assert_eq!(
         run.report["activation_policy"],
-        json!("auto_enable_after_validation")
+        json!("validate_then_activate")
     );
     assert_eq!(
         run.report["created_skills"][0]["metadata"]["state"],
@@ -632,8 +824,8 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
         json!("active")
     );
     assert_eq!(
-        run.report["created_skills"][0]["approval_status"],
-        json!("auto_enabled")
+        run.report["created_skills"][0]["activation_status"],
+        json!("active")
     );
     assert_eq!(
         run.report["updated_skills"][0]["proposal_action"],
@@ -641,8 +833,8 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
     );
     assert_eq!(run.report["updated_skills"][0]["action"], json!("update"));
     assert_eq!(
-        run.report["updated_skills"][0]["approval_status"],
-        json!("auto_enabled")
+        run.report["updated_skills"][0]["activation_status"],
+        json!("active")
     );
     assert_eq!(
         run.report["updated_skills"][0]["base_checksum"],
@@ -661,9 +853,9 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
         updated.metadata.summary,
         "Review self-improvement automation runs and activation policy."
     );
-    assert!(updated.pending_update.is_none());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -672,15 +864,16 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
-    create_managed_skill_draft(
+    let active = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
-            body_markdown: "Check the run ledger before approving changes.".to_string(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "Check the run ledger before applying changes.".to_string(),
             support_files: vec![
                 ManagedSupportFile::new("references/old.md", b"old checklist".to_vec()).unwrap(),
             ],
@@ -693,22 +886,20 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     )
     .await
     .unwrap();
-    let active = approve_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
     let base_checksum = active.metadata.checksum.clone();
-    create_managed_skill_draft(
+    let user_owned = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "user-owned-review".to_string(),
             title: "User-owned review".to_string(),
             summary: "User-authored workflow.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Keep this user-authored content unchanged.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
+                source: ManagedSkillSource::User,
                 actor: "test-user".to_string(),
                 run_id: None,
             },
@@ -716,11 +907,9 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     )
     .await
     .unwrap();
-    let user_owned = approve_managed_skill(&profile_root, "user-owned-review")
-        .await
-        .unwrap();
-    let backend = SkillJsonBackend::new(json!({
-        "skills": [
+    let backend = SequentialJsonBackend::new(vec![
+        json!({
+            "skills": [
             {
                 "action": "update",
                 "id": "automation-run-review",
@@ -732,9 +921,9 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
                 "action": "update",
                 "id": "automation-run-review",
                 "base_checksum": base_checksum.clone(),
-                "summary": "Review automation runs, rejected proposals, and approval gates.",
+                "summary": "Review automation runs, rejected proposals, and validation gates.",
                 "targets": ["claude", "kimi"],
-                "body_markdown": "Check the run ledger, rejected proposals, and pending approval state before applying changes.",
+                "body_markdown": "Check the run ledger, rejected proposals, and validation outcomes before applying changes.",
                 "support_files": [
                     {
                         "path": "references/checklist.md",
@@ -758,11 +947,27 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             {
                 "action": "update",
                 "id": "user-owned-review",
-                "base_checksum": user_owned.metadata.checksum,
+                "base_checksum": user_owned.metadata.checksum.clone(),
                 "summary": "Automation must not edit this user-owned skill."
             }
-        ]
-    }));
+            ]
+        }),
+        json!({
+            "skills": [{
+                "action": "update",
+                "id": "automation-run-review",
+                "base_checksum": base_checksum.clone(),
+                "summary": "Review automation runs, rejected proposals, and validation gates.",
+                "targets": ["claude", "kimi"],
+                "body_markdown": "Check the run ledger, rejected proposals, and validation outcomes before applying changes.",
+                "support_files": [{
+                    "path": "references/checklist.md",
+                    "text": "- Check ledger counts\n- Check rejected proposals\n"
+                }],
+                "reason": "Session evidence repeats automation workflow outcome review."
+            }]
+        }),
+    ]);
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
@@ -774,10 +979,12 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
+    assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 1);
-    assert_eq!(run.ledger_record.rejected_count, 4);
+    assert_eq!(run.ledger_record.rejected_count, 0);
+    assert_eq!(run.report["status"], json!("applied"));
+    assert_eq!(run.report["validation_repairs"][0]["attempt"], json!(1));
     assert_eq!(run.report["created_skills"], json!([]));
     assert_eq!(
         run.report["updated_skills"][0]["metadata"]["id"],
@@ -785,7 +992,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     );
     assert_eq!(
         run.report["updated_skills"][0]["metadata"]["state"],
-        json!("pending_approval")
+        json!("active")
     );
     assert_eq!(
         run.report["updated_skills"][0]["proposal_action"],
@@ -801,8 +1008,8 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
         json!("Session evidence repeats automation workflow outcome review.")
     );
     assert_eq!(
-        run.report["updated_skills"][0]["approval_status"],
-        json!("staged_update")
+        run.report["updated_skills"][0]["activation_status"],
+        json!("active")
     );
     assert_eq!(
         run.report["updated_skills"][0]["base_checksum"],
@@ -824,61 +1031,43 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     assert_eq!(skill.metadata.state, ManagedSkillState::Active);
     assert_eq!(
         skill.metadata.summary,
-        "Review self-improvement automation runs."
+        "Review automation runs, rejected proposals, and validation gates."
     );
-    assert_eq!(skill.metadata.checksum, active.metadata.checksum);
-    let pending = skill.pending_update.as_ref().unwrap();
-    assert_eq!(pending.metadata.state, ManagedSkillState::PendingApproval);
+    assert_ne!(skill.metadata.checksum, active.metadata.checksum);
     assert_eq!(
-        pending.metadata.summary,
-        "Review automation runs, rejected proposals, and approval gates."
-    );
-    assert_eq!(
-        pending.metadata.targets,
+        skill.metadata.targets,
         vec![
-            tracedecay::automation::managed_skills::SkillInstallTarget::Claude,
-            tracedecay::automation::managed_skills::SkillInstallTarget::Kimi,
+            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::Claude,
+            tracedecay_agent_hosts::automation::managed_skills::SkillInstallTarget::Kimi,
         ]
     );
-    assert_ne!(pending.metadata.checksum, active.metadata.checksum);
     let skill_dir = profile_root.join("agent_managed/skills/automation-run-review");
-    assert!(skill_dir.join("references/old.md").is_file());
-    assert!(!skill_dir.join("references/checklist.md").exists());
-
-    let approved = approve_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
-    assert_eq!(approved.metadata.state, ManagedSkillState::Active);
-    assert_eq!(
-        approved.metadata.summary,
-        "Review automation runs, rejected proposals, and approval gates."
-    );
-    assert!(approved.pending_update.is_none());
     assert!(!skill_dir.join("references/old.md").exists());
     assert!(skill_dir.join("references/checklist.md").is_file());
 
     let user_owned = load_managed_skill(&profile_root, "user-owned-review")
         .await
         .unwrap();
+    assert_eq!(user_owned.metadata.state, ManagedSkillState::Active);
     assert_eq!(user_owned.metadata.summary, "User-authored workflow.");
-    assert!(user_owned.pending_update.is_none());
 
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].accepted_count, 1);
-    assert_eq!(records[0].rejected_count, 4);
+    assert_eq!(records[0].rejected_count, 0);
     assert_eq!(
         records[0].proposed_ops.as_ref().unwrap()["updated_skills"][0]["metadata"]["id"],
         json!("automation-run-review")
     );
     assert_eq!(
-        records[0].applied_ops.as_ref().unwrap()["updated_skills"][0]["approval_status"],
-        json!("staged_update")
+        records[0].applied_ops.as_ref().unwrap()["updated_skills"][0]["activation_status"],
+        json!("active")
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_ledgers_malformed_backend_output() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -929,6 +1118,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     assert_eq!(records[0].error_retryable, Some(false));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_ledgers_missing_skills_array() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -980,6 +1170,7 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     assert_eq!(records[0].error_retryable, Some(false));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails() {
     let _env_lock = ENV_LOCK.lock().await;

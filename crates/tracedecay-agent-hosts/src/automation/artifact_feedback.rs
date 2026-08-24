@@ -23,18 +23,7 @@ pub(super) fn validation_feedback_entries(record: &AutomationRunLedgerRecord) ->
 }
 
 fn accepted_feedback_items(record: &AutomationRunLedgerRecord) -> Vec<Value> {
-    let applied = artifact_items(record.applied_ops.as_ref());
-    if !applied.is_empty() {
-        return applied;
-    }
-    let report = record.validation_report.as_ref();
-    artifact_items(
-        report
-            .and_then(|report| report.pointer("/applied_proposals/accepted_facts"))
-            .or_else(|| {
-                report.and_then(|report| report.pointer("/pending_proposals/accepted_facts"))
-            }),
-    )
+    artifact_items(record.applied_ops.as_ref())
 }
 
 fn artifact_items(value: Option<&Value>) -> Vec<Value> {

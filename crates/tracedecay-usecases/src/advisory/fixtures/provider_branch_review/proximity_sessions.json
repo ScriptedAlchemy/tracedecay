@@ -1,0 +1,43 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:06:18Z",
+    "tool": "tracedecay_sessions_for",
+    "arguments": {
+      "git_ref": "branch",
+      "value": "codex/tracedecay-total-redesign-plan",
+      "limit": 3,
+      "since": "2026-07-21T21:30:00Z",
+      "until": "2026-07-21T22:10:00Z"
+    }
+  },
+  "response": {
+    "git_ref": "branch",
+    "value": "codex/tracedecay-total-redesign-plan",
+    "count": 3,
+    "sessions": [
+      {
+        "session_id": "005f4a69-6fbc-43a7-88f7-dc73be23dab7",
+        "branch": "codex/tracedecay-total-redesign-plan",
+        "active_from": "2026-07-21T21:43:46Z",
+        "active_until": "2026-07-21T22:06:18Z"
+      },
+      {
+        "session_id": "71f6e620-32c0-4129-9659-323f454f1ab4",
+        "branch": "codex/tracedecay-total-redesign-plan",
+        "active_from": "2026-07-21T21:44:54Z",
+        "active_until": "2026-07-21T22:06:08Z"
+      },
+      {
+        "session_id": "7a1c7379-9b8c-43cc-bd37-0fd6bb402a05",
+        "branch": "codex/tracedecay-total-redesign-plan",
+        "active_from": "2026-07-21T21:59:39Z",
+        "active_until": "2026-07-21T22:03:11Z"
+      }
+    ]
+  },
+  "redacted": {
+    "worktree_path": {
+      "sha256": "sha256:3b667bf84334f0faf7135022e8203424e0cb0350214de6d09cb4b1051fdc58a1"
+    }
+  }
+}

@@ -1,6 +1,3 @@
-/// Graph traversal algorithms for the code graph.
-pub mod traversal;
-
 /// Query operations for analyzing the code graph.
 pub mod queries;
 
@@ -13,5 +10,7 @@ pub mod health;
 /// Git integration helpers for churn analysis.
 pub mod git;
 
-pub use queries::{GraphQueryManager, NodeMetrics};
-pub use traversal::GraphTraverser;
+/// AST-level functional-duplicate scanning over the code graph.
+pub mod redundancy_scan;
+
+pub use queries::GraphQueryManager;

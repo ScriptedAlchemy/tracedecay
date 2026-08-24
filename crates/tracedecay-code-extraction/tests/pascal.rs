@@ -2,6 +2,12 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::PascalExtractor;
 use tracedecay_domain::*;
 
+// Inlined rather than `mod`: each of these files compiles twice — as a
+// module of `main.rs` and as its own test target — and a `#[path] mod`
+// would load the same file as a module four times in the `main` binary,
+// which rustc rejects. `include!` gives each target its own copy in its
+// own namespace, and resolves identically in both compilations.
+include!("support/docstrings.rs");
 fn extract(source: &str) -> ExtractionResult {
     let extractor = PascalExtractor;
     extractor.extract("test.pas", source)
@@ -713,10 +719,14 @@ end."#,
 // Comment extraction (docstrings)
 // ----------------------------
 
+/// Every comment style Pascal must lift into a function docstring. The table is
+/// a fixed-size array, so it can never iterate empty.
 #[test]
-fn test_pascal_brace_comment_docstring() {
-    let result = extract(
-        r#"program Test;
+fn test_pascal_comment_style_docstrings() {
+    let cases: [(&str, &str, &[&str]); 3] = [
+        (
+            "brace comment",
+            r#"program Test;
 
 { This is a brace comment }
 function Add(a, b: Integer): Integer;
@@ -726,24 +736,11 @@ end;
 
 begin
 end."#,
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let func = result
-        .nodes
-        .iter()
-        .find(|n| n.name == "Add" && n.kind == NodeKind::Function)
-        .expect("Should find Add function");
-    assert!(
-        func.docstring.is_some(),
-        "Add should have a docstring from brace comment"
-    );
-    assert!(func.docstring.as_ref().unwrap().contains("brace comment"));
-}
-
-#[test]
-fn test_pascal_oldstyle_comment_docstring() {
-    let result = extract(
-        r#"program Test;
+            &["brace comment"],
+        ),
+        (
+            "old-style comment",
+            r#"program Test;
 
 (* This is an old-style comment *)
 function Add(a, b: Integer): Integer;
@@ -753,29 +750,11 @@ end;
 
 begin
 end."#,
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let func = result
-        .nodes
-        .iter()
-        .find(|n| n.name == "Add" && n.kind == NodeKind::Function)
-        .expect("Should find Add function");
-    assert!(
-        func.docstring.is_some(),
-        "Add should have a docstring from old-style comment"
-    );
-    assert!(
-        func.docstring
-            .as_ref()
-            .unwrap()
-            .contains("old-style comment")
-    );
-}
-
-#[test]
-fn test_pascal_line_comment_docstring() {
-    let result = extract(
-        r#"program Test;
+            &["old-style comment"],
+        ),
+        (
+            "line comment",
+            r#"program Test;
 
 // This is a line comment
 function Add(a, b: Integer): Integer;
@@ -785,18 +764,14 @@ end;
 
 begin
 end."#,
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let func = result
-        .nodes
-        .iter()
-        .find(|n| n.name == "Add" && n.kind == NodeKind::Function)
-        .expect("Should find Add function");
-    assert!(
-        func.docstring.is_some(),
-        "Add should have a docstring from line comment"
-    );
-    assert!(func.docstring.as_ref().unwrap().contains("line comment"));
+            &["line comment"],
+        ),
+    ];
+
+    for (style, source, expected) in cases {
+        let result = extract(source);
+        assert_node_docstring(style, &result, NodeKind::Function, Some("Add"), expected);
+    }
 }
 
 // ----------------------------

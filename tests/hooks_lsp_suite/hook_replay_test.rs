@@ -14,10 +14,20 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::global_db::{AnalyticsEventQuery, GlobalDb};
+use tracedecay::global_db::AnalyticsEventQuery;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{StorageMode, default_profile_sharded_layout};
 
-use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
+use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_command_with_home};
+
+/// `.cargo/config.toml` sets `TRACEDECAY_DISABLE_GLOBAL_DB=1` so cargo-launched
+/// processes never touch the operator's real accounting store. This test's
+/// subject is the bridge from hook JSONL into the durable `analytics_events`
+/// table, which lives in the registered profile accounting database, so it must
+/// opt back in — against its own hermetic temp profile, never a live one.
+fn enable_profile_accounting(command: &mut Command) -> &mut Command {
+    command.env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+}
 
 struct Replay {
     subcommand: &'static str,
@@ -169,6 +179,7 @@ fn replays(root: &str) -> Vec<Replay> {
 fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
     let mut command: Command = {
         let mut c = tracedecay_command_with_home(home);
+        enable_profile_accounting(&mut c);
         c.arg(replay.subcommand)
             .current_dir(project_root)
             .stdin(Stdio::piped())
@@ -213,13 +224,6 @@ fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
     row.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
-/// Strips Windows' verbatim `\\?\` prefix: attribution resolved from a hook
-/// process's `current_dir()` is non-verbatim while `canonicalize()` yields
-/// the extended-length form, and the two must compare equal.
-fn normalize_path_text(path: &str) -> String {
-    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
-}
-
 #[tokio::test]
 async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_events() {
     let home = tempfile::TempDir::new().expect("temp home");
@@ -253,8 +257,10 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                 .success()
         );
     }
-    let daemon = spawn_tracedecay_daemon(&home_root);
-    let init = tracedecay_command_with_home(&home_root)
+    let daemon = spawn_tracedecay_daemon_with(&home_root, |command| {
+        enable_profile_accounting(command);
+    });
+    let init = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .arg("init")
         .current_dir(&project_root)
         .output()
@@ -277,8 +283,8 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     }
 
     // Every replay resolved a project root, so every row must land in the
-    // project store file with `project_root` attribution (the user-level
-    // fallback file stays empty).
+    // project store file. Raw project paths stay out of hook timing rows; the
+    // store placement supplies project attribution to the durable bridge.
     let store_rows = read_jsonl_rows(&layout.data_root.join("hook_analytics.jsonl"));
     let hook_invoked: Vec<&Value> = store_rows
         .iter()
@@ -301,10 +307,9 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             matched.len(),
             hook_invoked
         );
-        assert_eq!(
-            normalize_path_text(str_field(matched[0], "project_root")),
-            normalize_path_text(&root_str),
-            "{}/{} row must carry project attribution",
+        assert!(
+            matched[0].get("project_root").is_none(),
+            "{}/{} row must not persist a raw project path",
             replay.agent,
             replay.hook_name
         );
@@ -316,7 +321,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
 
     // Bridge: `analytics sync` imports the JSONL rows into the durable table.
-    let sync = tracedecay_command_with_home(&home_root)
+    let sync = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .args(["analytics", "sync"])
         .current_dir(&project_root)
         .output()
@@ -340,16 +345,18 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
     drop(daemon);
 
-    let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
-        .expect("open replay global db");
-    let events = global_db
-        .query_analytics_events(&AnalyticsEventQuery {
+        .expect("open registered replay profile runtime");
+    let events = runtime
+        .query_profile_analytics_events_for_test(&AnalyticsEventQuery {
             provider: None,
             project_id: None,
             session_id: None,
             event_kind: Some("hook_invoked".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 1000,
         })
         .await
@@ -359,7 +366,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         replays.len(),
         "every replayed hook must bridge into analytics_events"
     );
-    let canonical_project = GlobalDb::canonical_project_key(&project_root);
+    let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_root);
     for replay in &replays {
         let provider = format!("hook_{}", replay.agent);
         let event = events

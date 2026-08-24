@@ -1,12 +1,17 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::common::host_sources;
 use tempfile::TempDir;
-use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
-use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
-
-use crate::common::{PYYAML_FALLBACK_PRELUDE, write_pyyaml_shim};
+use tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
+use tracedecay::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
+use tracedecay::external_tools::ast_grep_command;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the
@@ -57,45 +62,236 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 "#;
 
-fn make_install_ctx(home: &Path) -> InstallContext {
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: Vec::new(),
-        project_root: None,
-        // The LCM bridge checks never touch the dashboard deploy, and
-        // skipping it avoids writing ~430KB of embedded bundles per install;
-        // dashboard deployment has dedicated coverage in `dashboard.rs`.
-        dashboard: false,
-    }
-}
+/// Binary path baked into the generated `tools.py` for the shared install.
+/// Part of the bundle fingerprint: changing it changes the rendered plugin.
+const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
 
-/// One unpinned Hermes install shared by every check in this process.
+/// One unpinned Hermes install shared by every check.
 ///
-/// `HermesIntegration::install` regenerates the full plugin from embedded
+/// The embedded host catalog regenerates the full plugin from embedded
 /// templates, so the output is identical for every unpinned install — there
 /// is no reason to redo it per test. Each check writes its own uniquely
-/// named script (and, where needed, fake binaries) into the shared plugin
-/// dir and only mutates state inside its own python interpreter, so tests
-/// stay independent. Checks that need a different `InstallContext` (e.g. a
-/// pinned project root) keep a private `TempDir` install.
+/// named script into the shared plugin dir and only mutates state inside its
+/// own python interpreter, so tests stay independent.
+///
+/// The bundle is also shared across *processes* (see [`cached_install_home`]):
+/// nextest runs one process per test, so a `LazyLock` alone re-renders the
+/// bundle 70+ times per suite. Rendering is not cheap — `get_tool_definitions`
+/// probes the host `ast-grep` with `--version` and `outline --help`, two real
+/// subprocess spawns, and Windows CI resolves `ast-grep` through an npm shim.
 struct SharedInstall {
     home: PathBuf,
     plugin_dir: PathBuf,
-    _tempdir: TempDir,
+    fake_tools_dir: PathBuf,
+    /// Set only on the fallback path, where the bundle could not be shared
+    /// and this process rendered a private copy that it must clean up.
+    _tempdir: Option<TempDir>,
 }
 
-static SHARED_INSTALL: LazyLock<SharedInstall> = LazyLock::new(|| {
-    let tempdir = TempDir::new().unwrap();
-    HermesIntegration
-        .install(&make_install_ctx(tempdir.path()))
-        .unwrap();
-    SharedInstall {
-        home: tempdir.path().to_path_buf(),
-        plugin_dir: tempdir.path().join(".hermes/plugins/tracedecay"),
-        _tempdir: tempdir,
+/// Written last, so its presence means the bundle beside it is complete.
+const INSTALL_READY_MARKER: &str = ".tracedecay-hermes-install-ready";
+/// How long a process waits for a peer that is already rendering the bundle
+/// before giving up and rendering a private copy.
+const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A lock older than this outlived the run that took it, so it is stale.
+const INSTALL_LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
+
+static SHARED_INSTALL: LazyLock<SharedInstall> = LazyLock::new(|| match cached_install_home() {
+    Some(home) => SharedInstall {
+        plugin_dir: plugin_dir_for(&home),
+        fake_tools_dir: fake_tools_dir_for(&home),
+        home,
+        _tempdir: None,
+    },
+    None => {
+        let tempdir = TempDir::new().unwrap();
+        render_install(tempdir.path()).unwrap();
+        SharedInstall {
+            home: tempdir.path().to_path_buf(),
+            plugin_dir: plugin_dir_for(tempdir.path()),
+            fake_tools_dir: fake_tools_dir_for(tempdir.path()),
+            _tempdir: Some(tempdir),
+        }
     }
 });
+
+fn plugin_dir_for(home: &Path) -> PathBuf {
+    home.join(".hermes/plugins/tracedecay")
+}
+
+fn fake_tools_dir_for(home: &Path) -> PathBuf {
+    home.join("fake-tools")
+}
+
+/// Renders everything the checks read out of a shared install: the generated
+/// Hermes plugin plus the immutable fake `tracedecay` binaries the subprocess
+/// failure-mode check executes.
+fn render_install(home: &Path) -> std::io::Result<()> {
+    // The rendered plugin's schemas.json and JSON_FORMAT_TOOLS come from the
+    // root MCP catalog ports, which `main` wires at process startup; a test
+    // process must wire them itself or the bundle renders empty tool sets.
+    static PORTS: std::sync::Once = std::sync::Once::new();
+    PORTS.call_once(|| {
+        tracedecay::register_runtime_ports().expect("runtime port registration");
+    });
+    let component_set = verified_embedded_host_component_set_with_tracedecay_bin(
+        HostKindV1::Hermes,
+        &[HostBundleComponentV1::Core],
+        0,
+        FIXTURE_TRACEDECAY_BIN,
+    )
+    .map_err(std::io::Error::other)?;
+    for component in component_set.component_set.components {
+        for artifact in component.contents {
+            let path = home.join(artifact.relative_path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, artifact.bytes)?;
+        }
+    }
+    write_fake_tracedecay_binaries(&fake_tools_dir_for(home))
+}
+
+/// Path of the machine-shared bundle for the current inputs, rendering it
+/// first if no complete bundle exists yet.
+///
+/// Returns `None` when the bundle cannot be shared (unwritable temp dir, a
+/// peer still rendering after [`INSTALL_WAIT_TIMEOUT`]); the caller then
+/// renders a private copy, which is exactly the old per-process behaviour.
+fn cached_install_home() -> Option<PathBuf> {
+    let root = std::env::temp_dir().join(format!("tracedecay-hermes-suite-{}", install_key()));
+    let ready = root.join(INSTALL_READY_MARKER);
+    if ready.is_file() {
+        return Some(root);
+    }
+
+    let lock = root.with_extension("lock");
+    if lock_is_stale(&lock) {
+        let _ = std::fs::remove_file(&lock);
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
+        Ok(_) => {
+            // A leftover directory here is a partial render from a run that
+            // died before publishing the marker; nobody can be reading it,
+            // because readers only ever follow the marker.
+            let _ = std::fs::remove_dir_all(&root);
+            let rendered =
+                render_install(&root).and_then(|()| std::fs::write(&ready, install_key()));
+            let _ = std::fs::remove_file(&lock);
+            rendered.ok()?;
+            Some(root)
+        }
+        Err(_) => wait_for_ready(&ready, &lock).then_some(root),
+    }
+}
+
+/// Every input that can change the rendered bundle: the generator build (this
+/// executable embeds the plugin templates), the binary path baked into
+/// `tools.py`, and the `ast-grep` image whose presence decides which tool
+/// definitions are rendered. Metadata only — resolving the key must not spawn
+/// the subprocesses the shared bundle exists to avoid.
+fn install_key() -> String {
+    let mut hasher = DefaultHasher::new();
+    FIXTURE_TRACEDECAY_BIN.hash(&mut hasher);
+    let ast_grep = PathBuf::from(ast_grep_command().get_program());
+    for path in [std::env::current_exe().ok(), Some(ast_grep)]
+        .into_iter()
+        .flatten()
+    {
+        path.hash(&mut hasher);
+        file_identity(&path).hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn file_identity(path: &Path) -> Option<(u64, Duration)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    Some((metadata.len(), modified))
+}
+
+fn lock_is_stale(lock: &Path) -> bool {
+    file_identity(lock)
+        .and_then(|(_, modified)| SystemTime::UNIX_EPOCH.checked_add(modified)?.elapsed().ok())
+        .is_some_and(|age| age > INSTALL_LOCK_STALE_AFTER)
+}
+
+/// Blocks until the peer holding `lock` publishes the ready marker.
+///
+/// The holder writes the marker before releasing the lock, so a lock that
+/// disappears with no marker means the render failed and waiting longer is
+/// pointless. The timeout only covers a holder killed outright.
+fn wait_for_ready(ready: &Path, lock: &Path) -> bool {
+    let deadline = Instant::now() + INSTALL_WAIT_TIMEOUT;
+    while Instant::now() < deadline {
+        if ready.is_file() {
+            return true;
+        }
+        if !lock.exists() {
+            return ready.is_file();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// Fake `tracedecay` binaries for the subprocess failure-mode check, written
+/// once as part of the shared bundle.
+///
+/// `(file stem, POSIX body, Windows body)`. cmd.exe `echo` always appends a
+/// newline that POSIX `printf` does not, and a plain `echo text 1>&2` would
+/// emit a trailing space before the redirect — hence the redirect-first form
+/// (`>&2 echo`).
+const FAKE_TRACEDECAY_BINARIES: &[(&str, &str, &str)] = &[
+    (
+        // Dies mid-handshake: nonzero exit with partial stdout and stderr.
+        "fake-tracedecay-crash",
+        "printf '{\"content'\nprintf 'handshake aborted' >&2\nexit 3\n",
+        "echo {\"content\n>&2 echo handshake aborted\nexit /b 3\n",
+    ),
+    (
+        // Exit 0 with malformed JSON on stdout.
+        "fake-tracedecay-badjson",
+        "printf 'not-json-at-all'\nexit 0\n",
+        "echo not-json-at-all\nexit /b 0\n",
+    ),
+    (
+        // Exit 0 with empty stdout.
+        "fake-tracedecay-empty",
+        "exit 0\n",
+        "exit /b 0\n",
+    ),
+];
+
+fn write_fake_tracedecay_binaries(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, posix_body, windows_body) in FAKE_TRACEDECAY_BINARIES {
+        if cfg!(windows) {
+            // CRLF matches what cmd.exe batch files are written with.
+            let body = format!("@echo off\n{windows_body}").replace('\n', "\r\n");
+            std::fs::write(dir.join(format!("{name}.cmd")), body)?;
+            continue;
+        }
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{posix_body}"))?;
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(&path)?.permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            std::fs::set_permissions(&path, permissions)?;
+        }
+    }
+    Ok(())
+}
 
 /// Command for the test python interpreter.
 ///
@@ -126,7 +322,14 @@ fn python_command() -> Command {
 fn run_python_check(script_name: &str, script: &str, failure_message: &str) {
     let install = &*SHARED_INSTALL;
     let script_path = install.plugin_dir.join(script_name);
-    std::fs::write(&script_path, script).unwrap();
+    // Script names are unique per check and their bodies are constants, so a
+    // matching file in a reused bundle is already this exact script. Skipping
+    // the rewrite keeps the shared plugin dir immutable across processes.
+    let already_written =
+        std::fs::read(&script_path).is_ok_and(|existing| existing == script.as_bytes());
+    if !already_written {
+        std::fs::write(&script_path, script).unwrap();
+    }
 
     let mut command = python_command();
     command
@@ -134,6 +337,7 @@ fn run_python_check(script_name: &str, script: &str, failure_message: &str) {
         .arg(&install.plugin_dir)
         // Isolate from the developer's real ~/.hermes.
         .env("HOME", &install.home)
+        .env("TRACEDECAY_TEST_FAKE_TOOLS", &install.fake_tools_dir)
         .env_remove("HERMES_HOME")
         .env_remove("HERMES_PROFILE");
     // Ambient LCM_* vars from the worker shell must not leak into the
@@ -249,6 +453,162 @@ assert len(ctx.context_engines) == 1
 }
 
 #[test]
+fn generated_native_callbacks_forward_content_free_terminal_receipts() {
+    run_generated_plugin_script(
+        "check_native_hook_forwarding.py",
+        r#"
+import copy
+
+captured = []
+plugin._notify_host_receipt = (
+    lambda event, thread_name: captured.append((copy.deepcopy(event), thread_name)) or True
+)
+plugin._code_project_root = lambda **_kwargs: "/workspace/project"
+
+# Non-terminal tools never produce receipts: transcript content flows through
+# the daemon's authenticated ingest route, not host callbacks.
+plugin._post_tool_call(
+    tool_name="write_file",
+    session_id="session-hermes-native",
+    tool_input={"path": "/workspace/project/secret.txt", "content": "secret"},
+    cwd="/workspace/project",
+)
+assert captured == []
+
+plugin._post_tool_call(
+    tool_name="bash",
+    session_id="session-hermes-native",
+    thread_id="thread-hermes-native",
+    turn_id="turn-hermes-native",
+    tool_call_id="call-hermes-native",
+    args={"command": "cat /workspace/project/secret.txt"},
+    cwd="/workspace/project",
+    status="success",
+    duration_ms=42,
+)
+
+assert len(captured) == 1, captured
+receipt_event, receipt_thread = captured[0]
+assert receipt_thread == "tracedecay-terminal-receipt"
+assert receipt_event == {
+    "agent": "hermes",
+    "event": "terminalReceipt",
+    "_project_candidate": "/workspace/project",
+    "_hermes_home": None,
+    "_trusted_project": False,
+    "route": {
+        "session_id": "session-hermes-native",
+        "thread_id": "thread-hermes-native",
+    },
+    "receipt": {
+        "tool_call_id": "call-hermes-native",
+        "turn_id": "turn-hermes-native",
+        "status": "success",
+        "duration_ms": 42,
+        "transcript_watermark": "turn-hermes-native",
+    },
+}
+assert "secret.txt" not in repr(captured)
+assert "cat " not in repr(captured)
+
+# The engine's session-end boundary drops per-session state without emitting
+# a host receipt; the daemon owns any stop-side transcript work.
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-hermes-native", project_root="/workspace/project")
+assert engine.active_session_id == "session-hermes-native"
+engine.on_session_end(session_id="session-hermes-native")
+assert engine.active_session_id is None
+assert len(captured) == 1
+
+class Ctx:
+    def __init__(self):
+        self.hooks = []
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+ctx = Ctx()
+plugin.register(ctx)
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
+"#,
+        "generated Hermes callbacks must forward terminal receipt identity without content",
+    );
+}
+
+#[test]
+fn generated_native_callback_queue_applies_explicit_backpressure() {
+    run_generated_plugin_script(
+        "check_native_hook_queue_bound.py",
+        r#"
+import threading as real_threading
+
+class DormantThread:
+    def __init__(self, *args, **kwargs):
+        pass
+    def start(self):
+        pass
+    def join(self, timeout=None):
+        pass
+
+# plugin.threading is the shared real module; keep a handle to the real
+# Thread class before patching it out for the plugin's worker spawn.
+RealThread = real_threading.Thread
+plugin.threading.Thread = DormantThread
+plugin._HOST_RECEIPT_QUEUE.clear()
+plugin._HOST_RECEIPT_WORKER = None
+
+# The plugin's atexit join spins until the worker slot clears, and the
+# dormant worker never clears it; guarantee cleanup even on assertion
+# failure so a failing run reports instead of hanging at interpreter exit.
+try:
+    for sequence in range(plugin._HOST_RECEIPT_QUEUE_LIMIT):
+        plugin._notify_host_receipt({"sequence": sequence}, "test-native-hook")
+
+    assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+
+    admitted = real_threading.Event()
+
+    def overflow_producer():
+        plugin._notify_host_receipt(
+            {"sequence": plugin._HOST_RECEIPT_QUEUE_LIMIT}, "test-native-hook"
+        )
+        admitted.set()
+
+    producer = RealThread(target=overflow_producer, daemon=True)
+    producer.start()
+
+    # A producer at capacity must block -- native events are never dropped and
+    # admitted events are never evicted while the queue is full.
+    assert not admitted.wait(0.5)
+    assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+    assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+        range(plugin._HOST_RECEIPT_QUEUE_LIMIT)
+    )
+
+    with plugin._HOST_RECEIPT_QUEUE_CONDITION:
+        drained = plugin._HOST_RECEIPT_QUEUE.popleft()
+        plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+    assert drained["sequence"] == 0
+
+    assert admitted.wait(5), "blocked producer must resume once capacity frees"
+    producer.join(5)
+    assert not producer.is_alive()
+    assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+        range(1, plugin._HOST_RECEIPT_QUEUE_LIMIT + 1)
+    )
+finally:
+    # Restore the real Thread and drop the dormant worker so the plugin's
+    # atexit join sees a clean queue instead of the stub.
+    plugin.threading.Thread = RealThread
+    with plugin._HOST_RECEIPT_QUEUE_CONDITION:
+        plugin._HOST_RECEIPT_QUEUE.clear()
+        plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+    plugin._HOST_RECEIPT_WORKER = None
+"#,
+        "generated Hermes callback queue must block producers at capacity without dropping or evicting admitted events",
+    );
+}
+
+#[test]
 fn generated_registration_skips_tools_without_message_forwarding_capability() {
     run_generated_plugin_script(
         "check_registration_capability_gate.py",
@@ -278,8 +638,12 @@ plugin.register(ctx)
 # Code-graph / memory / transcript tools register even without message
 # forwarding; only the live-ingest LCM verbs whose schemas carry the
 # in-memory messages list (and the context-engine tool mirrors) are gated.
-assert "tracedecay_search" in ctx.tools
-assert "tracedecay_context" in ctx.tools
+expected_without_messages = {
+    schema["name"]
+    for schema in plugin.schemas.TOOL_SCHEMAS
+    if schema["name"] not in plugin.MESSAGE_DEPENDENT_TOOLS
+}
+assert expected_without_messages.issubset(ctx.tools)
 assert "tracedecay_lcm_compress" not in ctx.tools
 assert "tracedecay_lcm_preflight" not in ctx.tools
 assert "lcm_grep" not in ctx.tools
@@ -337,6 +701,7 @@ assert "role" not in load_params["properties"]
 assert "start_time" not in load_params["properties"]
 assert "end_time" not in load_params["properties"]
 assert "content_limit" not in load_params["properties"]
+assert "after_store_id" not in load_params["properties"]
 assert load_params["required"] == ["session_id"]
 
 describe_params = schemas_by_name["lcm_describe"]["parameters"]
@@ -350,7 +715,7 @@ assert "node_id" in expand_params["properties"]
 assert "store_id" in expand_params["properties"]
 assert "externalized_ref" in expand_params["properties"]
 assert "session_id" in expand_params["properties"]
-assert "source_offset" in expand_params["properties"]
+assert "source_offset" not in expand_params["properties"]
 assert "source_limit" in expand_params["properties"]
 assert "target" not in expand_params["properties"]
 assert expand_params.get("required") == []
@@ -371,9 +736,6 @@ assert status["project_root"] == "/tmp/project"
 assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
 assert isinstance(status["tracedecay_binary_available"], bool)
 assert status["context_engine_tool_names"] == sorted(schema_names)
-assert status["route_failures"] == {}
-assert status["cooldown_routes"] == []
-assert status["route_cooldowns"] == {}
 assert status["last_compress_result"] == {"status": "never_ran"}
 assert status["live_ingest"]["registered_tool_names"] == []
 assert status["live_ingest"]["context_tool_names"] == []
@@ -422,147 +784,64 @@ assert json.loads(describe_payload_result) == {"ok": True, "tool": "tracedecay_l
 assert json.loads(expand_result) == {"ok": True, "tool": "tracedecay_lcm_expand"}
 assert json.loads(direct_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
 assert json.loads(implicit_current_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
-assert calls[0][0] == "tracedecay_lcm_preflight"
-assert calls[0][1]["messages"] == [{"role": "user", "content": "current turn"}]
-assert calls[0][1]["session_id"] == "session-1"
+# Read tools dispatch straight to the daemon-owned CLI route: no local
+# preflight interception, and current-turn messages never leave the host.
+assert len(calls) == 7
+assert calls[0][0] == "tracedecay_lcm_grep"
+assert calls[0][1]["query"] == "orchard"
+assert calls[0][1]["scope"] == "current"
+assert calls[0][1]["sort"] == "relevance"
+assert calls[0][1]["source"] == "cli"
+assert calls[0][1]["role"] == "assistant"
+assert calls[0][1]["start_time"] == 1
+assert calls[0][1]["end_time"] == 2
+assert "session_scope" not in calls[0][1]
+assert "time_from" not in calls[0][1]
+assert "time_to" not in calls[0][1]
+assert "messages" not in calls[0][1]
 assert "project_root" not in calls[0][1]
+assert calls[0][1]["session_id"] == "session-1"
 assert calls[0][2] == {"project_root": "/tmp/project"}
-assert calls[1][0] == "tracedecay_lcm_grep"
-assert calls[1][1]["query"] == "orchard"
-assert calls[1][1]["scope"] == "current"
-assert calls[1][1]["sort"] == "relevance"
-assert calls[1][1]["source"] == "cli"
-assert calls[1][1]["role"] == "assistant"
+assert calls[1][0] == "tracedecay_lcm_load_session"
+assert calls[1][1]["content_limit"] == 123
+assert calls[1][1]["roles"] == ["user", "tool"]
 assert calls[1][1]["start_time"] == 1
 assert calls[1][1]["end_time"] == 2
-assert "session_scope" not in calls[1][1]
+assert "max_content_chars" not in calls[1][1]
+assert "role" not in calls[1][1]
 assert "time_from" not in calls[1][1]
 assert "time_to" not in calls[1][1]
 assert "messages" not in calls[1][1]
-assert "project_root" not in calls[1][1]
-assert calls[1][1]["session_id"] == "session-1"
-assert calls[1][2] == {"project_root": "/tmp/project"}
-assert calls[2][0] == "tracedecay_lcm_preflight"
-assert calls[2][1]["messages"] == [{"role": "assistant", "content": "load turn"}]
-assert calls[3][0] == "tracedecay_lcm_load_session"
-assert calls[3][1]["content_limit"] == 123
-assert calls[3][1]["roles"] == ["user", "tool"]
-assert calls[3][1]["start_time"] == 1
-assert calls[3][1]["end_time"] == 2
-assert "max_content_chars" not in calls[3][1]
-assert "role" not in calls[3][1]
-assert "time_from" not in calls[3][1]
-assert "time_to" not in calls[3][1]
-assert calls[4][0] == "tracedecay_lcm_describe"
-assert calls[4][1]["target"] == {"kind": "summary_node", "node_id": "7"}
-assert "node_id" not in calls[4][1]
-assert calls[5][0] == "tracedecay_lcm_describe"
-assert calls[5][1]["target"] == {"kind": "external_payload", "payload_ref": "payload_123.payload"}
-assert "externalized_ref" not in calls[5][1]
-assert calls[6][0] == "tracedecay_lcm_expand"
-assert calls[6][1]["target"] == {"kind": "raw_message", "store_id": 42}
-assert calls[6][1]["session_id"] == "session-foreign"
-assert calls[6][1]["content_limit"] == 308
-assert calls[6][1]["source_offset"] == 3
-assert calls[6][1]["source_limit"] == 2
-assert "store_id" not in calls[6][1]
-assert "max_tokens" not in calls[6][1]
-assert calls[7][0] == "tracedecay_lcm_grep"
-assert calls[7][1]["query"] == "direct"
-assert calls[7][1]["scope"] == "all"
-assert "session_scope" not in calls[7][1]
-assert "project_root" not in calls[7][1]
-assert calls[7][2] == {"project_root": "/tmp/project"}
-assert calls[7][1]["session_id"] == "session-1"
-assert calls[8][0] == "tracedecay_lcm_grep"
-assert calls[8][1]["query"] == "implicit"
-assert calls[8][1]["scope"] == "current"
-assert "session_scope" not in calls[8][1]
-assert "project_root" not in calls[8][1]
-assert calls[8][2] == {"project_root": "/tmp/project"}
-assert calls[8][1]["session_id"] == "session-1"
+assert calls[2][0] == "tracedecay_lcm_describe"
+assert calls[2][1]["target"] == {"kind": "summary_node", "node_id": "7"}
+assert "node_id" not in calls[2][1]
+assert calls[3][0] == "tracedecay_lcm_describe"
+assert calls[3][1]["target"] == {"kind": "external_payload", "payload_ref": "payload_123.payload"}
+assert "externalized_ref" not in calls[3][1]
+assert calls[4][0] == "tracedecay_lcm_expand"
+assert calls[4][1]["target"] == {"kind": "raw_message", "store_id": 42}
+assert calls[4][1]["session_id"] == "session-foreign"
+assert calls[4][1]["content_limit"] == 308
+assert "source_offset" not in calls[4][1]
+assert "source_limit" not in calls[4][1]
+assert "store_id" not in calls[4][1]
+assert "max_tokens" not in calls[4][1]
+assert calls[5][0] == "tracedecay_lcm_grep"
+assert calls[5][1]["query"] == "direct"
+assert calls[5][1]["scope"] == "all"
+assert "session_scope" not in calls[5][1]
+assert "project_root" not in calls[5][1]
+assert calls[5][2] == {"project_root": "/tmp/project"}
+assert calls[5][1]["session_id"] == "session-1"
+assert calls[6][0] == "tracedecay_lcm_grep"
+assert calls[6][1]["query"] == "implicit"
+assert calls[6][1]["scope"] == "current"
+assert "session_scope" not in calls[6][1]
+assert "project_root" not in calls[6][1]
+assert calls[6][2] == {"project_root": "/tmp/project"}
+assert calls[6][1]["session_id"] == "session-1"
 "#,
         "generated context engine should expose Hermes-style native LCM surface",
-    );
-}
-
-#[test]
-fn generated_context_engine_exposes_optional_hermes_hooks() {
-    run_generated_plugin_script(
-        "check_context_engine_optional_hooks.py",
-        r#"
-import json
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="old-session", project_root="/tmp/project")
-engine.threshold_tokens = 2000
-
-calls = []
-
-def envelope(payload):
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_preflight":
-        return envelope({"should_compress": True})
-    if name == "tracedecay_lcm_compress":
-        return envelope({
-            "status": "compressed",
-            "replay_messages": [{"role": "system", "content": "summary"}],
-            "summary_node_count": 1,
-            "raw_message_count": 2,
-        })
-    if name == "tracedecay_lcm_session_boundary":
-        return json.dumps({"ok": True})
-    raise AssertionError(f"unexpected tool call: {name}")
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-assert engine.has_content_to_compress([]) is False
-assert engine.has_content_to_compress([
-    {"role": "system", "content": ""},
-    {"role": "assistant", "content": "   "},
-]) is False
-assert calls == []
-assert engine.has_content_to_compress([
-    {"role": "user", "content": "single message stays protected"},
-]) is False
-
-eligible = [
-    {"role": "user", "content": "older content"},
-    {"role": "assistant", "content": "newer content"},
-]
-assert engine.has_content_to_compress(eligible, current_tokens=123) is True
-assert calls == []
-
-compressed = engine.compress(
-    [{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}],
-    current_tokens=2100,
-)
-assert compressed == [{"role": "system", "content": "summary"}]
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is False
-status = engine.get_status()
-assert status["awaiting_real_usage_after_compression"] is True
-assert status["last_compress_result"]["status"] == "compressed"
-assert status["last_compress_result"]["summary_node_count"] == 1
-assert status["last_compress_result"]["raw_message_count"] == 2
-
-engine.update_from_response({"prompt_tokens": 321, "completion_tokens": 7})
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is True
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=7000) is False
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is True
-assert engine.last_real_prompt_tokens == 321
-
-engine.carry_over_new_session_context("old-session", "new-session")
-boundary_calls = [call for call in calls if call[0] == "tracedecay_lcm_session_boundary"]
-assert len(boundary_calls) == 1
-assert boundary_calls[0][1]["old_session_id"] == "old-session"
-assert boundary_calls[0][1]["session_id"] == "new-session"
-assert boundary_calls[0][1]["boundary_reason"] == "compression"
-assert engine.active_session_id == "new-session"
-"#,
-        "generated context engine should expose optional Hermes hook shims",
     );
 }
 
@@ -625,15 +904,12 @@ engine.handle_tool_call(
     messages=[{"role": "user", "content": "profile current turn"}],
 )
 
-assert calls[0][0] == "tracedecay_lcm_preflight"
+assert len(calls) == 1
+assert calls[0][0] == "tracedecay_lcm_grep"
 assert "project_root" not in calls[0][1]
 assert calls[0][1]["storage_scope"] == "user"
 assert calls[0][2] == {}
-assert calls[0][1]["messages"] == [{"role": "user", "content": "profile current turn"}]
-assert calls[1][0] == "tracedecay_lcm_grep"
-assert "project_root" not in calls[1][1]
-assert calls[1][1]["storage_scope"] == "user"
-assert calls[1][2] == {}
+assert "messages" not in calls[0][1]
 
 os.environ["HERMES_HOME"] = "/tmp/another-hermes-home"
 other = plugin.TraceDecayContextEngine()
@@ -643,236 +919,6 @@ assert calls[-1][1]["storage_scope"] == "user"
 assert calls[-1][2] == {}
 "#,
         "generated context engine must not use HERMES_HOME as a TraceDecay storage identity",
-    );
-}
-
-#[test]
-fn context_engine_debounces_current_turn_preflight_when_messages_unchanged() {
-    run_generated_plugin_script(
-        "check_preflight_debounce.py",
-        r#"
-import json
-
-calls = []
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    calls.append((name, dict(args), dict(kwargs)))
-    return json.dumps({"status": "ok", "tool": name})
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-same_messages = [{"role": "user", "content": "unchanged context"}]
-changed_messages = [{"role": "user", "content": "changed context"}]
-
-for _ in range(3):
-    engine.handle_tool_call("lcm_status", {}, messages=same_messages)
-engine.handle_tool_call("lcm_status", {}, messages=changed_messages)
-
-preflight_calls = [call for call in calls if call[0] == "tracedecay_lcm_preflight"]
-status_calls = [call for call in calls if call[0] == "tracedecay_lcm_status"]
-
-assert len(status_calls) == 4
-assert len(preflight_calls) == 2
-assert preflight_calls[0][1]["messages"] == same_messages
-assert preflight_calls[1][1]["messages"] == changed_messages
-"#,
-        "generated context engine should debounce unchanged preflight message arrays",
-    );
-}
-
-#[test]
-fn context_engine_wraps_extraction_result_into_provided_summarizer_route() {
-    run_generated_plugin_script(
-        "check_auxiliary_extraction_route.py",
-        r#"
-import json
-import os
-
-os.environ["LCM_EXTRACTION_ENABLED"] = "true"
-os.environ["LCM_EXTRACTION_MODEL"] = "openai/gpt-5.4-mini"
-os.environ["LCM_EXTRACTION_OUTPUT_PATH"] = "/tmp/extractions"
-os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
-
-compress_calls = []
-
-def fake_call_tracedecay_json(name, args, **kwargs):
-    if name != "tracedecay_lcm_compress":
-        raise AssertionError(name)
-    compress_calls.append((name, dict(args)))
-    summarizer_mode = (args.get("summarizer") or {}).get("mode")
-    if summarizer_mode == "hermes_auxiliary":
-        return {
-            "status": "needs_summary",
-            "summary_request": {
-                "focus_topic": "billing",
-                "source_range": {"from_store_id": 11, "to_store_id": 11},
-                "source_messages": [
-                    {"store_id": 11, "role": "user", "content": "We decided to rotate keys weekly."}
-                ],
-                "extraction_request": {
-                    "session_id": "session-1",
-                    "source_range": {"from_store_id": 11, "to_store_id": 11},
-                    "source_messages": [
-                        {"store_id": 11, "role": "user", "content": "We decided to rotate keys weekly."}
-                    ],
-                    "serialized_messages": "[USER]: We decided to rotate keys weekly.",
-                    "prompt": "extract decisions"
-                },
-            },
-            "replay_messages": [{"role": "user", "content": "fresh"}],
-        }
-    if summarizer_mode == "provided":
-        return {
-            "status": "ok",
-            "reason": "compressed_backlog",
-            "summary_nodes_created": 1,
-            "summary_nodes": [],
-            "replay_messages": [{"role": "system", "content": "summary"}],
-            "frontier": {
-                "provider": "cursor",
-                "conversation_id": "session-1",
-                "current_session_id": "session-1",
-                "current_frontier_store_id": 11,
-                "last_finalized_session_id": None,
-                "last_finalized_frontier_store_id": None,
-                "maintenance_debt": [],
-            },
-        }
-    raise AssertionError(f"unexpected summarizer mode: {summarizer_mode}")
-
-plugin.call_tracedecay_json = fake_call_tracedecay_json
-
-class _FakeMessage:
-    def __init__(self, content):
-        self.content = content
-
-class _FakeChoice:
-    def __init__(self, content):
-        self.message = _FakeMessage(content)
-
-class _FakeResponse:
-    def __init__(self, content):
-        self.choices = [_FakeChoice(content)]
-
-class _AuxClient:
-    def __init__(self):
-        self.calls = []
-    def call_llm(self, **kwargs):
-        self.calls.append(dict(kwargs))
-        if kwargs.get("task") == "extraction":
-            return _FakeResponse("<think>hidden reasoning</think>- Decision: rotate keys weekly")
-        if kwargs.get("task") == "compression":
-            return _FakeResponse("Compact summary text")
-        raise AssertionError(kwargs.get("task"))
-
-agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
-
-engine = plugin.TraceDecayContextEngine()
-engine.agent = agent
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-result = engine._compress_to_result([{"role": "user", "content": "current"}], current_tokens=700)
-
-assert result["status"] == "ok"
-assert len(compress_calls) == 2
-provided_args = compress_calls[1][1]
-assert provided_args["summarizer"]["mode"] == "provided"
-route_payload = json.loads(provided_args["summarizer"]["route"])
-assert route_payload["pre_compaction_extraction"]["status"] == "ok"
-assert route_payload["pre_compaction_extraction"]["items"] == ["Decision: rotate keys weekly"]
-assert route_payload["pre_compaction_extraction"]["model"] == "openai/gpt-5.4-mini"
-assert route_payload["pre_compaction_extraction"]["output_path"] == "/tmp/extractions"
-assert route_payload["route"] == "default"
-
-tasks = [call["task"] for call in agent.auxiliary_client.calls]
-assert tasks == ["extraction", "compression"]
-"#,
-        "generated context engine should attach extraction results to provided route envelope",
-    );
-}
-
-#[test]
-fn context_engine_compress_continues_when_extraction_call_fails() {
-    run_generated_plugin_script(
-        "check_auxiliary_extraction_failure_non_blocking.py",
-        r#"
-import json
-import os
-
-os.environ["LCM_EXTRACTION_ENABLED"] = "true"
-
-compress_calls = []
-
-def fake_call_tracedecay_json(name, args, **kwargs):
-    compress_calls.append(dict(args))
-    mode = (args.get("summarizer") or {}).get("mode")
-    if mode == "hermes_auxiliary":
-        return {
-            "status": "needs_summary",
-            "summary_request": {
-                "source_messages": [{"store_id": 1, "role": "user", "content": "hello"}],
-                "source_range": {"from_store_id": 1, "to_store_id": 1},
-                "extraction_request": {
-                    "session_id": "session-1",
-                    "source_range": {"from_store_id": 1, "to_store_id": 1},
-                    "prompt": "extract decisions"
-                },
-            },
-            "replay_messages": [],
-        }
-    return {
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [],
-        "frontier": {
-            "provider": "cursor",
-            "conversation_id": "session-1",
-            "current_session_id": "session-1",
-            "current_frontier_store_id": 1,
-            "last_finalized_session_id": None,
-            "last_finalized_frontier_store_id": None,
-            "maintenance_debt": [],
-        },
-    }
-
-plugin.call_tracedecay_json = fake_call_tracedecay_json
-
-class _FakeMessage:
-    def __init__(self, content):
-        self.content = content
-
-class _FakeChoice:
-    def __init__(self, content):
-        self.message = _FakeMessage(content)
-
-class _FakeResponse:
-    def __init__(self, content):
-        self.choices = [_FakeChoice(content)]
-
-class _AuxClient:
-    def call_llm(self, **kwargs):
-        if kwargs.get("task") == "extraction":
-            raise RuntimeError("extraction backend unavailable")
-        return _FakeResponse("summary text")
-
-agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
-
-engine = plugin.TraceDecayContextEngine()
-engine.agent = agent
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-result = engine._compress_to_result([{"role": "user", "content": "current"}], current_tokens=700)
-assert result["status"] == "ok"
-provided = compress_calls[1]
-payload = json.loads(provided["summarizer"]["route"])
-assert payload["pre_compaction_extraction"]["status"] == "failed_non_blocking"
-assert "extraction backend unavailable" in payload["pre_compaction_extraction"]["error"]
-"#,
-        "generated context engine should never block compression when extraction fails",
     );
 }
 
@@ -951,7 +997,7 @@ assert args["messages"] == [{"role": "user", "content": "current turn"}]
 
 tools.call_tracedecay_tool("tracedecay_status", {})
 args = json.loads(calls[1][calls[1].index("--args") + 1])
-assert args["format"] == "json"
+assert args == {}
 "#,
         "generated subprocess bridge should preserve messages kwargs in JSON args",
     );
@@ -1097,13 +1143,7 @@ plugin._resolved_project_scope = lambda path, *_args: (
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
-profile_engine.should_compress_preflight(messages=[], current_tokens=123)
-name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
-assert args["session_id"] == "session-1"
-assert "project_root" not in args
-assert args["storage_scope"] == "user"
-assert kwargs == {}
+assert profile_engine.should_compress_preflight(messages=[], current_tokens=123) is False
 
 project_engine = plugin.TraceDecayContextEngine()
 project_engine.on_session_start(
@@ -1111,33 +1151,18 @@ project_engine.on_session_start(
     hermes_home="/tmp/hermes",
     project_root="/tmp/project",
 )
-project_engine.should_compress_preflight(messages=[], current_tokens=456)
-name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
-assert args["session_id"] == "session-2"
-assert "project_root" not in args
-assert kwargs == {"project_root": "/tmp/project"}
+assert project_engine.should_compress_preflight(messages=[], current_tokens=456) is False
 
 project_engine = plugin.TraceDecayContextEngine()
 project_engine.initialize(session_id="initial", project_root="/tmp/project")
 project_engine.on_session_start(session_id="next", project_root="/tmp/project")
-project_engine.should_compress_preflight(messages=[], current_tokens=789)
-name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
-assert args["session_id"] == "next"
-assert "project_root" not in args
-assert kwargs == {"project_root": "/tmp/project"}
+assert project_engine.should_compress_preflight(messages=[], current_tokens=789) is False
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.initialize(session_id="initial", hermes_home="/tmp/hermes")
 profile_engine.on_session_start(session_id="next")
-profile_engine.should_compress_preflight(messages=[], current_tokens=321)
-name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
-assert args["session_id"] == "next"
-assert "project_root" not in args
-assert args["storage_scope"] == "user"
-assert kwargs == {}
+assert profile_engine.should_compress_preflight(messages=[], current_tokens=321) is False
+assert calls == []
 
 class LegacyCtx:
     def register_tool(self, *args, **kwargs):
@@ -1150,565 +1175,6 @@ legacy = LegacyCtx()
 plugin.register(legacy)
 "#,
         "generated plugin should register a Hermes context engine when supported",
-    );
-}
-
-#[test]
-fn context_engine_preflight_uses_tracedecay_tool_json_args() {
-    run_python_check(
-        "check_preflight_bridge.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(argv)
-    inner = {
-        "status": "ok",
-        "should_compress": False,
-        "messages": [],
-    }
-    outer = {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(inner),
-            }
-        ]
-    }
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(hermes_home="/tmp/hermes-profile")
-engine.on_session_start(session_id="session-1", project_root="/tmp/project")
-result = engine._preflight_probe(
-    [{"role": "user", "content": "hello"}],
-    current_tokens=987,
-)
-
-assert result["status"] == "ok"
-assert result["should_compress"] is False
-assert result["messages"] == []
-
-assert len(calls) == 1
-argv = calls[0]
-assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_preflight", "--json"]
-args_index = argv.index("--args")
-args = json.loads(argv[args_index + 1])
-assert args == {
-    "format": "json",
-    "provider": "hermes",
-    "fresh_tail_count": 64,
-    "leaf_chunk_tokens": 20000,
-    "dynamic_leaf_chunk_enabled": False,
-    "dynamic_leaf_chunk_max": 40000,
-    "max_assembly_tokens": 0,
-    "reserve_tokens_floor": 0,
-    "summary_fan_in": 4,
-    "incremental_max_depth": 1,
-    "session_id": "session-1",
-    "messages": [{"role": "user", "content": "hello"}],
-    "current_tokens": 987,
-}
-"#,
-        "generated context engine should call tracedecay_lcm_preflight through the JSON bridge",
-    );
-}
-
-#[test]
-fn context_engine_session_start_reports_compression_boundary() {
-    run_python_check(
-        "check_session_boundary_bridge.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_boundary"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(argv)
-    inner = {"status": "ok", "recorded": True, "reason": "compression_boundary_skip_recorded"}
-    outer = {"content": [{"type": "text", "text": json.dumps(inner)}]}
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-a", project_root="/tmp/project")
-
-# Plain session starts must not call the boundary tool.
-engine.on_session_start(session_id="session-a")
-assert calls == []
-
-# Compression boundary session starts hand bound/old session ids to tracedecay
-# so the Rust side can decide whether the boundary skipped carry-over.
-engine.on_session_start(
-    session_id="session-b",
-    old_session_id="session-c",
-    boundary_reason="compression",
-)
-assert len(calls) == 1
-argv = calls[0]
-assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_session_boundary", "--json"]
-args = json.loads(argv[argv.index("--args") + 1])
-assert args == {
-    "format": "json",
-    "provider": "hermes",
-    "session_id": "session-b",
-    "old_session_id": "session-c",
-    "boundary_reason": "compression",
-    "bound_session_id": "session-a",
-}
-
-# The engine binds the new session even when the boundary tool was called.
-assert engine.active_session_id == "session-b"
-
-# A non-compression boundary must not call the tool.
-engine.on_session_start(session_id="session-d", old_session_id="session-b", boundary_reason="manual")
-assert len(calls) == 1
-"#,
-        "generated context engine should report compression boundaries through tracedecay_lcm_session_boundary",
-    );
-}
-
-#[test]
-fn context_engine_compress_uses_tracedecay_tool_json_args() {
-    run_python_check(
-        "check_compress_bridge.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(argv)
-    inner = {
-        "status": "not_implemented",
-        "message": "placeholder parsed",
-    }
-    outer = {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(inner),
-            }
-        ]
-    }
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-2", project_root="/tmp/project")
-messages = [{"role": "assistant", "content": "hello"}]
-result = engine.compress(
-    list(messages),
-    current_tokens=1200,
-    focus_topic="handoff",
-)
-
-# Host ABC contract: compress() returns a message LIST (here: the input,
-# since the placeholder result carries no usable replay window); the raw
-# tracedecay result stays on the engine for diagnostics.
-assert result == messages
-assert engine.last_compress_result == {"status": "not_implemented", "message": "placeholder parsed"}
-
-assert len(calls) == 1
-argv = calls[0]
-assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:4] == ["tool", "--project", "/tmp/project"]
-tool_idx = argv.index("tracedecay_lcm_compress")
-assert argv[tool_idx + 1] == "--json"
-assert argv[tool_idx + 2] == "--args"
-args_ref = argv[argv.index("--args") + 1]
-if args_ref.startswith("@"):
-    with open(args_ref[1:], encoding="utf-8") as args_file:
-        args = json.load(args_file)
-else:
-    args = json.loads(args_ref)
-# expanduser matches the plugin's fallback byte-for-byte on Windows too.
-assert args == {
-    "format": "json",
-    "response_handle_project_root": "/tmp/project",
-    "provider": "hermes",
-    "fresh_tail_count": 64,
-    "leaf_chunk_tokens": 20000,
-    "dynamic_leaf_chunk_enabled": False,
-    "dynamic_leaf_chunk_max": 40000,
-    "max_assembly_tokens": 0,
-    "reserve_tokens_floor": 0,
-    "summary_fan_in": 4,
-    "incremental_max_depth": 1,
-    "session_id": "session-2",
-    "messages": messages,
-    "current_tokens": 1200,
-    "focus_topic": "handoff",
-    "summarizer": {"mode": "hermes_auxiliary"},
-}
-"#,
-        "generated context engine should call tracedecay_lcm_compress through the JSON bridge",
-    );
-}
-
-#[test]
-fn context_engine_projects_config_defaults_into_preflight_and_compress_args() {
-    run_python_check(
-        "check_context_engine_config_defaults.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_config_defaults"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(argv)
-    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-config = {
-    "threshold_tokens": 777,
-    "fresh_tail_count": 5,
-    "leaf_chunk_tokens": 123,
-    "dynamic_leaf_chunk_enabled": True,
-    "dynamic_leaf_chunk_max": 456,
-    "max_assembly_tokens": 999,
-    "condensation_fanin": 3,
-    "context_length": 200000,
-    "reserve_tokens_floor": 4096,
-    "incremental_max_depth": 2,
-}
-engine = plugin.TraceDecayContextEngine(config=config)
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-engine.should_compress_preflight(
-    [{"role": "user", "content": "hello"}],
-    current_tokens=800,
-)
-engine.compress(
-    [{"role": "assistant", "content": "compress me"}],
-    current_tokens=800,
-)
-
-assert len(calls) == 2
-preflight_args = json.loads(calls[0][calls[0].index("--args") + 1])
-compress_args = json.loads(calls[1][calls[1].index("--args") + 1])
-
-for args in (preflight_args, compress_args):
-    assert args["threshold_tokens"] == 777
-    assert args["fresh_tail_count"] == 5
-    assert args["leaf_chunk_tokens"] == 123
-    assert args["dynamic_leaf_chunk_enabled"] is True
-    assert args["dynamic_leaf_chunk_max"] == 456
-    assert args["max_assembly_tokens"] == 999
-    assert args["summary_fan_in"] == 3
-    assert args["context_length"] == 200000
-    assert args["reserve_tokens_floor"] == 4096
-    assert args["incremental_max_depth"] == 2
-
-assert preflight_args["session_id"] == "session-1"
-assert preflight_args["current_tokens"] == 800
-assert preflight_args["messages"] == [{"role": "user", "content": "hello"}]
-assert compress_args["summarizer"] == {"mode": "hermes_auxiliary"}
-"#,
-        "generated context engine should project configured Hermes defaults into preflight/compress args",
-    );
-}
-
-#[test]
-fn context_engine_project_routing_never_uses_hermes_home() {
-    run_python_check(
-        "check_project_flag_bridge.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]})
-
-run_cwds = []
-
-def fake_run(argv, check, capture_output, text, timeout, shell, cwd=None):
-    calls.append(argv)
-    run_cwds.append(cwd)
-    tool_name = argv[4] if "--project" in argv else argv[2]
-    if tool_name == "tracedecay_lcm_expand_query":
-        inner = {
-            "status": "ok",
-            "prompt": "What changed?",
-            "query": "orchard",
-            "needs_synthesis": False,
-            "answer": "orchard summary",
-        }
-    else:
-        inner = {"status": "ok", "messages": []}
-    return Result(0, mcp_response(inner), "")
-
-plugin.tools.subprocess.run = fake_run
-
-project_engine = plugin.TraceDecayContextEngine()
-project_engine.initialize(session_id="session-1", project_root="/tmp/project")
-answer = project_engine.expand_query(prompt="What changed?", query="orchard")
-assert answer["status"] == "ok"
-project_argv = calls.pop()
-assert project_argv[0] == plugin.tools.TRACEDECAY_BIN
-# LCM session state uses the unified user-level store for the project.
-assert project_argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_expand_query", "--json"]
-project_args = json.loads(project_argv[project_argv.index("--args") + 1])
-assert "project_root" not in project_args
-
-profile_engine = plugin.TraceDecayContextEngine()
-profile_engine.initialize(session_id="session-2", hermes_home="/tmp/hermes-profile")
-profile_result = profile_engine._preflight_probe(messages=[], current_tokens=100)
-assert profile_result["status"] == "ok"
-assert profile_engine.should_compress_preflight([], current_tokens=100) is False
-profile_argv = calls.pop()
-profile_cwd = run_cwds.pop()
-assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
-assert profile_argv[1:3] == ["tool", "tracedecay_lcm_preflight"]
-assert "--project" not in profile_argv
-assert profile_cwd == os.path.abspath(os.sep)
-profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
-assert "project_root" not in profile_args
-assert profile_args["storage_scope"] == "user"
-
-explicit = plugin.tools.call_tracedecay_tool(
-    "tracedecay_lcm_status",
-    {"storage_scope": "hermes_profile", "hermes_home": "/tmp/hermes-profile"},
-    project_root="/tmp/project",
-)
-assert json.loads(explicit)["content"]
-explicit_argv = calls.pop()
-assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_status", "--json"]
-explicit_args = json.loads(explicit_argv[explicit_argv.index("--args") + 1])
-assert explicit_args["storage_scope"] == "hermes_profile"
-assert explicit_args["hermes_home"] == "/tmp/hermes-profile"
-"#,
-        "generated bridge must route only by real projects and isolate explicit user scope",
-    );
-}
-
-#[test]
-fn auxiliary_summary_strips_reasoning_tags() {
-    run_python_check(
-        "check_auxiliary_summary.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-assert plugin._strip_reasoning("<think>x</think>Useful") == "Useful"
-assert plugin._strip_reasoning("<THINKING>x</THINKING>\nUseful") == "Useful"
-assert plugin._strip_reasoning("<reasoning>x</reasoning>\nUseful") == "Useful"
-assert plugin._strip_reasoning("<thought>x</thought>\nUseful") == "Useful"
-assert plugin._strip_reasoning("<REASONING_SCRATCHPAD>x</REASONING_SCRATCHPAD>\nUseful") == "Useful"
-
-class Aux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        return "<think>hidden chain</think>\nUseful compact summary"
-
-agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-summary = engine._call_auxiliary_summary(
-    "Summarize",
-    [{"role": "user", "content": "raw"}],
-)
-
-assert summary["status"] == "ok"
-assert summary["text"] == "Useful compact summary"
-assert summary["route"] == "default"
-assert summary["model"] is None
-assert agent.auxiliary_client.calls[0]["task"] == "compression"
-# Hermes _call_llm_for_summary sends the full prompt as one user message.
-assert agent.auxiliary_client.calls[0]["messages"] == [
-    {"role": "user", "content": "Summarize"},
-]
-assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
-"#,
-        "generated context engine should strip reasoning from auxiliary summaries",
     );
 }
 
@@ -1842,614 +1308,18 @@ assert failed_payload["matches"], "retrieval must survive synthesis failures"
 }
 
 #[test]
-fn context_engine_compress_provides_auxiliary_summary_after_needs_summary() {
-    run_python_check(
-        "check_auxiliary_compress_flow.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-old_one = "old one " * 20
-old_two = "old two " * 20
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    args = json.loads(argv[argv.index("--args") + 1])
-    calls.append(args)
-    if len(calls) == 1:
-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
-        return mcp_response({
-            "status": "needs_summary",
-            "reason": "hermes_auxiliary_not_available_in_task_9",
-            "summary_nodes_created": 0,
-            "summary_nodes": [],
-            "replay_messages": [{"role": "user", "content": "fresh"}],
-            "frontier": {"current_frontier_store_id": None},
-            "summary_request": {
-                "provider": "cursor",
-                "session_id": "session-1",
-                "focus_topic": "handoff",
-                "prompt": "Summarize backlog",
-                "source_range": {"from_store_id": 1, "to_store_id": 2},
-                "source_messages": [
-                    {"store_id": 1, "role": "user", "content": old_one},
-                    {"store_id": 2, "role": "assistant", "content": old_two},
-                ],
-            },
-        })
-    assert args["summarizer"] == {
-        "mode": "provided",
-        "summary_text": "Useful compact summary",
-        "route": "default",
-    }
-    return mcp_response({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": "Useful compact summary"}],
-        "frontier": {"current_frontier_store_id": 2},
-        "summary_request": None,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-class Aux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        return "<thinking>hidden chain</thinking>\nUseful compact summary"
-
-agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine._compress_to_result(
-    [{"role": "user", "content": old_one}],
-    current_tokens=1200,
-    focus_topic="handoff",
-)
-
-assert result["status"] == "ok"
-assert result["reason"] == "compressed_backlog"
-assert len(calls) == 2
-assert agent.auxiliary_client.calls[0]["task"] == "compression"
-# Hermes escalation L1 contract: a single user message carrying the depth-0
-# prompt with focus brief, token budget, and serialized CONTENT block.
-assert len(agent.auxiliary_client.calls[0]["messages"]) == 1
-assert agent.auxiliary_client.calls[0]["messages"][0]["role"] == "user"
-prompt = agent.auxiliary_client.calls[0]["messages"][0]["content"]
-assert prompt.startswith("Summarize this conversation segment for future turns.")
-assert "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values." in prompt
-assert 'End with: "Expand for details about: <what was compressed>"' in prompt
-assert "Focus brief:" in prompt
-assert "Primary focus: handoff" in prompt
-assert "Target ~2000 tokens." in prompt
-assert "CONTENT:" in prompt
-assert f"[USER]: {old_one}" in prompt
-assert f"[ASSISTANT]: {old_two}" in prompt
-assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
-assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
-"#,
-        "generated context engine should provide auxiliary summaries back to Rust",
-    );
-}
-
-#[test]
-fn context_engine_marks_no_usable_replay_as_aborted() {
-    run_generated_plugin_script(
-        "check_no_usable_replay_abort.py",
-        r#"
-import json
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    return mcp_response({
-        "status": "ok",
-        "reason": "noop_summarizer",
-        "summary_nodes_created": 0,
-        "summary_nodes": [],
-        "replay_messages": [],
-        "replay_token_estimate": 0,
-        "replay_over_budget": False,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-messages = [{"role": "user", "content": "oversized live transcript"}]
-compressed = engine.compress(messages, current_tokens=292666)
-
-assert compressed == messages
-assert engine._last_compress_aborted is True
-assert engine._last_summary_error == "noop_summarizer"
-assert engine.last_compress_result["reason"] == "noop_summarizer"
-"#,
-        "generated context engine should mark no usable replay as an aborted compression",
-    );
-}
-
-#[test]
-fn context_engine_rejects_orphan_heavy_replay_at_host_boundary() {
-    run_generated_plugin_script(
-        "check_orphan_heavy_replay_rejected.py",
-        r#"
-messages = [
-    {"role": "user", "content": "original valid transcript " * 80},
-    {"role": "assistant", "content": "still valid"},
-]
-replay = [
-    {"role": "system", "content": "Useful compact summary"},
-    {"role": "tool", "tool_call_id": "orphan-result", "content": "unmatched output"},
-    {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": "orphan-call",
-            "type": "function",
-            "function": {"name": "lookup", "arguments": "{}"},
-        }],
-    },
-]
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.last_real_prompt_tokens = 100
-engine._compress_to_result = lambda *args, **kwargs: {
-    "status": "ok",
-    "reason": "compressed_backlog",
-    "replay_messages": replay,
-    "replay_token_estimate": 40,
-}
-
-compressed = engine.compress(list(messages), current_tokens=107)
-
-assert compressed == messages
-assert engine._last_compress_aborted is True
-assert engine._last_summary_error == "invalid_replay_tool_pairs"
-assert engine.compression_count == 0
-assert engine.last_compress_result["status"] == "aborted"
-assert engine.last_compress_result["replay_messages"] == []
-diagnostic = engine.last_compress_result["compression_diagnostic"]
-assert diagnostic["type"] == "replay_boundary_rejection"
-assert diagnostic["code"] == "invalid_replay_tool_pairs"
-assert {issue["tool_call_id"] for issue in diagnostic["issues"]} == {"orphan-result"}
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=107) is True
-"#,
-        "generated context engine should reject orphan-heavy replay before host adoption",
-    );
-}
-
-#[test]
-fn context_engine_rejects_reported_107_to_201_token_expansion() {
-    run_generated_plugin_script(
-        "check_expanding_replay_rejected.py",
-        r#"
-messages = [{"role": "user", "content": "small live input"}]
-replay = [{"role": "system", "content": "expanded replay " * 100}]
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.last_real_prompt_tokens = 100
-engine._compress_to_result = lambda *args, **kwargs: {
-    "status": "ok",
-    "reason": "compressed_backlog",
-    "replay_messages": replay,
-    "replay_token_estimate": 201,
-}
-
-compressed = engine.compress(list(messages), current_tokens=107)
-
-assert compressed == messages
-assert engine._last_compress_aborted is True
-assert engine.compression_count == 0
-diagnostic = engine.last_compress_result["compression_diagnostic"]
-assert diagnostic["type"] == "replay_boundary_rejection"
-assert diagnostic["code"] in ("non_shrinking_replay", "non_shrinking_reported_replay")
-assert diagnostic["reported_source_tokens"] == 107
-assert diagnostic["reported_replay_tokens"] == 201
-assert engine.last_compress_result["replay_messages"] == []
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=107) is True
-"#,
-        "generated context engine should reject the observed 107-to-201 token expansion",
-    );
-}
-
-#[test]
-fn context_engine_prefers_reported_shrink_over_host_estimator_tie() {
-    run_generated_plugin_script(
-        "check_reported_shrink_wins.py",
-        r#"
-messages = [
-    {"role": "user", "content": "first"},
-    {"role": "assistant", "content": "second"},
-]
-replay = [
-    {"role": "system", "content": "short"},
-    {"role": "user", "content": "tail"},
-]
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine._compress_to_result = lambda *args, **kwargs: {
-    "status": "ok",
-    "reason": "compressed_backlog",
-    "replay_messages": replay,
-    "replay_token_estimate": 3,
-}
-
-compressed = engine.compress(list(messages), current_tokens=50)
-
-assert compressed == replay
-assert engine._last_compress_aborted is False
-assert engine.compression_count == 1
-"#,
-        "backend shrink estimates should override a tied secondary host estimate",
-    );
-}
-
-#[test]
-fn context_engine_preserves_valid_tool_pairs_and_summary() {
-    run_generated_plugin_script(
-        "check_valid_tool_pair_replay.py",
-        r#"
-messages = [{"role": "user", "content": "old backlog " * 300}]
-replay = [
-    {"role": "system", "content": "Useful compact summary"},
-    {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": "call-1",
-            "type": "function",
-            "function": {"name": "lookup", "arguments": "{}"},
-        }],
-    },
-    {"role": "tool", "tool_call_id": "call-1", "content": "bounded result"},
-]
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine._compress_to_result = lambda *args, **kwargs: {
-    "status": "ok",
-    "reason": "compressed_backlog",
-    "replay_messages": replay,
-    "replay_token_estimate": 30,
-}
-
-compressed = engine.compress(list(messages), current_tokens=500)
-
-assert compressed == replay
-assert compressed[0]["content"] == "Useful compact summary"
-assert compressed[1]["tool_calls"][0]["id"] == "call-1"
-assert compressed[2]["tool_call_id"] == "call-1"
-assert engine._last_compress_aborted is False
-assert engine.compression_count == 1
-"#,
-        "generated context engine should preserve valid summaries and paired tool events",
-    );
-}
-
-#[test]
-fn context_engine_preserves_trailing_open_tool_call() {
-    run_generated_plugin_script(
-        "check_trailing_open_tool_call.py",
-        r#"
-messages = [{"role": "user", "content": "old backlog " * 200}]
-replay = [
-    {"role": "system", "content": "Useful compact summary"},
-    {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": "call-open",
-            "type": "function",
-            "function": {"name": "lookup", "arguments": "{}"},
-        }],
-    },
-]
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine._compress_to_result = lambda *args, **kwargs: {
-    "status": "ok",
-    "reason": "compressed_backlog",
-    "replay_messages": replay,
-    "replay_token_estimate": 20,
-}
-
-compressed = engine.compress(list(messages), current_tokens=500)
-
-assert compressed == replay
-assert compressed[-1]["tool_calls"][0]["id"] == "call-open"
-assert engine._last_compress_aborted is False
-assert engine.compression_count == 1
-"#,
-        "generated context engine should preserve a trailing call awaiting its tool result",
-    );
-}
-
-#[test]
-fn context_engine_treats_identical_replay_as_clean_noop() {
-    run_generated_plugin_script(
-        "check_identical_replay_noop.py",
-        r#"
-import json
-
-messages = [{"role": "user", "content": "same replay should not count as progress"}]
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    return mcp_response({
-        "status": "ok",
-        "reason": "no_backlog_to_compress",
-        "summary_nodes_created": 0,
-        "summary_nodes": [],
-        "replay_messages": messages,
-        "replay_token_estimate": 10,
-        "replay_over_budget": False,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-compressed = engine.compress(list(messages), current_tokens=292666)
-
-assert compressed == messages
-assert engine._last_compress_aborted is False
-assert engine._last_summary_error is None
-assert engine.compression_count == 0
-"#,
-        "generated context engine should treat identical valid replay as a clean no-op",
-    );
-}
-
-#[test]
-fn context_engine_adopts_decoded_replay_even_when_should_compress_false() {
-    run_generated_plugin_script(
-        "check_decoded_replay_compression.py",
-        r#"
-import json
-
-messages = [
-    {"role": "user", "content": "old oversized context"},
-    {"role": "assistant", "content": "old acknowledgement"},
-]
-replay = [{"role": "system", "content": "compressed replay"}]
-calls = []
-
-def envelope(payload):
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    calls.append((name, dict(args), dict(kwargs)))
-    if name == "tracedecay_lcm_preflight":
-        return envelope({
-            "status": "ok",
-            "should_compress": False,
-            "reason": "replay_only",
-            "replay_messages": replay,
-        })
-    if name == "tracedecay_lcm_compress":
-        return envelope({"truncated": True, "handle": "compress-payload"})
-    if name == "tracedecay_retrieve":
-        assert args == {"handle": "compress-payload"}
-        assert kwargs.get("project_root") == "/tmp/project", kwargs
-        return envelope({
-            "content": json.dumps({
-                "status": "ok",
-                "reason": "compressed_backlog",
-                "replay_messages": replay,
-            })
-        })
-    raise AssertionError(f"unexpected tool call: {name}")
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-assert engine.should_compress_preflight(list(messages), current_tokens=292666) is True
-compressed = engine.compress(list(messages), current_tokens=292666)
-
-assert compressed == replay
-assert engine._last_compress_aborted is False
-assert engine.compression_count == 1
-assert engine.last_compress_result["status"] == "ok"
-assert engine.last_compress_result["reason"] == "compressed_backlog"
-assert [call[0] for call in calls] == [
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
-    "tracedecay_retrieve",
-]
-"#,
-        "generated context engine should adopt decoded replay payloads as compression progress",
-    );
-}
-
-#[test]
-fn projectless_context_engine_compression_uses_user_session_store() {
-    run_generated_plugin_script(
-        "check_projectless_compression_user_scope.py",
-        r#"
-import json
-
-calls = []
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    calls.append((name, dict(args), dict(kwargs)))
-    return json.dumps({"content": [{"type": "text", "text": json.dumps({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "replay_messages": [{"role": "user", "content": "compressed"}],
-    })}]})
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="general-chat")
-compressed = engine.compress(
-    [{"role": "user", "content": "oversized general chat"}],
-    current_tokens=350000,
-)
-
-assert compressed == [{"role": "user", "content": "compressed"}]
-name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_compress"
-assert args["storage_scope"] == "user"
-assert "project_root" not in kwargs
-"#,
-        "projectless Hermes compression must use the profile-level user session store",
-    );
-}
-
-#[test]
-fn project_resolution_uses_registry_and_rejects_hermes_descendants() {
-    run_generated_plugin_script(
-        "check_registry_project_resolution.py",
-        r#"
-import json
-import os
-import pathlib
-import tempfile
-
-calls = []
-temp = tempfile.TemporaryDirectory()
-base = pathlib.Path(temp.name)
-canonical = base / "repo"
-alias = base / "repo-feature"
-hermes_home = base / "hermes"
-for path in (canonical, alias, hermes_home / "hermes-agent"):
-    path.mkdir(parents=True)
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    calls.append((name, dict(args), dict(kwargs)))
-    assert name == "tracedecay_project_context"
-    assert args == {"project_path": str(alias)}
-    return json.dumps({"content": [{"type": "text", "text": json.dumps({
-        "project": {"project_root": str(canonical)},
-        "aliases": [{"alias_path": str(alias)}],
-    })}]})
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-state, root = plugin._project_scope_resolution(str(alias), str(hermes_home))
-assert state == "registered"
-assert root == str(canonical)
-assert [call[0] for call in calls] == ["tracedecay_project_context"]
-
-for path in (hermes_home, hermes_home / "hermes-agent"):
-    assert plugin._code_project_root(explicit=str(path), hermes_home=str(hermes_home)) is None
-    assert plugin.tools.code_project_root(explicit=str(path), hermes_home=str(hermes_home)) is None
-"#,
-        "Hermes project resolution must use the registry and reject host-owned descendants",
-    );
-}
-
-#[test]
-fn context_engine_rejects_compacted_compression_replay() {
-    run_generated_plugin_script(
-        "check_compacted_replay_abort.py",
-        r#"
-import json
-
-messages = [
-    {"role": "user", "content": "old oversized context"},
-    {"role": "assistant", "content": "old acknowledgement"},
-]
-compacted_replay = [{"role": "system", "content": "truncated replay"}]
-
-def envelope(payload):
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    assert name == "tracedecay_lcm_compress"
-    return envelope({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "contract_truncated": True,
-        "mcp_truncation_reason": "lcm-compress response compacted to preserve Hermes bridge contract",
-        "replay_messages": compacted_replay,
-        "replay_messages_truncated_for_mcp": True,
-    })
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-compressed = engine.compress(list(messages), current_tokens=292666)
-
-assert compressed == messages
-assert engine._last_compress_aborted is True
-assert "compacted" in engine._last_summary_error
-assert engine.compression_count == 0
-"#,
-        "generated context engine should never adopt compacted MCP replay as live transcript",
-    );
-}
-
-#[test]
 fn memory_provider_sync_turn_assigns_unique_fallback_message_ids() {
     run_generated_plugin_script(
         "check_sync_turn_unique_ids.py",
         r#"
 calls = []
 
-def fake_call_tracedecay_tool(name, args, **kwargs):
+def fake_call_tracedecay_json(name, args, **kwargs):
     calls.append((name, args, kwargs))
-    return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
+    return {"status": "committed"}
 
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._project_scope_available = lambda root, *_args: True
+plugin.call_tracedecay_json = fake_call_tracedecay_json
+plugin._project_scope_resolution = lambda root, *_args: ("registered", str(root))
 
 provider = plugin.TracedecayMemoryProvider()
 provider.initialize(session_id="session-1", hermes_home="/tmp/hermes", project_root="/tmp/project")
@@ -2462,10 +1332,12 @@ assert provider.project_root == "/tmp/project"
 assert len(calls) == 8
 for index in range(0, len(calls), 2):
     user_call, project_call = calls[index:index + 2]
-    assert user_call[0] == "tracedecay_lcm_preflight"
+    assert user_call[0] == "tracedecay_hook_runtime"
+    assert user_call[1]["action"] == "ingest_transcript"
     assert user_call[1]["storage_scope"] == "user"
     assert user_call[2] == {}
-    assert project_call[0] == "tracedecay_lcm_preflight"
+    assert project_call[0] == "tracedecay_hook_runtime"
+    assert project_call[1]["action"] == "ingest_transcript"
     assert "storage_scope" not in project_call[1]
     assert project_call[2]["project_root"] == "/tmp/project"
     assert user_call[1]["messages"] == project_call[1]["messages"]
@@ -2485,6 +1357,9 @@ assert all(message.get("id") for message in empty_list_second_messages)
 assert empty_list_first_messages[0]["id"] != empty_list_second_messages[0]["id"]
 assert empty_list_first_messages[1]["id"] != empty_list_second_messages[1]["id"]
 
+# Without an explicit or registered project identity the provider must stay
+# user-scoped even though root resolution consults the working directory.
+plugin._project_scope_resolution = lambda root, *_args: ("unregistered", None)
 fallback = plugin.TracedecayMemoryProvider()
 fallback.initialize(session_id="session-2", hermes_home="/tmp/hermes")
 fallback.sync_turn("user", "assistant", session_id="session-2")
@@ -2506,11 +1381,11 @@ calls = []
 completed = []
 ingested = []
 
-def fake_call_tracedecay_tool(name, args, **kwargs):
+def fake_call_tracedecay_json(name, args, **kwargs):
     calls.append((name, dict(args), dict(kwargs)))
-    return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
+    return {"status": "committed"}
 
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin.call_tracedecay_json = fake_call_tracedecay_json
 def fake_project_scope_resolution(path, *_args):
     normalized = str(path).replace("\\", "/")
     marker = "/repos/"
@@ -2604,6 +1479,71 @@ assert set(expected).issubset(set(ctx.registered))
 }
 
 #[test]
+fn native_describe_and_expand_schemas_are_closed_and_conditional() {
+    run_generated_plugin_script(
+        "check_closed_lcm_target_schemas.py",
+        r#"
+schemas = {schema["name"]: schema["parameters"] for schema in plugin.LCM_NATIVE_SCHEMAS}
+
+describe = schemas["lcm_describe"]
+assert describe["additionalProperties"] is False
+assert len(describe["oneOf"]) == 3
+assert describe["properties"]["node_id"]["type"] == "string"
+assert describe["properties"]["externalized_ref"]["type"] == "string"
+
+expand = schemas["lcm_expand"]
+assert expand["additionalProperties"] is False
+assert len(expand["oneOf"]) == 3
+assert expand["properties"]["node_id"]["type"] == "string"
+assert expand["properties"]["source_limit"]["minimum"] == 1
+assert expand["properties"]["source_limit"]["maximum"] == 100
+assert expand["properties"]["source_limit"]["default"] == 50
+assert expand["properties"]["cursor"]["type"] == "string"
+
+target, error = plugin._native_expand_target({"store_id": 7})
+assert error is None
+assert target == {"kind": "raw_message", "store_id": 7}
+target, error = plugin._native_expand_target({"store_id": 7, "node_id": 8})
+assert target is None
+assert error == "lcm_expand expects exactly one of node_id, store_id, or externalized_ref"
+
+summary = plugin._translate_lcm_args(
+    "lcm_expand",
+    {
+        "node_id": "summary-v1:abc",
+        "source_offset": 4,
+        "source_limit": 7,
+        "content_offset": 3,
+        "cursor": "opaque-summary-page",
+    },
+)
+assert summary["target"] == {"kind": "summary_node", "node_id": "summary-v1:abc"}
+assert "source_offset" not in summary
+assert summary["source_limit"] == 7
+assert summary["content_offset"] == 3
+assert summary["cursor"] == "opaque-summary-page"
+
+raw = plugin._translate_lcm_args(
+    "lcm_expand",
+    {
+        "store_id": 7,
+        "source_offset": 4,
+        "source_limit": 7,
+        "content_offset": 3,
+        "cursor": "wrong-target-page",
+    },
+)
+assert raw["target"] == {"kind": "raw_message", "store_id": 7}
+assert raw["content_offset"] == 3
+assert "source_offset" not in raw
+assert "source_limit" not in raw
+assert "cursor" not in raw
+"#,
+        "generated Hermes schemas should close each compatibility target branch",
+    );
+}
+
+#[test]
 fn context_engine_lcm_expand_query_tolerates_forwarded_agent_kwarg() {
     run_generated_plugin_script(
         "check_expand_query_forwarded_agent.py",
@@ -2639,1404 +1579,6 @@ assert payload["status"] == "ok"
 assert payload["answer"] == "retrieval-only answer"
 "#,
         "generated context engine should not pass duplicate agent kwargs through lcm_expand_query",
-    );
-}
-
-#[test]
-fn context_engine_compress_rejects_oversized_auxiliary_summary() {
-    run_python_check(
-        "check_auxiliary_oversized_fallback.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-source_content = "source text " * 600
-huge_summary = "non-compressing summary " * 600
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    args = json.loads(argv[argv.index("--args") + 1])
-    calls.append(args)
-    if len(calls) == 1:
-        return mcp_response({
-            "status": "needs_summary",
-            "reason": "summary_required",
-            "summary_nodes_created": 0,
-            "summary_nodes": [],
-            "replay_messages": [{"role": "user", "content": "fresh"}],
-            "frontier": {"current_frontier_store_id": None},
-            "summary_request": {
-                "provider": "cursor",
-                "session_id": "session-1",
-                "focus_topic": "handoff",
-                "prompt": "Summarize backlog",
-                "source_range": {"from_store_id": 1, "to_store_id": 1},
-                "source_messages": [
-                    {"store_id": 1, "role": "user", "content": source_content},
-                ],
-            },
-        })
-    summary = args["summarizer"]
-    assert summary["mode"] == "provided"
-    assert summary["summary_text"] != huge_summary
-    assert len(summary["summary_text"]) < len(source_content)
-    assert summary["summary_text"].endswith("[deterministic compression fallback]")
-    assert summary["route"] == "deterministic_fallback"
-    return mcp_response({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
-        "frontier": {"current_frontier_store_id": 1},
-        "summary_request": None,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-class OversizedAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        return huge_summary
-
-agent = type("Agent", (), {"auxiliary_client": OversizedAux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine._compress_to_result(
-    [{"role": "user", "content": source_content}],
-    current_tokens=1200,
-    focus_topic="handoff",
-)
-
-assert result["status"] == "ok"
-assert result["fallback_used"] is True
-assert len(calls) == 2
-# Hermes escalation: oversized L1 retries once with the aggressive L2
-# bullet prompt at half budget before deterministic (L3) fallback.
-assert len(agent.auxiliary_client.calls) == 2
-l1_prompt = agent.auxiliary_client.calls[0]["messages"][0]["content"]
-l2_prompt = agent.auxiliary_client.calls[1]["messages"][0]["content"]
-assert l1_prompt.startswith("Summarize this conversation segment for future turns.")
-assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 tokens.")
-assert "Keep only: decisions made, files changed, errors hit, current state." in l2_prompt
-assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
-assert agent.auxiliary_client.calls[1]["max_tokens"] == 2000
-"#,
-        "generated context engine should reject oversized auxiliary summaries",
-    );
-}
-
-#[test]
-fn retry_worthy_auxiliary_failures_fall_through_escalation_rungs() {
-    run_generated_plugin_script(
-        "check_auxiliary_retry_shrinks_chunk.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-source_messages = [
-    {"store_id": 1, "role": "user", "content": "old one " * 20},
-    {"store_id": 2, "role": "assistant", "content": "old two " * 20},
-]
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def needs_summary(messages):
-    return {
-        "status": "needs_summary",
-        "reason": "summary_required",
-        "summary_nodes_created": 0,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "user", "content": "fresh"}],
-        "frontier": {"current_frontier_store_id": None, "maintenance_debt": []},
-        "summary_request": {
-            "provider": "cursor",
-            "session_id": "session-1",
-            "focus_topic": "handoff",
-            "prompt": "Summarize backlog",
-            "source_range": {
-                "from_store_id": messages[0]["store_id"],
-                "to_store_id": messages[-1]["store_id"],
-            },
-            "source_messages": messages,
-        },
-    }
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    args = json.loads(argv[argv.index("--args") + 1])
-    calls.append(args)
-    if len(calls) == 1:
-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
-        assert "max_source_messages" not in args
-        return mcp_response(needs_summary(source_messages))
-    assert args["summarizer"]["mode"] == "provided"
-    assert args["summarizer"]["route"] == "deterministic_fallback"
-    assert args["summarizer"]["summary_text"].endswith("[deterministic compression fallback]")
-    return mcp_response({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": args["summarizer"]["summary_text"]}],
-        "frontier": {"current_frontier_store_id": 1, "maintenance_debt": [
-            {"kind": "raw_backlog", "from_store_id": 2, "to_store_id": 2}
-        ]},
-        "summary_request": None,
-        "replay_token_estimate": 3,
-        "replay_over_budget": False,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-class ContextLimitedAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        if "old two" in kwargs["messages"][0]["content"]:
-            raise RuntimeError("context length exceeded")
-        return "Smaller chunk summary"
-
-agent = type("Agent", (), {"auxiliary_client": ContextLimitedAux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine._compress_to_result(
-    [{"role": "user", "content": "active"}],
-    current_tokens=1200,
-    focus_topic="handoff",
-)
-
-assert result["status"] == "ok"
-assert len(calls) == 2
-assert len(agent.auxiliary_client.calls) == 2
-assert "old two" in agent.auxiliary_client.calls[0]["messages"][0]["content"]
-assert "old two" in agent.auxiliary_client.calls[1]["messages"][0]["content"]
-assert result["auxiliary_attempts"] == 1
-assert result["auxiliary_retry_status"] == "fallback_summary"
-assert result["auxiliary_error_classification"] == "retry_worthy"
-"#,
-        "retry-worthy auxiliary failures should fall through L1/L2 before deterministic fallback",
-    );
-}
-
-#[test]
-fn generated_auxiliary_retry_classifier_matches_hermes_context_markers() {
-    run_generated_plugin_script(
-        "check_auxiliary_retry_classifier.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_context_retry_classifier"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-retry_worthy_markers = (
-    "context length exceeded",
-    "maximum context",
-    "max context",
-    "too many tokens",
-    "token limit",
-    "prompt is too long",
-    "input too long",
-    "request too large",
-    "timed out",
-    "timeout",
-)
-for marker in retry_worthy_markers:
-    assert plugin._auxiliary_error_classification(RuntimeError(marker)) == "retry_worthy", marker
-
-permanent_markers = (
-    "rate limit",
-    "temporarily unavailable",
-    "service unavailable",
-    "overloaded",
-    "try again",
-    "route unavailable",
-)
-for marker in permanent_markers:
-    assert plugin._auxiliary_error_classification(RuntimeError(marker)) == "permanent", marker
-"#,
-        "generated auxiliary retry classifier should match Hermes LCM context markers",
-    );
-}
-
-#[test]
-fn permanent_auxiliary_failure_falls_back_deterministically() {
-    run_generated_plugin_script(
-        "check_auxiliary_permanent_failure.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    args = json.loads(argv[argv.index("--args") + 1])
-    calls.append(args)
-    if len(calls) == 1:
-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
-        return mcp_response({
-            "status": "needs_summary",
-            "reason": "summary_required",
-            "summary_nodes_created": 0,
-            "summary_nodes": [],
-            "replay_messages": [{"role": "user", "content": "fresh"}],
-            "frontier": {"current_frontier_store_id": None, "maintenance_debt": [
-                {"kind": "raw_backlog", "from_store_id": 1, "to_store_id": 2}
-            ]},
-            "summary_request": {
-                "provider": "cursor",
-                "session_id": "session-1",
-                "focus_topic": "handoff",
-                "prompt": "Summarize backlog",
-                "source_range": {"from_store_id": 1, "to_store_id": 2},
-                "source_messages": [
-                    {"store_id": 1, "role": "user", "content": "old one"},
-                    {"store_id": 2, "role": "assistant", "content": "old two"},
-                ],
-            },
-        })
-
-    assert args["summarizer"]["mode"] == "provided"
-    assert args["summarizer"]["route"] == "deterministic_fallback"
-    assert args["summarizer"]["summary_text"].endswith("[deterministic compression fallback]")
-    return mcp_response({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": args["summarizer"]["summary_text"]}],
-        "frontier": {"current_frontier_store_id": 1, "maintenance_debt": []},
-        "summary_request": None,
-        "replay_token_estimate": 3,
-        "replay_over_budget": False,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-class BadTemplateAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        raise RuntimeError("template exploded")
-
-agent = type("Agent", (), {"auxiliary_client": BadTemplateAux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine._compress_to_result(
-    [{"role": "user", "content": "active"}],
-    current_tokens=1200,
-    focus_topic="handoff",
-)
-
-assert result["status"] == "ok"
-assert result["reason"] == "compressed_backlog"
-assert result["auxiliary_attempts"] == 1
-assert result["auxiliary_retry_status"] == "fallback_summary"
-assert result["auxiliary_error_classification"] == "permanent"
-assert result["frontier"]["current_frontier_store_id"] == 1
-assert len(calls) == 2
-assert len(agent.auxiliary_client.calls) == 2
-"#,
-        "permanent auxiliary failures should still fall through to deterministic fallback",
-    );
-}
-
-#[test]
-fn auxiliary_summary_falls_back_and_tracks_route_cooldown() {
-    run_python_check(
-        "check_auxiliary_fallbacks.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-class RoutingAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        if kwargs.get("model") == "primary":
-            raise RuntimeError("primary unavailable")
-        return "<reasoning>scratch</reasoning>Fallback route summary"
-
-agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-summary = engine._call_auxiliary_summary(
-    "Summarize",
-    [{"role": "user", "content": "raw"}],
-    routes=[
-        {"model": "primary", "temperature": 0.2},
-        {"model": "backup", "temperature": 0.3},
-    ],
-)
-assert summary["status"] == "ok"
-assert summary["text"] == "Fallback route summary"
-assert summary["route"] == "backup"
-assert summary["model"] == "backup"
-assert engine._route_failures["primary"] == 1
-assert "primary" not in engine._cooldown_until
-assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
-summary_second = engine._call_auxiliary_summary(
-    "Summarize again",
-    [{"role": "user", "content": "raw"}],
-    routes=[
-        {"model": "primary", "temperature": 0.2},
-        {"model": "backup", "temperature": 0.3},
-    ],
-)
-assert summary_second["status"] == "ok"
-assert engine._route_failures["primary"] == 2
-assert engine._cooldown_until["primary"] > 0
-
-class FailingAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        raise RuntimeError("route unavailable")
-
-failing_agent = type("Agent", (), {"auxiliary_client": FailingAux()})()
-failing_engine = plugin.TraceDecayContextEngine()
-failing_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
-fallback = failing_engine._call_auxiliary_summary(
-    "Summarize",
-    [{"role": "user", "content": "A" * 10000}],
-)
-assert fallback["status"] == "fallback"
-assert len(fallback["text"]) < 10000
-assert fallback["text"].endswith("[deterministic compression fallback]")
-assert failing_engine._route_failures["default"] == 1
-assert "default" not in failing_engine._cooldown_until
-
-import os
-os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"] = "1"
-os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"] = "30"
-tuned_engine = plugin.TraceDecayContextEngine()
-tuned_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
-tuned_engine._call_auxiliary_summary(
-    "Summarize",
-    [{"role": "user", "content": "B" * 1000}],
-)
-assert tuned_engine._route_failures["default"] == 1
-assert tuned_engine._cooldown_until["default"] > 0
-del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"]
-del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"]
-"#,
-        "generated context engine should route, cooldown, and fallback auxiliary summaries",
-    );
-}
-
-#[test]
-fn auxiliary_model_route_splits_resolvable_providers() {
-    run_generated_plugin_script(
-        "check_auxiliary_model_routing.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-import types
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_model_routing"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-# Fake Hermes host provider registries used by the model-route resolver.
-hermes_cli = types.ModuleType("hermes_cli")
-hermes_cli.__path__ = []
-auth = types.ModuleType("hermes_cli.auth")
-auth.PROVIDER_REGISTRY = {"cerebras": {}, "anthropic": {}, "openai-codex": {}}
-runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
-
-def _get_named_custom_provider(name):
-    return {"name": name} if name == "mycustom" else None
-
-runtime_provider._get_named_custom_provider = _get_named_custom_provider
-sys.modules["hermes_cli"] = hermes_cli
-sys.modules["hermes_cli.auth"] = auth
-sys.modules["hermes_cli.runtime_provider"] = runtime_provider
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-def routed(value):
-    kwargs = {}
-    plugin._apply_lcm_model_route(kwargs, value)
-    return kwargs
-
-# Registry allowlist provider splits into provider/model.
-assert routed("cerebras/llama-3.3-70b") == {"provider": "cerebras", "model": "llama-3.3-70b"}
-# Registry providers off the allowlist stay model-only (OpenRouter-style slugs).
-assert routed("anthropic/claude-sonnet") == {"model": "anthropic/claude-sonnet"}
-# Named custom providers are resolvable, including the custom: prefix form.
-assert routed("mycustom/bar-model") == {"provider": "mycustom", "model": "bar-model"}
-assert routed("custom:mycustom/foo-model") == {"provider": "mycustom", "model": "foo-model"}
-# Canonical built-ins behind custom: stay model-only.
-assert routed("custom:openai-codex/gpt") == {"model": "custom:openai-codex/gpt"}
-# Plain model names and empty overrides pass through untouched.
-assert routed("plain-model") == {"model": "plain-model"}
-assert routed("") == {}
-assert routed(None) == {}
-
-# End to end: routed kwargs reach the Hermes auxiliary client.
-class Aux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        return "Routed summary"
-
-agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-summary = engine._call_auxiliary_summary(
-    "Summarize",
-    [{"role": "user", "content": "raw"}],
-    routes=[{"model": "cerebras/llama-3.3-70b"}],
-)
-assert summary["status"] == "ok"
-assert summary["model"] == "cerebras/llama-3.3-70b"
-assert agent.auxiliary_client.calls[0]["provider"] == "cerebras"
-assert agent.auxiliary_client.calls[0]["model"] == "llama-3.3-70b"
-"#,
-        "generated plugin should split resolvable provider-prefixed LCM model overrides",
-    );
-}
-
-#[test]
-fn oversized_l1_summary_escalates_to_l2_bullets() {
-    run_generated_plugin_script(
-        "check_l2_escalation_rung.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_l2_escalation"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-source_content = "alpha beta " * 300
-oversize_l1 = "L1 too big " * 2000
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    args = json.loads(argv[argv.index("--args") + 1])
-    calls.append(args)
-    if len(calls) == 1:
-        return mcp_response({
-            "status": "needs_summary",
-            "reason": "summary_required",
-            "summary_nodes_created": 0,
-            "summary_nodes": [],
-            "replay_messages": [{"role": "user", "content": "fresh"}],
-            "frontier": {"current_frontier_store_id": None},
-            "summary_request": {
-                "provider": "cursor",
-                "session_id": "session-1",
-                "focus_topic": "handoff",
-                "prompt": "Summarize backlog",
-                "source_range": {"from_store_id": 1, "to_store_id": 1},
-                "source_messages": [
-                    {"store_id": 1, "role": "user", "content": source_content},
-                ],
-            },
-        })
-    summary = args["summarizer"]
-    assert summary["mode"] == "provided"
-    assert summary["summary_text"] == "Bullet summary of decisions"
-    assert summary["route"] == "default"
-    return mcp_response({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
-        "frontier": {"current_frontier_store_id": 1},
-        "summary_request": None,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-class EscalatingAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        prompt = kwargs["messages"][0]["content"]
-        if prompt.startswith("Summarize this conversation segment"):
-            return oversize_l1
-        return "Bullet summary of decisions"
-
-agent = type("Agent", (), {"auxiliary_client": EscalatingAux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine._compress_to_result(
-    [{"role": "user", "content": source_content}],
-    current_tokens=1200,
-    focus_topic="handoff",
-)
-
-assert result["status"] == "ok"
-assert result.get("fallback_used") is not True
-assert len(calls) == 2
-assert len(agent.auxiliary_client.calls) == 2
-l2_prompt = agent.auxiliary_client.calls[1]["messages"][0]["content"]
-assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 tokens.")
-assert "Drop all reasoning, alternatives considered, and process detail." in l2_prompt
-assert "Primary focus: handoff" in l2_prompt
-assert "CONTENT:" in l2_prompt
-"#,
-        "oversized L1 summaries should escalate to the L2 bullet rung before fallback",
-    );
-}
-
-#[test]
-fn l1_auxiliary_errors_fall_through_to_l2_success() {
-    run_generated_plugin_script(
-        "check_l1_error_l2_success.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_l1_error_l2_success"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-source_messages = [
-    {"store_id": 1, "role": "user", "content": "alpha " * 120},
-    {"store_id": 2, "role": "assistant", "content": "beta " * 120},
-]
-
-class Aux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        prompt = kwargs["messages"][0]["content"]
-        if prompt.startswith("Summarize this conversation segment"):
-            raise RuntimeError("timed out")
-        return "L2 concise summary"
-
-agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-summary = engine._summarize_with_escalation(
-    source_messages,
-    focus_topic="handoff",
-    allow_retry_signal=True,
-)
-
-assert summary["status"] == "ok"
-assert summary["text"] == "L2 concise summary"
-assert summary["route"] == "default"
-assert len(summary["rung_failures"]) == 1
-assert summary["rung_failures"][0]["level"] == 1
-assert summary["rung_failures"][0]["status"] in ("retry", "error")
-assert summary["rung_failures"][0]["error_classification"] == "retry_worthy"
-assert len(agent.auxiliary_client.calls) == 2
-"#,
-        "L1 auxiliary errors should fall through to L2 success",
-    );
-}
-
-#[test]
-fn summary_acceptance_uses_token_estimates_not_chars() {
-    run_generated_plugin_script(
-        "check_token_based_acceptance.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_token_acceptance"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-# Per-message role overhead means short messages cost ~5 tokens each even
-# though they are only two characters long. A 51-char summary therefore has
-# fewer tokens than the source but more characters than the char sum, which
-# the old char-based acceptance falsely rejected.
-source_messages = [
-    {"store_id": idx + 1, "role": "user", "content": "hi"} for idx in range(10)
-]
-accepted_summary = "This summary is longer than the raw character sum."
-assert len(accepted_summary) > sum(len(m["content"]) for m in source_messages)
-assert plugin._count_messages_tokens(source_messages) > plugin._count_tokens(accepted_summary)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def mcp_response(inner):
-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    args = json.loads(argv[argv.index("--args") + 1])
-    calls.append(args)
-    if len(calls) == 1:
-        return mcp_response({
-            "status": "needs_summary",
-            "reason": "summary_required",
-            "summary_nodes_created": 0,
-            "summary_nodes": [],
-            "replay_messages": [{"role": "user", "content": "fresh"}],
-            "frontier": {"current_frontier_store_id": None},
-            "summary_request": {
-                "provider": "cursor",
-                "session_id": "session-1",
-                "focus_topic": None,
-                "prompt": "Summarize backlog",
-                "source_range": {"from_store_id": 1, "to_store_id": 10},
-                "source_messages": source_messages,
-            },
-        })
-    summary = args["summarizer"]
-    assert summary["mode"] == "provided"
-    assert summary["summary_text"] == accepted_summary
-    assert summary["route"] == "default"
-    return mcp_response({
-        "status": "ok",
-        "reason": "compressed_backlog",
-        "summary_nodes_created": 1,
-        "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
-        "frontier": {"current_frontier_store_id": 10},
-        "summary_request": None,
-    })
-
-plugin.tools.subprocess.run = fake_run
-
-class Aux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        return accepted_summary
-
-agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine._compress_to_result(
-    [{"role": "user", "content": "active"}],
-    current_tokens=1200,
-)
-
-assert result["status"] == "ok"
-assert result.get("fallback_used") is not True
-assert len(calls) == 2
-assert len(agent.auxiliary_client.calls) == 1
-"#,
-        "summary acceptance should compare token estimates, not character lengths",
-    );
-}
-
-#[test]
-fn generated_plugin_reads_lcm_env_config_overrides() {
-    run_generated_plugin_script(
-        "check_lcm_env_config.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_env_config"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(json.loads(argv[argv.index("--args") + 1]))
-    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-# Documented hermes-lcm env vars (LCMConfig.from_env) override both the
-# hardcoded defaults and host ctx.config attributes.
-os.environ.update({
-    "LCM_FRESH_TAIL_COUNT": "7",
-    "LCM_LEAF_CHUNK_TOKENS": "111",
-    "LCM_CONTEXT_THRESHOLD": "0.5",
-    "LCM_CONDENSATION_FANIN": "9",
-    "LCM_DYNAMIC_LEAF_CHUNK_ENABLED": "true",
-    "LCM_DYNAMIC_LEAF_CHUNK_MAX": "222",
-    "LCM_MAX_ASSEMBLY_TOKENS": "333",
-    "LCM_RESERVE_TOKENS_FLOOR": "444",
-    "LCM_INCREMENTAL_MAX_DEPTH": "3",
-    "LCM_IGNORE_SESSION_PATTERNS": "tmp-*, scratch-*",
-    "LCM_STATELESS_SESSION_PATTERNS": "ro-*",
-    "LCM_IGNORE_MESSAGE_PATTERNS": "^/lcm ",
-})
-
-config = {"fresh_tail_count": 64, "context_length": 100000, "context_threshold": 0.9}
-engine = plugin.TraceDecayContextEngine(config=config)
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
-
-args = calls.pop()
-assert args["fresh_tail_count"] == 7
-assert args["leaf_chunk_tokens"] == 111
-assert args["summary_fan_in"] == 9
-assert args["dynamic_leaf_chunk_enabled"] is True
-assert args["dynamic_leaf_chunk_max"] == 222
-assert args["max_assembly_tokens"] == 333
-assert args["reserve_tokens_floor"] == 444
-assert args["incremental_max_depth"] == 3
-assert args["context_length"] == 100000
-# LCM_CONTEXT_THRESHOLD beats the ctx.config context_threshold attribute.
-assert args["threshold_tokens"] == 50000
-assert args["ignore_session_patterns"] == ["tmp-*", "scratch-*"]
-assert args["stateless_session_patterns"] == ["ro-*"]
-assert args["ignore_message_patterns"] == ["^/lcm"]
-
-# Unparseable env values fall back to ctx.config / defaults instead of failing.
-os.environ["LCM_MAX_ASSEMBLY_TOKENS"] = "not-a-number"
-os.environ["LCM_CONTEXT_THRESHOLD"] = "also-bad"
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
-args = calls.pop()
-assert args["max_assembly_tokens"] == 0
-assert args["threshold_tokens"] == 90000
-"#,
-        "generated plugin should honor documented LCM_* env config overrides",
-    );
-}
-
-#[test]
-fn generated_plugin_falls_back_to_hermes_yaml_threshold() {
-    run_generated_plugin_script(
-        "check_lcm_yaml_threshold.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-import tempfile
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_yaml_threshold"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(json.loads(argv[argv.index("--args") + 1]))
-    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-def preflight_threshold(config, hermes_home=None):
-    engine = plugin.TraceDecayContextEngine(config=config)
-    engine.initialize(
-        session_id="session-1",
-        project_root="/tmp/project",
-        hermes_home=hermes_home,
-    )
-    engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
-    return calls.pop().get("threshold_tokens")
-
-with tempfile.TemporaryDirectory() as tmp:
-    cfg = pathlib.Path(tmp) / "config.yaml"
-
-    # An explicitly supplied host config can backfill LCM.
-    cfg.write_text("compression:\n  enabled: true\n  threshold: 0.6\n")
-    assert preflight_threshold({"context_length": 100000}, tmp) == 60000
-
-    # Disabled Hermes compression must not leak its threshold into LCM.
-    cfg.write_text("compression:\n  enabled: false\n  threshold: 0.9\n")
-    assert preflight_threshold({"context_length": 100000}, tmp) == 75000
-
-    # Explicit env and ctx.config thresholds still win over the YAML fallback.
-    cfg.write_text("compression:\n  enabled: true\n  threshold: 0.6\n")
-    os.environ["LCM_CONTEXT_THRESHOLD"] = "0.5"
-    assert preflight_threshold({"context_length": 100000}, tmp) == 50000
-    del os.environ["LCM_CONTEXT_THRESHOLD"]
-    assert preflight_threshold({"context_length": 100000, "context_threshold": 0.8}, tmp) == 80000
-
-with tempfile.TemporaryDirectory() as tmp:
-    # No config.yaml at all: the documented 0.75 default applies whenever the
-    # context window is known instead of silently disabling threshold pressure.
-    assert preflight_threshold({"context_length": 100000}, tmp) == 75000
-    assert preflight_threshold(None, tmp) is None
-
-with tempfile.TemporaryDirectory() as tmp:
-    # The explicitly resolved host home remains usable.
-    cfg = pathlib.Path(tmp) / "config.yaml"
-    cfg.write_text("compression:\n  enabled: true\n  threshold: 0.55\n")
-    engine = plugin.TraceDecayContextEngine(config={"context_length": 100000})
-    engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
-    args = plugin._lcm_config_args(engine.config, engine.hermes_home)
-    assert args["threshold_tokens"] == 55000
-
-with tempfile.TemporaryDirectory() as tmp:
-    # The environment override is ignored when no explicit host home is supplied.
-    pathlib.Path(tmp, "config.yaml").write_text(
-        "compression:\n  enabled: true\n  threshold: 0.1\n"
-    )
-    os.environ["HERMES_HOME"] = tmp
-    assert preflight_threshold({"context_length": 100000}) == 75000
-"#,
-        "generated plugin should fall back to the Hermes YAML compression threshold",
-    );
-}
-
-#[test]
-fn generated_plugin_defaults_to_reserve_floor_for_runtime_context_cap() {
-    run_generated_plugin_script(
-        "check_default_reserve_floor.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_default_reserve_floor"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(json.loads(argv[argv.index("--args") + 1]))
-    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-engine = plugin.TraceDecayContextEngine(config={"context_length": 100000})
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.should_compress_preflight(
-    [{"role": "user", "content": "hello"}],
-    current_tokens=96000,
-)
-
-args = calls.pop()
-assert args["context_length"] == 100000
-assert args["max_assembly_tokens"] == 0
-assert args["reserve_tokens_floor"] == 4096
-
-# Explicit config and env still win over the Hermes bridge default.
-engine = plugin.TraceDecayContextEngine(
-    config={"context_length": 100000, "reserve_tokens_floor": 8192}
-)
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=96000)
-assert calls.pop()["reserve_tokens_floor"] == 8192
-
-os.environ["LCM_RESERVE_TOKENS_FLOOR"] = "1234"
-engine = plugin.TraceDecayContextEngine(
-    config={"context_length": 100000, "reserve_tokens_floor": 8192}
-)
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=96000)
-assert calls.pop()["reserve_tokens_floor"] == 1234
-"#,
-        "generated plugin should derive a default assembly cap from the runtime context window",
-    );
-}
-
-#[test]
-fn generated_plugin_preserves_zero_value_leaf_and_tail_knobs() {
-    run_generated_plugin_script(
-        "check_zero_value_knobs.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_zero_knobs"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-class Result:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def fake_run(argv, check, capture_output, text, timeout, shell):
-    calls.append(json.loads(argv[argv.index("--args") + 1]))
-    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
-    return Result(0, json.dumps(outer), "")
-
-plugin.tools.subprocess.run = fake_run
-
-os.environ["LCM_FRESH_TAIL_COUNT"] = "0"
-os.environ["LCM_LEAF_CHUNK_TOKENS"] = "0"
-
-engine = plugin.TraceDecayContextEngine(config={"fresh_tail_count": 9, "leaf_chunk_tokens": 9000})
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
-
-args = calls.pop()
-assert args["fresh_tail_count"] == 0
-assert args["leaf_chunk_tokens"] == 0
-"#,
-        "generated plugin should preserve zero-valued LCM env knobs",
-    );
-}
-
-#[test]
-fn context_engine_propagates_runtime_context_window_from_update_model_and_session_start() {
-    run_generated_plugin_script(
-        "check_context_window_runtime_precedence.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_context_window_precedence"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-def fake_call_tracedecay_tool(tool, args, **kwargs):
-    calls.append((tool, dict(args)))
-    if tool == "tracedecay_lcm_preflight":
-        payload = {"status": "ok", "should_compress": True, "reason": "test", "replay_messages": []}
-    else:
-        payload = {"status": "ok", "reason": "test", "replay_messages": [], "summary_nodes": [], "frontier": {"provider": "cursor", "conversation_id": "session-1", "current_session_id": "session-1", "current_frontier_store_id": None, "last_finalized_session_id": None, "last_finalized_frontier_store_id": None, "maintenance_debt": []}}
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-engine = plugin.TraceDecayContextEngine(
-    config={"context_length": 100000, "context_threshold": 0.8}
-)
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-# Fallback to ctx.config before runtime updates.
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
-_, args = calls.pop()
-assert args["context_length"] == 100000
-assert args["threshold_tokens"] == 80000
-
-# Session-start kwargs should arm threshold pressure by themselves.
-engine.on_session_start(session_id="session-1", context_length=200000)
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
-_, args = calls.pop()
-assert args["context_length"] == 200000
-assert args["threshold_tokens"] == 160000
-
-# update_model is authoritative over ctx.config/session-start metadata.
-engine.update_model(
-    model="deepseek-v4-flash",
-    context_length=1000000,
-    base_url="https://opencode.ai/zen/go",
-    api_key="test-key",
-    provider="opencode-go",
-    api_mode="anthropic_messages",
-)
-assert engine.model == "deepseek-v4-flash"
-
-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
-_, args = calls.pop()
-assert args["context_length"] == 1000000
-assert args["threshold_tokens"] == 800000
-
-# compress must forward the same runtime window and threshold.
-engine.compress([{"role": "user", "content": "compress me"}], current_tokens=1)
-tool, args = calls.pop()
-assert tool == "tracedecay_lcm_compress"
-assert args["context_length"] == 1000000
-assert args["threshold_tokens"] == 800000
-
-# should_compress gates locally below the tracked threshold (no spawn)...
-calls.clear()
-assert engine.should_compress(prompt_tokens=1) is False
-assert calls == []
-# ...and defers to the preflight probe once tokens reach the threshold.
-assert engine.should_compress(prompt_tokens=800000) is True
-tool, _args = calls.pop()
-assert tool == "tracedecay_lcm_preflight"
-"#,
-        "generated plugin should propagate update_model/session_start context windows into preflight/compress",
-    );
-}
-
-#[test]
-fn context_engine_force_compress_sets_backend_overflow_cap() {
-    run_generated_plugin_script(
-        "check_force_compress_sets_backend_cap.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_force_compress"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-calls = []
-
-def fake_call_tracedecay_tool(tool, args, **kwargs):
-    calls.append((tool, dict(args), dict(kwargs)))
-    payload = {
-        "status": "ok",
-        "reason": "forced_overflow_recovery",
-        "summary_nodes": [],
-        "replay_messages": [{"role": "user", "content": "compressed"}],
-        "frontier": {
-            "provider": "cursor",
-            "conversation_id": "session-1",
-            "current_session_id": "session-1",
-            "current_frontier_store_id": None,
-            "last_finalized_session_id": None,
-            "last_finalized_frontier_store_id": None,
-            "maintenance_debt": [],
-        },
-    }
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
-engine = plugin.TraceDecayContextEngine(config={"context_length": 100000, "context_threshold": 0.8})
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-compressed = engine.compress(
-    [{"role": "user", "content": "compress this oversized turn now"}],
-    current_tokens=90000,
-    force=True,
-)
-
-tool, args, kwargs = calls.pop()
-assert tool == "tracedecay_lcm_compress"
-assert args["max_assembly_tokens"] == 89999
-assert "force" not in kwargs
-assert compressed == [{"role": "user", "content": "compressed"}]
-"#,
-        "generated plugin should translate Hermes force=True into a backend overflow cap",
     );
 }
 
@@ -4133,133 +1675,6 @@ assert llm_call["timeout"] == 9.0
 }
 
 #[test]
-fn summary_routes_built_from_config_and_env_models() {
-    run_generated_plugin_script(
-        "check_summary_route_wiring.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import os
-import pathlib
-import sys
-import tempfile
-
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_summary_routes"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-# summary_model / summary_fallback_models from ctx.config wire the default
-# auxiliary route chain (deduplicated, in order, with the summary timeout).
-config = {
-    "summary_model": "primary",
-    "summary_fallback_models": ["backup", "primary"],
-    "summary_timeout_ms": 30000,
-}
-engine = plugin.TraceDecayContextEngine(config=config)
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-routes = engine._auxiliary_routes()
-assert [route.get("model") for route in routes] == ["primary", "backup"]
-assert [route.get("timeout") for route in routes] == [30.0, 30.0]
-
-# Hosts that pass no config keep the single task-default route; an environment
-# override cannot redirect the timeout config.
-with tempfile.TemporaryDirectory() as tmp:
-    os.environ["HERMES_HOME"] = tmp
-    pathlib.Path(tmp, "config.yaml").write_text(
-        "auxiliary:\n  compression:\n    timeout: 1\n"
-    )
-    bare_engine = plugin.TraceDecayContextEngine()
-    bare_engine.initialize(session_id="session-1", project_root="/tmp/project")
-    bare_routes = bare_engine._auxiliary_routes()
-    assert len(bare_routes) == 1
-    assert "model" not in bare_routes[0]
-    assert bare_routes[0]["timeout"] == 60.0
-
-with tempfile.TemporaryDirectory() as tmp:
-    cfg = pathlib.Path(tmp) / "config.yaml"
-    cfg.write_text("auxiliary:\n  compression:\n    timeout: 12.5\n")
-    yaml_engine = plugin.TraceDecayContextEngine()
-    yaml_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
-    yaml_routes = yaml_engine._auxiliary_routes()
-    assert yaml_routes[0]["timeout"] == 12.5
-
-with tempfile.TemporaryDirectory() as tmp:
-    cfg = pathlib.Path(tmp) / "config.yaml"
-    cfg.write_text("auxiliary:\n  compression:\n    timeout: not-a-number\n")
-    malformed_engine = plugin.TraceDecayContextEngine()
-    malformed_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
-    malformed_routes = malformed_engine._auxiliary_routes()
-    assert malformed_routes[0]["timeout"] == 60.0
-
-with tempfile.TemporaryDirectory() as tmp:
-    missing_engine = plugin.TraceDecayContextEngine()
-    missing_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
-    missing_routes = missing_engine._auxiliary_routes()
-    assert missing_routes[0]["timeout"] == 60.0
-
-# Documented env vars override ctx.config for the route chain.
-os.environ["LCM_SUMMARY_MODEL"] = "env-primary"
-os.environ["LCM_SUMMARY_FALLBACK_MODELS"] = "env-backup1, env-backup2"
-os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
-env_routes = engine._auxiliary_routes()
-assert [route.get("model") for route in env_routes] == [
-    "env-primary",
-    "env-backup1",
-    "env-backup2",
-]
-assert env_routes[0]["timeout"] == 45.0
-for key in [name for name in os.environ if name.startswith("LCM_")]:
-    del os.environ[key]
-
-# Per-call model overrides still take precedence over the configured chain.
-kwarg_routes = engine._auxiliary_routes(model="kwarg-model")
-assert [route.get("model") for route in kwarg_routes] == ["kwarg-model"]
-
-# End to end: the configured chain falls over from primary to backup.
-class RoutingAux:
-    def __init__(self):
-        self.calls = []
-
-    def call_llm(self, **kwargs):
-        self.calls.append(kwargs)
-        if kwargs.get("model") == "primary":
-            raise RuntimeError("primary unavailable")
-        return "Configured backup summary"
-
-agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
-engine.agent = agent
-summary = engine._call_auxiliary_summary(
-    "Summarize",
-    [{"role": "user", "content": "raw"}],
-)
-assert summary["status"] == "ok"
-assert summary["text"] == "Configured backup summary"
-assert summary["route"] == "backup"
-assert summary["model"] == "backup"
-assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
-assert agent.auxiliary_client.calls[0]["timeout"] == 30.0
-"#,
-        "summary model chain should wire config and env models into auxiliary routes",
-    );
-}
-
-#[test]
 fn call_tracedecay_json_normalizes_and_decodes_mcp_envelopes() {
     run_generated_plugin_script(
         "check_bridge_envelope_decoding.py",
@@ -4275,7 +1690,7 @@ plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
 def call_with_outer(outer):
     responses.append(json.dumps(outer))
-    return plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+    return plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 
 missing_content = call_with_outer({})
 assert missing_content["error"] == "tracedecay tool response missing text content"
@@ -4287,7 +1702,7 @@ non_text_content = call_with_outer({"content": [{"type": "text", "text": 123}]})
 assert non_text_content["error"] == "tracedecay tool response missing text content"
 
 responses.append(json.dumps({"content": [{"type": "text", "text": "{not json"}]}))
-invalid_nested_json = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+invalid_nested_json = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 assert invalid_nested_json["error"] == "tracedecay tool returned invalid nested JSON"
 
 outer_error = {"error": "tool failed", "code": "boom", "content": []}
@@ -4300,7 +1715,7 @@ def envelope(payload):
 
 def fake_retrieve_call(name, args, **kwargs):
     calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_preflight":
+    if name == "tracedecay_lcm_status":
         return envelope({"truncated": True, "handle": "payload-1"})
     if name == "tracedecay_retrieve":
         if args == {"handle": "payload-1"}:
@@ -4314,14 +1729,14 @@ def fake_retrieve_call(name, args, **kwargs):
     raise AssertionError(f"unexpected tool call: {name}")
 
 plugin.tools.call_tracedecay_tool = fake_retrieve_call
-retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {}, project_root="/tmp/project")
+retrieved = plugin.call_tracedecay_json("tracedecay_lcm_status", {}, project_root="/tmp/project")
 assert retrieved == {"should_compress": True, "source": "retrieved"}
-assert [call[0] for call in calls] == ["tracedecay_lcm_preflight", "tracedecay_retrieve"]
+assert [call[0] for call in calls] == ["tracedecay_lcm_status", "tracedecay_retrieve"]
 
 retrieved_fact = plugin.call_tracedecay_json("tracedecay_fact_store", {})
 assert retrieved_fact == {"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]}
 assert [call[0] for call in calls] == [
-    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_status",
     "tracedecay_retrieve",
     "tracedecay_fact_store",
     "tracedecay_retrieve",
@@ -4335,19 +1750,19 @@ responses.append(json.dumps({
         {"type": "text", "text": split_payload[12:]},
     ]
 }))
-split_content = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+split_content = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 assert split_content == {"status": "ok", "source": "split-content"}
 
 nested_payload = {"content": json.dumps({"status": "ok", "source": "nested-content"})}
 responses.append(envelope(nested_payload))
-nested_content = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+nested_content = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 assert nested_content == {"status": "ok", "source": "nested-content"}
 
 response_handle_calls = []
 
 def fake_response_handle_call(name, args, **kwargs):
     response_handle_calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_compress":
+    if name == "tracedecay_lcm_status":
         return envelope({"truncated": True, "response_handle": "payload-2"})
     if name == "tracedecay_retrieve":
         assert args == {"handle": "payload-2"}
@@ -4362,10 +1777,10 @@ def fake_response_handle_call(name, args, **kwargs):
     raise AssertionError(f"unexpected tool call: {name}")
 
 plugin.tools.call_tracedecay_tool = fake_response_handle_call
-response_handle_payload = plugin.call_tracedecay_json("tracedecay_lcm_compress", {})
+response_handle_payload = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 assert response_handle_payload == {"status": "ok", "source": "response-handle"}
 assert [call[0] for call in response_handle_calls] == [
-    "tracedecay_lcm_compress",
+    "tracedecay_lcm_status",
     "tracedecay_retrieve",
 ]
 "#,
@@ -4387,10 +1802,10 @@ import importlib.util
 import json
 import os
 import pathlib
-import stat
 import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
+fake_tools = pathlib.Path(os.environ["TRACEDECAY_TEST_FAKE_TOOLS"])
 parent_name = "_hermes_user_subprocess_failures"
 parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
 parent_spec.submodule_search_locations = []
@@ -4409,18 +1824,16 @@ spec.loader.exec_module(plugin)
 
 tools = plugin.tools
 
-def write_fake_binary(name, body_posix, body_windows):
-    if os.name == "nt":
-        path = plugin_dir / f"{name}.cmd"
-        path.write_text("@echo off\n" + body_windows)
-        return str(path)
-    path = plugin_dir / name
-    path.write_text('#!/bin/sh\n' + body_posix)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+# The fake binaries are part of the shared immutable fixture, generated once
+# per machine by the Rust harness rather than rewritten (and re-chmodded, and
+# on Windows rescanned and re-imaged) on every run of this check.
+def fake_binary(name):
+    path = fake_tools / (f"{name}.cmd" if os.name == "nt" else name)
+    assert path.is_file(), f"missing fake tracedecay fixture: {path}"
     return str(path)
 
 # Missing binary: the OSError is wrapped, never raised.
-tools.TRACEDECAY_BIN = str(plugin_dir / "definitely-missing-tracedecay")
+tools.TRACEDECAY_BIN = str(fake_tools / "definitely-missing-tracedecay")
 missing = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
 assert missing["error"].startswith("tracedecay tool failed:"), missing
 # The JSON bridge surfaces the same error dict without raising.
@@ -4428,187 +1841,28 @@ assert "error" in plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 
 # Subprocess dies mid-handshake: nonzero exit with partial stdout and stderr
 # is reported with the exit status and bounded captures.
-# cmd.exe `echo` always appends a newline that POSIX printf does not, and a
-# plain `echo text 1>&2` would emit a trailing space before the redirect —
-# hence the redirect-first form (`>&2 echo`). Trim trailing newlines only on
-# Windows so Unix keeps byte-exact capture assertions.
+# cmd.exe `echo` always appends a newline that POSIX printf does not, so trim
+# trailing newlines only on Windows and keep Unix byte-exact.
 def trim_capture(text):
     return text.rstrip("\r\n") if os.name == "nt" else text
 
-tools.TRACEDECAY_BIN = write_fake_binary(
-    "fake-tracedecay-crash",
-    'printf \'{"content\'\nprintf \'handshake aborted\' >&2\nexit 3\n',
-    'echo {"content\n>&2 echo handshake aborted\nexit /b 3\n',
-)
+tools.TRACEDECAY_BIN = fake_binary("fake-tracedecay-crash")
 crashed = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
 assert crashed["error"] == "tracedecay tool exited with status 3", crashed
 assert trim_capture(crashed["stdout"]) == '{"content', crashed
 assert trim_capture(crashed["stderr"]) == "handshake aborted", crashed
 
 # Exit 0 with malformed JSON on stdout.
-tools.TRACEDECAY_BIN = write_fake_binary(
-    "fake-tracedecay-badjson",
-    "printf 'not-json-at-all'\nexit 0\n",
-    "echo not-json-at-all\nexit /b 0\n",
-)
+tools.TRACEDECAY_BIN = fake_binary("fake-tracedecay-badjson")
 malformed = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
 assert malformed["error"] == "tracedecay tool returned invalid JSON", malformed
 assert trim_capture(malformed["stdout"]) == "not-json-at-all", malformed
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
-tools.TRACEDECAY_BIN = write_fake_binary("fake-tracedecay-empty", "exit 0\n", "exit /b 0\n")
+tools.TRACEDECAY_BIN = fake_binary("fake-tracedecay-empty")
 assert tools.call_tracedecay_tool("tracedecay_lcm_status", {}) == "{}"
 "#,
         "generated tool bridge should normalize subprocess failures into JSON errors",
-    );
-}
-
-// With the tracedecay binary unavailable, the context engine must degrade
-// gracefully: preflight/status/compress return error dicts and session-start
-// boundary reporting never raises into the host.
-#[test]
-fn context_engine_degrades_when_tracedecay_binary_missing() {
-    run_generated_plugin_script(
-        "check_engine_missing_binary_degradation.py",
-        r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_missing_binary"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-plugin.tools.TRACEDECAY_BIN = str(plugin_dir / "definitely-missing-tracedecay")
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-degraded", project_root=str(plugin_dir))
-
-# Boundary reporting on session start swallows the failure.
-engine.on_session_start(
-    session_id="session-degraded-next",
-    old_session_id="session-degraded",
-    boundary_reason="compression",
-)
-
-messages = [{"role": "user", "content": "hello"}]
-preflight = engine._preflight_probe(messages, current_tokens=128)
-assert isinstance(preflight, dict), preflight
-assert preflight["error"].startswith("tracedecay tool failed:"), preflight
-# ABC contract: the bool probe must not treat the error dict as truthy.
-assert engine.should_compress_preflight(messages, current_tokens=128) is False
-
-status = engine.status()
-assert isinstance(status, dict)
-assert status["error"].startswith("tracedecay tool failed:"), status
-
-# compress() honors the host ABC contract even while degraded: the input
-# list comes back unchanged, the abort flag is set, and the raw error dict
-# stays on the engine for diagnostics.
-compressed = engine.compress(messages, current_tokens=128)
-assert compressed == messages, compressed
-assert engine._last_compress_aborted is True
-assert engine.last_compress_result["error"].startswith("tracedecay tool failed:")
-
-# Tool dispatch through the engine surface stays JSON-stringly typed.
-raw = engine.handle_tool_call("lcm_status", {})
-assert isinstance(raw, str)
-assert "error" in raw
-"#,
-        "context engine should degrade to error dicts when the tracedecay binary is missing",
-    );
-}
-
-#[test]
-fn lcm_compression_request_contract_serializes_fake_summarizer() {
-    let request = LcmCompressionRequest {
-        provider: "cursor".to_string(),
-        session_id: "session-1".to_string(),
-        messages: vec![serde_json::json!({"role": "user", "content": "fresh"})],
-        current_tokens: Some(100),
-        focus_topic: Some("billing".to_string()),
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-        expected_current_frontier_store_id: None,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
-        summarizer: LcmSummarizerMode::Fake {
-            summary_text: "deterministic summary".to_string(),
-        },
-    };
-
-    let encoded = serde_json::to_value(&request).unwrap();
-    assert_eq!(encoded["provider"], "cursor");
-    assert_eq!(encoded["session_id"], "session-1");
-    assert_eq!(encoded["messages"][0]["content"], "fresh");
-    assert_eq!(encoded["current_tokens"], 100);
-    assert_eq!(encoded["focus_topic"], "billing");
-    assert!(encoded.get("threshold_tokens").is_none());
-    assert!(encoded.get("fresh_tail_count").is_none());
-    assert!(encoded.get("dynamic_leaf_chunk_enabled").is_none());
-    assert_eq!(encoded["summarizer"]["mode"], "fake");
-    assert_eq!(
-        encoded["summarizer"]["summary_text"],
-        "deterministic summary"
-    );
-
-    let decoded: LcmCompressionRequest = serde_json::from_value(encoded).unwrap();
-    assert_eq!(decoded.provider, "cursor");
-    assert_eq!(decoded.session_id, "session-1");
-    assert_eq!(decoded.messages[0]["role"], "user");
-    assert_eq!(decoded.current_tokens, Some(100));
-    assert_eq!(decoded.focus_topic.as_deref(), Some("billing"));
-    assert_eq!(
-        decoded.summarizer,
-        LcmSummarizerMode::Fake {
-            summary_text: "deterministic summary".to_string()
-        }
-    );
-}
-
-#[test]
-fn lcm_summarizer_modes_are_stable_bridge_placeholders() {
-    let noop = serde_json::to_value(LcmSummarizerMode::Noop).unwrap();
-    assert_eq!(noop, serde_json::json!({"mode": "noop"}));
-
-    let hermes_auxiliary = serde_json::to_value(LcmSummarizerMode::HermesAuxiliary).unwrap();
-    assert_eq!(
-        hermes_auxiliary,
-        serde_json::json!({"mode": "hermes_auxiliary"})
-    );
-
-    let decoded: LcmSummarizerMode =
-        serde_json::from_value(serde_json::json!({"mode": "fake", "summary_text": "fixed"}))
-            .unwrap();
-    assert_eq!(
-        decoded,
-        LcmSummarizerMode::Fake {
-            summary_text: "fixed".to_string()
-        }
     );
 }
 
@@ -4722,6 +1976,65 @@ assert ctx.skills[0][1].name == "SKILL.md"
     );
 }
 
+#[test]
+fn generated_skill_mirrors_session_context_retrieval_contract() {
+    let template = host_sources::HERMES_SKILL_MD;
+    let installed =
+        std::fs::read_to_string(SHARED_INSTALL.plugin_dir.join("skills/tracedecay/SKILL.md"))
+            .unwrap();
+    let required_markers = [
+        "tracedecay_message_search",
+        "`provider=all`",
+        "`catch_up=false`",
+        "`limit=10`",
+        "lcm_grep",
+        "lcm_load_session",
+        "lcm_describe",
+        "lcm_expand",
+        "lcm_expand_query",
+        "`temporal_mode=current`",
+        "`temporal_mode=forensic`",
+        "`next_cursor`",
+        "same target, source limit, and content slice",
+        "`coverage`",
+        "`anchors`",
+        "needs_synthesis=true",
+        "host must synthesize",
+        "tracedecay_sessions_for",
+        "tracedecay_workflows",
+        "`limit=20`",
+        "tracedecay_session_refresh",
+        "`begin`",
+        "`status`",
+        "`cancel`",
+    ];
+
+    for (label, skill) in [
+        (
+            "repository managing-session-context skill",
+            include_str!("../../plugin/skills/managing-session-context/SKILL.md"),
+        ),
+        ("Hermes template", template),
+        ("installed Hermes skill snapshot", installed.as_str()),
+    ] {
+        for marker in required_markers {
+            assert!(
+                skill.contains(marker),
+                "{label} should document session retrieval marker {marker:?}",
+            );
+        }
+        assert!(
+            !skill.contains("after_store_id"),
+            "{label} must not teach deprecated numeric-cursor pagination",
+        );
+    }
+
+    assert_eq!(
+        installed, template,
+        "the installed Hermes skill snapshot should exactly match its template",
+    );
+}
+
 /// Stock Hermes keeps plugin skills out of the flat skills index, so the
 /// first-turn code nudge must expose the qualified name that skill_view accepts.
 #[test]
@@ -4785,145 +2098,5 @@ unpinned.on_session_start(session_id="s3", cwd="/cwd/fallback")
 assert unpinned.project_root == "/cwd/fallback", unpinned.project_root
 "#,
         "generated engine must prefer explicit project and real cwd over host config",
-    );
-}
-
-/// Legacy profile pins may still exist long enough for migration, but the
-/// generated runtime must ignore them for all TraceDecay routing.
-#[test]
-fn generated_plugin_ignores_legacy_profile_project_root_pin() {
-    // Pinned install: the shared unpinned fixture cannot cover this, so it
-    // keeps a private TempDir. The pin only affects config.yaml/tools
-    // dispatch, so the dashboard deploy is skipped for speed (pinned
-    // dashboard deploys are covered in `dashboard.rs`).
-    let home = TempDir::new().unwrap();
-    let ctx = InstallContext {
-        home: home.path().to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: Vec::new(),
-        project_root: Some(std::path::PathBuf::from("/pinned/project")),
-        dashboard: false,
-    };
-    HermesIntegration.install(&ctx).unwrap();
-
-    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    let script = plugin_dir.join("check_project_root_pin.py");
-    std::fs::write(
-        &script,
-        format!(
-            "{PYYAML_FALLBACK_PRELUDE}\n{}",
-            r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-import types
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_pin"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-tools = plugin.tools
-# A legacy pin may exist in config.yaml, but generated code exposes no reader.
-assert not hasattr(tools, "PINNED_PROJECT_ROOT")
-assert not hasattr(tools, "config_pinned_project_root")
-
-# Default CLI dispatch uses the real process cwd, never the profile pin.
-captured = []
-
-class FakeResult:
-    returncode = 0
-    stdout = "{}"
-    stderr = ""
-
-def fake_run(argv, **kwargs):
-    captured.append(argv)
-    return FakeResult()
-
-tools.subprocess.run = fake_run
-tools.call_tracedecay_tool("tracedecay_status", {})
-assert captured, "expected a subprocess invocation"
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-assert argv[idx + 1] != "/pinned/project", argv
-
-# An explicit project still wins over the pin.
-tools.call_tracedecay_tool("tracedecay_status", {}, project_root="/explicit/root")
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == "/explicit/root", argv
-
-# Memory tools follow the same real cwd route.
-tools.call_tracedecay_tool("tracedecay_fact_store", {})
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-
-# A stale MCP `project_root` argument is not translated. The normal cwd route
-# still selects the user-profile project store, and the strict CLI rejects the
-# unknown argument instead of silently preserving a compatibility protocol.
-tools.call_tracedecay_tool(
-    "tracedecay_lcm_status",
-    {"project_root": "/tmp/hermes-profile"},
-)
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-payload = json.loads(argv[argv.index("--args") + 1])
-assert payload["project_root"] == "/tmp/hermes-profile", payload
-
-# Engine resolution never consults the legacy profile pin.
-engine = plugin.TraceDecayContextEngine(config={})
-assert engine.project_root is None, engine.project_root
-plugin._resolved_project_scope = lambda path, *_args: path
-engine.on_session_start(session_id="s1", cwd="/somewhere/else")
-assert engine.project_root == "/somewhere/else", engine.project_root
-
-configured = plugin.TraceDecayContextEngine(config={"project_root": "/from/config"})
-assert configured.project_root == "/from/config", configured.project_root
-
-explicit = plugin.TraceDecayContextEngine(config={})
-explicit.on_session_start(session_id="s2", project_root="/explicit/root")
-assert explicit.project_root == "/explicit/root", explicit.project_root
-"#
-        ),
-    )
-    .unwrap();
-
-    let mut check = python_command();
-    check
-        .arg(&script)
-        .arg(&plugin_dir)
-        // Reading the config-block pin requires a yaml module; the script
-        // falls back to this shim only when the real PyYAML is missing.
-        .arg(write_pyyaml_shim(home.path()))
-        // expanduser reads HOME on POSIX and USERPROFILE on Windows.
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env_remove("HERMES_HOME");
-    let output = check
-        .output()
-        .expect("python3 should run generated Hermes plugin check");
-    assert!(
-        output.status.success(),
-        "generated plugin must ignore legacy profile project-root pins\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
     );
 }

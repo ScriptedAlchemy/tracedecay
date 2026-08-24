@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 
 use crate::branch_meta::BranchMeta;
 
-mod transaction;
-
 /// Destructive branch-store operation accepted by the daemon-owned
 /// administrative path. The tagged representation is also the wire contract
 /// used by the CLI.
@@ -38,9 +36,18 @@ pub struct BranchAdminReport {
     pub default_branch: Option<String>,
 }
 
+/// Exact single-store provenance selected for cleanup alongside a metadata
+/// removal. Older or legacy branch entries without sealed graph provenance are
+/// deliberately absent: destructive Git/worktree cleanup must never guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SingleStoreBranchRetirementV1 {
+    pub(crate) branch: String,
+    pub(crate) source: crate::branch_meta::BranchGraphSourceV1,
+}
+
 /// A branch metadata mutation selected while holding the shared branch lock.
-/// The daemon inspects [`Self::database_paths`] and proves every matching store
-/// owner is gone before calling the daemon-only transaction method.
+/// The daemon reserves [`Self::database_paths`] through the store runtime
+/// registry's destructive maintenance path before committing.
 pub struct PreparedBranchAdminMutation {
     project_root: PathBuf,
     tracedecay_dir: PathBuf,
@@ -48,6 +55,7 @@ pub struct PreparedBranchAdminMutation {
     metadata_after: Option<String>,
     database_paths: Vec<PathBuf>,
     gc_branches: Vec<String>,
+    single_store_retirements: Vec<SingleStoreBranchRetirementV1>,
     report: BranchAdminReport,
     _branch_lock: std::fs::File,
 }
@@ -61,15 +69,18 @@ impl PreparedBranchAdminMutation {
         &self.report
     }
 
-    /// Quarantines the selected `SQLite` families under a durable journal and
-    /// publishes branch metadata as the tracked-branch commit point. Any failure
-    /// before that point rolls every move back; failures after it retain recovery
-    /// evidence for cleanup on the next branch-lock acquisition.
-    #[cfg(test)]
-    fn commit(self) -> crate::errors::Result<BranchAdminReport> {
-        self.commit_with_precommit_hook(None, || Ok(()), |_| Ok(()), || Ok(()), |_| Ok(()))
+    pub(crate) fn single_store_retirements(&self) -> &[SingleStoreBranchRetirementV1] {
+        &self.single_store_retirements
     }
 
+    #[cfg(test)]
+    fn commit(self) -> crate::errors::Result<BranchAdminReport> {
+        self.commit_with_hook(|_| Ok(()))
+    }
+
+    /// CAS-publishes the prepared metadata mutation when no database file was
+    /// selected for deletion. Branches served by the single project store
+    /// retire this way: the metadata entry is the only state to remove.
     pub(crate) fn finish_without_database_deletion(
         self,
     ) -> crate::errors::Result<BranchAdminReport> {
@@ -79,96 +90,71 @@ impl PreparedBranchAdminMutation {
                     .to_string(),
             });
         }
-        self.commit_with_precommit_hook(None, || Ok(()), |_| Ok(()), || Ok(()), |_| Ok(()))
+        self.commit_with_hook(|_| Ok(()))
     }
 
-    pub(crate) fn commit_with_transaction<P, V, R, C>(
-        self,
-        transaction_id: &str,
-        publish_deleting: P,
-        validate_quarantined_stores: V,
-        rollback_deleting: R,
-        on_commit: C,
-    ) -> crate::errors::Result<BranchAdminReport>
-    where
-        P: FnOnce() -> crate::errors::Result<()>,
-        V: FnOnce(&[PathBuf]) -> crate::errors::Result<()>,
-        R: FnOnce() -> crate::errors::Result<()>,
-        C: FnOnce() -> crate::errors::Result<()>,
-    {
-        let mut on_commit = Some(on_commit);
-        self.commit_with_precommit_hook(
-            Some(transaction_id),
-            publish_deleting,
-            validate_quarantined_stores,
-            rollback_deleting,
-            move |phase| {
-                if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup {
-                    if let Some(on_commit) = on_commit.take() {
-                        on_commit()?;
-                    }
-                }
-                Ok(())
-            },
-        )
+    /// CAS-publishes the exact prepared branch metadata, then unlinks every
+    /// selected DB/WAL/SHM family. The caller must hold the canonical runtime
+    /// destructive reservation until this returns.
+    pub(crate) fn commit_destructive(self) -> crate::errors::Result<BranchAdminReport> {
+        self.commit_with_hook(|_| Ok(()))
     }
 
-    #[cfg(test)]
-    fn commit_with_hook<H>(
-        self,
-        transaction_id: Option<&str>,
-        hook: H,
-    ) -> crate::errors::Result<BranchAdminReport>
+    fn commit_with_hook<H>(self, mut hook: H) -> crate::errors::Result<BranchAdminReport>
     where
-        H: FnMut(transaction::TransactionPhase) -> crate::errors::Result<()>,
-    {
-        self.commit_with_precommit_hook(transaction_id, || Ok(()), |_| Ok(()), || Ok(()), hook)
-    }
-
-    fn commit_with_precommit_hook<P, V, R, H>(
-        self,
-        transaction_id: Option<&str>,
-        publish_deleting: P,
-        validate_quarantined_stores: V,
-        rollback_deleting: R,
-        hook: H,
-    ) -> crate::errors::Result<BranchAdminReport>
-    where
-        P: FnOnce() -> crate::errors::Result<()>,
-        V: FnOnce(&[PathBuf]) -> crate::errors::Result<()>,
-        R: FnOnce() -> crate::errors::Result<()>,
-        H: FnMut(transaction::TransactionPhase) -> crate::errors::Result<()>,
+        H: FnMut(BranchAdminCommitBoundary) -> crate::errors::Result<()>,
     {
         if self.report.outcome != BranchAdminOutcome::Removed {
             return Ok(self.report);
         }
-        let project_root = self.project_root.clone();
-        let gc_branches = self.gc_branches.clone();
-        transaction::commit_with_hook(
-            &self.tracedecay_dir,
-            transaction_id,
-            &self.database_paths,
-            self.metadata_before,
-            self.metadata_after,
-            publish_deleting,
-            move |quarantine_paths| {
-                validate_quarantined_stores(quarantine_paths)?;
-                for branch in &gc_branches {
-                    if super::is_branch_ref_present(&project_root, branch) {
-                        return Err(crate::errors::TraceDecayError::Config {
-                            message: format!(
-                                "branch ref '{branch}' reappeared before GC metadata publication; deletion rolled back"
-                            ),
-                        });
-                    }
+        let (_, current_metadata) = load_branch_meta_exact(&self.tracedecay_dir)?;
+        if current_metadata != self.metadata_before {
+            return Err(crate::errors::TraceDecayError::Config {
+                message:
+                    "branch metadata changed after deletion selection; destructive CAS refused"
+                        .to_owned(),
+            });
+        }
+        for branch in &self.gc_branches {
+            if super::is_branch_ref_present(&self.project_root, branch) {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "branch ref '{branch}' reappeared before GC metadata publication; deletion refused"
+                    ),
+                });
+            }
+        }
+        hook(BranchAdminCommitBoundary::BeforeMetadataCas)?;
+        if self.metadata_before != self.metadata_after {
+            let after = self.metadata_after.as_deref().ok_or_else(|| {
+                crate::errors::TraceDecayError::Config {
+                    message: "tracked branch deletion cannot remove branch metadata entirely"
+                        .to_owned(),
                 }
-                Ok(())
-            },
-            rollback_deleting,
-            hook,
-        )?;
+            })?;
+            crate::branch_meta::save_branch_meta_serialized(&self.tracedecay_dir, after).map_err(
+                |error| crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "cannot publish branch metadata '{}': {error}",
+                        self.tracedecay_dir
+                            .join(crate::storage::BRANCH_META_FILENAME)
+                            .display()
+                    ),
+                },
+            )?;
+        }
+        hook(BranchAdminCommitBoundary::AfterMetadataCas)?;
+        for path in &self.database_paths {
+            remove_branch_db_files_checked(path)?;
+        }
         Ok(self.report)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchAdminCommitBoundary {
+    BeforeMetadataCas,
+    AfterMetadataCas,
 }
 
 /// Selects a destructive branch mutation while holding the same lock used by
@@ -187,6 +173,7 @@ pub fn prepare_branch_admin_mutation(
     let mut removed_branches = Vec::new();
     let mut removed_orphan_dbs = Vec::new();
     let mut gc_branches = Vec::new();
+    let mut single_store_retirements = Vec::new();
     let mut outcome = BranchAdminOutcome::NoChanges;
 
     match action {
@@ -200,6 +187,7 @@ pub fn prepare_branch_admin_mutation(
                     metadata_after: metadata_before.clone(),
                     database_paths,
                     gc_branches,
+                    single_store_retirements,
                     report: BranchAdminReport {
                         outcome,
                         removed_branches,
@@ -215,8 +203,17 @@ pub fn prepare_branch_admin_mutation(
                 });
             }
             if let Some(entry) = branch_meta.remove_branch(&branch) {
-                database_paths.push(tracedecay_dir.join(entry.db_file));
-                removed_branches.push(branch);
+                // Branches served by the single project store retire
+                // metadata-only; only a legacy private copy is deletable.
+                if !entry.served_by_project_store() {
+                    database_paths.push(tracedecay_dir.join(entry.db_file));
+                } else if let Some(source) = entry.graph_source {
+                    single_store_retirements.push(SingleStoreBranchRetirementV1 {
+                        branch: branch.clone(),
+                        source,
+                    });
+                }
+                removed_branches.push(branch.clone());
                 outcome = BranchAdminOutcome::Removed;
             } else {
                 outcome = BranchAdminOutcome::NotTracked;
@@ -232,6 +229,7 @@ pub fn prepare_branch_admin_mutation(
                     metadata_after: metadata_before.clone(),
                     database_paths,
                     gc_branches,
+                    single_store_retirements,
                     report: BranchAdminReport {
                         outcome,
                         removed_branches,
@@ -244,8 +242,15 @@ pub fn prepare_branch_admin_mutation(
             let mut removed = branch_meta.remove_all_branches();
             removed.sort_by(|left, right| left.0.cmp(&right.0));
             for (branch, entry) in removed {
-                removed_branches.push(branch);
-                database_paths.push(tracedecay_dir.join(entry.db_file));
+                removed_branches.push(branch.clone());
+                if !entry.served_by_project_store() {
+                    database_paths.push(tracedecay_dir.join(entry.db_file));
+                } else if let Some(source) = entry.graph_source {
+                    single_store_retirements.push(SingleStoreBranchRetirementV1 {
+                        branch: branch.clone(),
+                        source,
+                    });
+                }
             }
             if !removed_branches.is_empty() {
                 outcome = BranchAdminOutcome::Removed;
@@ -265,14 +270,27 @@ pub fn prepare_branch_admin_mutation(
                             && now.saturating_sub(super::parse_unix_secs(&entry.last_synced_at))
                                 >= branch_grace
                     })
-                    .map(|(name, entry)| (name.clone(), entry.db_file.clone()))
+                    .map(|(name, entry)| {
+                        // Metadata is always collectable; only a legacy
+                        // private store is a physical deletion candidate.
+                        let private_store = (!entry.served_by_project_store())
+                            .then(|| tracedecay_dir.join(&entry.db_file));
+                        (name.clone(), private_store, entry.graph_source.clone())
+                    })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.0.cmp(&right.0));
-                for (name, db_file) in candidates {
+                for (name, private_store, source) in candidates {
                     branch_meta.remove_branch(&name);
                     gc_branches.push(name.clone());
-                    removed_branches.push(name);
-                    database_paths.push(tracedecay_dir.join(db_file));
+                    removed_branches.push(name.clone());
+                    if let Some(path) = private_store {
+                        database_paths.push(path);
+                    } else if let Some(source) = source {
+                        single_store_retirements.push(SingleStoreBranchRetirementV1 {
+                            branch: name,
+                            source,
+                        });
+                    }
                 }
             }
             let referenced = meta
@@ -287,7 +305,7 @@ pub fn prepare_branch_admin_mutation(
             removed_orphan_dbs =
                 select_orphan_dbs(tracedecay_dir, &referenced, orphan_db_gc_days, now);
             database_paths.extend(removed_orphan_dbs.iter().cloned());
-            if !database_paths.is_empty() {
+            if !removed_branches.is_empty() || !database_paths.is_empty() {
                 outcome = BranchAdminOutcome::Removed;
             } else if meta.is_none() {
                 outcome = BranchAdminOutcome::NoTracking;
@@ -315,6 +333,7 @@ pub fn prepare_branch_admin_mutation(
         metadata_after,
         database_paths,
         gc_branches,
+        single_store_retirements,
         report: BranchAdminReport {
             outcome,
             removed_branches,
@@ -322,6 +341,50 @@ pub fn prepare_branch_admin_mutation(
             default_branch,
         },
         _branch_lock: branch_lock,
+    })
+}
+
+/// Retires branch metadata that branch-add published but could not sync.
+/// Metadata is the only mutation: the branch never owned a database of its
+/// own, and any legacy private store is left for canonical orphan collection.
+/// Takes the branch-add lock for its own load-verify-save window.
+#[cfg(test)]
+pub(super) fn rollback_published_branch_tracking(
+    tracedecay_dir: &Path,
+    branch_name: &str,
+    db_file: &str,
+) -> crate::errors::Result<()> {
+    let _branch_lock = acquire_branch_add_lock_blocking(tracedecay_dir)?;
+    let (meta, metadata_before) = load_branch_meta_exact(tracedecay_dir)?;
+    let mut meta = meta.ok_or_else(|| crate::errors::TraceDecayError::Config {
+        message: format!("cannot roll back branch '{branch_name}': branch metadata is missing"),
+    })?;
+    if meta
+        .branches
+        .get(branch_name)
+        .is_none_or(|entry| entry.db_file != db_file)
+    {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "cannot roll back branch '{branch_name}': published database path changed"
+            ),
+        });
+    }
+    meta.remove_branch(branch_name);
+    let metadata_after = Some(crate::branch_meta::serialize_branch_meta(&meta)?);
+    let (_, current_metadata) = load_branch_meta_exact(tracedecay_dir)?;
+    if current_metadata != metadata_before {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!("cannot roll back branch '{branch_name}': branch metadata changed"),
+        });
+    }
+    let after = metadata_after.ok_or_else(|| crate::errors::TraceDecayError::Config {
+        message: format!("cannot roll back branch '{branch_name}': metadata disappeared"),
+    })?;
+    crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, &after).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!("cannot retire failed branch '{branch_name}': {error}"),
+        }
     })
 }
 
@@ -378,122 +441,32 @@ fn load_branch_meta_exact(
     Ok((Some(meta), Some(serialized)))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BranchAdminRecoveryDisposition {
-    PreCommitRollback,
-    CommittedCleanup,
+use super::acquire_branch_lock_blocking as acquire_branch_add_lock_blocking;
+
+fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
+    let mut wal = db_path.to_path_buf();
+    wal.set_extension("db-wal");
+    let mut shm = db_path.to_path_buf();
+    shm.set_extension("db-shm");
+    [db_path.to_path_buf(), wal, shm]
 }
 
-pub(crate) struct PreparedBranchAdminRecovery {
-    tracedecay_dir: PathBuf,
-    pending: transaction::PendingRecovery,
-    database_paths: Vec<PathBuf>,
-    _branch_lock: std::fs::File,
-}
-
-impl PreparedBranchAdminRecovery {
-    pub(crate) fn transaction_id(&self) -> &str {
-        self.pending.transaction_id()
-    }
-
-    pub(crate) fn disposition(&self) -> BranchAdminRecoveryDisposition {
-        match self.pending.disposition() {
-            transaction::RecoveryDisposition::PreCommitRollback => {
-                BranchAdminRecoveryDisposition::PreCommitRollback
-            }
-            transaction::RecoveryDisposition::CommittedCleanup => {
-                BranchAdminRecoveryDisposition::CommittedCleanup
+pub(super) fn remove_branch_db_files_checked(db_path: &Path) -> crate::errors::Result<()> {
+    for path in branch_db_family_paths(db_path) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "failed to delete branch store file '{}': {error}",
+                        path.display()
+                    ),
+                });
             }
         }
     }
-
-    pub(crate) fn database_paths(&self) -> &[PathBuf] {
-        &self.database_paths
-    }
-
-    pub(crate) fn recover<V, T>(
-        self,
-        validate_stores: V,
-        transition_tombstones: T,
-    ) -> crate::errors::Result<()>
-    where
-        V: FnOnce(&[PathBuf]) -> crate::errors::Result<()>,
-        T: FnOnce(BranchAdminRecoveryDisposition) -> crate::errors::Result<()>,
-    {
-        self.pending
-            .recover(&self.tracedecay_dir, validate_stores, |disposition| {
-                transition_tombstones(match disposition {
-                    transaction::RecoveryDisposition::PreCommitRollback => {
-                        BranchAdminRecoveryDisposition::PreCommitRollback
-                    }
-                    transaction::RecoveryDisposition::CommittedCleanup => {
-                        BranchAdminRecoveryDisposition::CommittedCleanup
-                    }
-                })
-            })
-    }
-}
-
-pub(crate) fn prepare_pending_branch_admin_recovery(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<Option<PreparedBranchAdminRecovery>> {
-    let branch_lock = acquire_branch_add_lock_blocking_raw(tracedecay_dir)?;
-    let Some(pending) = transaction::prepare_pending_recovery(tracedecay_dir)? else {
-        return Ok(None);
-    };
-    let database_paths = pending.database_paths(tracedecay_dir);
-    Ok(Some(PreparedBranchAdminRecovery {
-        tracedecay_dir: tracedecay_dir.to_path_buf(),
-        pending,
-        database_paths,
-        _branch_lock: branch_lock,
-    }))
-}
-
-pub(super) fn ensure_no_pending_branch_admin_recovery(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<()> {
-    transaction::ensure_no_pending_recovery(tracedecay_dir)
-}
-
-/// Blocking-with-timeout variant of [`super::try_acquire_branch_add_lock`] for
-/// synchronous callers. Retries a briefly-contended lock (a concurrent branch
-/// add is only holding it for the duration of a DB clone) before giving up.
-pub(super) fn acquire_branch_add_lock_blocking(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
-    acquire_branch_add_lock_blocking_with(tracedecay_dir, super::try_acquire_branch_add_lock)
-}
-
-fn acquire_branch_add_lock_blocking_raw(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
-    acquire_branch_add_lock_blocking_with(tracedecay_dir, super::try_acquire_branch_add_lock_raw)
-}
-
-fn acquire_branch_add_lock_blocking_with(
-    tracedecay_dir: &Path,
-    acquire: fn(&Path) -> crate::errors::Result<std::fs::File>,
-) -> crate::errors::Result<std::fs::File> {
-    let mut last_contention = None;
-    for _ in 0..super::BRANCH_LOCK_RETRY_ATTEMPTS {
-        match acquire(tracedecay_dir) {
-            Ok(lock) => return Ok(lock),
-            Err(error @ crate::errors::TraceDecayError::SyncLock { .. }) => {
-                last_contention = Some(error);
-                std::thread::sleep(super::BRANCH_LOCK_RETRY_INTERVAL);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(
-        last_contention.unwrap_or_else(|| crate::errors::TraceDecayError::SyncLock {
-            message: format!(
-                "timed out waiting for branch metadata lock at {}",
-                tracedecay_dir.join(".branch-add.lock").display()
-            ),
-        }),
-    )
+    Ok(())
 }
 
 pub(super) fn select_orphan_dbs(

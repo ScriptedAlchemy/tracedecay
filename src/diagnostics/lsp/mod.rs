@@ -1,3 +1,3 @@
-//! Compatibility facade for LSP diagnostics owned by `tracedecay-lsp`.
+//! Root-owned concrete semantic authorities over the crate-owned analyzer runtime.
 
-pub use tracedecay_lsp::{activity, adapters, broker, client, settings};
+pub(crate) mod semantic;

@@ -3,7 +3,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::{ComplexityMetrics, OCAML_COMPLEXITY, count_complexity};
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -38,12 +38,18 @@ impl ExtractionState {
         }
     }
 
+    /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -59,16 +65,32 @@ impl ExtractionState {
 
 impl OcamlExtractor {
     pub fn extract_ocaml(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(t) => t,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -99,11 +121,17 @@ impl OcamlExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
-        Self::build_result(state, start)
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -227,10 +255,8 @@ impl OcamlExtractor {
             });
         }
 
-        if is_fn {
-            if let Some(body) = node.child_by_field_name("body") {
-                Self::extract_calls(state, body, &id);
-            }
+        if is_fn && let Some(body) = node.child_by_field_name("body") {
+            Self::extract_calls(state, body, &id);
         }
     }
 
@@ -240,50 +266,50 @@ impl OcamlExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "type_binding" {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let name = state.node_text(name_node);
-                        let start_line = child.start_position().row as u32;
-                        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                        let id =
-                            generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
-                        let sig = Self::first_line(state, child);
+                if child.kind() == "type_binding"
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let name = state.node_text(name_node);
+                    let start_line = child.start_position().row as u32;
+                    let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+                    let id =
+                        generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+                    let sig = Self::first_line(state, child);
 
-                        let graph_node = Node {
-                            id: id.clone(),
-                            kind: NodeKind::Class,
-                            name,
-                            qualified_name,
-                            file_path: state.file_path.clone(),
-                            start_line,
-                            attrs_start_line: start_line,
-                            end_line: child.end_position().row as u32,
-                            start_column: child.start_position().column as u32,
-                            end_column: child.end_position().column as u32,
-                            signature: sig,
-                            docstring: None,
-                            visibility: Visibility::Pub,
-                            is_async: false,
-                            branches: 0,
-                            loops: 0,
-                            returns: 0,
-                            max_nesting: 0,
-                            unsafe_blocks: 0,
-                            unchecked_calls: 0,
-                            assertions: 0,
-                            updated_at: state.timestamp,
-                            parent_id: None,
-                        };
-                        state.nodes.push(graph_node);
+                    let graph_node = Node {
+                        id: id.clone(),
+                        kind: NodeKind::Class,
+                        name,
+                        qualified_name,
+                        file_path: state.file_path.clone(),
+                        start_line,
+                        attrs_start_line: start_line,
+                        end_line: child.end_position().row as u32,
+                        start_column: child.start_position().column as u32,
+                        end_column: child.end_position().column as u32,
+                        signature: sig,
+                        docstring: None,
+                        visibility: Visibility::Pub,
+                        is_async: false,
+                        branches: 0,
+                        loops: 0,
+                        returns: 0,
+                        max_nesting: 0,
+                        unsafe_blocks: 0,
+                        unchecked_calls: 0,
+                        assertions: 0,
+                        updated_at: state.timestamp,
+                        parent_id: None,
+                    };
+                    state.nodes.push(graph_node);
 
-                        if let Some(parent_id) = state.parent_node_id() {
-                            state.edges.push(Edge {
-                                source: parent_id.to_string(),
-                                target: id,
-                                kind: EdgeKind::Contains,
-                                line: Some(start_line),
-                            });
-                        }
+                    if let Some(parent_id) = state.parent_node_id() {
+                        state.edges.push(Edge {
+                            source: parent_id.to_string(),
+                            target: id,
+                            kind: EdgeKind::Contains,
+                            line: Some(start_line),
+                        });
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -299,61 +325,56 @@ impl OcamlExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "module_binding" {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let name = state.node_text(name_node);
-                        let start_line = child.start_position().row as u32;
-                        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                        let id = generate_node_id(
-                            &state.file_path,
-                            &NodeKind::Module,
-                            &name,
-                            start_line,
-                        );
+                if child.kind() == "module_binding"
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let name = state.node_text(name_node);
+                    let start_line = child.start_position().row as u32;
+                    let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+                    let id =
+                        generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
 
-                        let graph_node = Node {
-                            id: id.clone(),
-                            kind: NodeKind::Module,
-                            name: name.clone(),
-                            qualified_name,
-                            file_path: state.file_path.clone(),
-                            start_line,
-                            attrs_start_line: start_line,
-                            end_line: child.end_position().row as u32,
-                            start_column: child.start_position().column as u32,
-                            end_column: child.end_position().column as u32,
-                            signature: None,
-                            docstring: None,
-                            visibility: Visibility::Pub,
-                            is_async: false,
-                            branches: 0,
-                            loops: 0,
-                            returns: 0,
-                            max_nesting: 0,
-                            unsafe_blocks: 0,
-                            unchecked_calls: 0,
-                            assertions: 0,
-                            updated_at: state.timestamp,
-                            parent_id: None,
-                        };
-                        state.nodes.push(graph_node);
+                    let graph_node = Node {
+                        id: id.clone(),
+                        kind: NodeKind::Module,
+                        name: name.clone(),
+                        qualified_name,
+                        file_path: state.file_path.clone(),
+                        start_line,
+                        attrs_start_line: start_line,
+                        end_line: child.end_position().row as u32,
+                        start_column: child.start_position().column as u32,
+                        end_column: child.end_position().column as u32,
+                        signature: None,
+                        docstring: None,
+                        visibility: Visibility::Pub,
+                        is_async: false,
+                        branches: 0,
+                        loops: 0,
+                        returns: 0,
+                        max_nesting: 0,
+                        unsafe_blocks: 0,
+                        unchecked_calls: 0,
+                        assertions: 0,
+                        updated_at: state.timestamp,
+                        parent_id: None,
+                    };
+                    state.nodes.push(graph_node);
 
-                        if let Some(parent_id) = state.parent_node_id() {
-                            state.edges.push(Edge {
-                                source: parent_id.to_string(),
-                                target: id.clone(),
-                                kind: EdgeKind::Contains,
-                                line: Some(start_line),
-                            });
-                        }
-
-                        // Recurse into module body.
-                        state.node_stack.push((name, id));
-                        if let Some(body) = child.child_by_field_name("body") {
-                            Self::visit_children(state, body);
-                        }
-                        state.node_stack.pop();
+                    if let Some(parent_id) = state.parent_node_id() {
+                        state.edges.push(Edge {
+                            source: parent_id.to_string(),
+                            target: id.clone(),
+                            kind: EdgeKind::Contains,
+                            line: Some(start_line),
+                        });
                     }
+
+                    state.node_stack.push((name, id));
+                    if let Some(body) = child.child_by_field_name("body") {
+                        Self::visit_children(state, body);
+                    }
+                    state.node_stack.pop();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -367,50 +388,50 @@ impl OcamlExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "class_binding" {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let name = state.node_text(name_node);
-                        let start_line = child.start_position().row as u32;
-                        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                        let id =
-                            generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
-                        let sig = Self::first_line(state, child);
+                if child.kind() == "class_binding"
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let name = state.node_text(name_node);
+                    let start_line = child.start_position().row as u32;
+                    let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+                    let id =
+                        generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+                    let sig = Self::first_line(state, child);
 
-                        let graph_node = Node {
-                            id: id.clone(),
-                            kind: NodeKind::Class,
-                            name,
-                            qualified_name,
-                            file_path: state.file_path.clone(),
-                            start_line,
-                            attrs_start_line: start_line,
-                            end_line: child.end_position().row as u32,
-                            start_column: child.start_position().column as u32,
-                            end_column: child.end_position().column as u32,
-                            signature: sig,
-                            docstring: None,
-                            visibility: Visibility::Pub,
-                            is_async: false,
-                            branches: 0,
-                            loops: 0,
-                            returns: 0,
-                            max_nesting: 0,
-                            unsafe_blocks: 0,
-                            unchecked_calls: 0,
-                            assertions: 0,
-                            updated_at: state.timestamp,
-                            parent_id: None,
-                        };
-                        state.nodes.push(graph_node);
+                    let graph_node = Node {
+                        id: id.clone(),
+                        kind: NodeKind::Class,
+                        name,
+                        qualified_name,
+                        file_path: state.file_path.clone(),
+                        start_line,
+                        attrs_start_line: start_line,
+                        end_line: child.end_position().row as u32,
+                        start_column: child.start_position().column as u32,
+                        end_column: child.end_position().column as u32,
+                        signature: sig,
+                        docstring: None,
+                        visibility: Visibility::Pub,
+                        is_async: false,
+                        branches: 0,
+                        loops: 0,
+                        returns: 0,
+                        max_nesting: 0,
+                        unsafe_blocks: 0,
+                        unchecked_calls: 0,
+                        assertions: 0,
+                        updated_at: state.timestamp,
+                        parent_id: None,
+                    };
+                    state.nodes.push(graph_node);
 
-                        if let Some(parent_id) = state.parent_node_id() {
-                            state.edges.push(Edge {
-                                source: parent_id.to_string(),
-                                target: id,
-                                kind: EdgeKind::Contains,
-                                line: Some(start_line),
-                            });
-                        }
+                    if let Some(parent_id) = state.parent_node_id() {
+                        state.edges.push(Edge {
+                            source: parent_id.to_string(),
+                            target: id,
+                            kind: EdgeKind::Contains,
+                            line: Some(start_line),
+                        });
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -549,5 +570,15 @@ impl crate::LanguageExtractor for OcamlExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_ocaml(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

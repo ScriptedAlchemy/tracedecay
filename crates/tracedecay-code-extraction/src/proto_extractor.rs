@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
@@ -43,12 +43,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -65,20 +70,34 @@ impl ExtractionState {
 }
 
 impl ProtoExtractor {
-    /// Extract code graph nodes and edges from a Protobuf source file.
     pub fn extract_proto(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -108,13 +127,17 @@ impl ProtoExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -129,21 +152,6 @@ impl ProtoExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
-    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                Self::visit_node(state, child);
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package" => Self::visit_package(state, node),
@@ -220,7 +228,6 @@ impl ProtoExtractor {
             || "<unknown>".to_string(),
             |n| {
                 let text = state.node_text(n);
-                // Strip surrounding quotes
                 text.trim_matches('"').trim_matches('\'').to_string()
             },
         );
@@ -328,7 +335,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit message body for fields, nested messages, enums, oneofs.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "messageBody") {
             Self::visit_message_body(state, body);
@@ -467,7 +473,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit enum body for variants.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "enumBody") {
             Self::visit_enum_body(state, body);
@@ -597,7 +602,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit service body for rpc methods.
         state.node_stack.push((name, id));
         Self::visit_service_body(state, node);
         state.node_stack.pop();
@@ -634,7 +638,6 @@ impl ProtoExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::ProtoRpc, &name, start_line);
 
-        // Build signature from the full rpc text (first line)
         let text = state.node_text(node);
         let signature = text
             .lines()
@@ -756,10 +759,6 @@ impl ProtoExtractor {
         }
     }
 
-    // ----------------------------
-    // Helper methods
-    // ----------------------------
-
     /// Extract docstrings from `// comment` lines preceding definitions.
     ///
     /// Protobuf uses line comments (`//`) as documentation. We look for `comment`
@@ -807,5 +806,15 @@ impl crate::LanguageExtractor for ProtoExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_proto(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

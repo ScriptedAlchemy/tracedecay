@@ -25,7 +25,7 @@
 //!
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
+use tracedecay_agent_hosts::automation::skill_frontmatter::SkillFrontmatterValue;
 
 use crate::plugin_validation_support::{SkillDoc, is_kebab_case_skill_name, load_skill_docs};
 

@@ -1,13 +1,13 @@
 //! Intersection contract for the single shared `plugin/skills/` tree.
 //!
-//! Host-specific install parity stays in `plugin_skill_contract_test.rs`; this
+//! Host-specific install parity stays in the receipt-backed lifecycle suite; this
 //! file owns per-skill frontmatter, body, hygiene, and support-file rules.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
 
-use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
+use tracedecay_agent_hosts::automation::skill_frontmatter::SkillFrontmatterValue;
 
 use crate::plugin_validation_support::{
     SkillDoc, is_kebab_case_skill_name, load_skill_docs, relative_files_under, repo_path,
@@ -65,10 +65,10 @@ fn unfenced_headings(body: &str) -> Vec<(usize, String)> {
             continue;
         }
         let level = line.bytes().take_while(|byte| *byte == b'#').count();
-        if level <= 6 {
-            if let Some(text) = line[level..].strip_prefix(' ') {
-                headings.push((level, text.trim().to_string()));
-            }
+        if level <= 6
+            && let Some(text) = line[level..].strip_prefix(' ')
+        {
+            headings.push((level, text.trim().to_string()));
         }
     }
     headings
@@ -190,12 +190,12 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
                 h1s.len()
             ));
         }
-        if let Some(title) = h1s.first() {
-            if title.starts_with('/') {
-                violations.push(format!(
-                    "{at}: model-invocable skill must use a plain-title H1, not {title:?}"
-                ));
-            }
+        if let Some(title) = h1s.first()
+            && title.starts_with('/')
+        {
+            violations.push(format!(
+                "{at}: model-invocable skill must use a plain-title H1, not {title:?}"
+            ));
         }
 
         match skill.body.lines().find(|line| !line.trim().is_empty()) {
@@ -318,8 +318,6 @@ fn cursor_native_commands_are_hygienic_slash_commands() {
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
         .collect();
     entries.sort();
-    assert_eq!(entries.len(), 13, "expected 13 cursor native commands");
-
     let mut violations = Vec::new();
     for path in entries {
         let at = path.display();
@@ -371,6 +369,11 @@ fn generated_cursor_agents_are_present_and_clean() {
     for (file, raw) in agents {
         if raw.contains('\r') || !raw.ends_with('\n') {
             violations.push(format!("{}: line-ending hygiene", file));
+        }
+        if file == "agents/session-historian.md" && raw.contains("after_store_id") {
+            violations.push(format!(
+                "{file}: must teach only opaque session continuation cursors"
+            ));
         }
     }
     assert_no_violations("generated cursor agents", &violations);

@@ -1,6 +1,9 @@
-use serde_json::{Value, json};
+use std::path::Path;
 
-use crate::global_db::{AnalyticsEventInsert, GlobalDb};
+use serde_json::{Value, json};
+use tracedecay_domain::canonical_text::sha256_hex;
+
+use crate::global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use crate::mcp::hook_events::HookEvent;
 
 pub(super) struct McpToolAnalyticsEvent<'a> {
@@ -47,6 +50,12 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
 /// contents.
 const FAILURE_REASON_MAX_CHARS: usize = 160;
 
+/// Hex chars kept from a SHA-256 digest for cardinality-capped labels
+/// (paths, session/thread ids, branches). Full digests are unnecessary for
+/// correlation and inflate label cardinality / export size.
+const CARDINALITY_LABEL_HASH_CHARS: usize = 16;
+const LOOKUP_IDENTIFIER_MAX_BYTES: usize = 256;
+
 /// Collapse whitespace and cap a failure reason to
 /// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies — callers
 /// must derive `reason` from response/error text only).
@@ -57,6 +66,44 @@ pub(super) fn bounded_failure_reason(reason: &str) -> String {
     } else {
         collapsed.chars().take(FAILURE_REASON_MAX_CHARS).collect()
     }
+}
+
+/// Stable short hash for high-cardinality or private identifiers. Never
+/// embeds the raw value — only `h:` + truncated SHA-256 hex.
+fn hashed_cardinality_label(value: &str) -> String {
+    let digest = sha256_hex(value.as_bytes());
+    format!("h:{}", &digest[..CARDINALITY_LABEL_HASH_CHARS])
+}
+
+fn optional_hashed_label(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(hashed_cardinality_label)
+}
+
+fn optional_hashed_path(path: Option<&Path>) -> Option<String> {
+    path.map(|path| hashed_cardinality_label(&path.display().to_string()))
+}
+
+fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= LOOKUP_IDENTIFIER_MAX_BYTES
+                && !value.chars().any(char::is_control)
+        })
+        .and_then(|value| crate::privacy::protect_sensitive_structural_id(value).ok())
+}
+
+/// One durable spool sequence represents one admitted host event. Identical
+/// envelopes intentionally receive distinct sequences, so the sequence—not
+/// route/session content—is the non-lossy analytics idempotency identity.
+fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String {
+    hashed_cardinality_label(&format!(
+        "hook_route_v1|{}|{admission_seq}",
+        RegisteredGlobalDb::canonical_project_key(project_root)
+    ))
 }
 
 pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
@@ -77,8 +124,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
         metadata["failure_reason"] = json!(
             input
                 .failure_reason
-                .map(bounded_failure_reason)
-                .unwrap_or_else(|| "tool_dispatch_error".to_string())
+                .map_or_else(|| "tool_dispatch_error".to_string(), bounded_failure_reason)
         );
     }
     if crate::analytics::is_skill_view_tool(input.tool_name) {
@@ -88,17 +134,14 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
             "arguments": input.arguments,
         });
     }
-    // Fact-store adoption is currently invisible in analytics: add/search/list
-    // (tracedecay_fact_store) and helpful/unhelpful (tracedecay_fact_feedback)
-    // calls all look identical without this. Record only the bounded action
-    // string — never the fact content/arguments body.
-    if matches!(
-        input.tool_name,
-        "tracedecay_fact_store" | "tracedecay_fact_feedback"
-    ) {
-        if let Some(action) = input.arguments.get("action").and_then(Value::as_str) {
-            metadata["action"] = json!(action);
-        }
+    // Record the exact fact route as a bounded action without retaining fact
+    // content or the arguments body. Feedback keeps its bounded action field.
+    if let Some(action) = input.tool_name.strip_prefix("tracedecay_fact_store_") {
+        metadata["action"] = json!(action);
+    } else if input.tool_name == "tracedecay_fact_feedback"
+        && let Some(action) = input.arguments.get("action").and_then(Value::as_str)
+    {
+        metadata["action"] = json!(action);
     }
 
     append_tool_response_analytics(
@@ -109,7 +152,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
     );
     AnalyticsEventInsert {
         provider: "mcp".to_string(),
-        project_id: GlobalDb::canonical_project_key(input.project_root),
+        project_id: RegisteredGlobalDb::canonical_project_key(input.project_root),
         session_id: input.session_id,
         timestamp: input.timestamp,
         event_kind: "mcp_tool_call".to_string(),
@@ -124,29 +167,41 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
     }
 }
 
+/// Build a hook-route analytics insert.
+///
+/// Paths and branch labels are hashed; structural session/thread identities
+/// have already passed through deterministic credential protection at the
+/// hook boundary and remain byte-identical for joins. Command bodies and
+/// receipt payloads are never included. `admission_seq` is the per-admission
+/// idempotency identity.
 pub(super) fn hook_route_analytics_event(
     project_root: &std::path::Path,
     event: &HookEvent,
     current_branch: Option<&str>,
     timestamp: i64,
+    admission_seq: u64,
 ) -> Option<AnalyticsEventInsert> {
     let route = event.route.as_ref()?;
+    let session_id = bounded_lookup_identifier(route.session_id.as_deref());
+    let idempotency_key = hook_route_idempotency_key(project_root, admission_seq);
     let metadata = json!({
         "agent": event.agent.as_wire(),
         "hook_kind": event.kind.as_key(),
-        "event_cwd": event.cwd.as_ref().map(|path| path.display().to_string()),
-        "route_cwd": route.cwd.as_ref().map(|path| path.display().to_string()),
-        "worktree": route.worktree.as_ref().map(|path| path.display().to_string()),
-        "route_branch": route.branch.as_deref(),
-        "current_branch": current_branch,
-        "thread_id": route.thread_id.as_deref(),
+        "event_cwd": optional_hashed_path(event.cwd.as_deref()),
+        "route_cwd": optional_hashed_path(route.cwd.as_deref()),
+        "worktree": optional_hashed_path(route.worktree.as_deref()),
+        "route_branch": optional_hashed_label(route.branch.as_deref()),
+        "current_branch": optional_hashed_label(current_branch),
+        "thread_id": bounded_lookup_identifier(route.thread_id.as_deref()),
         "rel_path_count": event.rel_paths.len(),
-        "has_command": event.command.is_some(),
+        "has_command": event.had_command,
+        "admission_seq": admission_seq,
+        "idempotency_key": idempotency_key.clone(),
     });
     Some(AnalyticsEventInsert {
         provider: "daemon_hook".to_string(),
-        project_id: GlobalDb::canonical_project_key(project_root),
-        session_id: route.session_id.clone(),
+        project_id: RegisteredGlobalDb::canonical_project_key(project_root),
+        session_id,
         timestamp,
         event_kind: "hook_route".to_string(),
         hook_name: Some(event.kind.as_key().to_string()),
@@ -154,7 +209,7 @@ pub(super) fn hook_route_analytics_event(
         tool_category: None,
         skill_name: None,
         hint_category: None,
-        hint_id: None,
+        hint_id: Some(idempotency_key),
         outcome: Some("observed".to_string()),
         metadata_json: Some(metadata.to_string()),
     })
@@ -166,6 +221,14 @@ fn append_tool_response_analytics(
     internal_analytics: Option<&Value>,
     metadata: &mut Value,
 ) {
+    if let Some(stage_timings) = internal_analytics.and_then(|value| value.get("stage_timings_us"))
+    {
+        metadata["stage_timings_us"] = stage_timings.clone();
+    }
+    if let Some(symbol_coverage) = internal_analytics.and_then(|value| value.get("symbol_coverage"))
+    {
+        metadata["symbol_coverage"] = symbol_coverage.clone();
+    }
     if tool_name != "tracedecay_context" {
         return;
     }
@@ -208,29 +271,29 @@ mod tests {
 
     use super::{
         FAILURE_REASON_MAX_CHARS, McpToolAnalyticsEvent, bounded_failure_reason,
-        hook_route_analytics_event, mcp_tool_analytics_event,
+        hashed_cardinality_label, hook_route_analytics_event, mcp_tool_analytics_event,
     };
 
     #[test]
-    fn hook_route_analytics_event_preserves_correlation_fields() {
+    fn hook_route_analytics_event_preserves_protected_ids_and_omits_payloads() {
         let event = HookEvent {
             agent: HookAgent::Codex,
             kind: HookEventKind::Shell,
             rel_paths: Vec::new(),
-            command: Some("cargo test".to_string()),
-            cwd: Some(PathBuf::from("/repo")),
+            had_command: true,
+            cwd: Some(PathBuf::from("/home/user/private-repo")),
             route: Some(HookRouteMetadata {
                 session_id: Some("session-123".to_string()),
                 thread_id: Some("thread-456".to_string()),
-                cwd: Some(PathBuf::from("/repo")),
-                worktree: Some(PathBuf::from("/repo")),
+                cwd: Some(PathBuf::from("/home/user/private-repo")),
+                worktree: Some(PathBuf::from("/home/user/private-repo")),
                 branch: Some("feature/hook-route".to_string()),
             }),
             receipt: None,
         };
 
         let Some(record) =
-            hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 12345)
+            hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 12345, 7)
         else {
             panic!("route metadata should create analytics record");
         };
@@ -240,16 +303,72 @@ mod tests {
                 Err(err) => panic!("metadata should parse: {err}"),
             };
 
+        let expected_branch = hashed_cardinality_label("feature/hook-route");
+        let expected_cwd = hashed_cardinality_label("/home/user/private-repo");
+        let expected_key = record.hint_id.clone().expect("idempotency key");
+
         assert_eq!(record.provider, "daemon_hook");
         assert_eq!(record.session_id.as_deref(), Some("session-123"));
         assert_eq!(record.event_kind, "hook_route");
         assert_eq!(record.hook_name.as_deref(), Some("shell"));
         assert_eq!(record.outcome.as_deref(), Some("observed"));
+        assert_eq!(record.hint_id.as_deref(), Some(expected_key.as_str()));
         assert_eq!(metadata["agent"], "codex");
         assert_eq!(metadata["thread_id"], "thread-456");
-        assert_eq!(metadata["route_branch"], "feature/hook-route");
-        assert_eq!(metadata["current_branch"], "main");
+        assert_eq!(metadata["route_branch"], expected_branch);
+        assert_eq!(metadata["current_branch"], hashed_cardinality_label("main"));
+        assert_eq!(metadata["event_cwd"], expected_cwd);
+        assert_eq!(metadata["route_cwd"], expected_cwd);
+        assert_eq!(metadata["worktree"], expected_cwd);
         assert_eq!(metadata["has_command"], true);
+        assert_eq!(metadata["admission_seq"], 7);
+        assert_eq!(metadata["idempotency_key"], expected_key);
+        // Reject secret/payload leakage: no raw paths or command bodies.
+        // Public structural ids stay byte-identical for joins.
+        let serialized = record.metadata_json.clone().unwrap_or_default();
+        assert!(!serialized.contains("private-repo"));
+        assert!(!serialized.contains("cargo test"));
+        assert!(!serialized.contains("session-123"));
+        assert!(serialized.contains("thread-456"));
+        assert!(!serialized.contains("feature/hook-route"));
+    }
+
+    #[test]
+    fn hook_route_idempotency_key_distinguishes_durable_admissions() {
+        let event = HookEvent {
+            agent: HookAgent::Codex,
+            kind: HookEventKind::Shell,
+            rel_paths: Vec::new(),
+            had_command: false,
+            cwd: Some(PathBuf::from("/repo")),
+            route: Some(HookRouteMetadata {
+                session_id: Some("session-123".to_string()),
+                thread_id: Some("thread-456".to_string()),
+                cwd: Some(PathBuf::from("/repo")),
+                worktree: None,
+                branch: Some("main".to_string()),
+            }),
+            receipt: None,
+        };
+        let first =
+            hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 1, 1).unwrap();
+        let second =
+            hook_route_analytics_event(Path::new("/repo"), &event, Some("main"), 2, 99).unwrap();
+        assert_ne!(first.hint_id, second.hint_id);
+        assert!(
+            first
+                .metadata_json
+                .as_deref()
+                .unwrap()
+                .contains("\"admission_seq\":1")
+        );
+        assert!(
+            second
+                .metadata_json
+                .as_deref()
+                .unwrap()
+                .contains("\"admission_seq\":99")
+        );
     }
 
     #[test]
@@ -345,13 +464,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_analytics_event_records_action_and_client_for_fact_store() {
+    fn mcp_tool_analytics_event_records_action_and_client_for_exact_fact_route() {
         let request_id = json!(1);
-        let arguments = json!({"action": "add", "content": "secret fact body"});
+        let arguments = json!({"content": "secret fact body"});
         let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
             project_root: Path::new("/repo"),
             session_id: Some("session-abc".to_string()),
-            tool_name: "tracedecay_fact_store",
+            tool_name: "tracedecay_fact_store_add",
             outcome: "success",
             raw_file_tokens: 0,
             response_tokens: 0,
@@ -370,7 +489,10 @@ mod tests {
             serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
                 .expect("metadata should parse");
 
-        assert_eq!(event.tool_name.as_deref(), Some("tracedecay_fact_store"));
+        assert_eq!(
+            event.tool_name.as_deref(),
+            Some("tracedecay_fact_store_add")
+        );
         assert_eq!(metadata["action"], "add");
         assert_eq!(metadata["client_name"], "claude-code");
         // The action string is recorded, but never the fact content/arguments body.

@@ -1,83 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectRegistryView {
-    pub summary: ProjectRegistrySummary,
-    pub project_tree: Vec<ProjectRepoGroup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectRegistrySummary {
-    pub project_count: usize,
-    pub repo_count: usize,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectRepoGroup {
-    pub label: String,
-    pub git_common_dir: Option<String>,
-    pub project_count: usize,
-    pub branches: Vec<String>,
-    pub projects: Vec<ProjectRegistryEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectRegistryEntry {
-    pub project_id: String,
-    pub label: String,
-    pub project_root: String,
-    pub canonical_root: String,
-    pub kind: String,
-    pub default_branch: Option<String>,
-    pub branches: Vec<String>,
-    pub store_count: usize,
-    pub graph_scope_count: usize,
-    pub artifact_count: usize,
-    pub alias_count: usize,
-    pub last_seen_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublicCodeProject {
-    pub project_id: String,
-    pub label: String,
-    pub project_root: String,
-    pub display_root: String,
-    pub canonical_root: String,
-    pub git_common_dir: Option<String>,
-    pub default_branch: Option<String>,
-    pub created_at: i64,
-    pub last_seen_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-}
-
-impl PublicCodeProject {
-    pub fn from_record(project: &CodeProjectRecord, active_project_id: Option<&str>) -> Self {
-        Self {
-            project_id: project.project_id.clone(),
-            label: path_label(&project.display_root),
-            project_root: project.display_root.clone(),
-            display_root: project.display_root.clone(),
-            canonical_root: project.canonical_root.clone(),
-            git_common_dir: project.git_common_dir.clone(),
-            default_branch: project.default_branch.clone(),
-            created_at: project.created_at,
-            last_seen_at: project.last_seen_at,
-            is_active: active_project_id.map(|id| id == project.project_id),
-        }
-    }
-}
+// The registry data structs (and `PublicCodeProject::from_record`) are the
+// canonical copies beside the dashboard read model. The root keeps the superset
+// pieces: the label-disambiguating view builder/renderer and the
+// alias/store-wired `PublicProjectRegistryContext`.
+pub use tracedecay_dashboard_api::project_registry::{
+    ProjectRegistryEntry, ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup,
+    PublicCodeProject,
+};
 
 #[derive(Debug, Serialize)]
 pub struct PublicProjectRegistryContext<'a> {
@@ -159,20 +96,18 @@ pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> 
         return format!("No {title} found.");
     }
     let mut out = String::new();
-    out.push_str(&format!(
-        "Found {} {title} across {} repositories.\n\nRepositories:\n",
+    let _ = writeln!(
+        out,
+        "Found {} {title} across {} repositories.\n\nRepositories:",
         view.summary.project_count, view.summary.repo_count
-    ));
+    );
     for group in &view.project_tree {
         let group_branches = if group.branches.is_empty() {
             "-".to_string()
         } else {
             group.branches.join(", ")
         };
-        out.push_str(&format!(
-            "- {} (branches: {})\n",
-            group.label, group_branches
-        ));
+        let _ = writeln!(out, "- {} (branches: {})", group.label, group_branches);
         for project in &group.projects {
             let marker = if project.is_active == Some(true) {
                 " *"
@@ -184,15 +119,16 @@ pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> 
             } else {
                 project.branches.join(", ")
             };
-            out.push_str(&format!(
-                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}\n",
+            let _ = writeln!(
+                out,
+                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}",
                 project.project_id,
                 marker,
                 project.kind,
                 branches,
                 project.store_count,
                 project.project_root
-            ));
+            );
         }
     }
     if view.summary.truncated {
@@ -209,10 +145,8 @@ fn project_entry(
     if let Some(branch) = &context.project.default_branch {
         branches.insert(branch.clone());
     }
-    let mut graph_scope_count = 0usize;
     let mut artifact_count = 0usize;
     for store in &context.stores {
-        graph_scope_count += store.graph_scopes.len();
         artifact_count += store.artifacts.len();
         for scope in &store.graph_scopes {
             branches.insert(scope.branch_name.clone());
@@ -228,7 +162,6 @@ fn project_entry(
         default_branch: context.project.default_branch.clone(),
         branches: branches.into_iter().collect(),
         store_count: context.stores.len(),
-        graph_scope_count,
         artifact_count,
         alias_count: context.aliases.len(),
         last_seen_at: context.project.last_seen_at,
@@ -239,10 +172,10 @@ fn project_entry(
 fn repo_label(project: &CodeProjectRecord) -> String {
     if let Some(git_common_dir) = &project.git_common_dir {
         let path = Path::new(git_common_dir);
-        if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
-            if let Some(parent) = path.parent() {
-                return path_label(parent.to_string_lossy().as_ref());
-            }
+        if path.file_name().and_then(|name| name.to_str()) == Some(".git")
+            && let Some(parent) = path.parent()
+        {
+            return path_label(parent.to_string_lossy().as_ref());
         }
     }
     path_label(&project.display_root)
@@ -264,7 +197,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// `project_root`.
 ///
 /// A tracedecay project id is shared across every linked worktree of a
-/// repository: [`crate::global_db::GlobalDb::upsert_code_project`] indexes a
+/// repository: [`crate::global_db::RegisteredGlobalDb::upsert_code_project`] indexes a
 /// `git-common-dir:<common dir>` alias back to whichever project id first
 /// registered it, so a session opened from *any* linked worktree resolves
 /// to the same project id as the primary checkout. Because that same upsert
@@ -282,6 +215,14 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// git checkout at all, or the primary checkout no longer exists (a
 /// worktree-only project is legitimate and must keep registering itself).
 pub use tracedecay_runtime_core::project_registry::primary_checkout_root;
+
+/// Registry reap contract: root shim over the canonical copy beside its
+/// producer in `tracedecay_global_db::project_registry`.
+pub use tracedecay_global_db::{
+    EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
+    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path,
+    ephemeral_root_rejection, is_ephemeral_path,
+};
 
 fn path_label(path: &str) -> String {
     Path::new(path)
@@ -330,7 +271,7 @@ mod tests {
             project_id: project_id.to_string(),
             canonical_root: canonical_root.to_string(),
             display_root: canonical_root.to_string(),
-            git_common_dir: git_common_dir.map(|s| s.to_string()),
+            git_common_dir: git_common_dir.map(ToString::to_string),
             git_remote_url: None,
             default_branch: None,
             created_at: 0,

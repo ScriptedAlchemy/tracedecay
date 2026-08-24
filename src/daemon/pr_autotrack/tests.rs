@@ -1,17 +1,55 @@
+use std::sync::Arc;
+
 use super::*;
 
 #[tokio::test]
 async fn spawned_loop_is_cancellable_and_joinable() {
-    let profile = tempfile::tempdir().unwrap();
-    let handle = spawn(Some(profile.path().join("global.db")));
-
-    handle.abort();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+    let task = spawn_with_administration(StoreAdministration::default(), schedulers);
 
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(Duration::from_secs(1), task.shutdown())
             .await
             .is_ok()
     );
+}
+
+#[test]
+fn pr_git_commands_enforce_deadline_cancellation_and_output_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let expired = PrCommandControl {
+        command_timeout: Duration::ZERO,
+        ..PrCommandControl::default()
+    };
+    assert!(matches!(
+        run_git_with_control(root.path(), &["--version"], &expired),
+        Err(tracedecay_runtime_core::git::GitCommandError::DeadlineExceeded)
+    ));
+
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    cancellation.cancel();
+    let cancelled = PrCommandControl {
+        cancellation: Some(cancellation),
+        ..PrCommandControl::default()
+    };
+    assert!(matches!(
+        run_git_with_control(root.path(), &["--version"], &cancelled),
+        Err(tracedecay_runtime_core::git::GitCommandError::Cancelled)
+    ));
+
+    let limited = PrCommandControl {
+        max_stdout_bytes: 1,
+        ..PrCommandControl::default()
+    };
+    assert!(matches!(
+        run_git_with_control(root.path(), &["--version"], &limited),
+        Err(
+            tracedecay_runtime_core::git::GitCommandError::OutputLimitExceeded {
+                stream: "stdout",
+                bound: 1
+            }
+        )
+    ));
 }
 
 // ---- Pure discovery parsers -------------------------------------------------
@@ -162,25 +200,22 @@ fn state_round_trips_and_defaults_when_absent() {
 
 // ---- Reconcile: removal + idempotency (no index required) -------------------
 
-fn prove_no_open_store_holders(_database_paths: &[PathBuf]) -> crate::errors::Result<()> {
-    Ok(())
-}
-
 #[tokio::test]
-async fn reconcile_untracks_closed_pr_and_cleans_store() {
+async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable() {
     use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
 
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap(); // not a git repo; git ops no-op
 
-    // Seed a tracked PR branch store entry + its DB file.
     let mut meta = BranchMeta::new("main");
     meta.add_branch("pr/5", "branches/pr_5.db", "main");
     std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
-    std::fs::write(data_root.path().join("branches/pr_5.db"), b"db").unwrap();
+    drop(
+        rusqlite::Connection::open(data_root.path().join("branches/pr_5.db"))
+            .expect("empty branch database"),
+    );
     save_branch_meta(data_root.path(), &meta).unwrap();
 
-    // Seed autotrack state marking pr/5 as managed.
     let mut state = PrAutotrackState::default();
     state.managed.insert(
         "pr/5".to_string(),
@@ -194,10 +229,18 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     );
     save_state(data_root.path(), &state).unwrap();
 
-    // Empty discovery => PR 5 is closed/merged => must be untracked.
-    let daemon_administration =
-        StoreAdministration::with_external_holder_verifier(prove_no_open_store_holders);
-    let administration = PrStoreAdministration::new(&daemon_administration);
+    // Empty discovery means PR 5 closed, but no scheduler retirement authority
+    // is injected into this state-only fixture. Reconciliation must fail closed
+    // without deleting its durable state or Git-adjacent artifacts.
+    let identity = crate::daemon::profile_identity::load_or_create(data_root.path()).unwrap();
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "pr-autotrack-removal-test",
+    )
+    .unwrap();
+    let daemon_administration = StoreAdministration::default().with_profile_identity(identity);
+    let administration = PrStoreAdministration::state_only(&daemon_administration);
     let report = reconcile_project_with_administration(
         repo_root.path(),
         data_root.path(),
@@ -207,12 +250,128 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     )
     .await;
 
-    assert_eq!(report.untracked, vec!["pr/5".to_string()]);
+    assert!(report.untracked.is_empty());
     assert!(report.tracked.is_empty());
-    assert!(load_state(data_root.path()).managed.is_empty());
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        report.failures[0]
+            .1
+            .starts_with("code_index_scheduler_unavailable:")
+    );
+    assert!(load_state(data_root.path()).managed.contains_key("pr/5"));
     let reloaded = load_branch_meta(data_root.path()).unwrap();
-    assert!(!reloaded.is_tracked("pr/5"));
-    assert!(!data_root.path().join("branches/pr_5.db").exists());
+    assert!(reloaded.is_tracked("pr/5"));
+    assert!(data_root.path().join("branches/pr_5.db").exists());
+}
+
+#[tokio::test]
+async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
+    let data_root = tempfile::tempdir().unwrap();
+    let repo_root = tempfile::tempdir().unwrap();
+    let discovery = PrDiscovery {
+        open: vec![DiscoveredPr {
+            number: 9,
+            head_branch: "feature-9".to_owned(),
+            head_sha: "sha-9".to_owned(),
+        }],
+        ..Default::default()
+    };
+    let daemon_administration = StoreAdministration::default();
+
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await;
+
+    assert!(report.tracked.is_empty());
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        report.failures[0]
+            .1
+            .starts_with("code_index_scheduler_unavailable:")
+    );
+    assert!(load_state(data_root.path()).managed.is_empty());
+    assert!(!data_root.path().join("pr-worktrees").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    git(repo.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    std::fs::write(repo.path().join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "initial"]);
+    git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    git(
+        repo.path(),
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+    );
+    git(repo.path(), &["push", "-q", "origin", "main"]);
+    git(repo.path(), &["checkout", "-q", "-b", "feature-11", "main"]);
+    std::fs::write(repo.path().join("src/pr_11.rs"), "pub fn pr_eleven() {}\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "PR 11 content"]);
+    git(repo.path(), &["push", "-q", "origin", "feature-11"]);
+    git(
+        origin.path(),
+        &["update-ref", "refs/pull/11/head", "refs/heads/feature-11"],
+    );
+    git(repo.path(), &["checkout", "-q", "main"]);
+    git(repo.path(), &["branch", "-q", "-D", "feature-11"]);
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let discovery = discover_open_prs(repo.path()).expect("discover PR head");
+    assert_eq!(discovery.open.len(), 1);
+    assert_eq!(discovery.open[0].number, 11);
+
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let command_control = PrCommandControl::default();
+    let report = reconcile_project_with_administration(
+        repo.path(),
+        &data_root,
+        &discovery,
+        10,
+        PrStoreAdministration::with_control(&schedulers, &graph, &command_control),
+    )
+    .await;
+
+    assert_eq!(report.failures, Vec::<(String, String)>::new());
+    assert_eq!(report.tracked, vec![pr_label(11)]);
+    let worktree = data_root.join("pr-worktrees/pr-11");
+    assert!(worktree.is_dir(), "PR head must be checked out");
+    assert!(
+        schedulers.is_worktree_mounted(&worktree).await,
+        "scheduler must mount the registered PR worktree"
+    );
+    assert!(load_state(&data_root).managed.contains_key(&pr_label(11)));
+    schedulers.shutdown().await;
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .expect("spawn git");
+    assert!(status.success(), "git {args:?} failed");
 }
 
 #[tokio::test]
@@ -242,7 +401,15 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
         skipped_forks: vec![],
         ..Default::default()
     };
-    let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
+    let daemon_administration = StoreAdministration::default();
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await;
 
     // Already managed and still open: nothing changes.
     assert!(report.tracked.is_empty());
@@ -261,7 +428,6 @@ async fn partial_discovery_suppresses_removals() {
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap();
 
-    // Seed a managed PR branch store + entry, exactly as the untrack test does.
     let mut meta = BranchMeta::new("main");
     meta.add_branch("pr/5", "branches/pr_5.db", "main");
     std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
@@ -287,7 +453,15 @@ async fn partial_discovery_suppresses_removals() {
         partial: true,
         ..Default::default()
     };
-    let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
+    let daemon_administration = StoreAdministration::default();
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await;
 
     assert!(
         report.removals_suppressed,
@@ -304,4 +478,810 @@ async fn partial_discovery_suppresses_removals() {
             .is_tracked("pr/5")
     );
     assert!(data_root.path().join("branches/pr_5.db").exists());
+}
+
+fn init_manual_branch_repo(repo: &Path, branch: &str) {
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        repo,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-qm", "initial"]);
+    git(repo, &["checkout", "-q", "-b", branch, "main"]);
+    std::fs::write(repo.join("src/feature.rs"), "pub fn on_feature() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-qm", "feature content"]);
+    git(repo, &["checkout", "-q", "main"]);
+}
+
+fn git_ref_exists(repo: &Path, reference: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--end-of-options", reference])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_activates_when_scheduler_is_injected() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature-manual");
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let activation =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature-manual")
+            .await
+            .expect("manual branch activation");
+
+    assert_eq!(activation.branch, "feature-manual");
+    assert_eq!(activation.outcome, crate::branch::BranchAddOutcome::Added);
+    assert!(
+        activation.worktree.is_dir(),
+        "branch head must be checked out"
+    );
+    assert!(
+        schedulers.is_worktree_mounted(&activation.worktree).await,
+        "scheduler must mount the registered branch worktree"
+    );
+    assert!(git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature-manual"
+    ));
+    let synthetic_branch = crate::branch::current_branch(&activation.worktree)
+        .expect("manual worktree has an attached synthetic branch");
+    let source = crate::daemon::branch_add::capture_exact_branch_source(
+        &graph,
+        &schedulers,
+        repo.path(),
+        &activation.worktree,
+        &synthetic_branch,
+    )
+    .await
+    .expect("synthetic branch source uses exact Git ref identity");
+    assert_eq!(
+        source.reference,
+        "refs/heads/tracedecay/track/feature-manual"
+    );
+    assert_eq!(source.source_oid, activation.head_sha);
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
+    use crate::daemon::code_index_scheduler::{
+        CodeIndexSchedulerRegistryV1, identity::IndexingIdentityV1,
+    };
+    use tracedecay_domain::configuration::{
+        ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
+        ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationValueV1,
+        INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, SettingKey,
+    };
+    use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros};
+    use tracedecay_usecases::configuration::{
+        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
+    };
+
+    let repo = tempfile::tempdir().expect("repository root");
+    let linked_parent = tempfile::tempdir().expect("linked-worktree parent");
+    let linked = linked_parent.path().join("linked");
+    init_manual_branch_repo(repo.path(), "feature-retained-refusal");
+
+    let graph = crate::tracedecay::TraceDecay::open(repo.path())
+        .await
+        .expect("open writable parent graph");
+    let current = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("read parent configuration");
+    let project_id = current.target.project_id.clone();
+    let mutation = DirectConfigurationMutation::Set {
+        layer: ConfigurationLayerIdV1::Project {
+            project_id: project_id.clone(),
+        },
+        key: SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
+            .expect("native graph activation key"),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
+    };
+    let authority = ConfigurationMutationAuthority {
+        receipt: ConfigurationMutationGrantReceiptV1::issue(
+            ConfigurationGrantReceiptId::new("configuration.grant-receipt.linked-graph-refusal")
+                .expect("grant receipt id"),
+            ConfigurationGrantId::new("configuration.grant.linked-graph-refusal")
+                .expect("grant id"),
+            ActorId::new("actor.linked-graph-refusal").expect("actor id"),
+            ConfigurationMutationOperationV1::DirectMutation,
+            mutation
+                .target_scope_digest()
+                .expect("mutation target scope"),
+            current.revision_id.clone(),
+            1,
+            AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).expect("policy digest"),
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            Some(
+                ConfigurationIdempotencyKey::new("configuration.idempotency.linked-graph-refusal")
+                    .expect("idempotency key"),
+            ),
+            UtcMicros(1),
+            UtcMicros(100),
+        )
+        .expect("issue mutation grant"),
+    };
+    ConfigurationControlStore::commit_direct(
+        &graph.configuration_runtime().configuration_store(),
+        &authority,
+        &mutation,
+        &current.revision_id,
+    )
+    .await
+    .expect("persist native graph refusal");
+    let data_root = graph.store_layout().data_root.clone();
+    graph.close();
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open_read_only(repo.path())
+            .await
+            .expect("reopen parent graph from persisted configuration"),
+    );
+    assert!(
+        !graph.get_config().native_graph_activation,
+        "the parent graph must carry the persisted refusal into linked-worktree activation"
+    );
+
+    let head = resolve_branch_head(
+        repo.path(),
+        "feature-retained-refusal",
+        default_pr_command_control(),
+    )
+    .expect("resolve linked-worktree head");
+    let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, "feature-retained-refusal");
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &linked,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare linked worktree");
+
+    let code_index_store = data_root.join("code-index-v1");
+    let seeder = CodeIndexSchedulerRegistryV1::new(1);
+    seeder
+        .mount_worktree(project_id.clone(), &linked, code_index_store.clone(), None)
+        .await
+        .expect("mount retained-generation seeder");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while seeder.latest_generation_id(&linked).await.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("seal retained linked-worktree generation");
+    seeder.shutdown().await;
+
+    let identity = IndexingIdentityV1::resolve(&linked).expect("linked-worktree identity");
+    let scope = tracedecay_application::ResolvedScope::new(
+        project_id,
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("linked-worktree scope");
+    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+    activate_linked_worktree(&schedulers, &graph, &linked)
+        .await
+        .expect("mount retained linked-worktree generation");
+    let latest = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = schedulers.latest_complete_serving_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("configured graph refusal must still seat retained text serving");
+    assert!(
+        latest.production_query_owners().is_ok(),
+        "exact and lexical owners must warm from the retained generation"
+    );
+    assert!(
+        latest.interactive_graph_store().is_err(),
+        "configured refusal must not open the persistent Grafeo graph"
+    );
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/a");
+    git(repo.path(), &["checkout", "-q", "-b", "feature_a", "main"]);
+    std::fs::write(
+        repo.path().join("src/underscored.rs"),
+        "pub fn underscored() {}\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "underscored feature"]);
+    git(repo.path(), &["checkout", "-q", "main"]);
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let slashed = activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/a")
+        .await
+        .expect("slash branch activation");
+    let underscored =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature_a")
+            .await
+            .expect("underscore branch activation");
+
+    assert_eq!(slashed.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(underscored.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_ne!(slashed.worktree, underscored.worktree);
+    assert_ne!(
+        manual_branch_worktree_path(&data_root, "feature/a"),
+        manual_branch_worktree_path(&data_root, "feature_a")
+    );
+    assert!(git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature/a"
+    ));
+    assert!(git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature_a"
+    ));
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advances() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/advance");
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let initial =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
+            .await
+            .expect("initial activation");
+
+    git(repo.path(), &["checkout", "-q", "feature/advance"]);
+    std::fs::write(
+        repo.path().join("src/advanced.rs"),
+        "pub fn advanced() {}\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "advance branch head"]);
+    let advanced_head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    git(repo.path(), &["checkout", "-q", "main"]);
+
+    let replay =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
+            .await
+            .expect("advanced branch activation");
+    let mounted_head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&replay.worktree)
+        .output()
+        .unwrap();
+
+    assert_eq!(replay.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_ne!(initial.head_sha, replay.head_sha);
+    assert_eq!(
+        String::from_utf8_lossy(&advanced_head.stdout).trim(),
+        String::from_utf8_lossy(&mounted_head.stdout).trim(),
+        "a mounted stale worktree must be replaced with the newly resolved branch head"
+    );
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_mutating_git() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/contended");
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let lifecycle =
+        try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, "feature/contended")
+            .expect("first lifecycle owner");
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+
+    let error =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/contended")
+            .await
+            .expect_err("concurrent exact branch activation must be rejected");
+
+    assert!(matches!(
+        &error,
+        ManualBranchActivationError::LifecycleContended { .. }
+    ));
+    assert!(!git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature/contended"
+    ));
+    drop(lifecycle);
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_tracking_ref() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/failure-cleanup");
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, "feature/failure-cleanup")
+        .expect("lifecycle owner");
+    let activation = activate_manual_branch_head_with_lifecycle(
+        repo.path(),
+        &graph,
+        Some(&schedulers),
+        "feature/failure-cleanup",
+        &lifecycle,
+    )
+    .await
+    .expect("activation before synthetic sealing failure");
+
+    cleanup_manual_branch_activation(
+        repo.path(),
+        &data_root,
+        &schedulers,
+        &activation,
+        &lifecycle,
+    )
+    .await
+    .expect("failed sealing must clean activation-owned artifacts");
+
+    assert!(
+        !activation.worktree.exists(),
+        "the linked worktree must not leak after sealing failure"
+    );
+    assert!(
+        !git_ref_exists(
+            repo.path(),
+            "refs/tracedecay/branch/feature/failure-cleanup"
+        ),
+        "the exact tracking ref must not leak after sealing failure"
+    );
+    assert!(
+        !schedulers.is_worktree_mounted(&activation.worktree).await,
+        "the scheduler generation must retire with the failed worktree"
+    );
+    drop(lifecycle);
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutation() {
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature-denied");
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let error = activate_manual_branch_head(repo.path(), &graph, None, "feature-denied")
+        .await
+        .expect_err("missing scheduler must deny activation");
+
+    assert!(matches!(
+        &error,
+        ManualBranchActivationError::SchedulerUnavailable { .. }
+    ));
+    assert_eq!(error.reason_code(), "code_index_scheduler_unavailable");
+    assert!(!data_root.join("branch-worktrees").exists());
+    assert!(!git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature-denied"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_missing_ref_is_typed_failure() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature-present");
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let error = activate_manual_branch_head(
+        repo.path(),
+        &graph,
+        Some(&schedulers),
+        "definitely-missing-branch",
+    )
+    .await
+    .expect_err("missing branch ref must be a typed failure");
+
+    assert!(matches!(
+        &error,
+        ManualBranchActivationError::InvalidBranchRef { .. }
+    ));
+    assert_eq!(error.reason_code(), "invalid_branch_ref");
+    assert!(
+        !error.retryable(),
+        "a permanently missing branch identity must not become retryable"
+    );
+    assert!(!data_root.join("branch-worktrees").exists());
+    assert!(!git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/definitely-missing-branch"
+    ));
+    schedulers.shutdown().await;
+}
+
+#[test]
+fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature/exact-cleanup";
+    init_manual_branch_repo(repo.path(), branch);
+    let data = tempfile::tempdir().unwrap();
+    let artifacts = ManualBranchArtifactsV1::for_branch(data.path(), branch);
+    let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+        .expect("feature branch head");
+
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare exact worktree");
+    assert!(
+        cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("exact cleanup")
+    );
+    assert!(
+        cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("absent artifacts are an idempotent success")
+    );
+
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare replacement exact worktree");
+    let foreign = resolve_branch_head(repo.path(), "main", default_pr_command_control())
+        .expect("main branch head");
+    assert_ne!(foreign, head, "fixture branches must have distinct heads");
+    assert!(
+        successful_git_with_control(
+            repo.path(),
+            &["update-ref", &artifacts.tracking_ref, &foreign],
+            default_pr_command_control(),
+        )
+        .is_some()
+    );
+
+    assert!(
+        !cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("foreign provenance must be a typed false result"),
+        "foreign ref replacement must survive an exact-source cleanup"
+    );
+    assert!(
+        ref_points_to(
+            repo.path(),
+            &artifacts.tracking_ref,
+            &foreign,
+            default_pr_command_control(),
+        ),
+        "the foreign tracking ref must remain untouched"
+    );
+    assert!(
+        artifacts.worktree.exists(),
+        "a foreign provenance mismatch must not delete the linked worktree"
+    );
+}
+
+#[test]
+fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() {
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature/retry-after-git-failure";
+    init_manual_branch_repo(repo.path(), branch);
+    let data = tempfile::tempdir().unwrap();
+    let artifacts = ManualBranchArtifactsV1::for_branch(data.path(), branch);
+    let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+        .expect("feature branch head");
+    let branch_ref = format!("refs/heads/{}", artifacts.label);
+
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare exact worktree");
+    remove_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        default_pr_command_control(),
+    );
+    assert!(
+        !artifacts.worktree.try_exists().expect("inspect worktree"),
+        "the sealed ref retry begins after the linked worktree is absent"
+    );
+
+    let unavailable = PrCommandControl {
+        command_timeout: Duration::ZERO,
+        ..PrCommandControl::default()
+    };
+    let error = cleanup_owned_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        &unavailable,
+    )
+    .expect_err("unavailable Git must not be collapsed into an absent ref");
+    assert!(matches!(
+        &error,
+        ManualBranchActivationError::GitAuthorityUnavailable { .. }
+    ));
+    assert!(
+        error.retryable(),
+        "a bounded exact-ref read timeout must remain retryable"
+    );
+    let response = super::super::branch_add::typed_project_route_error(
+        serde_json::json!("exact-read-timeout"),
+        error.reason_code(),
+        error.retryable(),
+        error.detail(),
+    );
+    let response = serde_json::to_value(response).expect("serialize production JSON-RPC error");
+    assert_eq!(
+        response["error"]["data"]["reason_code"],
+        "git_authority_unavailable"
+    );
+    assert_eq!(response["error"]["data"]["retryable"], true);
+    assert!(
+        git_ref_exists(repo.path(), &artifacts.tracking_ref)
+            && git_ref_exists(repo.path(), &branch_ref),
+        "a failed exact read must retain the sealed reference proof for retry"
+    );
+
+    assert!(
+        cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("restored Git authority must complete exact cleanup")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_exact_read() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature/stalled-exact-read";
+    init_manual_branch_repo(repo.path(), branch);
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let activation = activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), branch)
+        .await
+        .expect("initial activation creates exact artifacts");
+    let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, branch);
+    let ref_path = repo.path().join(".git").join(
+        artifacts
+            .tracking_ref
+            .strip_prefix("refs/")
+            .expect("manual tracking ref is rooted under refs"),
+    );
+    std::fs::remove_file(&ref_path).expect("replace exact tracking ref with a FIFO");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&ref_path)
+            .status()
+            .expect("run mkfifo")
+            .success(),
+        "the exact Git ref reader must block on the real FIFO"
+    );
+
+    let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::sync_channel(1);
+    let writer_path = ref_path.clone();
+    let fifo_writer_task = tokio::task::spawn_blocking(move || {
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .expect("open FIFO writer once Git begins its exact ref read");
+        writer_ready_tx
+            .send(writer)
+            .expect("deliver open FIFO writer");
+    });
+
+    let (owner_done_tx, owner_done_rx) = tokio::sync::oneshot::channel();
+    let owner_repo = repo.path().to_path_buf();
+    let owner_data_root = data_root.clone();
+    let owner_graph = Arc::clone(&graph);
+    let owner_schedulers = schedulers.clone();
+    let owner_branch = branch.to_owned();
+    let requester = tokio::spawn(async move {
+        let owner = tokio::spawn(async move {
+            let lifecycle = try_acquire_manual_branch_lifecycle(&owner_data_root, &owner_branch)
+                .expect("activation owner acquires the exact lifecycle");
+            let control = PrCommandControl {
+                command_timeout: Duration::from_millis(300),
+                ..PrCommandControl::default()
+            };
+            let outcome = activate_manual_branch_with_administration(
+                &owner_repo,
+                &owner_data_root,
+                &owner_branch,
+                PrStoreAdministration::with_control(&owner_schedulers, &owner_graph, &control),
+                &lifecycle,
+            )
+            .await;
+            let _ = owner_done_tx.send(outcome);
+        });
+        let _ = owner.await;
+    });
+
+    let fifo_writer = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || {
+            writer_ready_rx
+                .recv()
+                .expect("Git exact-ref read opens the FIFO")
+        }),
+    )
+    .await
+    .expect("activation reaches the stalled exact-ref read")
+    .expect("FIFO-writer task joins");
+    fifo_writer_task.await.expect("FIFO writer task joins");
+    let (heartbeat_tx, heartbeat_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        let _ = heartbeat_tx.send(());
+    });
+    tokio::time::timeout(Duration::from_millis(100), heartbeat_rx)
+        .await
+        .expect("the current-thread runtime keeps scheduling while Git exact-read stalls")
+        .expect("heartbeat task runs");
+
+    requester.abort();
+    assert!(
+        requester.await.is_err(),
+        "the requester is cancelled while its lifecycle owner continues"
+    );
+    let error = tokio::time::timeout(Duration::from_secs(2), owner_done_rx)
+        .await
+        .expect("lifecycle owner remains bounded by its Git deadline")
+        .expect("lifecycle owner reports its terminal activation outcome")
+        .expect_err("a timed-out exact read cannot be treated as a missing ref");
+    assert!(matches!(
+        &error,
+        ManualBranchActivationError::GitAuthorityUnavailable { .. }
+    ));
+    assert!(error.retryable());
+
+    drop(fifo_writer);
+    std::fs::remove_file(&ref_path).expect("remove stalled FIFO ref");
+    git(
+        repo.path(),
+        &["update-ref", &artifacts.tracking_ref, &activation.head_sha],
+    );
+    assert!(
+        crate::branch_meta::load_branch_meta(&data_root)
+            .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
+        "activation alone must not leak sealed branch provenance"
+    );
+    let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, branch)
+        .expect("completed owner releases the exact lifecycle lease");
+    cleanup_manual_branch_activation(
+        repo.path(),
+        &data_root,
+        &schedulers,
+        &activation,
+        &lifecycle,
+    )
+    .await
+    .expect("recovered exact artifacts cleanly retire");
+    assert!(!activation.worktree.exists(), "no linked worktree leaks");
+    assert!(
+        !git_ref_exists(repo.path(), &artifacts.tracking_ref),
+        "no synthetic tracking ref leaks"
+    );
+    assert!(
+        !schedulers.is_worktree_mounted(&activation.worktree).await,
+        "no scheduler mount leaks"
+    );
+    assert!(
+        crate::branch_meta::load_branch_meta(&data_root)
+            .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
+        "no branch provenance leaks"
+    );
+    drop(lifecycle);
+    schedulers.shutdown().await;
 }

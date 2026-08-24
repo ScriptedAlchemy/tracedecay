@@ -35,6 +35,9 @@ impl CompressionSummarizerAdapter {
                 summary_text,
                 route,
             } => {
+                if summary_text.trim().is_empty() {
+                    return Self::HermesAuxiliary;
+                }
                 let (route, extraction_result) = extraction::split_summary_route(route.as_deref());
                 Self::Persisted(PersistedSummaryInvocation {
                     summary_text,
@@ -210,6 +213,26 @@ mod tests {
                     error: None,
                 }),
             }
+        );
+    }
+
+    #[test]
+    fn empty_provided_summary_requires_an_authoritative_summary() {
+        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
+            summary_text: " \n ".into(),
+            route: Some("obsolete_empty_route".into()),
+        });
+
+        assert!(adapter.persisted_summary_invocation().is_none());
+        assert!(
+            adapter
+                .summary_request(
+                    "cursor",
+                    "session-1",
+                    None,
+                    &[raw_message(11, "user", "source")]
+                )
+                .is_some()
         );
     }
 

@@ -1,36 +1,32 @@
-// Rust guideline compliant 2025-10-17
-//! Central orchestrator for the code graph.
+//! Central orchestrator for registered `TraceDecay` project storage.
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:
-//! [`lifecycle`] (init/open/branch tracking), [`indexing`] (index/sync),
-//! [`scan`] (file walking), [`edits`] (anchored source edits), [`queries`]
+//! [`lifecycle`] (init/open/branch provenance), [`edits`] (anchored source
+//! edits), [`queries`]
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
-//! (session memory), and [`locking`] (dirty sentinel + sync lock).
+//! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
-use crate::db::Database;
+use crate::db::{Database, DatabaseStorageTelemetryHandle};
 use crate::errors::Result;
-use crate::extraction::LanguageRegistry;
-use crate::global_db::GlobalDb;
 use crate::storage::{self, StoreLayout};
 
+#[cfg(test)]
+mod concrete_runtime_tests;
 mod diagnostics;
 mod edits;
-mod facts;
-mod indexing;
+pub(crate) mod facts;
 mod lifecycle;
-mod locking;
 mod move_symbol;
-mod queries;
-mod scan;
+mod project_runtime_port;
+pub(crate) mod queries;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
+pub use lifecycle::MovedStoreAdoption;
 pub(crate) use lifecycle::git_remote_url;
-
-#[doc(hidden)]
-pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at};
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
@@ -38,12 +34,14 @@ pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at
 /// syncing a Rust codebase's semantic knowledge graph.
 pub struct TraceDecay {
     db: Database,
+    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    store_runtime_registry:
+        Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
+    configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
-    active_graph_layout: ActiveGraphLayout,
     open_options: TraceDecayOpenOptions,
-    registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
     active_branch: Option<String>,
     /// The branch whose DB is actually being served (may differ from `active_branch` on fallback).
@@ -51,12 +49,191 @@ pub struct TraceDecay {
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
     read_only: bool,
+    /// Memoized result of [`diagnostics::TraceDecay::db_path`]. All inputs
+    /// (`project_root`, `store_layout.data_root`, `serving_branch`) are
+    /// immutable for the lifetime of an instance — branch changes produce a
+    /// new `TraceDecay` rather than mutating an existing one, so the resolved
+    /// path is safe to cache for the instance's lifetime.
+    db_path_cache: OnceLock<PathBuf>,
+    context_scout_owner:
+        Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
+    context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
+    #[cfg(any(test, feature = "test-transport"))]
+    test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
+    _standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
 }
 
-#[derive(Debug, Clone)]
-struct ActiveGraphLayout {
-    dirty_path: PathBuf,
-    sync_lock_path: PathBuf,
+const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
+
+#[derive(Clone)]
+struct MountedContextScoutClaimAuthorityV1 {
+    registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
+    pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+    context: tracedecay_application::RequestContext,
+    lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    input_watermark: [u8; 32],
+}
+
+impl TraceDecay {
+    pub(crate) fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
+        self.db.storage_telemetry_handle()
+    }
+
+    pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
+        self.db.storage_page_counts().await
+    }
+
+    pub(crate) fn configuration_runtime(
+        &self,
+    ) -> &Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime> {
+        &self.configuration_runtime
+    }
+
+    pub(crate) fn store_runtime_registry(
+        &self,
+    ) -> &Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1> {
+        &self.store_runtime_registry
+    }
+
+    pub(crate) fn profile_database(&self) -> &crate::global_db::RegisteredGlobalDbLeaseV1 {
+        &self.profile_database
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn test_runtime_for_test(
+        &self,
+    ) -> Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>> {
+        self.test_runtime_guard.clone()
+    }
+
+    pub(crate) fn hook_store_layout(&self) -> &StoreLayout {
+        &self.store_layout
+    }
+
+    pub(crate) fn context_scout_owner(
+        &self,
+    ) -> Option<&Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>> {
+        self.context_scout_owner.as_ref()
+    }
+
+    /// Publishes one hook-admissible Context Scout claim authority for an
+    /// enqueued producer generation. The mount re-validates the durable
+    /// address registry and the current Plan 20 configuration before the
+    /// authority becomes claimable; a stale pin or a foreign address never
+    /// mounts.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn mount_current_context_scout_claim_authority(
+        &self,
+        registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
+        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
+        pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        context: tracedecay_application::RequestContext,
+        lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+        input_watermark: [u8; 32],
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> bool {
+        if input_watermark == [0; 32]
+            || !self.context_scout_configuration_is_current(&pin).await
+            || registry
+                .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
+                .await
+                != crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                    address,
+                )
+        {
+            return false;
+        }
+        let mounted = MountedContextScoutClaimAuthorityV1 {
+            registry,
+            pin,
+            context,
+            lifecycle,
+            address,
+            input_watermark,
+        };
+        let mut authorities = self.context_scout_claim_authorities.write().await;
+        if let Some(existing) = authorities
+            .iter_mut()
+            .find(|existing| existing.lifecycle == mounted.lifecycle)
+        {
+            *existing = mounted;
+            return true;
+        }
+        if authorities.len() == MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
+            authorities.remove(0);
+        }
+        authorities.push(mounted);
+        true
+    }
+
+    /// Resolves the claim authority mounted for one exact lifecycle, or
+    /// `None` when nothing was mounted, the Plan 20 configuration moved past
+    /// the mounted pin, or the durable address registry no longer resolves
+    /// the mounted address for this hook.
+    pub(crate) async fn resolve_current_context_scout_claim_authority(
+        &self,
+        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
+        lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Option<(
+        crate::agents::context_scout_v2::ContextScoutAddressV1,
+        [u8; 32],
+    )> {
+        let mounted = self
+            .context_scout_claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.lifecycle == *lifecycle)
+            .cloned()?;
+        if !self
+            .context_scout_configuration_is_current(&mounted.pin)
+            .await
+        {
+            return None;
+        }
+        let resolved = mounted
+            .registry
+            .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
+            .await;
+        let resolved = (resolved
+            == crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                mounted.address,
+            ))
+        .then_some((mounted.address, mounted.input_watermark));
+        // Re-check currentness after the registry read: a configuration
+        // revision that lands mid-resolve must not hand out a stale claim.
+        if resolved.is_some()
+            && self
+                .context_scout_configuration_is_current(&mounted.pin)
+                .await
+        {
+            resolved
+        } else {
+            None
+        }
+    }
+
+    async fn context_scout_configuration_is_current(
+        &self,
+        pin: &crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+    ) -> bool {
+        self.configuration_runtime
+            .client()
+            .current()
+            .await
+            .ok()
+            .map(
+                |pinned| tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                    revision_id: pinned.revision_id,
+                    snapshot: pinned.snapshot,
+                },
+            )
+            .is_some_and(|current| pin.configuration().matches_current(&current))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,48 +256,17 @@ impl TraceDecayOpenOptions {
         }
         storage::default_profile_root()
     }
-
-    async fn open_global_db(&self) -> Option<GlobalDb> {
-        match self.global_db_path.as_deref() {
-            Some(path) => GlobalDb::open_at(path).await,
-            None => GlobalDb::open().await,
-        }
-    }
 }
 
-/// Result of a full indexing operation.
-pub struct IndexResult {
-    /// Number of files scanned and indexed.
-    pub file_count: usize,
-    /// Total number of nodes extracted.
-    pub node_count: usize,
-    /// Total number of edges (extracted + resolved).
-    pub edge_count: usize,
-    /// Time taken in milliseconds.
-    pub duration_ms: u64,
-}
-
-/// Result of an incremental sync operation.
-#[derive(Debug)]
-pub struct SyncResult {
-    /// Number of newly added files.
-    pub files_added: usize,
-    /// Number of modified (re-indexed) files.
-    pub files_modified: usize,
-    /// Number of removed files.
-    pub files_removed: usize,
-    /// Time taken in milliseconds.
-    pub duration_ms: u64,
-    /// Paths of added files (populated only when doctor mode is requested).
-    pub added_paths: Vec<String>,
-    /// Paths of modified files (populated only when doctor mode is requested).
-    pub modified_paths: Vec<String>,
-    /// Paths of removed files (populated only when doctor mode is requested).
-    pub removed_paths: Vec<String>,
-    /// Files that were found on disk but could not be read (path, error message).
-    pub skipped_paths: Vec<(String, String)>,
-}
-
+/// Returns the current UNIX timestamp in seconds.
+///
+/// Defined in `tracedecay_runtime_core::tracedecay` because the memory and
+/// `memory_v2` writers stamp records with it and those layers moved into the
+/// kernel crate.
 pub use tracedecay_runtime_core::tracedecay::current_timestamp;
 
+/// Returns `true` if the file path looks like a test file.
+///
+/// Re-exported from the code-index crate so the segment list has one
+/// definition shared by extraction and the orchestrator's read paths.
 pub use tracedecay_code_index::is_test_file;

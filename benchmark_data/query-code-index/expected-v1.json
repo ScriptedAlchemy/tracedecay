@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "workload_id": "query-code-index-v1",
+  "scales": [
+    {
+      "name": "current",
+      "cases": [
+        {
+          "name": "clean",
+          "files_parsed": 9,
+          "chunks_added_or_changed": 1957,
+          "chunks_deleted": 0,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 1957,
+          "full_rebuild_reason": null,
+          "input_bytes": 153569,
+          "output_bytes": 4974303
+        },
+        {
+          "name": "warm_one_file",
+          "files_parsed": 1,
+          "chunks_added_or_changed": 1,
+          "chunks_deleted": 1,
+          "chunks_reused": 1956,
+          "projection_calls": 1,
+          "changed_ranges": 1,
+          "invalidated_chunks": 1,
+          "projection_operations": 2,
+          "full_rebuild_reason": null,
+          "input_bytes": 22394,
+          "output_bytes": 5167097
+        },
+        {
+          "name": "deletion",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 885,
+          "chunks_reused": 1072,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 885,
+          "projection_operations": 885,
+          "full_rebuild_reason": null,
+          "input_bytes": 0,
+          "output_bytes": 3668439
+        },
+        {
+          "name": "no_op",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 0,
+          "chunks_reused": 1957,
+          "projection_calls": 0,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 0,
+          "full_rebuild_reason": null,
+          "input_bytes": 0,
+          "output_bytes": 5166121
+        },
+        {
+          "name": "chunker_replay",
+          "files_parsed": 9,
+          "chunks_added_or_changed": 1957,
+          "chunks_deleted": 1957,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 1957,
+          "projection_operations": 3914,
+          "full_rebuild_reason": null,
+          "input_bytes": 153569,
+          "output_bytes": 6941116
+        },
+        {
+          "name": "incompatible_rebuild",
+          "files_parsed": 9,
+          "chunks_added_or_changed": 1957,
+          "chunks_deleted": 1957,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 1957,
+          "projection_operations": 3914,
+          "full_rebuild_reason": "chunker_incompatible",
+          "input_bytes": 153569,
+          "output_bytes": 6952858
+        }
+      ]
+    },
+    {
+      "name": "10x",
+      "cases": [
+        {
+          "name": "clean",
+          "files_parsed": 90,
+          "chunks_added_or_changed": 19570,
+          "chunks_deleted": 0,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 19570,
+          "full_rebuild_reason": null,
+          "input_bytes": 1535690,
+          "output_bytes": 49736118
+        },
+        {
+          "name": "warm_one_file",
+          "files_parsed": 1,
+          "chunks_added_or_changed": 1,
+          "chunks_deleted": 1,
+          "chunks_reused": 19569,
+          "projection_calls": 1,
+          "changed_ranges": 1,
+          "invalidated_chunks": 1,
+          "projection_operations": 2,
+          "full_rebuild_reason": null,
+          "input_bytes": 22394,
+          "output_bytes": 51654987
+        },
+        {
+          "name": "deletion",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 885,
+          "chunks_reused": 18685,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 885,
+          "projection_operations": 885,
+          "full_rebuild_reason": null,
+          "input_bytes": 0,
+          "output_bytes": 50156329
+        },
+        {
+          "name": "no_op",
+          "files_parsed": 0,
+          "chunks_added_or_changed": 0,
+          "chunks_deleted": 0,
+          "chunks_reused": 19570,
+          "projection_calls": 0,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 0,
+          "full_rebuild_reason": null,
+          "input_bytes": 0,
+          "output_bytes": 51654011
+        },
+        {
+          "name": "chunker_replay",
+          "files_parsed": 90,
+          "chunks_added_or_changed": 19570,
+          "chunks_deleted": 19570,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 19570,
+          "projection_operations": 39140,
+          "full_rebuild_reason": null,
+          "input_bytes": 1535690,
+          "output_bytes": 69403996
+        },
+        {
+          "name": "incompatible_rebuild",
+          "files_parsed": 90,
+          "chunks_added_or_changed": 19570,
+          "chunks_deleted": 19570,
+          "chunks_reused": 0,
+          "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 19570,
+          "projection_operations": 39140,
+          "full_rebuild_reason": "chunker_incompatible",
+          "input_bytes": 1535690,
+          "output_bytes": 69521416
+        }
+      ]
+    }
+  ]
+}

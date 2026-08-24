@@ -1,10 +1,18 @@
 //! AWS Kiro agent integration.
 //!
-//! Handles registration of the tracedecay MCP server in Kiro's shared global
-//! MCP config (`~/.kiro/settings/mcp.json`), adds global tracedecay steering
-//! (`~/.kiro/steering/tracedecay.md`), and installs a tracedecay-managed Kiro
-//! agent selected as the default when doing so does not overwrite a user's
-//! existing default-agent choice.
+//! Global MCP registration is driven through Kiro's own registry CLI
+//! (`kiro-cli mcp add` / `kiro-cli mcp remove`), which owns
+//! `~/.kiro/settings/mcp.json`. TraceDecay does not merge that file itself: the
+//! host owns the registry, and emulating its writes is exactly what the
+//! host-capability doctrine forbids. The binary is therefore a hard
+//! requirement for the global lifecycle, with no config-editing fallback.
+//!
+//! The rest of the integration has no CLI equivalent and stays
+//! TraceDecay-written: global tracedecay steering
+//! (`~/.kiro/steering/tracedecay.md`), a tracedecay-managed Kiro agent
+//! (`~/.kiro/agents/tracedecay.json`) selected as the default when doing so
+//! does not overwrite a user's existing default-agent choice, and the
+//! workspace-local `.kiro/settings/mcp.json`.
 //!
 //! User-owned Kiro agents remain user-managed. If `~/.kiro/agents/tracedecay.json`
 //! already exists and is not the file tracedecay writes, install and uninstall
@@ -22,12 +30,12 @@ use crate::automation::skill_targets::{
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
-    safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
+    UpdatePluginOutcome, backup_config_file, config_backup_path, install_mcp_server_entry,
+    load_json_file, load_json_file_strict, mcp_config_has_tracedecay, safe_write_json_file,
+    uninstall_mcp_server_entry,
 };
 
-/// Kiro agent.
 pub struct KiroIntegration;
 
 const PROMPT_MARKER: &str = "## TraceDecay: mandatory tool routing";
@@ -44,58 +52,66 @@ const OWNED_AGENT_DESCRIPTION: &str =
 const KIRO_AGENT_ALL_TOOLS: &str = "*";
 const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
-const KIRO_PRE_TOOL_HOOK: &str = "hook-kiro-pre-tool-use";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
-const KIRO_POST_TOOL_HOOK: &str = "hook-kiro-post-tool-use";
-const KIRO_SHORT_HOOK_TIMEOUT_MS: u64 = 5_000;
-const KIRO_SYNC_HOOK_TIMEOUT_MS: u64 = 30_000;
 
-/// A hook the managed Kiro agent registers.
+/// Name of Kiro's own MCP registry binary.
+const KIRO_CLI: &str = "kiro-cli";
+
+/// What the binary is required *for*, used in the typed absence error.
+const KIRO_CLI_LIFECYCLE: &str = "kiro MCP registry lifecycle";
+
+/// Name Kiro's registry selects the server by (`kiro-cli mcp add --name`,
+/// `kiro-cli mcp remove --name`) and the key it lands under in
+/// `mcpServers`. The two are the same string by Kiro's own contract, so the
+/// doctor and registration-state readers below keep reading `mcpServers`.
+const KIRO_MCP_SERVER_NAME: &str = "tracedecay";
+
+/// Arguments the tracedecay MCP server is launched with.
+///
+/// Shared by the CLI-driven global registration (one raw `--args` value per
+/// item) and the workspace-local config writer, so the two spellings of the
+/// same server cannot drift apart.
+const MCP_SERVER_ARGS: &[&str] = &["serve"];
+
+/// A hook the managed Kiro agent registers. Kiro's documented hook entry
+/// schema is `command` plus an optional `matcher` — nothing else, so no
+/// timeout or other tuning field exists to carry here.
 struct KiroManagedHook {
     event: &'static str,
     matcher: Option<&'static str>,
     subcommand: &'static str,
-    timeout_ms: u64,
 }
 
 /// Every managed-agent hook, in registration order. The single source of
 /// truth for the generated agent config ([`managed_agent_config`]) and the
 /// doctor checks.
-const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[
-    KiroManagedHook {
-        event: "userPromptSubmit",
-        matcher: None,
-        subcommand: KIRO_PROMPT_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "preToolUse",
-        matcher: Some("delegate"),
-        subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "preToolUse",
-        matcher: Some("subagent"),
-        subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "postToolUse",
-        matcher: Some("fs_write"),
-        subcommand: KIRO_POST_TOOL_HOOK,
-        timeout_ms: KIRO_SYNC_HOOK_TIMEOUT_MS,
-    },
-];
+///
+/// No `stop`/session-end hook is registered. Kiro's documentation describes a
+/// Stop trigger, so the host-event catalog carries it
+/// (`fixtures/host_events/kiro.json`, identity `stop`) — but only at
+/// `support: documented_unverified`, because tracedecay has never captured a
+/// real Kiro stop event or verified Kiro's persisted session format. Until a
+/// capture verifies it the native decoder rejects the event (see `decode_kiro`
+/// and the `kiro_documented_unverified_events_are_rejected_instead_of_emulated`
+/// test in `tracedecay-hooks`), `stock_event_support(Kiro, SessionBoundary)` is
+/// `Unavailable`, and no CLI subcommand or managed hook is wired. The catalog
+/// entry documents the unverified event rather than enabling it; see
+/// `docs/KIRO-INTEGRATION.md` ("Deliberate non-defaults").
+const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[KiroManagedHook {
+    event: "userPromptSubmit",
+    matcher: None,
+    subcommand: KIRO_PROMPT_HOOK,
+}];
 
 /// Builds the managed agent's `hooks` object from [`KIRO_MANAGED_HOOKS`],
-/// grouping entries per event in table order.
+/// grouping entries per event in table order. Entries carry exactly Kiro's
+/// documented fields (`command`, optional `matcher`); an undocumented field
+/// would ship schema noise Kiro never reads.
 fn managed_agent_hooks(tracedecay_bin: &str) -> serde_json::Value {
     let mut grouped: Vec<(&str, Vec<serde_json::Value>)> = Vec::new();
     for hook in KIRO_MANAGED_HOOKS {
         let mut entry = json!({
             "command": super::hook_command(tracedecay_bin, hook.subcommand),
-            "timeout_ms": hook.timeout_ms,
         });
         if let Some(matcher) = hook.matcher {
             entry["matcher"] = json!(matcher);
@@ -113,13 +129,10 @@ fn managed_agent_hooks(tracedecay_bin: &str) -> serde_json::Value {
 }
 
 fn kiro_home(home: &Path) -> PathBuf {
-    if let Ok(kiro) = std::env::var("KIRO_HOME") {
-        let kiro_path = PathBuf::from(&kiro);
-        let is_real_home = super::home_dir().as_deref() == Some(home);
-        if is_real_home || kiro_path.starts_with(home) {
-            return kiro_path;
-        }
-    }
+    // Kiro's registry CLI is invoked with an environment-cleared child and
+    // therefore resolves its profile from the admitted HOME. Do the same for
+    // every path we inspect or write here; an ambient operator KIRO_HOME must
+    // never redirect an isolated lifecycle to another profile.
     home.join(".kiro")
 }
 
@@ -147,6 +160,99 @@ fn workspace_mcp_config_path(project_path: &Path) -> PathBuf {
     project_path.join(".kiro/settings/mcp.json")
 }
 
+enum KiroDoctorInstallationState {
+    HostAbsent,
+    TraceDecayAbsent,
+    Installed,
+}
+
+fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationState> {
+    let host_home = kiro_home(home);
+    match std::fs::metadata(&host_home) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!("Kiro home {} is not a directory", host_home.display()),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(KiroDoctorInstallationState::HostAbsent);
+        }
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Kiro home {}: {error}",
+                    host_home.display()
+                ),
+            });
+        }
+    }
+
+    let mcp_path = mcp_config_path(home);
+    match std::fs::metadata(&mcp_path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!("Kiro MCP config {} is not a file", mcp_path.display()),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(KiroDoctorInstallationState::TraceDecayAbsent);
+        }
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Kiro MCP config {}: {error}",
+                    mcp_path.display()
+                ),
+            });
+        }
+    }
+
+    let contents = std::fs::read_to_string(&mcp_path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to read Kiro MCP config {}: {error}",
+            mcp_path.display()
+        ),
+    })?;
+    if contents.trim().is_empty() {
+        return Err(TraceDecayError::Config {
+            message: format!("Kiro MCP config {} is empty", mcp_path.display()),
+        });
+    }
+    let config: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to parse Kiro MCP config {}: {error}",
+                mcp_path.display()
+            ),
+        })?;
+    let Some(config) = config.as_object() else {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Kiro MCP config {} is not a JSON object",
+                mcp_path.display()
+            ),
+        });
+    };
+    let Some(servers) = config.get("mcpServers") else {
+        return Ok(KiroDoctorInstallationState::TraceDecayAbsent);
+    };
+    let Some(servers) = servers.as_object() else {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Kiro MCP config {} has a non-object mcpServers value",
+                mcp_path.display()
+            ),
+        });
+    };
+    if servers.contains_key(KIRO_MCP_SERVER_NAME) {
+        Ok(KiroDoctorInstallationState::Installed)
+    } else {
+        Ok(KiroDoctorInstallationState::TraceDecayAbsent)
+    }
+}
+
 impl AgentIntegration for KiroIntegration {
     fn name(&self) -> &'static str {
         "Kiro"
@@ -156,44 +262,25 @@ impl AgentIntegration for KiroIntegration {
         "kiro"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        std::fs::create_dir_all(kiro_home(&ctx.home)).ok();
-
-        let mcp_path = mcp_config_path(&ctx.home);
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-
-        let steering = steering_path(&ctx.home);
-        install_steering_rules(&steering)?;
-
-        let agent_path = managed_agent_path(&ctx.home);
-        let skill_index_path = managed_skill_index_path(&ctx.home);
-        let owns_agent = install_managed_agent(
-            &agent_path,
-            &ctx.tracedecay_bin,
-            &steering,
-            &ctx.home,
-            Some(&skill_index_path),
-        )?;
-
-        let cli_path = cli_config_path(&ctx.home);
-        install_default_agent(&cli_path, owns_agent)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Kiro session");
-        eprintln!("     tracedecay tools are now available through Kiro MCP");
-        eprintln!(
-            "     the tracedecay Kiro agent includes hooks for delegation guardrails and sync"
-        );
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
     }
 
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+    /// Workspace-local registration still writes `.kiro/settings/mcp.json`
+    /// directly rather than driving `kiro-cli mcp add --scope workspace`.
+    /// `--scope workspace` resolves against the CLI's *working directory*, and
+    /// `host_cli::run_host_cli` admits the profile home as its working
+    /// directory. That cannot target an arbitrary `project_path` from here;
+    /// adopting it needs a project-aware host-CLI invocation first. Until then
+    /// the file write is the only way to target the requested project. The
+    /// global path above *is* CLI-driven.
+    #[hotpath::measure(label = "kiro_project_install")]
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
         let mcp_path = workspace_mcp_config_path(project_path);
         let steering = project_path.join(".kiro/steering/tracedecay.md");
         let agent_path = project_path.join(".kiro/agents/tracedecay.json");
@@ -207,7 +294,6 @@ impl AgentIntegration for KiroIntegration {
                 skill_index_path.as_path(),
             ],
         )?;
-
         install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
         install_steering_rules(&steering)?;
         install_managed_agent(
@@ -217,7 +303,48 @@ impl AgentIntegration for KiroIntegration {
             &ctx.home,
             Some(&skill_index_path),
         )?;
+        Ok(())
+    }
 
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            workspace_mcp_config_path(project_path),
+            project_path.join(".kiro/steering/tracedecay.md"),
+            project_path.join(".kiro/agents/tracedecay.json"),
+            project_path.join(".kiro/steering/tracedecay-managed-skills.md"),
+        ])
+    }
+
+    /// Mirrors `activate_project_host_component_registration`: the workspace
+    /// scope is file-written for the same working-directory reason.
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = workspace_mcp_config_path(project_path);
+        let steering = project_path.join(".kiro/steering/tracedecay.md");
+        let agent_path = project_path.join(".kiro/agents/tracedecay.json");
+        let skill_index_path = project_path.join(".kiro/steering/tracedecay-managed-skills.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [
+                mcp_path.as_path(),
+                steering.as_path(),
+                agent_path.as_path(),
+                skill_index_path.as_path(),
+            ],
+        )?;
+        uninstall_mcp_server(&mcp_path)?;
+        remove_steering_rules(&steering);
+        remove_kiro_managed_skill_index(&ctx.home, &skill_index_path)?;
+        uninstall_managed_agent(&agent_path);
         Ok(())
     }
 
@@ -241,23 +368,30 @@ impl AgentIntegration for KiroIntegration {
         Ok(UpdatePluginOutcome::Refreshed(vec![agent_path]))
     }
 
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        uninstall_mcp_server(&mcp_config_path(&ctx.home));
-        remove_steering_rules(&steering_path(&ctx.home));
-        remove_kiro_managed_skill_index(&ctx.home, &managed_skill_index_path(&ctx.home));
-        let agent_path = managed_agent_path(&ctx.home);
-        let owned_agent = is_owned_agent_file(&agent_path);
-        uninstall_managed_agent(&agent_path);
-        uninstall_default_agent(&cli_config_path(&ctx.home), &agent_path, owned_agent);
-
-        eprintln!();
-        eprintln!("Uninstall complete. TraceDecay has been removed from Kiro.");
-        eprintln!("Start a new Kiro session for changes to take effect.");
-        Ok(())
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
+        let host_home = kiro_home(&ctx.home);
+        match kiro_doctor_installation_state(&ctx.home) {
+            Ok(KiroDoctorInstallationState::HostAbsent) => {
+                dc.warn(&format!(
+                    "Kiro is not detected at {} — run `tracedecay install --agent kiro` if you use Kiro",
+                    host_home.display()
+                ));
+                return;
+            }
+            Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
+                dc.warn(&format!(
+                    "Kiro is detected at {}, but TraceDecay is not installed — run `tracedecay install --agent kiro` if you use Kiro",
+                    host_home.display()
+                ));
+                return;
+            }
+            Ok(KiroDoctorInstallationState::Installed) => {}
+            Err(error) => {
+                dc.fail(&format!("Kiro installation state is unreadable: {error}"));
+                return;
+            }
+        }
         let global_server = doctor_check_mcp_config(dc, &ctx.home);
         doctor_check_workspace_mcp_override(
             dc,
@@ -270,6 +404,25 @@ impl AgentIntegration for KiroIntegration {
         doctor_check_default_agent(dc, &ctx.home);
     }
 
+    fn reports_absence_to_doctor(&self) -> bool {
+        true
+    }
+
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::{
+            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
+        };
+
+        if component != HostBundleComponentV1::ContextMcp {
+            return State::Missing;
+        }
+        kiro_context_mcp_registration_state(&ctx.home)
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         kiro_home(home).is_dir()
     }
@@ -278,15 +431,55 @@ impl AgentIntegration for KiroIntegration {
         Some(mcp_config_path(home))
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
-        let path = mcp_config_path(home);
-        if !path.exists() {
-            return false;
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        vec![
+            mcp_config_path(home),
+            cli_config_path(home),
+            managed_agent_path(home),
+            steering_path(home),
+            managed_skill_index_path(home),
+        ]
+    }
+
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = mcp_config_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            self.host_registration_paths(home)
         }
-        let json = load_json_file(&path);
-        json.get("mcpServers")
-            .and_then(|v| v.get("tracedecay"))
-            .is_some()
+    }
+
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            let kiro_cli = require_kiro_cli()?;
+            kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            let kiro_cli = require_kiro_cli()?;
+            kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
+        }
+        Ok(())
+    }
+
+    fn has_tracedecay(&self, home: &Path) -> bool {
+        mcp_registry_has_tracedecay(&mcp_config_path(home))
     }
 
     fn export_managed_skills(
@@ -322,14 +515,11 @@ impl AgentIntegration for KiroIntegration {
 }
 
 fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let path = workspace_mcp_config_path(project_root);
-    if !path.exists() {
-        return false;
-    }
-    let json = load_json_file(&path);
-    json.get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some()
+    mcp_registry_has_tracedecay(&workspace_mcp_config_path(project_root))
+}
+
+fn mcp_registry_has_tracedecay(path: &Path) -> bool {
+    mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
 // ---------------------------------------------------------------------------
@@ -339,15 +529,79 @@ fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
 fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
     json!({
         "command": tracedecay_bin,
-        "args": ["serve"],
+        "args": MCP_SERVER_ARGS,
         "disabled": false
     })
 }
 
-/// Render a path as a `file://` resource URI for Kiro's agent config.
+/// Resolve Kiro's own registry CLI, or fail with the typed requirement.
+///
+/// Kiro owns `~/.kiro/settings/mcp.json` through `kiro-cli mcp`. Its CLI is
+/// therefore a hard requirement for the global lifecycle, not a preference
+/// with a config-editing fallback: emulating those writes is precisely what
+/// the host-capability doctrine forbids, and a half-emulated registration is
+/// indistinguishable on disk from a corrupt one.
+fn require_kiro_cli() -> Result<PathBuf> {
+    super::host_cli::require_host_cli(KIRO_CLI, KIRO_CLI_LIFECYCLE)
+}
+
+/// Drive Kiro's own registry to add the tracedecay MCP server globally.
+///
+/// Split from the trait method so tests can supply a fake CLI and an isolated
+/// `HOME` without mutating the process environment.
+#[hotpath::measure(label = "kiro_mcp_install")]
+fn kiro_mcp_add_with(kiro_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
+    // Make the global scope explicit. Kiro's CLI also supports a workspace
+    // registry, but this lifecycle owns only the profile-global entry; the
+    // workspace (`--scope workspace`) form is deliberately not driven here —
+    // see `activate_project_host_component_registration`.
+    let mut args = vec![
+        "mcp",
+        "add",
+        "--name",
+        KIRO_MCP_SERVER_NAME,
+        "--command",
+        tracedecay_bin,
+    ];
+    for server_arg in MCP_SERVER_ARGS {
+        args.extend(["--args", server_arg]);
+    }
+    args.extend(["--scope", "global", "--force"]);
+    run_mcp_registry_step(kiro_cli, &args, home)
+}
+
+/// Drive Kiro's own registry to drop the tracedecay MCP server globally.
+fn kiro_mcp_remove_with(kiro_cli: &Path, home: &Path) -> Result<()> {
+    run_mcp_registry_step(
+        kiro_cli,
+        &[
+            "mcp",
+            "remove",
+            "--name",
+            KIRO_MCP_SERVER_NAME,
+            "--scope",
+            "global",
+        ],
+        home,
+    )
+}
+
+fn run_mcp_registry_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
+    super::host_cli::run_mcp_registry_step(
+        kiro_cli,
+        args,
+        home,
+        &mcp_config_path(home),
+        KIRO_MCP_SERVER_NAME,
+        "Kiro CLI",
+    )
+}
+
+/// Render a path as a `file://` resource URI for Kiro's agent config. Reuses
+/// the LSP client's encoder, which additionally handles Windows drive paths and
+/// UNC (`//server/share`) prefixes; POSIX paths encode identically to before.
 fn file_resource_uri(path: &Path) -> String {
-    url::Url::from_file_path(path)
-        .map_or_else(|()| path.to_string_lossy().into_owned(), |url| url.into())
+    tracedecay_lsp::analyzer::client::file_uri_from_path_text(&path.to_string_lossy())
 }
 
 fn managed_agent_config(
@@ -370,29 +624,15 @@ fn managed_agent_config(
     })
 }
 
-/// Register MCP server in ~/.kiro/settings/mcp.json.
+/// Register MCP server in a workspace-local `.kiro/settings/mcp.json`.
 fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let backup = backup_config_file(path)?;
-    let mut config = match load_json_file_strict(path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    ensure_json_object(&config, path)?;
-    ensure_child_object(&mut config, "mcpServers", path)?;
-    config["mcpServers"]["tracedecay"] = mcp_server_entry(tracedecay_bin);
-
-    safe_write_json_file(path, &config, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        path.display()
-    );
-    Ok(())
+    install_mcp_server_entry(
+        path,
+        "mcpServers",
+        mcp_server_entry(tracedecay_bin),
+        "Kiro",
+        load_json_file_strict,
+    )
 }
 
 /// Create or refresh the tracedecay-owned Kiro agent.
@@ -400,6 +640,7 @@ fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
 /// Returns true when tracedecay owns the resulting agent file. A pre-existing
 /// user-managed `tracedecay.json` is preserved and returns false so the default
 /// agent selector is not pointed at a file whose policy tracedecay does not own.
+#[hotpath::measure(label = "kiro_agent_install")]
 fn install_managed_agent(
     path: &Path,
     tracedecay_bin: &str,
@@ -434,103 +675,18 @@ fn install_kiro_managed_skill_index<'a>(
     index_path: &'a Path,
 ) -> Result<Option<&'a Path>> {
     let profile_root = profile_root_for_agent_home(home);
+    super::retired_memory_digest::remove_state(&profile_root)?;
+    super::retired_memory_digest::remove_prompt_block(index_path)?;
     let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
-    let digest_exported = crate::automation::memory_digest::sync_memory_digest_export(
-        &profile_root,
-        SkillInstallTarget::Kiro,
-        index_path,
-    )?;
-    Ok((summary.exported_count > 0 || digest_exported).then_some(index_path))
+    Ok((summary.exported_count > 0).then_some(index_path))
 }
 
-fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) {
-    super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro).ok();
-}
-
-fn install_default_agent(path: &Path, owns_agent: bool) -> Result<()> {
-    if !owns_agent {
-        eprintln!(
-            "  Skipping Kiro default-agent update because tracedecay does not own the agent file"
-        );
-        return Ok(());
-    }
-
-    let backup = backup_config_file(path)?;
-    let mut config = match load_json_file_strict(path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    ensure_json_object(&config, path)?;
-    ensure_child_object(&mut config, "chat", path)?;
-
-    match config["chat"].get("defaultAgent") {
-        Some(v) if v.as_str() == Some(KIRO_AGENT_NAME) => {
-            eprintln!("  Kiro default agent already set to tracedecay");
-            return Ok(());
-        }
-        Some(v) if v.as_str().is_some_and(is_builtin_default_agent) => {}
-        Some(v) if is_empty_default_agent(v) => {}
-        None => {}
-        Some(v) => {
-            eprintln!(
-                "  Kiro default agent is {}, leaving user choice unchanged",
-                format_json_scalar(v)
-            );
-            return Ok(());
-        }
-    }
-
-    config["chat"]["defaultAgent"] = json!(KIRO_AGENT_NAME);
-    safe_write_json_file(path, &config, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Set Kiro default agent in {}",
-        path.display()
-    );
-    Ok(())
+fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) -> Result<()> {
+    super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro)
 }
 
 fn is_builtin_default_agent(agent: &str) -> bool {
     matches!(agent, "kiro_default" | "default")
-}
-
-fn is_empty_default_agent(value: &serde_json::Value) -> bool {
-    value.is_null() || value.as_str() == Some("")
-}
-
-fn format_json_scalar(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), |s| format!("\"{s}\""))
-}
-
-fn ensure_json_object(config: &serde_json::Value, path: &Path) -> Result<()> {
-    if config.is_object() {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("{} must contain a JSON object", path.display()),
-        })
-    }
-}
-
-fn ensure_child_object(config: &mut serde_json::Value, key: &str, path: &Path) -> Result<()> {
-    if config.get(key).is_none() {
-        config[key] = json!({});
-        return Ok(());
-    }
-    if config.get(key).is_some_and(serde_json::Value::is_object) {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("{}.{} must be a JSON object", path.display(), key),
-        })
-    }
 }
 
 /// Add or refresh tracedecay's global steering resource for default Kiro
@@ -641,8 +797,9 @@ Do not use Kiro's `delegate` tool for codebase exploration, architecture mapping
 call graph work, symbol lookup, or other code research until tracedecay MCP tools \
 have been tried. Delegation is still appropriate for long-running execution work \
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
-For durable project/user facts, prefer `tracedecay_fact_store`, \
-`tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. Do not \
+For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
+`tracedecay_fact_store_search` to recall or deduplicate them; use \
+`tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. Do not \
 store secrets, credentials, or unnecessary PII in persistent facts. Use \
 `memory_scope=user` for durable preferences or projectless chat and \
 `memory_scope=project` for active-codebase facts.\n\n\
@@ -659,39 +816,17 @@ or proprietary code from the bug description before submitting.",
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn uninstall_mcp_server(path: &Path) {
-    if !path.exists() {
-        eprintln!("  {} not found, skipping", path.display());
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-    let Some(servers) = config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
-        eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
-        return;
-    };
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
-        return;
-    }
-    if servers.is_empty() {
-        config.as_object_mut().map(|o| o.remove("mcpServers"));
-    }
-    let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        std::fs::remove_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else if backup_and_write_json(path, &config) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            path.display()
-        );
-    }
+fn uninstall_mcp_server(path: &Path) -> Result<()> {
+    uninstall_mcp_server_entry(
+        path,
+        "mcpServers",
+        load_json_file,
+        McpUninstallPolicy {
+            prune_empty_root: true,
+            remove_empty_file: true,
+            durable_remove: true,
+        },
+    )
 }
 
 fn remove_steering_rules(path: &Path) {
@@ -720,7 +855,7 @@ fn remove_steering_rules(path: &Path) {
     }
     let new_contents = new_contents.trim().to_string();
     if new_contents.is_empty() {
-        std::fs::remove_file(path).ok();
+        super::safe_remove_host_file(path).ok();
         eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
     } else {
         std::fs::write(path, format!("{new_contents}\n")).ok();
@@ -739,57 +874,9 @@ fn uninstall_managed_agent(path: &Path) {
         eprintln!("  {} is user-managed, leaving unchanged", path.display());
         return;
     }
-    if std::fs::remove_file(path).is_ok() {
+    if super::safe_remove_host_file(path).is_ok() {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay Kiro agent from {}",
-            path.display()
-        );
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir(parent).ok();
-        }
-    }
-}
-
-fn uninstall_default_agent(path: &Path, agent_path: &Path, owned_agent: bool) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-    if config
-        .get("chat")
-        .and_then(|v| v.get("defaultAgent"))
-        .and_then(serde_json::Value::as_str)
-        != Some(KIRO_AGENT_NAME)
-    {
-        return;
-    }
-    if agent_path.exists() && !owned_agent {
-        eprintln!(
-            "  Kiro default agent points at a user-managed tracedecay agent, leaving unchanged"
-        );
-        return;
-    }
-
-    let Some(chat) = config.get_mut("chat").and_then(|v| v.as_object_mut()) else {
-        return;
-    };
-    chat.remove("defaultAgent");
-    if chat.is_empty() {
-        config.as_object_mut().map(|o| o.remove("chat"));
-    }
-
-    let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        std::fs::remove_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else if backup_and_write_json(path, &config) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay Kiro default agent from {}",
             path.display()
         );
     }
@@ -809,6 +896,38 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
             .get("description")
             .and_then(serde_json::Value::as_str)
             == Some(OWNED_AGENT_DESCRIPTION)
+}
+
+fn kiro_context_mcp_registration_state(
+    home: &Path,
+) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    let Ok(mcp_bytes) = std::fs::read(mcp_config_path(home)) else {
+        return State::Missing;
+    };
+    let Ok(mcp_config) = serde_json::from_slice::<serde_json::Value>(&mcp_bytes) else {
+        return State::Corrupt;
+    };
+    let Some(server) = mcp_config
+        .pointer("/mcpServers/tracedecay")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return State::Missing;
+    };
+    let mcp_current = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| !command.is_empty())
+        && server
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        && server.get("disabled").and_then(serde_json::Value::as_bool) != Some(true);
+    if !mcp_current {
+        return State::Repairable;
+    }
+    State::Current
 }
 
 /// True when the steering file carries either the current or the legacy
@@ -1033,14 +1152,7 @@ fn doctor_check_managed_agent(dc: &mut DoctorCounters, home: &Path) {
     }
 
     for hook in KIRO_MANAGED_HOOKS {
-        doctor_check_agent_hook(
-            dc,
-            &config,
-            hook.event,
-            hook.matcher,
-            hook.subcommand,
-            hook.timeout_ms,
-        );
+        doctor_check_agent_hook(dc, &config, hook.event, hook.matcher, hook.subcommand);
     }
 }
 
@@ -1087,7 +1199,6 @@ fn doctor_check_agent_hook(
     event: &str,
     matcher: Option<&str>,
     subcommand: &str,
-    timeout_ms: u64,
 ) {
     let hook = find_agent_hook(config, event, matcher, subcommand);
     let Some(hook) = hook else {
@@ -1098,15 +1209,18 @@ fn doctor_check_agent_hook(
         return;
     };
 
-    let timeout_ok = hook.get("timeout_ms").and_then(serde_json::Value::as_u64) == Some(timeout_ms);
-    if timeout_ok {
-        let matcher_label = matcher.map_or(String::new(), |m| format!(" ({m})"));
-        dc.pass(&format!("Kiro {event}{matcher_label} hook installed"));
-    } else {
+    // Kiro's hook schema is `command` + optional `matcher` only. A stray
+    // `timeout_ms` is residue from an older tracedecay version that wrote an
+    // undocumented field; a reinstall rewrites the entry to the exact schema.
+    if hook.get("timeout_ms").is_some() {
         dc.warn(&format!(
-            "Kiro {event} hook timeout differs from tracedecay default -- run `tracedecay install --agent kiro` to update"
+            "Kiro {event} hook carries an undocumented timeout_ms field from an older \
+             tracedecay version -- run `tracedecay install --agent kiro` to rewrite it"
         ));
+        return;
     }
+    let matcher_label = matcher.map_or(String::new(), |m| format!(" ({m})"));
+    dc.pass(&format!("Kiro {event}{matcher_label} hook installed"));
 }
 
 fn find_agent_hook<'a>(
@@ -1164,3 +1278,7 @@ fn doctor_check_default_agent(dc: &mut DoctorCounters, home: &Path) {
         ),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;

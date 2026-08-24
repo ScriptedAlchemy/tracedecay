@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use tracedecay_lsp::percent_hex_nibble;
+
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -133,7 +135,7 @@ fn percent_decode_path(path: &str) -> Option<String> {
         if bytes[i] == b'%' {
             let hi = *bytes.get(i + 1)?;
             let lo = *bytes.get(i + 2)?;
-            decoded.push((hex_value(hi)? << 4) | hex_value(lo)?);
+            decoded.push((percent_hex_nibble(hi)? << 4) | percent_hex_nibble(lo)?);
             i += 3;
         } else {
             decoded.push(bytes[i]);
@@ -141,15 +143,6 @@ fn percent_decode_path(path: &str) -> Option<String> {
         }
     }
     String::from_utf8(decoded).ok()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +174,10 @@ fn proxy_serve_handshake(
     original_cwd: Option<&Path>,
     timings: bool,
 ) -> Result<crate::daemon::DaemonHandshake> {
+    let unexpanded_template_path = path_arg
+        .as_deref()
+        .and_then(unexpanded_template_variable)
+        .is_some();
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
     let mut project_path = if explicit_path {
@@ -190,26 +187,43 @@ fn proxy_serve_handshake(
     };
 
     let initialized = TraceDecay::is_initialized(&project_path);
-    let auto_init_root = (!initialized && crate::config::load_sync_config(&project_path).auto_init)
-        .then(|| crate::worktree::git_worktree_root(&project_path))
-        .flatten();
+    // `serve` is a database-free proxy. It may consult only an already-pinned
+    // in-memory snapshot; missing authority disables implicit auto-init rather
+    // than reading legacy `config.json` from the client process.
+    // A never-opened project has no pinned snapshot, so `cached_sync_config`
+    // fails. Follow the schema default (auto-init enabled) in that case rather
+    // than failing closed: otherwise a discovery-mode client sitting in an
+    // unindexed git worktree would surrender routing to MCP initialize roots
+    // (or the daemon's own cwd) instead of initializing the client's cwd. This
+    // mirrors the same default fallback in `resolve_daemon_initialize_route`.
+    let auto_init_root = (!initialized
+        && crate::config::cached_sync_config(&project_path).map_or_else(
+            |_| crate::config::SyncConfig::default().auto_init,
+            |config| config.auto_init,
+        ))
+    .then(|| crate::worktree::git_worktree_root(&project_path))
+    .flatten();
     if let Some(root) = auto_init_root.as_ref() {
         project_path.clone_from(root);
     }
 
     let scope_prefix = serve_scope_prefix(original_cwd, &project_path);
-    let telemetry_timings = timings || crate::config::load_telemetry_config(&project_path).timings;
+    let telemetry_timings = timings
+        || crate::config::cached_telemetry_config(&project_path)
+            .is_ok_and(|telemetry| telemetry.timings);
     let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(project_path),
         scope_prefix,
         telemetry_timings,
         auto_init_root.is_some(),
     )?;
-    // An explicit path remains authoritative. Discovery-mode clients may use
-    // initialize roots only when cwd neither resolved nor can be auto-inited,
-    // matching the local resolver's fallback order.
+    // An explicit path remains authoritative. A literal host template means
+    // the host failed to provide that path, so initialize roots must replace
+    // any incidental process-cwd discovery (for example Cursor launching the
+    // MCP process from $HOME). Ordinary discovery-mode clients retain cwd
+    // precedence when cwd resolved or can be auto-initialized.
     handshake.allow_initialize_root_routing =
-        !explicit_path && !initialized && auto_init_root.is_none();
+        unexpanded_template_path || (!explicit_path && !initialized && auto_init_root.is_none());
     Ok(handshake)
 }
 
@@ -227,8 +241,9 @@ fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Optio
 
 /// Legacy marker recognized in existing Cursor logs by doctor diagnostics.
 /// Proxy-only `serve` no longer emits it, but older logs remain actionable.
-pub const DEGRADED_SERVE_STDERR_MARKER: &str =
-    "[tracedecay] serve: staying alive in degraded MCP mode";
+/// Canonical copy lives beside its reader in
+/// `tracedecay_agent_hosts::agents::cursor_diagnostics`.
+pub use tracedecay_agent_hosts::agents::DEGRADED_SERVE_STDERR_MARKER;
 
 #[cfg(test)]
 mod tests {

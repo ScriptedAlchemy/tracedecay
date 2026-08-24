@@ -6,6 +6,10 @@ Claude Code.
 
 ## What it ships
 
+- **Configured-language LSP bridge** (`.lsp.json`): one TraceDecay server maps
+  the supported file extensions to `tracedecay lsp bridge --stdio --project .`.
+  It is one plugin, not one plugin per language, and forwards to the
+  daemon-owned gateway rather than embedding analyzer logic.
 - **MCP server** (`.mcp.json`): the `tracedecay` stdio server exposing the code
   graph, search, call-graph, impact, memory, and session-recall tools.
 - **Skills** (`skills/`): one skill per common workflow — searching for code,
@@ -13,12 +17,12 @@ Claude Code.
   recalling project memory and session context, and more. Claude Code
   auto-discovers each `SKILL.md` by its `name`/`description` frontmatter and
   loads the body only when the workflow matches.
-- **Lifecycle hooks** (`hooks/hooks.json`): `SessionStart`,
-  `UserPromptSubmit`, `Stop`, `PreToolUse`, and `PostToolUse` handlers that
-  inject index status and tool-routing steering, keep the graph/session store
-  warm, redirect explore-agent calls toward the tracedecay tools, and nudge
-  Grep/Glob/Read-style searches toward `tracedecay_grep`, `tracedecay_search`,
-  `tracedecay_context`, and bounded graph reads.
+- **Lifecycle hooks** (`hooks/hooks.json`): `SessionStart`, `Stop`, and saved
+  edit `PostToolUse` events. Each handler submits one bounded native envelope
+  to the daemon and may return daemon-approved guidance through Claude Code's
+  documented `additionalContext` response. The daemon owns follow-up capture,
+  indexing, staleness work, and any advisory delivery; hooks never read stores,
+  route tools, or run a model.
 
 ## Install
 
@@ -31,6 +35,10 @@ tracedecay install --agent claude
 The installer resolves the absolute path of the `tracedecay` binary and writes
 it into the managed hooks, so the plugin works even when tracedecay lives on a
 path with spaces.
+
+The LSP bridge, hooks, skills, and CLI bindings form the MCP-free core. The MCP
+registration is an independently installable companion in the signed host
+bundle lifecycle; the compatibility installer composes both.
 
 ## CLI fallback
 

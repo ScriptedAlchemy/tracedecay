@@ -6,11 +6,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_glsl_file_node_is_root() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
@@ -24,11 +20,7 @@ fn test_glsl_file_node_is_root() {
 
 #[test]
 fn test_glsl_extract_functions() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
@@ -58,11 +50,7 @@ fn test_glsl_extract_functions() {
 
 #[test]
 fn test_glsl_extract_structs() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let structs: Vec<_> = result
@@ -83,11 +71,7 @@ fn test_glsl_extract_structs() {
 
 #[test]
 fn test_glsl_extract_struct_fields() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
@@ -96,7 +80,6 @@ fn test_glsl_extract_struct_fields() {
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
     let field_names: Vec<_> = fields.iter().map(|n| n.name.as_str()).collect();
-    // PointLight fields
     assert!(field_names.contains(&"position"), "fields: {field_names:?}");
     assert!(field_names.contains(&"color"), "fields: {field_names:?}");
     assert!(
@@ -104,7 +87,6 @@ fn test_glsl_extract_struct_fields() {
         "fields: {field_names:?}"
     );
     assert!(field_names.contains(&"radius"), "fields: {field_names:?}");
-    // Material fields
     assert!(field_names.contains(&"albedo"), "fields: {field_names:?}");
     assert!(field_names.contains(&"metallic"), "fields: {field_names:?}");
     assert!(
@@ -115,11 +97,7 @@ fn test_glsl_extract_struct_fields() {
 
 #[test]
 fn test_glsl_extract_uniforms() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
@@ -146,11 +124,7 @@ fn test_glsl_extract_uniforms() {
 
 #[test]
 fn test_glsl_extract_in_out_declarations() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
@@ -182,11 +156,7 @@ fn test_glsl_extract_in_out_declarations() {
 
 #[test]
 fn test_glsl_extract_preproc_defines() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
@@ -203,11 +173,7 @@ fn test_glsl_extract_preproc_defines() {
 
 #[test]
 fn test_glsl_extract_const_globals() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
@@ -221,11 +187,7 @@ fn test_glsl_extract_const_globals() {
 
 #[test]
 fn test_glsl_function_docstrings() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fresnel = result
@@ -250,11 +212,7 @@ fn test_glsl_function_docstrings() {
 
 #[test]
 fn test_glsl_function_signatures() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let dist = result
@@ -275,11 +233,7 @@ fn test_glsl_function_signatures() {
 
 #[test]
 fn test_glsl_contains_edges() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let contains: Vec<_> = result
@@ -292,11 +246,7 @@ fn test_glsl_contains_edges() {
 
 #[test]
 fn test_glsl_call_sites() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let calls: Vec<_> = result
@@ -305,7 +255,6 @@ fn test_glsl_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     let call_names: Vec<_> = calls.iter().map(|r| r.reference_name.as_str()).collect();
-    // calculatePointLight calls fresnelSchlick, distributionGGX, geometrySchlickGGX
     assert!(
         call_names.contains(&"fresnelSchlick"),
         "calls: {call_names:?}"
@@ -318,7 +267,6 @@ fn test_glsl_call_sites() {
         call_names.contains(&"geometrySchlickGGX"),
         "calls: {call_names:?}"
     );
-    // main calls calculatePointLight
     assert!(
         call_names.contains(&"calculatePointLight"),
         "calls: {call_names:?}"
@@ -338,14 +286,9 @@ fn test_glsl_extensions() {
 
 #[test]
 fn test_glsl_complexity_metrics() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.glsl"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // calculatePointLight has an if statement and main has a for loop
     let calc = result
         .nodes
         .iter()

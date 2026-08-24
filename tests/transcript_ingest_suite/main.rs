@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated transcript-ingest integration suite.
 //!
 //! One test binary for every per-agent transcript ingestion source (Claude,
@@ -14,8 +13,15 @@ mod support;
 mod claude;
 mod cline_like;
 mod codex;
+mod codex_compaction;
+mod codex_goals;
+mod codex_ingest;
+mod codex_response_items;
+mod codex_usage;
 mod cursor;
 mod cursor_composer;
 mod hermes;
 mod kiro;
+mod provider_contract;
+mod restart_atomicity;
 mod vibe;

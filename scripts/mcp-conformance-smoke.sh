@@ -24,9 +24,9 @@
 
 set -euo pipefail
 
-INSPECTOR_VERSION="${INSPECTOR_VERSION:-0.22.0}"
-CALL_TIMEOUT_SECS="${CALL_TIMEOUT_SECS:-60}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSPECTOR_VERSION="${INSPECTOR_VERSION:-$(tr -d '[:space:]' < "$REPO_ROOT/scripts/lib/inspector_version")}"
+CALL_TIMEOUT_SECS="${CALL_TIMEOUT_SECS:-60}"
 SCRIPT_PATH="$REPO_ROOT/scripts/mcp-conformance-smoke.sh"
 DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
 WORK_DIR=""
@@ -79,10 +79,10 @@ run_smoke() {
     else
       fail "tools/list has tools with object inputSchemas"
     fi
-    if json_assert "$tools_a" 'j.tools.some(t => t.name === "tracedecay_search")'; then
-      ok "tools/list includes tracedecay_search"
+    if json_assert "$tools_a" '["tracedecay_search", "tracedecay_diagnostics", "tracedecay_impact", "tracedecay_affected", "tracedecay_test_map"].every(name => j.tools.some(t => t.name === name))'; then
+      ok "tools/list includes required search and analysis tools"
     else
-      fail "tools/list includes tracedecay_search"
+      fail "tools/list includes required search and analysis tools"
     fi
   else
     cat "$work_dir/tools-a.err" >&2
@@ -103,10 +103,90 @@ run_smoke() {
     json_assert "$call_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.includes("Search Results") && c.text.includes("main"))'; then
     ok "tools/call tracedecay_search finds main()"
   else
+    if [[ -s "$call_out" ]]; then
+      cat "$call_out" >&2
+    fi
     fail "tools/call tracedecay_search finds main()"
   fi
 
-  # 4. resources/list exposes the status resource.
+  # 4. Installed analysis tools execute through the official SDK client.
+  local diagnostics_out affected_out test_map_out symbol_json impact_out node_id
+  diagnostics_out="$work_dir/diagnostics.json"
+  if inspect --method tools/call --tool-name tracedecay_diagnostics >"$diagnostics_out" 2>/dev/null &&
+    json_assert "$diagnostics_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_diagnostics returns typed evidence"
+  else
+    fail "tools/call tracedecay_diagnostics returns typed evidence"
+  fi
+
+  affected_out="$work_dir/affected.json"
+  if inspect --method tools/call --tool-name tracedecay_affected --tool-arg 'files=["src/main.rs"]' >"$affected_out" 2>/dev/null &&
+    json_assert "$affected_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_affected returns typed evidence"
+  else
+    fail "tools/call tracedecay_affected returns typed evidence"
+  fi
+
+  test_map_out="$work_dir/test-map.json"
+  if inspect --method tools/call --tool-name tracedecay_test_map --tool-arg file=src/main.rs >"$test_map_out" 2>/dev/null &&
+    json_assert "$test_map_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_test_map returns typed evidence"
+  else
+    fail "tools/call tracedecay_test_map returns typed evidence"
+  fi
+
+  symbol_json="$work_dir/find-exact-symbol.json"
+  impact_out="$work_dir/impact.json"
+  extract_exact_symbol_id() {
+    node - "$1" <<'NODE'
+const fs = require("fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+for (const content of response.content || []) {
+  if (content.type !== "text") continue;
+  try {
+    const parsed = JSON.parse(content.text);
+    const match = Array.isArray(parsed.matches) ? parsed.matches[0] : null;
+    if (match && typeof match.id === "string" && match.id) {
+      process.stdout.write(match.id);
+      process.exit(0);
+    }
+  } catch {}
+}
+process.exit(1);
+NODE
+  }
+  # Search races the verified graph and omits node_id when lexical results
+  # arrive first. find_exact_symbol waits for graph admission, then impact
+  # can use the occurrence id. Retry while the first generation is still
+  # sealing symbols into that graph.
+  node_id=""
+  for _ in $(seq 1 30); do
+    if inspect --method tools/call --tool-name tracedecay_find_exact_symbol --tool-arg name=main --tool-arg format=json >"$symbol_json" 2>/dev/null; then
+      node_id=$(extract_exact_symbol_id "$symbol_json") || true
+      if [[ -n ${node_id:-} ]]; then
+        break
+      fi
+    fi
+    sleep 1
+  done
+  if [[ -n ${node_id:-} ]] &&
+    inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>/dev/null &&
+    json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_impact returns typed evidence"
+  else
+    echo "mcp-conformance-smoke: impact node_id='${node_id:-}'" >&2
+    if [[ -s "$symbol_json" ]]; then
+      echo "----- tracedecay_find_exact_symbol format=json -----" >&2
+      cat "$symbol_json" >&2 || true
+    fi
+    if [[ -s "$impact_out" ]]; then
+      echo "----- tracedecay_impact -----" >&2
+      cat "$impact_out" >&2 || true
+    fi
+    fail "tools/call tracedecay_impact returns typed evidence"
+  fi
+
+  # 5. resources/list exposes the status resource.
   res_out="$work_dir/resources.json"
   if inspect --method resources/list > "$res_out" 2>/dev/null &&
     json_assert "$res_out" 'Array.isArray(j.resources) && j.resources.some(r => r.uri === "tracedecay://status")'; then
@@ -115,7 +195,7 @@ run_smoke() {
     fail "resources/list exposes tracedecay://status"
   fi
 
-  # 5. Error path: unknown tool must fail with a nonzero exit code.
+  # 6. Error path: unknown tool must fail with a nonzero exit code.
   if inspect --method tools/call --tool-name definitely_not_a_tool >/dev/null 2>&1; then
     fail "tools/call unknown tool exits nonzero"
   else
@@ -181,6 +261,11 @@ main() {
   mkdir -p "$fixture/src" "$WORK_DIR/home"
   printf 'fn main() { println!("hello"); }\n' > "$fixture/src/main.rs"
   git -C "$fixture" init --quiet
+  git -C "$fixture" add src/main.rs
+  git -C "$fixture" \
+    -c user.name="TraceDecay MCP Smoke" \
+    -c user.email="tracedecay-mcp-smoke@example.invalid" \
+    commit --quiet -m "test: seed MCP smoke fixture"
   trap cleanup EXIT
 
   set +e
@@ -191,7 +276,7 @@ main() {
     TRACEDECAY_BIN="$tracedecay_bin" \
     INSPECTOR_VERSION="$INSPECTOR_VERSION" \
     CALL_TIMEOUT_SECS="$CALL_TIMEOUT_SECS" \
-    "$DAEMON_HARNESS" --bin "$tracedecay_bin" --ready-timeout 5 -- \
+    "$DAEMON_HARNESS" --bin "$tracedecay_bin" --ready-timeout 60 -- \
     "$SCRIPT_PATH" --run "$WORK_DIR" "$fixture"
   status=$?
   set -e

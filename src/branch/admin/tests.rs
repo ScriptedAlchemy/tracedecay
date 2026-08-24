@@ -33,24 +33,55 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (temp, project_root, tracedecay_dir)
 }
 
-#[test]
-fn branch_admin_selection_does_not_mutate_before_commit() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
+fn prepare_remove(project_root: &Path, tracedecay_dir: &Path) -> PreparedBranchAdminMutation {
+    prepare_branch_admin_mutation(
+        project_root,
+        tracedecay_dir,
         BranchAdminAction::Remove {
             branch: "feature".to_string(),
         },
         14,
         7,
     )
-    .unwrap();
-    assert_eq!(
-        prepared.database_paths(),
-        &[tracedecay_dir.join("branches/feature.db")]
-    );
-    assert!(tracedecay_dir.join("branches/feature.db").exists());
+    .unwrap()
+}
+
+fn failpoint(message: &str) -> crate::errors::Result<()> {
+    Err(crate::errors::TraceDecayError::Config {
+        message: message.to_string(),
+    })
+}
+
+fn add_sealed_single_store_branch(tracedecay_dir: &Path, branch: &str) {
+    let mut meta = crate::branch_meta::load_branch_meta(tracedecay_dir).unwrap();
+    meta.add_branch(branch, crate::config::DB_FILENAME, "main");
+    crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).unwrap();
+    let source = crate::branch_meta::BranchGraphSourceDraftV1 {
+        project_id: "project".to_owned(),
+        repository_id: "repository".to_owned(),
+        worktree_id: format!("worktree-{branch}"),
+        worktree_root: format!("/manual/{branch}"),
+        reference: format!("refs/heads/tracedecay/track/{branch}"),
+        source_oid: format!("oid-{branch}"),
+    };
+    let outcome =
+        crate::branch_meta::publish_graph_source(tracedecay_dir, branch, None, source).unwrap();
+    assert!(matches!(
+        outcome,
+        crate::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+    ));
+}
+
+#[test]
+fn selection_is_read_only_and_commit_unlinks_exact_family() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    std::fs::write(db.with_extension("db-wal"), b"wal").unwrap();
+    std::fs::write(db.with_extension("db-shm"), b"shm").unwrap();
+    let prepared = prepare_remove(&project_root, &tracedecay_dir);
+
+    assert_eq!(prepared.database_paths(), std::slice::from_ref(&db));
+    assert!(db.exists());
     assert!(
         crate::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
@@ -59,9 +90,108 @@ fn branch_admin_selection_does_not_mutate_before_commit() {
 
     let report = prepared.commit().unwrap();
     assert_eq!(report.outcome, BranchAdminOutcome::Removed);
-    assert!(!tracedecay_dir.join("branches/feature.db").exists());
+    assert!(!db.exists());
+    assert!(!db.with_extension("db-wal").exists());
+    assert!(!db.with_extension("db-shm").exists());
     assert!(
         !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+}
+
+#[test]
+fn crash_before_metadata_cas_preserves_route_and_files() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let error = prepare_remove(&project_root, &tracedecay_dir)
+        .commit_with_hook(|boundary| {
+            if boundary == BranchAdminCommitBoundary::BeforeMetadataCas {
+                failpoint("crash before metadata CAS")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("crash before metadata CAS"));
+    assert!(db.exists());
+    assert!(
+        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+}
+
+#[test]
+fn crash_after_metadata_cas_leaves_only_unreferenced_files() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let error = prepare_remove(&project_root, &tracedecay_dir)
+        .commit_with_hook(|boundary| {
+            if boundary == BranchAdminCommitBoundary::AfterMetadataCas {
+                failpoint("crash after metadata CAS")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("crash after metadata CAS"));
+    assert!(db.exists());
+    assert!(
+        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+}
+
+#[test]
+fn metadata_cas_rejects_changed_store_path_without_unlink() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let prepared = prepare_remove(&project_root, &tracedecay_dir);
+    let mut changed = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    changed.branches.get_mut("feature").unwrap().db_file = "branches/recreated.db".to_owned();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &changed).unwrap();
+
+    let error = prepared.commit().unwrap_err();
+
+    assert!(error.to_string().contains("destructive CAS refused"));
+    assert!(db.exists());
+    assert_eq!(
+        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .branches["feature"]
+            .db_file,
+        "branches/recreated.db"
+    );
+}
+
+#[test]
+fn gc_ref_reappearance_is_refused_before_metadata_cas() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Gc,
+        0,
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(prepared.report().removed_branches, vec!["feature"]);
+    run_git(&project_root, &["branch", "feature"]);
+
+    let error = prepared.commit().unwrap_err();
+
+    assert!(error.to_string().contains("reappeared"));
+    assert!(db.exists());
+    assert!(
+        crate::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -71,19 +201,9 @@ fn branch_admin_selection_does_not_mutate_before_commit() {
 fn nonempty_metadata_only_finish_fails_closed_without_deleting() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared.finish_without_database_deletion().unwrap_err();
-
+    let error = prepare_remove(&project_root, &tracedecay_dir)
+        .finish_without_database_deletion()
+        .unwrap_err();
     assert!(
         error
             .to_string()
@@ -153,786 +273,97 @@ fn branch_admin_refuses_corrupt_metadata_without_selecting_stores() {
     assert!(tracedecay_dir.join("branches/feature.db").exists());
 }
 
-fn failpoint(message: &str) -> crate::errors::Result<()> {
-    Err(crate::errors::TraceDecayError::Config {
-        message: message.to_string(),
-    })
-}
-
-fn quarantine_files(tracedecay_dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(tracedecay_dir.join("branches"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.contains(".branch-delete-"))
-        })
-        .collect()
-}
-
-fn recover_without_fence(tracedecay_dir: &Path) {
-    let recovery = prepare_pending_branch_admin_recovery(tracedecay_dir)
-        .unwrap()
-        .expect("pending branch deletion recovery");
-    recovery.recover(|_| Ok(()), |_| Ok(())).unwrap();
-}
-
-fn recover_precommit_with_fence(
-    tracedecay_dir: &Path,
-    transaction_id: &str,
-) -> crate::db::DatabaseDeletionStates {
-    let recovery = prepare_pending_branch_admin_recovery(tracedecay_dir)
-        .unwrap()
-        .expect("pending branch deletion recovery");
-    assert_eq!(
-        recovery.disposition(),
-        BranchAdminRecoveryDisposition::PreCommitRollback
-    );
-    let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
-        recovery.database_paths(),
-        transaction_id,
-        "recover branch deletion test",
-    )
-    .unwrap();
-    recovery
-        .recover(
-            |_| Ok(()),
-            |disposition| {
-                assert_eq!(
-                    disposition,
-                    BranchAdminRecoveryDisposition::PreCommitRollback
-                );
-                fence.rollback_deleting()
-            },
-        )
-        .unwrap();
-    states
-}
-
-fn recover_committed_with_fence(
-    tracedecay_dir: &Path,
-    transaction_id: &str,
-) -> crate::db::DatabaseDeletionStates {
-    let recovery = prepare_pending_branch_admin_recovery(tracedecay_dir)
-        .unwrap()
-        .expect("pending branch deletion recovery");
-    assert_eq!(
-        recovery.disposition(),
-        BranchAdminRecoveryDisposition::CommittedCleanup
-    );
-    let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
-        recovery.database_paths(),
-        transaction_id,
-        "complete branch deletion test",
-    )
-    .unwrap();
-    recovery
-        .recover(
-            |_| Ok(()),
-            |disposition| {
-                assert_eq!(
-                    disposition,
-                    BranchAdminRecoveryDisposition::CommittedCleanup
-                );
-                fence.promote_deleted()
-            },
-        )
-        .unwrap();
-    states
-}
-
 #[test]
-fn crash_after_journal_before_deleting_publication_recovers_missing_tombstone() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
+fn failed_branch_sync_rollback_retires_only_metadata() {
+    let (_temp, _project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-    let mut primary_failed = false;
 
-    let error = prepared
-        .commit_with_precommit_hook(
-            Some(&transaction_id),
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            |phase| {
-                if phase
-                    == transaction::TransactionPhase::AfterJournalBeforeDeletingPublication
-                {
-                    primary_failed = true;
-                    return failpoint("crash before deleting publication");
-                }
-                if primary_failed
-                    && phase
-                        == transaction::TransactionPhase::AfterPhysicalRollbackBeforeDeletingRollback
-                {
-                    return failpoint("crash before tombstone rollback");
-                }
-                Ok(())
-            },
-        )
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("crash before deleting publication")
-    );
-    drop(fence);
+    rollback_published_branch_tracking(&tracedecay_dir, "feature", "branches/feature.db").unwrap();
 
     assert!(db.exists());
-    assert!(!crate::db::database_path_is_tombstoned(&db).unwrap());
-    assert!(
-        tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-    let states = recover_precommit_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.missing(), 1);
-    assert!(!crate::db::database_path_is_tombstoned(&db).unwrap());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn crash_after_physical_rollback_recovers_same_id_deleting_tombstone() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-
-    let error = prepared
-        .commit_with_precommit_hook(
-            Some(&transaction_id),
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            |phase| match phase {
-                transaction::TransactionPhase::BeforeMetadataPublication => {
-                    failpoint("force precommit rollback")
-                }
-                transaction::TransactionPhase::AfterPhysicalRollbackBeforeDeletingRollback => {
-                    failpoint("crash after physical rollback")
-                }
-                _ => Ok(()),
-            },
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("crash after physical rollback"));
-    drop(fence);
-
-    assert!(db.exists());
-    assert!(crate::db::database_path_is_tombstoned(&db).unwrap());
-    let states = recover_precommit_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.deleting(), 1);
-    assert!(!crate::db::database_path_is_tombstoned(&db).unwrap());
-}
-
-#[test]
-fn crash_after_deleting_rollback_recovers_missing_tombstone_and_clears_journal() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-
-    let error = prepared
-        .commit_with_precommit_hook(
-            Some(&transaction_id),
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            |phase| match phase {
-                transaction::TransactionPhase::BeforeMetadataPublication => {
-                    failpoint("force precommit rollback")
-                }
-                transaction::TransactionPhase::AfterDeletingRollbackBeforeJournalClear => {
-                    failpoint("crash after deleting rollback")
-                }
-                _ => Ok(()),
-            },
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("crash after deleting rollback"));
-    drop(fence);
-
-    assert!(db.exists());
-    assert!(!crate::db::database_path_is_tombstoned(&db).unwrap());
-    assert!(
-        tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-    let states = recover_precommit_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.missing(), 1);
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn metadata_commit_before_deleted_promotion_recovers_as_committed() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-
-    let error = prepared
-        .commit_with_transaction(
-            &transaction_id,
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            || failpoint("crash before deleted promotion"),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("crash before deleted promotion"));
-    drop(fence);
-
-    assert!(!db.exists());
     assert!(
         !crate::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
-    assert!(!quarantine_files(&tracedecay_dir).is_empty());
-    let states = recover_committed_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.deleting(), 1);
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(crate::db::database_path_is_tombstoned(&db).unwrap());
 }
 
-#[cfg(unix)]
+/// A branch tracked on the single project store retires metadata-only: no
+/// physical deletion candidate may reference the shared main database.
 #[test]
-fn committed_recovery_syncs_metadata_before_tombstone_transition() {
+fn removing_a_single_store_branch_never_deletes_the_project_store() {
     let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let metadata_path = tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME);
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-    prepared
-        .commit_with_transaction(
-            &transaction_id,
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            || failpoint("crash before deleted promotion"),
-        )
-        .unwrap_err();
-    drop(fence);
-
-    let metadata = std::fs::read(&metadata_path).unwrap();
-    let recovery = prepare_pending_branch_admin_recovery(&tracedecay_dir)
-        .unwrap()
-        .unwrap();
-    std::fs::remove_file(&metadata_path).unwrap();
-    let transitioned = std::cell::Cell::new(false);
-    let error = recovery
-        .recover(
-            |_| Ok(()),
-            |_| {
-                transitioned.set(true);
-                Ok(())
-            },
-        )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("failed to sync"));
-    assert!(!transitioned.get());
-    assert!(!quarantine_files(&tracedecay_dir).is_empty());
-    std::fs::write(metadata_path, metadata).unwrap();
-    recover_committed_with_fence(&tracedecay_dir, &transaction_id);
-}
-
-#[test]
-fn orphan_commit_before_deleted_promotion_recovers_as_committed() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let orphan = tracedecay_dir.join("branches/orphan.db");
-    std::fs::write(&orphan, b"orphan").unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        u64::MAX,
-        0,
-    )
-    .unwrap();
-    let fence = crate::db::DatabaseDeletionFence::acquire(
-        std::slice::from_ref(&orphan),
-        "delete orphan branch test",
-    )
-    .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-
-    let error = prepared
-        .commit_with_transaction(
-            &transaction_id,
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            || failpoint("crash after orphan commit"),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("crash after orphan commit"));
-    drop(fence);
-
-    let journal =
-        std::fs::read_to_string(tracedecay_dir.join(".branch-delete-transaction.json")).unwrap();
-    assert!(journal.contains(r#""state": "committed_orphans""#));
-    assert!(!orphan.exists());
-    let states = recover_committed_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.deleting(), 1);
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(crate::db::database_path_is_tombstoned(&orphan).unwrap());
-}
-
-#[cfg(unix)]
-#[test]
-fn committed_recovery_syncs_store_directory_before_tombstone_transition() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let orphan = tracedecay_dir.join("branches/orphan.db");
-    std::fs::write(&orphan, b"orphan").unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        u64::MAX,
-        0,
-    )
-    .unwrap();
-    let fence = crate::db::DatabaseDeletionFence::acquire(
-        std::slice::from_ref(&orphan),
-        "delete orphan branch test",
-    )
-    .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-    prepared
-        .commit_with_transaction(
-            &transaction_id,
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            || failpoint("crash after orphan commit"),
-        )
-        .unwrap_err();
-    drop(fence);
-
-    let recovery = prepare_pending_branch_admin_recovery(&tracedecay_dir)
-        .unwrap()
-        .unwrap();
-    let branches = tracedecay_dir.join("branches");
-    let displaced = tracedecay_dir.join("branches-displaced");
-    std::fs::rename(&branches, &displaced).unwrap();
-    let transitioned = std::cell::Cell::new(false);
-    let error = recovery
-        .recover(
-            |_| Ok(()),
-            |_| {
-                transitioned.set(true);
-                Ok(())
-            },
-        )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("failed to sync directory"));
-    assert!(!transitioned.get());
-    assert!(std::fs::read_dir(&displaced).unwrap().any(|entry| {
-        entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains(".branch-delete-")
-    }));
-    std::fs::rename(displaced, branches).unwrap();
-    recover_committed_with_fence(&tracedecay_dir, &transaction_id);
-}
-
-#[test]
-fn partial_rename_failpoint_rolls_back_entire_sqlite_family() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let wal = db.with_extension("db-wal");
-    std::fs::write(&wal, b"wal").unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::AfterMove(1) {
-                return failpoint("partial rename failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("partial rename failpoint"));
-    assert!(db.exists());
-    assert!(wal.exists());
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn hard_linked_wal_is_rejected_before_journal_publication() {
-    let (temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let wal = db.with_extension("db-wal");
-    std::fs::write(&wal, b"wal").unwrap();
-    std::fs::hard_link(&wal, temp.path().join("wal-alias")).unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared.commit().unwrap_err();
-
-    assert!(error.to_string().contains("hard links"));
-    assert!(db.exists());
-    assert!(wal.exists());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn hard_linked_shm_is_rejected_before_journal_publication() {
-    let (temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let shm = db.with_extension("db-shm");
-    std::fs::write(&shm, b"shm").unwrap();
-    std::fs::hard_link(&shm, temp.path().join("shm-alias")).unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared.commit().unwrap_err();
-
-    assert!(error.to_string().contains("hard links"));
-    assert!(db.exists());
-    assert!(shm.exists());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn metadata_publication_failpoint_rolls_back_quarantine() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::BeforeMetadataPublication {
-                return failpoint("metadata publication failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("metadata publication failpoint"));
-    assert!(db.exists());
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-}
-
-#[test]
-fn post_commit_cleanup_failpoint_is_retried_during_next_lock_acquisition() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup {
-                return failpoint("post-commit cleanup failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("post-commit cleanup failpoint"));
-    assert!(!db.exists());
-    assert!(
-        tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-    assert!(!quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-
-    recover_without_fence(&tracedecay_dir);
-    let retry = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    assert_eq!(retry.report().outcome, BranchAdminOutcome::NotTracked);
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn orphan_only_cleanup_retry_uses_explicit_committed_journal_state() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let orphan = tracedecay_dir.join("branches/orphan.db");
-    std::fs::write(&orphan, b"orphan").unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        u64::MAX,
-        0,
-    )
-    .unwrap();
-    assert_eq!(prepared.report().removed_orphan_dbs, vec![orphan.clone()]);
-
-    prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup {
-                return failpoint("orphan cleanup failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-    let journal =
-        std::fs::read_to_string(tracedecay_dir.join(".branch-delete-transaction.json")).unwrap();
-    assert!(journal.contains(r#""state": "committed_orphans""#));
-    assert!(!orphan.exists());
-    assert!(!quarantine_files(&tracedecay_dir).is_empty());
-
-    recover_without_fence(&tracedecay_dir);
-    let retry = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        u64::MAX,
-        0,
-    )
-    .unwrap();
-    assert_eq!(retry.report().outcome, BranchAdminOutcome::NoChanges);
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn recreated_original_family_fails_closed_and_retains_recovery_evidence() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let fence = crate::db::DatabaseDeletionFence::acquire(
-        std::slice::from_ref(&db),
-        "delete branch recreation test",
-    )
-    .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
-    let mut recreated = false;
-
-    let error = prepared
-        .commit_with_precommit_hook(
-            Some(&transaction_id),
-            || fence.publish_deleting(),
-            |_| Ok(()),
-            || fence.rollback_deleting(),
-            |phase| {
-                if phase == transaction::TransactionPhase::BeforeRefRevalidation && !recreated {
-                    std::fs::write(&db, b"recreated").unwrap();
-                    recreated = true;
-                }
-                Ok(())
-            },
-        )
-        .unwrap_err();
-    drop(fence);
-
-    assert!(
-        error
-            .to_string()
-            .contains("unexpected original branch store")
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("ambiguous source/quarantine state")
-    );
-    assert!(error.to_string().contains("recovery evidence was retained"));
-    assert_eq!(std::fs::read(&db).unwrap(), b"recreated");
-    let quarantine = quarantine_files(&tracedecay_dir);
-    assert_eq!(quarantine.len(), 1);
-    assert_eq!(std::fs::read(&quarantine[0]).unwrap(), b"feature");
-    assert!(crate::db::database_path_is_tombstoned(&db).unwrap());
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-    assert!(
-        tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-
-    std::fs::remove_file(&db).unwrap();
-    let states = recover_precommit_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.deleting(), 1);
-    assert_eq!(std::fs::read(&db).unwrap(), b"feature");
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-}
-
-#[test]
-fn gc_ref_reappearance_failpoint_rolls_back_before_metadata_commit() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
     let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.add_branch("topic", crate::config::DB_FILENAME, "main");
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Remove {
+            branch: "topic".to_string(),
+        },
+        14,
+        7,
+    )
+    .unwrap();
+
+    assert!(
+        prepared.database_paths().is_empty(),
+        "single-store branch removal must not select any database for deletion"
+    );
+    // The daemon routes empty selections through the metadata-only commit.
+    let report = prepared.finish_without_database_deletion().unwrap();
+    assert_eq!(report.outcome, BranchAdminOutcome::Removed);
+    assert!(main_db.exists(), "the project store must survive removal");
+    assert!(
+        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("topic")
+    );
+}
+
+#[test]
+fn remove_all_carries_exact_single_store_provenance_for_daemon_retirement() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    add_sealed_single_store_branch(&tracedecay_dir, "feature/one");
+    add_sealed_single_store_branch(&tracedecay_dir, "feature/two");
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::RemoveAll,
+        14,
+        7,
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .single_store_retirements()
+            .iter()
+            .map(|retirement| retirement.branch.as_str())
+            .collect::<Vec<_>>(),
+        vec!["feature/one", "feature/two"],
+        "remove-all must retain exact source provenance until cleanup commits"
+    );
+}
+
+/// GC of a dead single-store branch collects its metadata while the shared
+/// main database survives; a dead legacy private copy is still physically
+/// collected in the same pass (Plan 38 keep-list).
+#[test]
+fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_store() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let legacy_db = tracedecay_dir.join("branches/feature.db");
+    let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.add_branch("topic", crate::config::DB_FILENAME, "main");
+    meta.branches.get_mut("topic").unwrap().last_synced_at = "0".to_string();
     meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
     crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+
     let prepared = prepare_branch_admin_mutation(
         &project_root,
         &tracedecay_dir,
@@ -941,25 +372,52 @@ fn gc_ref_reappearance_failpoint_rolls_back_before_metadata_commit() {
         u64::MAX,
     )
     .unwrap();
-    assert_eq!(prepared.report().removed_branches, vec!["feature"]);
-    let mut recreated = false;
 
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::BeforeRefRevalidation && !recreated {
-                run_git(&project_root, &["branch", "feature"]);
-                recreated = true;
-            }
-            Ok(())
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("reappeared"));
-    assert!(db.exists());
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
+    assert_eq!(prepared.report().removed_branches, vec!["feature", "topic"]);
+    assert_eq!(
+        prepared.database_paths(),
+        std::slice::from_ref(&legacy_db),
+        "only the legacy private store may be a physical deletion candidate"
+    );
+    let report = prepared.commit().unwrap();
+    assert_eq!(report.outcome, BranchAdminOutcome::Removed);
     assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
+        !legacy_db.exists(),
+        "legacy private store must be collected"
+    );
+    assert!(main_db.exists(), "the project store must survive GC");
+    let persisted = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    assert!(!persisted.is_tracked("topic"));
+    assert!(!persisted.is_tracked("feature"));
+}
+
+#[test]
+fn gc_carries_only_exact_sealed_single_store_provenance_for_retirement() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    add_sealed_single_store_branch(&tracedecay_dir, "feature/stale");
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.branches
+        .get_mut("feature/stale")
+        .unwrap()
+        .last_synced_at = "0".to_owned();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Gc,
+        0,
+        u64::MAX,
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .single_store_retirements()
+            .iter()
+            .map(|retirement| retirement.branch.as_str())
+            .collect::<Vec<_>>(),
+        vec!["feature/stale"],
+        "GC must carry sealed manual provenance instead of deleting metadata alone"
     );
 }

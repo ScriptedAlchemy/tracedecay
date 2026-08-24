@@ -2,9 +2,14 @@
 name = "tracedecay-jsonrpc"
 version = "0.1.0"
 publish = false
-edition = "2024"
+edition.workspace = true
 license = "MIT"
 description = "JSON-RPC 2.0 contracts for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

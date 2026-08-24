@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated dashboard API integration tests.
 //!
 //! All `dashboard_*` integration tests live in this single binary so Windows
@@ -8,20 +7,25 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod runtime;
 
 mod dashboard_api_support;
 
 mod analytics;
 mod api;
+mod assets;
 mod automation;
 mod automation_config;
 mod automation_jobs;
 mod automation_skills;
 mod code_diagnostics;
+mod delivery;
+mod doctor;
+mod explorer;
 mod graph;
-mod lcm;
-mod lcm_fixes;
+mod loom;
 mod memory_curation;
 mod projects;
 mod savings;
 mod settings;
+mod storage;

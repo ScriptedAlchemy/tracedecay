@@ -2,16 +2,24 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::sessions::SessionMessageRecord;
-use tracedecay::sessions::lcm::LcmPreflightRequest;
-use tracedecay::sessions::source::{
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource, ingest_source,
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_sessions::runtime::SessionMessageRecord;
+use tracedecay_sessions::runtime::lcm::{LcmCompressionRequest, LcmSummarizerMode};
+use tracedecay_sessions::runtime::source::{
+    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,
     open_lcm_db as open_isolated_db,
 };
+
+async fn open_registered_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered profile session runtime")
+}
 
 struct FakeTranscriptSource {
     path: PathBuf,
@@ -98,12 +106,19 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
         "ingest_protection": {"source": "original-message"},
     });
 
-    let preflight = db
-        .lcm_preflight(LcmPreflightRequest {
+    // Active-message ingest happens on the compress path now; preflight is a
+    // read-only decision surface and never stores host messages.
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
             provider: "cursor".into(),
             session_id: "session-active-metadata".into(),
             messages: vec![active_message.clone()],
             current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
             threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -115,13 +130,12 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
             dynamic_leaf_chunk_max: None,
             context_length: None,
             reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
+            summarizer: LcmSummarizerMode::Noop,
         })
         .await
         .unwrap();
-    assert_eq!(preflight.replay_messages[0], active_message);
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 0);
 
     let raw = db
         .lcm_load_raw_message("cursor", "active-collision-metadata")
@@ -129,7 +143,7 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
         .expect("raw active message should exist");
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["lcm_active_replay"], true);
-    assert_eq!(metadata["active_replay"], preflight.replay_messages[0]);
+    assert_eq!(metadata["active_replay"], active_message);
     assert!(metadata.get("payload_ref").is_none());
     assert!(metadata.get("byte_count").is_none());
     assert!(metadata.get("char_count").is_none());
@@ -145,32 +159,37 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     let transcript = project.join("fake-transcript.jsonl");
     std::fs::write(&transcript, "{}\n").unwrap();
 
-    let db = open_isolated_db(&tmp).await;
+    let db = open_registered_runtime(&tmp).await;
     let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
     let source = FakeTranscriptSource {
         path: transcript,
         content: content.clone(),
     };
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = db
+        .ingest_profile_transcript_source_for_test(&source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
 
     let compatibility = db
-        .get_session_message("fake", "fake-message-1")
+        .session_message_for_test(HostAdmissionScope::Profile, "fake", "fake-message-1")
         .await
+        .unwrap()
         .expect("compatibility message should exist");
     assert!(
-        compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
+        compatibility.text.chars().count()
+            <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS
     );
     assert!(
         compatibility
             .text
-            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+            .contains(tracedecay_sessions::runtime::lcm::DERIVED_TRUNCATION_MARKER)
     );
 
     let raw = db
-        .lcm_load_raw_message("fake", "fake-message-1")
+        .lcm_load_raw_message_for_test("fake", "fake-message-1")
         .await
         .expect("raw message should exist");
     assert_eq!(raw.content, content);
@@ -182,35 +201,50 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
 #[tokio::test]
 async fn search_uses_bounded_projection_but_load_recovers_raw() {
     let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
+    let db = open_registered_runtime(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
-    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.upsert_session_for_test(HostAdmissionScope::Profile, &session)
+            .await
+            .unwrap()
+    );
 
     let oversized = format!(
         "unique-search-token\n{}::lossless-tail",
-        "x".repeat(tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 5)
+        "x".repeat(tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS * 5)
     );
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
-    assert!(db.upsert_session_message(&message).await);
+    assert!(
+        db.upsert_session_message_for_test(HostAdmissionScope::Profile, &message)
+            .await
+            .unwrap()
+    );
 
     let results = db
-        .search_session_messages("cursor", Some("project-a"), "unique-search-token", 10)
-        .await;
+        .search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            "cursor",
+            Some("project-a"),
+            "unique-search-token",
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].message.message_id, "message-1");
     assert!(
         results[0].message.text.chars().count()
-            <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
+            <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS
     );
     assert!(
         results[0]
             .message
             .text
-            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+            .contains(tracedecay_sessions::runtime::lcm::DERIVED_TRUNCATION_MARKER)
     );
 
     let raw = db
-        .lcm_load_raw_message("cursor", "message-1")
+        .lcm_load_raw_message_for_test("cursor", "message-1")
         .await
         .expect("raw message should exist");
     assert_eq!(raw.content, oversized);

@@ -4,20 +4,28 @@
 //! argument normalization, scope filtering, and registered-project selection.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 
 use super::super::ToolResult;
 use super::super::render;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
+use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
+
+const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
+static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
 pub(super) struct CancelSearchOnDrop(Arc<AtomicBool>);
 
 impl CancelSearchOnDrop {
+    #[cfg(test)]
     pub(super) fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self(cancelled)
     }
@@ -29,13 +37,133 @@ impl Drop for CancelSearchOnDrop {
     }
 }
 
-/// Trimmed, non-empty string argument by key, or `None` when absent, non-string,
-/// or blank after trimming.
-pub(super) fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+pub(super) async fn run_bounded_search<T, E, F>(
+    tool_name: &'static str,
+    query: String,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+    worker: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: FnOnce(
+            Arc<AtomicBool>,
+            Option<tracedecay_application::CancellationSignal>,
+        ) -> std::result::Result<T, E>
+        + Send
+        + 'static,
+{
+    let budget = search_budget(tool_name, deadline.as_ref())?;
+    run_bounded_search_with_capacity(
+        Arc::clone(&SEARCH_SCAN_SEMAPHORE),
+        budget,
+        tool_name,
+        query,
+        cancellation,
+        worker,
+    )
+    .await
+}
+
+async fn run_bounded_search_with_capacity<T, E, F>(
+    capacity: Arc<Semaphore>,
+    budget: Duration,
+    tool_name: &'static str,
+    query: String,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+    worker: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: FnOnce(
+            Arc<AtomicBool>,
+            Option<tracedecay_application::CancellationSignal>,
+        ) -> std::result::Result<T, E>
+        + Send
+        + 'static,
+{
+    if cancellation
+        .as_ref()
+        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+    {
+        return Err(search_cancelled_error(tool_name));
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_on_drop = CancelSearchOnDrop(Arc::clone(&cancelled));
+    let worker_cancellation = cancellation.clone();
+    let outcome = tokio::time::timeout(budget, async move {
+        let permit = capacity
+            .acquire_owned()
+            .await
+            .map_err(|error| TraceDecayError::Search {
+                message: format!("{tool_name} concurrency gate closed: {error}"),
+                query: query.clone(),
+            })?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            worker(cancelled, worker_cancellation)
+        })
+        .await
+        .map_err(|error| TraceDecayError::Search {
+            message: format!("{tool_name} worker failed: {error}"),
+            query,
+        })?
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })
+    })
+    .await;
+    drop(cancel_on_drop);
+
+    match outcome {
+        Ok(result) => {
+            if cancellation
+                .as_ref()
+                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            {
+                Err(search_cancelled_error(tool_name))
+            } else {
+                result
+            }
+        }
+        Err(_) => Err(TraceDecayError::project_route(
+            "source_search_deadline_exceeded",
+            true,
+            format!(
+                "{tool_name} exceeded its {}s source-scan deadline; narrow the request with path_glob",
+                budget.as_secs_f64()
+            ),
+        )),
+    }
+}
+
+fn search_budget(
+    tool_name: &str,
+    deadline: Option<&tracedecay_application::Deadline>,
+) -> Result<Duration> {
+    match deadline {
+        Some(deadline) => crate::daemon_client::deadline_remaining(deadline)
+            .map(|remaining| remaining.min(SEARCH_SCAN_CEILING))
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "source_search_deadline_exceeded",
+                    true,
+                    format!("{tool_name} request deadline elapsed before source scanning"),
+                )
+            }),
+        None => Ok(SEARCH_SCAN_CEILING),
+    }
+}
+
+fn search_cancelled_error(tool_name: &str) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "source_search_cancelled",
+        true,
+        format!("{tool_name} was cancelled during source scanning"),
+    )
 }
 
 /// Builds a `Config` error from a message, for argument-validation failures.
@@ -45,40 +173,167 @@ pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Wraps a JSON payload in a text `ToolResult`, rendering the default-format
-/// (markdown) body with a caller-supplied closure. The `format:"json"` path is
+pub(super) fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
+    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if encoded.len() > 4_096 {
+        return Err(argument_error(
+            "cursor exceeds its bounded authenticated envelope",
+        ));
+    }
+    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
+    cursor.validate().map_err(|_| {
+        argument_error("cursor is not a valid authenticated retrieval continuation")
+    })?;
+    Ok(Some(cursor))
+}
+
+/// Key under which context handlers stash analytics that must reach the server
+/// but never the client. [`rendered_tool_result`] is the one place it is lifted
+/// back out, so no handler has to remember to strip it.
+pub(super) const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
+
+/// The single wrapper every MCP tool handler returns through.
+///
+/// Lifts internal analytics out of `value` so they travel beside the result
+/// instead of inside the client payload, renders the default-format (markdown)
+/// body with `md`, and records `touched_files`. The `format:"json"` path is
 /// unaffected — [`render::finalize`] serializes `value` compactly there.
+pub(super) fn rendered_tool_result<F: FnOnce() -> String>(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+    md: F,
+) -> ToolResult {
+    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
+    let public_value = internal_analytics
+        .as_ref()
+        .and_then(|_| public_value_without_internal_context_memory_analytics(value));
+    let value = public_value.as_ref().unwrap_or(value);
+    let text = render::finalize(project_root, args, value, md);
+    let result = text_tool_result(&text, touched_files);
+    if let Some(internal_analytics) = internal_analytics {
+        result.with_internal_analytics(internal_analytics)
+    } else {
+        result
+    }
+}
+
+fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
+    let mut value = value.clone();
+    take_internal_context_memory_analytics(&mut value).map(|_| value)
+}
+
+pub(super) fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
+    value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
+}
+
+pub(super) fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files,
+    )
+}
+
+/// [`rendered_tool_result`] for handlers that touch no files.
 pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
     value: &Value,
     md: F,
 ) -> ToolResult {
-    let text = render::finalize(project_root, args, value, md);
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    )
+    rendered_tool_result(project_root, args, value, Vec::new(), md)
 }
 
-/// Wraps a JSON payload in a text `ToolResult`, rendering the default markdown
-/// body via [`render::generic_md`]. Convenience wrapper around
-/// [`tool_json_with_md`] for handlers that don't need a custom markdown
-/// renderer.
+/// [`rendered_tool_result`] for handlers that don't need a custom markdown
+/// renderer — the default body is [`render::generic_md`] over the same value.
+pub(super) fn generic_tool_result(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+) -> ToolResult {
+    rendered_tool_result(project_root, args, value, touched_files, || {
+        render::generic_md(value)
+    })
+}
+
+/// [`generic_tool_result`] for handlers that touch no files.
 pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    tool_json_with_md(project_root, args, value, || render::generic_md(value))
+    generic_tool_result(project_root, args, value, Vec::new())
+}
+
+/// Rejects tool arguments that are not a JSON object.
+///
+/// The argument value comes straight off the wire (an MCP client, the
+/// `tracedecay tool --args` CLI, or an internal dispatch probe), so a scalar
+/// or array is caller error, not a broken invariant — asserting it would
+/// panic the daemon's client task and the caller would see only a dropped
+/// connection.
+pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
+    if args.is_object() {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!("invalid arguments: {tool_name} expects a JSON object"),
+    })
+}
+
+/// Decode one catalog-owned primitive request after removing keys owned by
+/// the MCP transport rather than the application operation.
+pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
+    args: &Value,
+    tool_name: &str,
+) -> Result<T> {
+    require_object_args(args, tool_name)?;
+    let mut request = args.clone();
+    if let Some(object) = request.as_object_mut() {
+        for key in ["format", "__mcp_request_id", "project_selector"] {
+            object.remove(key);
+        }
+    }
+    serde_json::from_value(request).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid arguments for {tool_name}: {error}"),
+    })
+}
+
+/// Rejects a zero result limit with a typed error.
+///
+/// Handlers clamp a caller-supplied limit with `min(max)`, which leaves an
+/// explicit `"limit": 0` intact, so zero is caller input rather than an
+/// invariant the handler can assume away.
+pub(crate) fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
+    if limit == 0 {
+        return Err(TraceDecayError::Config {
+            message: format!("invalid parameter: {tool_name} requires limit to be at least 1"),
+        });
+    }
+    Ok(())
 }
 
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
 /// confusing error when that happens.
+///
+/// A present-but-blank value is rejected here rather than forwarded to the
+/// graph traversal layer; every handler that takes a node id shares this one
+/// guard, so the failure is a typed argument error naming the parameter.
 pub(super) fn require_node_id(args: &Value) -> Result<&str> {
-    args.get("node_id")
+    let node_id = args
+        .get("node_id")
         .or_else(|| args.get("id"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: node_id".to_string(),
-        })
+        })?;
+    if node_id.trim().is_empty() {
+        return Err(TraceDecayError::Config {
+            message: "invalid parameter: node_id must not be empty".to_string(),
+        });
+    }
+    Ok(node_id)
 }
 
 /// Returns the user-provided `path` argument, falling back to the scope
@@ -89,19 +344,6 @@ pub(super) fn effective_path<'a>(
     scope_prefix: Option<&'a str>,
 ) -> Option<&'a str> {
     args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
-}
-
-/// Returns string elements from an optional JSON array argument.
-pub(super) fn string_array_values(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Filters a Vec of items by file path prefix when a scope is active.
@@ -120,7 +362,6 @@ where
         .collect()
 }
 
-/// Deduplicates an iterator of file path strings into a `Vec<String>`.
 pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
@@ -132,325 +373,206 @@ pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec
     result
 }
 
-pub(super) fn safe_profile_relpath(value: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(value);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(TraceDecayError::Config {
-            message: format!("registry artifact path is not a safe profile-relative path: {value}"),
-        });
+#[cfg(test)]
+mod bounded_search_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timeout_includes_waiting_for_the_worker_permit() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&capacity).acquire_owned().await.unwrap();
+        let worker_started = Arc::new(AtomicBool::new(false));
+        let worker_observer = Arc::clone(&worker_started);
+
+        let error = run_bounded_search_with_capacity(
+            capacity,
+            Duration::from_millis(20),
+            "test_search",
+            "needle".to_owned(),
+            None,
+            move |_, _| -> std::result::Result<(), String> {
+                worker_observer.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        drop(held);
+
+        assert!(!worker_started.load(Ordering::Acquire));
+        assert_eq!(
+            error.project_route_context().map(|problem| problem.0),
+            Some("source_search_deadline_exceeded")
+        );
     }
-    Ok(path)
-}
 
-fn global_db_profile_root() -> Result<PathBuf> {
-    crate::storage::default_profile_root()
-}
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_the_waiter_cancels_the_blocking_worker() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(run_bounded_search_with_capacity(
+            capacity,
+            Duration::from_secs(5),
+            "test_search",
+            "needle".to_owned(),
+            None,
+            move |cancelled, _| -> std::result::Result<(), String> {
+                started_tx.send(()).unwrap();
+                while !cancelled.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                cancelled_tx.send(()).unwrap();
+                Ok(())
+            },
+        ));
 
-pub(super) fn profile_root_for_global_db(
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
-) -> Result<PathBuf> {
-    if let Some(global_db) = global_db {
-        return global_db
-            .db_path()
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "could not resolve tracedecay profile root".to_string(),
-            });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        task.abort();
+        cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
-    if !allow_default_registry_fallback {
-        return Err(TraceDecayError::Config {
-            message: "client project registry is unavailable for selector resolution".to_string(),
-        });
-    }
-    global_db_profile_root()
 }
 
-pub(super) fn project_selector_present(args: &Value, top_level_path_keys: &[&str]) -> bool {
-    args.get("project_selector").is_some()
-        || args.get("project_id").is_some()
-        || top_level_path_keys
-            .iter()
-            .any(|key| args.get(*key).is_some())
+fn invalid_registered_project_selector(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("project_route_invalid_selector", false, detail.into())
 }
 
-pub(super) async fn project_registry_context(
+pub(super) async fn registered_project_context(
     args: &Value,
-    top_level_path_keys: &[&str],
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
+    semantic_top_level_fields: &[&str],
+    global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<Option<ProjectRegistryContext>> {
-    let selector_present = project_selector_present(args, top_level_path_keys);
-    let selector = args
-        .get("project_selector")
-        .map(|value| {
-            value.as_object().ok_or_else(|| TraceDecayError::Config {
-                message: "project_selector must be an object".to_string(),
-            })
-        })
-        .transpose()?;
-    let project_id = selector
-        .and_then(|selector| selector.get("project_id"))
-        .or_else(|| args.get("project_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let project_path = selector
-        .and_then(|selector| {
-            selector
-                .get("path")
-                .or_else(|| selector.get("project_path"))
-        })
-        .or_else(|| top_level_path_keys.iter().find_map(|key| args.get(*key)))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if project_id.is_none() && project_path.is_none() {
-        if selector_present {
-            return Err(TraceDecayError::Config {
-                message: "project selector must include project_id or project_path".to_string(),
-            });
-        }
+    if let Some(alias) = ["project_id", "project_path", "project_root", "root"]
+        .into_iter()
+        .find(|key| !semantic_top_level_fields.contains(key) && args.get(*key).is_some())
+    {
+        return Err(invalid_registered_project_selector(format!(
+            "top-level `{alias}` is not a registered-project selector; use project_selector.project_id"
+        )));
+    }
+    let Some(selector_value) = args.get("project_selector") else {
         return Ok(None);
-    }
-
-    let owned_db;
-    let db = match global_db {
-        Some(db) => db,
-        None if allow_default_registry_fallback => {
-            owned_db = GlobalDb::open()
-                .await
-                .ok_or_else(|| TraceDecayError::Config {
-                    message:
-                        "could not open tracedecay project registry; run tracedecay init first"
-                            .to_string(),
-                })?;
-            &owned_db
-        }
-        None => {
-            return Err(TraceDecayError::Config {
-                message: "client project registry is unavailable for selector resolution"
-                    .to_string(),
-            });
-        }
     };
-    let context = resolve_project_registry_context(db, project_id, project_path).await;
-
-    context
-        .ok_or_else(|| unresolved_project_selector_error(project_id, project_path))
+    let selector = selector_value
+        .as_object()
+        .ok_or_else(|| invalid_registered_project_selector("project_selector must be an object"))?;
+    if selector.len() != 1 || !selector.contains_key("project_id") {
+        return Err(invalid_registered_project_selector(
+            "project_selector accepts only project_id",
+        ));
+    }
+    let project_id = selector
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            invalid_registered_project_selector(
+                "project_selector.project_id must be a non-empty string",
+            )
+        })?;
+    let db = global_db.ok_or_else(|| {
+        TraceDecayError::project_route(
+            "project_route_not_authorized",
+            false,
+            "client project registry is unavailable for selector resolution",
+        )
+    })?;
+    db.project_registry_context_by_id(project_id)
+        .await?
         .map(Some)
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "project_route_not_found",
+                false,
+                format!(
+                    "registered project not found for project_selector.project_id={project_id}; run tracedecay_project_search"
+                ),
+            )
+        })
 }
 
-async fn resolve_project_registry_context(
-    db: &GlobalDb,
-    project_id: Option<&str>,
-    project_path: Option<&str>,
-) -> Option<ProjectRegistryContext> {
-    if let Some(project_id) = project_id {
-        return db.project_registry_context_by_id(project_id).await;
-    }
-    let project_path = project_path?;
-    let selector_path = Path::new(project_path);
-    if let Some(context) = db.project_registry_context_by_alias(selector_path).await {
-        return Some(context);
-    }
-    if GlobalDb::is_explicit_project_path_selector(project_path) {
-        let git_common_dir = crate::worktree::git_common_dir(selector_path);
-        if let Some(context) = db
-            .project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
-            .await
-        {
-            return Some(context);
-        }
-    }
-    let basename = bare_project_name(project_path)?;
-    unique_project_basename_context(db, basename).await
-}
-
-async fn unique_project_basename_context(
-    db: &GlobalDb,
-    basename: &str,
-) -> Option<ProjectRegistryContext> {
-    let mut matching_ids = Vec::new();
-    for project in db.search_code_projects(basename, usize::MAX).await {
-        if !project_basename_matches(&project, basename)
-            || matching_ids.contains(&project.project_id)
-        {
-            continue;
-        }
-        matching_ids.push(project.project_id);
-        if matching_ids.len() > 1 {
-            return None;
-        }
-    }
-    let project_id = matching_ids.into_iter().next()?;
-    db.project_registry_context_by_id(&project_id).await
-}
-
-fn bare_project_name(value: &str) -> Option<&str> {
-    let mut components = Path::new(value).components();
-    let first = components.next()?;
-    if components.next().is_some() {
-        return None;
-    }
-    match first {
-        Component::Normal(name) => name.to_str().filter(|name| !name.is_empty()),
-        _ => None,
-    }
-}
-
-fn project_basename_matches(project: &CodeProjectRecord, basename: &str) -> bool {
-    [
-        project.display_root.as_str(),
-        project.canonical_root.as_str(),
-    ]
-    .into_iter()
-    .filter_map(|root| Path::new(root).file_name())
-    .any(|name| name == basename)
-}
-
-fn unresolved_project_selector_error(
-    project_id: Option<&str>,
-    project_path: Option<&str>,
-) -> TraceDecayError {
-    let selector = project_id
-        .map(|value| format!("project_id={value}"))
-        .or_else(|| project_path.map(|value| format!("project_path={value}")))
-        .unwrap_or_else(|| "empty selector".to_string());
-    TraceDecayError::Config {
-        message: format!(
-            "registered project not found for selector ({selector}); run tracedecay_project_search to find the registered project_id or full project_path"
-        ),
-    }
+/// Whether a selector names a path rather than a bare project name. This is
+/// pure syntax: it decides whether a selector may fall back to Git identity,
+/// and never consults the registry. Delegates to the canonical
+/// [`RegisteredGlobalDb::is_explicit_project_path_selector`].
+pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
+    RegisteredGlobalDb::is_explicit_project_path_selector(selector)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    use libsql::{Connection, params};
     use serde_json::json;
-    use tempfile::TempDir;
-    use tokio::sync::Mutex;
 
-    use crate::global_db::GlobalDb;
+    use crate::mcp::tools::render;
 
     use super::{
-        require_node_id, resolve_project_registry_context, string_array_values,
-        unique_project_basename_context,
+        CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,
+        is_explicit_project_path_selector, rendered_tool_result, require_node_id,
     };
+    use tracedecay_application::retrieval::NodeSurfaceRequestV1;
 
-    static CWD_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+    /// `generic_tool_result` must stay a pure spelling of the closure form it
+    /// replaced at every call site — same bytes on both output formats, and the
+    /// same internal-analytics lifting.
+    #[test]
+    fn generic_tool_result_matches_the_explicit_generic_md_closure() {
+        let mut value = json!({
+            "count": 2,
+            "items": [{"name": "alpha", "file": "src/a.rs"}, {"name": "beta", "file": "src/b.rs"}],
+        });
+        // Exercise the internal-analytics lifting branch too.
+        value[CONTEXT_MEMORY_ANALYTICS_KEY] = json!({"matches": 1});
+        let touched = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
 
-    struct CurrentDirGuard(PathBuf);
+        for args in [
+            json!({}),
+            json!({"format": "markdown"}),
+            json!({"format": "json"}),
+        ] {
+            let expected = rendered_tool_result(None, &args, &value, touched.clone(), || {
+                render::generic_md(&value)
+            });
+            let actual = generic_tool_result(None, &args, &value, touched.clone());
 
-    impl CurrentDirGuard {
-        fn capture() -> Result<Self, std::io::Error> {
-            std::env::current_dir().map(Self)
+            assert_eq!(actual.value, expected.value, "payload differs for {args}");
+            assert_eq!(
+                actual.touched_files, expected.touched_files,
+                "touched files differ for {args}"
+            );
+            assert_eq!(
+                actual.internal_analytics(),
+                expected.internal_analytics(),
+                "internal analytics differ for {args}"
+            );
         }
     }
 
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.0);
-        }
-    }
+    /// Handlers that used to build their own text envelope — `render::finalize`
+    /// then a hand-written `{"content":[{"type":"text",...}]}` — now go through
+    /// `rendered_tool_result`. That is the same envelope for any payload without
+    /// the internal-analytics key, which is every payload those handlers build.
+    #[test]
+    fn rendered_tool_result_matches_a_hand_built_text_envelope() {
+        let value = json!({"passed": 0, "failed": 1, "results": [], "note": "nothing ran"});
+        let touched = vec!["src/a.rs".to_string()];
 
-    struct TestProjectSeed {
-        project_id: String,
-        project_root: PathBuf,
-    }
+        for args in [
+            json!({}),
+            json!({"format": "markdown"}),
+            json!({"format": "json"}),
+        ] {
+            let text = render::finalize(None, &args, &value, || render::generic_md(&value));
+            let expected = super::text_tool_result(&text, touched.clone());
+            let actual = generic_tool_result(None, &args, &value, touched.clone());
 
-    async fn seed_code_project_registry_rows(
-        db: &GlobalDb,
-        projects: &[TestProjectSeed],
-    ) -> std::result::Result<(), libsql::Error> {
-        let conn = db.dashboard_connection();
-        conn.execute("BEGIN IMMEDIATE", ()).await?;
-        if let Err(err) = seed_code_project_registry_rows_in_tx(&conn, projects).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
+            assert_eq!(actual.value, expected.value, "payload differs for {args}");
+            assert_eq!(
+                actual.touched_files, expected.touched_files,
+                "touched files differ for {args}"
+            );
+            assert!(actual.internal_analytics().is_none(), "for {args}");
         }
-        if let Err(err) = conn.execute("COMMIT", ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-        Ok(())
-    }
-
-    async fn seed_code_project_registry_rows_in_tx(
-        conn: &Connection,
-        projects: &[TestProjectSeed],
-    ) -> std::result::Result<(), libsql::Error> {
-        let now = crate::tracedecay::current_timestamp();
-        for project in projects {
-            let canonical_root = GlobalDb::canonical_project_key(&project.project_root);
-            let display_root = project.project_root.to_string_lossy().to_string();
-            conn.execute(
-                "INSERT INTO code_projects
-                 (project_id, canonical_root, display_root, git_common_dir, git_remote_url,
-                  default_branch, created_at, last_seen_at)
-                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?5)
-                 ON CONFLICT(project_id) DO UPDATE SET
-                    canonical_root = excluded.canonical_root,
-                    display_root = excluded.display_root,
-                    git_common_dir = excluded.git_common_dir,
-                    git_remote_url = excluded.git_remote_url,
-                    default_branch = excluded.default_branch,
-                    last_seen_at = excluded.last_seen_at",
-                params![
-                    project.project_id.as_str(),
-                    canonical_root.as_str(),
-                    display_root.as_str(),
-                    "main",
-                    now,
-                ],
-            )
-            .await?;
-            conn.execute(
-                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(alias_path) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    last_seen_at = excluded.last_seen_at",
-                params![canonical_root.as_str(), project.project_id.as_str(), now],
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    fn run_git(cwd: &std::path::Path, args: &[&str]) {
-        let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect())
-            .unwrap_or_default();
-        #[cfg(not(windows))]
-        {
-            paths.push(PathBuf::from("/usr/bin"));
-            paths.push(PathBuf::from("/bin"));
-        }
-        let mut command = Command::new("git");
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
-        }
-        let output = command
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
-        assert!(
-            output.status.success(),
-            "git {args:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     #[test]
@@ -478,97 +600,59 @@ mod tests {
     }
 
     #[test]
-    fn test_string_array_values_keeps_only_string_items() {
-        let args = json!({
-            "values": ["alpha", 7, null, "beta"],
-            "not_array": "alpha"
-        });
-
-        assert_eq!(
-            string_array_values(&args, "values"),
-            vec!["alpha".to_string(), "beta".to_string()]
-        );
-        assert!(string_array_values(&args, "missing").is_empty());
-        assert!(string_array_values(&args, "not_array").is_empty());
-    }
-
-    #[tokio::test]
-    async fn unique_project_basename_context_scans_past_first_search_page()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let dir = TempDir::new()?;
-        let db = GlobalDb::open_at(&dir.path().join("global.db"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
-
-        let mut projects = Vec::with_capacity(102);
-        projects.push(TestProjectSeed {
-            project_id: "z_exact_old".to_string(),
-            project_root: dir.path().join("first").join("target"),
-        });
-        for index in 0..100 {
-            projects.push(TestProjectSeed {
-                project_id: format!("n_noise_{index:03}"),
-                project_root: dir
-                    .path()
-                    .join("noise")
-                    .join(format!("target-noise-{index:03}")),
-            });
-        }
-        projects.push(TestProjectSeed {
-            project_id: "a_exact_new".to_string(),
-            project_root: dir.path().join("second").join("target"),
-        });
-        seed_code_project_registry_rows(&db, &projects).await?;
-
-        assert!(
-            unique_project_basename_context(&db, "target")
-                .await
-                .is_none(),
-            "duplicate exact basenames must fail closed even when one match falls outside the first search page"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn bare_project_path_selector_prefers_unique_basename_over_cwd_git_identity()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = CWD_TEST_LOCK.lock().await;
-        let _cwd_guard = CurrentDirGuard::capture()?;
-        let dir = TempDir::new()?;
-        let repo = dir.path().join("active-repo");
-        let active_root = repo.join("active");
-        let incidental_target_dir = repo.join("target");
-        let target_root = dir.path().join("registered").join("target");
-        std::fs::create_dir_all(&active_root)?;
-        std::fs::create_dir_all(&incidental_target_dir)?;
-        std::fs::create_dir_all(&target_root)?;
-        run_git(&repo, &["init", "--quiet"]);
-
-        let db = GlobalDb::open_at(&dir.path().join("global.db"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
-        db.upsert_code_project(
-            "proj_active",
-            &active_root,
-            Some(&repo.join(".git")),
-            None,
-            Some("main"),
+    fn primitive_request_decode_strips_transport_keys_and_rejects_legacy_aliases() {
+        let decoded = decode_primitive_request::<NodeSurfaceRequestV1>(
+            &json!({
+                "node_id": "function:canonical",
+                "format": "json",
+                "project_selector": {"project_id": "project.fixture"},
+                "__mcp_request_id": "request.fixture",
+            }),
+            "tracedecay_node",
         )
-        .await
-        .ok_or_else(|| std::io::Error::other("failed to seed active project"))?;
-        db.upsert_code_project("proj_target", &target_root, None, None, Some("main"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to seed target project"))?;
+        .expect("transport keys must not enter the canonical request body");
+        assert_eq!(decoded.node_id, "function:canonical");
 
-        std::env::set_current_dir(&repo)?;
-        let context = resolve_project_registry_context(&db, None, Some("target"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to resolve bare target selector"))?;
+        let error = decode_primitive_request::<NodeSurfaceRequestV1>(
+            &json!({"node_id": "function:canonical", "project_id": "project.legacy"}),
+            "tracedecay_node",
+        )
+        .expect_err("the top-level project id alias is not a transport key");
+        assert!(error.to_string().contains("unknown field `project_id`"));
 
-        assert_eq!(
-            context.project.project_id, "proj_target",
-            "bare project_path selectors should keep basename semantics even when cwd has a git-tracked directory with the same name"
-        );
-        Ok(())
+        let error = decode_primitive_request::<NodeSurfaceRequestV1>(
+            &json!({"id": "function:legacy"}),
+            "tracedecay_node",
+        )
+        .expect_err("the unreleased id alias is not part of the canonical request");
+        assert!(error.to_string().contains("unknown field `id`"));
+    }
+
+    /// Every node-id handler shares this one guard, so a blank value must be
+    /// rejected here — naming the offending parameter — rather than reaching
+    /// graph traversal.
+    #[test]
+    fn require_node_id_rejects_blank_values() {
+        for args in [
+            json!({"node_id": ""}),
+            json!({"node_id": "   "}),
+            json!({"node_id": "\t\n"}),
+            json!({"id": ""}),
+        ] {
+            let error = require_node_id(&args).expect_err(&format!("blank node id: {args}"));
+            let message = error.to_string();
+            assert!(
+                message.contains("node_id must not be empty"),
+                "unexpected message for {args}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_project_path_detection_is_syntax_only() {
+        assert!(is_explicit_project_path_selector("/workspace/project"));
+        assert!(is_explicit_project_path_selector("team/project"));
+        assert!(is_explicit_project_path_selector("."));
+        assert!(!is_explicit_project_path_selector("project"));
     }
 }

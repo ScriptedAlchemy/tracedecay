@@ -1,0 +1,11 @@
+{
+  "session_id": "<SESSION_ID>",
+  "turn_id": "<TURN_ID>",
+  "transcript_path": null,
+  "cwd": "<PROJECT_ROOT>",
+  "hook_event_name": "Stop",
+  "model": "<MODEL>",
+  "permission_mode": "<PERMISSION_MODE>",
+  "stop_hook_active": false,
+  "last_assistant_message": "<REDACTED_RESPONSE>"
+}

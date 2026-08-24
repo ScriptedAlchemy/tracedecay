@@ -11,7 +11,7 @@ Produce a read-only code-health scorecard for the whole repo, or `$ARGUMENTS` if
 2. Inequality / god files → `tracedecay_gini` (`metric`, `scope`, optional `path`).
 3. Complexity & size offenders: `tracedecay_complexity`, `tracedecay_largest`, `tracedecay_god_class`, `tracedecay_hotspots`.
 4. Structure drill-downs matched to the weak dimension: acyclicity → `tracedecay_circular` + `tracedecay_recursion`; modularity → `tracedecay_dsm` + `tracedecay_coupling`; depth → `tracedecay_dependency_depth` + `tracedecay_inheritance_depth`.
-5. Duplication → `tracedecay_redundancy`; doc gaps → `tracedecay_doc_coverage`; panic sites → `tracedecay_unsafe_patterns`; test gaps → `tracedecay_test_risk`.
+5. Duplication → `tracedecay_redundancy`; doc gaps → `tracedecay_doc_coverage`; panic sites → `tracedecay_unsafe_patterns`; test gaps → `tracedecay_test_risk`; files the compiler never parses → `tracedecay_unmounted_files`.
 
 This reports and prioritizes; it does not edit.
 

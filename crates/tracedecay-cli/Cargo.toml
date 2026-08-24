@@ -1,0 +1,138 @@
+[package]
+name = "tracedecay-cli"
+version = "0.1.0-beta.37"
+publish = false
+edition.workspace = true
+description = "TraceDecay command-line interface and daemon binary"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[[bin]]
+name = "tracedecay"
+path = "src/main.rs"
+
+[[test]]
+name = "cli_boundary"
+path = "tests/cli_boundary.rs"
+
+[[test]]
+name = "host_lifecycle_cli_acceptance"
+path = "tests/host_lifecycle_cli_acceptance.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "opencode_one_analyzer_journey"
+path = "tests/opencode_one_analyzer_journey.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "work_loop_journey"
+path = "tests/work_loop_journey.rs"
+required-features = ["test-transport"]
+
+[features]
+default = ["production"]
+hotpath = ["dep:regex", "tracedecay/hotpath", "hotpath/hotpath", "hotpath/tokio", "hotpath/axum-0-8", "hotpath/ureq-3"]
+hotpath-alloc = ["hotpath", "tracedecay/hotpath-alloc", "hotpath/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "tracedecay/hotpath-cpu", "hotpath/hotpath-cpu"]
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+production = ["tracedecay/production"]
+token-counting = ["tracedecay/token-counting"]
+lite = ["tracedecay/lite"]
+medium = ["tracedecay/medium"]
+full = ["tracedecay/full"]
+semantic-fastembed = ["tracedecay/semantic-fastembed"]
+test-transport = ["tracedecay/test-transport"]
+lang-dart = ["tracedecay/lang-dart"]
+lang-pascal = ["tracedecay/lang-pascal"]
+lang-php = ["tracedecay/lang-php"]
+lang-ruby = ["tracedecay/lang-ruby"]
+lang-bash = ["tracedecay/lang-bash"]
+lang-protobuf = ["tracedecay/lang-protobuf"]
+lang-powershell = ["tracedecay/lang-powershell"]
+lang-nix = ["tracedecay/lang-nix"]
+lang-vbnet = ["tracedecay/lang-vbnet"]
+lang-lua = ["tracedecay/lang-lua"]
+lang-zig = ["tracedecay/lang-zig"]
+lang-objc = ["tracedecay/lang-objc"]
+lang-perl = ["tracedecay/lang-perl"]
+lang-batch = ["tracedecay/lang-batch"]
+lang-fortran = ["tracedecay/lang-fortran"]
+lang-cobol = ["tracedecay/lang-cobol"]
+lang-msbasic2 = ["tracedecay/lang-msbasic2"]
+lang-gwbasic = ["tracedecay/lang-gwbasic"]
+lang-qbasic = ["tracedecay/lang-qbasic"]
+lang-dockerfile = ["tracedecay/lang-dockerfile"]
+lang-glsl = ["tracedecay/lang-glsl"]
+lang-wgsl = ["tracedecay/lang-wgsl"]
+lang-hlsl = ["tracedecay/lang-hlsl"]
+lang-metal = ["tracedecay/lang-metal"]
+lang-markdown = ["tracedecay/lang-markdown"]
+lang-r = ["tracedecay/lang-r"]
+lang-sql = ["tracedecay/lang-sql"]
+lang-julia = ["tracedecay/lang-julia"]
+lang-haskell = ["tracedecay/lang-haskell"]
+lang-ocaml = ["tracedecay/lang-ocaml"]
+lang-clojure = ["tracedecay/lang-clojure"]
+lang-erlang = ["tracedecay/lang-erlang"]
+lang-elixir = ["tracedecay/lang-elixir"]
+lang-fsharp = ["tracedecay/lang-fsharp"]
+lang-quint = ["tracedecay/lang-quint"]
+lang-toml = ["tracedecay/lang-toml"]
+lang-lean = ["tracedecay/lang-lean"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+futures-util = "0.3.33"
+hex = "0.4"
+hotpath.workspace = true
+open = "5.3"
+rayon = "1"
+regex = { version = "1.12.3", optional = true }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["codec"] }
+tracedecay = { path = "../..", version = "0.1.0-beta.37", default-features = false }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+axum = "0.8"
+dirs = "6"
+filetime = "0.2"
+fs2 = "0.4"
+jsonschema = { version = "0.46.8", default-features = false }
+regex = "1.12.3"
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+toml = "1"
+tower = "0.5"
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+ureq = { version = "3", features = ["json"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xattr = "1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
+
+[build-dependencies]
+logo-art = "0.2"

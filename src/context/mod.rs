@@ -1,6 +1,3 @@
-/// Builds AI-ready context from the code graph.
-pub mod builder;
-
 /// Formats task context as Markdown or JSON.
 pub mod formatter;
 
@@ -13,7 +10,9 @@ pub mod read_cache;
 /// Mode dispatchers (`full`, `lines`, `map`, `signatures`) for `tracedecay_read`.
 pub mod read_modes;
 
-pub use builder::{ContextBuilder, extract_symbols_from_query};
+/// Shared source-read path, rendering, context, and cache authority.
+pub(crate) mod source_read;
+
 pub(crate) use formatter::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
     CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,

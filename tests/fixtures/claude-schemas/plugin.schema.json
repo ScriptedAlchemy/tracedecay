@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://anthropic.com/schemas/claude-code/plugin.json",
   "title": "Claude Code Plugin Manifest",
-  "description": "Schema for .claude-plugin/plugin.json — a Claude Code plugin manifest. Anthropic does not publish a standalone machine-readable schema, so this is derived from the Claude Code plugins reference (https://docs.anthropic.com/en/docs/claude-code/plugins — plugin.json fields) as of 2026-07-03. A Claude Code release adding new manifest fields requires re-vendoring.",
+  "description": "Schema for .claude-plugin/plugin.json — a Claude Code plugin manifest. Anthropic does not publish a standalone machine-readable schema, so this is derived from the Claude Code plugins reference (https://docs.anthropic.com/en/docs/claude-code/plugins — plugin.json fields) as of 2026-07-22. A Claude Code release adding new manifest fields requires re-vendoring.",
   "type": "object",
   "required": ["name"],
   "additionalProperties": false,
@@ -62,6 +62,10 @@
     "mcpServers": {
       "type": ["string", "object"],
       "description": "MCP config path (string) or inline MCP server definitions."
+    },
+    "lspServers": {
+      "type": ["string", "array", "object"],
+      "description": "Language Server Protocol configs for code intelligence: path to .lsp.json (string), or inline server map/array."
     }
   }
 }

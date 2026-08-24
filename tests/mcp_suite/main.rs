@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated MCP integration test suite.
 //!
 //! Windows CI links every integration-test binary separately, and link time
@@ -22,7 +21,6 @@ mod mcp_handler_test;
 mod mcp_rendering_test;
 #[cfg(feature = "test-transport")]
 mod mcp_server_test;
-mod mcp_test;
 mod multi_mcp_coordination_test;
 mod serve_harness;
 mod serve_template_path_test;

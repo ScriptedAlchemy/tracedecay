@@ -7,7 +7,7 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::{PHP_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -49,12 +49,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -71,23 +76,35 @@ impl ExtractionState {
 }
 
 impl PhpExtractor {
-    /// Extract code graph nodes and edges from a PHP source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the PHP source code to parse.
     pub fn extract_php(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -117,13 +134,17 @@ impl PhpExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -138,7 +159,6 @@ impl PhpExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -152,7 +172,6 @@ impl PhpExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_definition" => Self::visit_function(state, node),
@@ -165,7 +184,6 @@ impl PhpExtractor {
             "use_declaration" => Self::visit_use_declaration(state, node),
             "const_declaration" => Self::visit_const_declaration(state, node),
             "property_declaration" => Self::visit_property_declaration(state, node),
-            // Recurse into program / namespace body.
             _ => Self::visit_children(state, node),
         }
     }
@@ -213,7 +231,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -225,7 +242,6 @@ impl PhpExtractor {
 
         Self::extract_annotations(state, node, &id);
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -274,7 +290,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent class/trait/interface.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -286,7 +301,6 @@ impl PhpExtractor {
 
         Self::extract_annotations(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -334,7 +348,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -345,12 +358,9 @@ impl PhpExtractor {
         }
 
         Self::extract_annotations(state, node, &id);
-        // Extract base class (extends) references.
         Self::extract_class_extends(state, node, &id);
-        // Extract interface (implements) references.
         Self::extract_class_implements(state, node, &id);
 
-        // Visit class body members.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
@@ -401,7 +411,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -411,7 +420,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit interface body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
@@ -462,7 +470,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -472,7 +479,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit trait body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
@@ -523,7 +529,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -533,7 +538,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit enum body for cases.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "enum_declaration_list") {
@@ -651,7 +655,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -661,7 +664,6 @@ impl PhpExtractor {
             });
         }
 
-        // Visit namespace body (braced namespace) or siblings (unbraced).
         state.node_stack.push((name.clone(), id));
         if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::visit_children(state, body);
@@ -769,7 +771,6 @@ impl PhpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -779,7 +780,6 @@ impl PhpExtractor {
             });
         }
 
-        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: name.to_string(),
@@ -872,7 +872,6 @@ impl PhpExtractor {
                     } else {
                         state.node_text(child)
                     };
-                    // Strip leading $ from variable names.
                     let name = name.trim_start_matches('$').to_string();
 
                     let start_line = child.start_position().row as u32;
@@ -919,7 +918,6 @@ impl PhpExtractor {
                         });
                     }
 
-                    // Extract annotations from the enclosing property_declaration.
                     Self::extract_annotations(state, node, &id);
                 }
                 if !cursor.goto_next_sibling() {
@@ -948,10 +946,6 @@ impl PhpExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the visibility modifier from a node (looks for `visibility_modifier` child).
     fn extract_visibility(state: &ExtractionState, node: TsNode<'_>) -> Visibility {
@@ -1048,7 +1042,6 @@ impl PhpExtractor {
     ///
     /// Looks for a preceding sibling or leading `comment` node with `/**` prefix.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        // Walk previous named siblings to find a doc comment immediately before this node.
         let parent = node.parent()?;
         let mut cursor = parent.walk();
         let mut last_comment: Option<String> = None;
@@ -1057,7 +1050,6 @@ impl PhpExtractor {
             loop {
                 let child = cursor.node();
                 if child.id() == node.id() {
-                    // Return the last comment seen immediately before this node.
                     return last_comment;
                 }
                 if child.kind() == "comment" {
@@ -1083,13 +1075,11 @@ impl PhpExtractor {
     /// Strip `/** ... */` markers from a PHP doc comment.
     fn strip_doc_comment(text: &str) -> String {
         let trimmed = text.trim();
-        // Remove /** prefix and */ suffix.
         let inner = trimmed
             .strip_prefix("/**")
             .unwrap_or(trimmed)
             .strip_suffix("*/")
             .unwrap_or(trimmed);
-        // Clean up each line: remove leading * markers.
         inner
             .lines()
             .map(|line| line.trim().trim_start_matches('*').trim().to_string())
@@ -1118,7 +1108,6 @@ impl PhpExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "method_call_expression" | "nullsafe_method_call_expression" => {
@@ -1168,10 +1157,6 @@ impl PhpExtractor {
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Annotations (PHP 8 Attributes)
-    // -----------------------------------------------------------------------
 
     /// Extract PHP 8 attributes from a declaration node and create
     /// `AnnotationUsage` nodes and Annotates edges.
@@ -1254,7 +1239,6 @@ impl PhpExtractor {
                                 };
                                 state.nodes.push(graph_node);
 
-                                // Annotates unresolved ref.
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: id.clone(),
                                     reference_name: attr_name,
@@ -1264,7 +1248,6 @@ impl PhpExtractor {
                                     file_path: state.file_path.clone(),
                                 });
 
-                                // Direct Annotates edge from annotation to target.
                                 state.edges.push(Edge {
                                     source: id,
                                     target: target_id.to_string(),
@@ -1322,5 +1305,15 @@ impl crate::LanguageExtractor for PhpExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_php(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

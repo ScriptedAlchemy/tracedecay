@@ -2,68 +2,22 @@
 //! store.
 
 use std::path::{Path, PathBuf};
-
-use serde::Serialize;
+use std::sync::Arc;
 
 use crate::branch;
 use crate::branch_meta;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::storage::{self, StoreLayout};
+use crate::storage::StoreLayout;
 
-use super::{TraceDecay, TraceDecayOpenOptions};
+use super::TraceDecay;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TrackedBranchDiagnostic {
-    pub name: String,
-    pub db_file: String,
-    pub db_path: PathBuf,
-    pub db_exists: bool,
-    pub size_bytes: u64,
-    pub parent: Option<String>,
-    pub parent_db_path: Option<PathBuf>,
-    pub parent_db_exists: Option<bool>,
-    pub created_at: String,
-    pub last_synced_at: String,
-    pub is_default: bool,
-    pub is_current: bool,
-    pub is_open_active: bool,
-    pub is_serving: bool,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BranchDiagnostics {
-    pub tracking_enabled: bool,
-    pub default_branch: Option<String>,
-    pub current_branch: Option<String>,
-    pub open_active_branch: Option<String>,
-    pub serving_branch: Option<String>,
-    pub serving_db_path: PathBuf,
-    pub serving_db_exists: bool,
-    pub branch_drifted: bool,
-    pub branch_resolution: String,
-    pub is_fallback: bool,
-    pub fallback_target: Option<String>,
-    pub fallback_warning: Option<String>,
-    pub live_branch_tracked: bool,
-    pub live_branch_db_path: Option<PathBuf>,
-    pub live_branch_db_exists: Option<bool>,
-    pub nearest_tracked_ancestor: Option<String>,
-    pub nearest_tracked_ancestor_db_path: Option<PathBuf>,
-    pub nearest_tracked_ancestor_db_exists: Option<bool>,
-    pub tracked_branch_count: usize,
-    pub branches: Vec<TrackedBranchDiagnostic>,
-    pub warnings: Vec<String>,
-}
+/// Branch diagnostics are part of the downward graph-runtime port contract, so
+/// `tracedecay-usecases` owns the shape and the root engine produces exactly
+/// that type rather than a structurally identical twin.
+pub use tracedecay_usecases::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
 
 impl TraceDecay {
-    /// Raw connection to the project database for crate-internal read layers
-    /// (the dashboard HTTP server). Honors whatever branch DB `open` selected.
-    pub(crate) fn dashboard_connection(&self) -> libsql::Connection {
-        self.db.conn().clone()
-    }
-
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
         std::sync::Arc::new(self.db.clone())
     }
@@ -74,97 +28,109 @@ impl TraceDecay {
         self.db_path()
     }
 
-    pub(super) fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
-        if self.read_only {
-            return Err(TraceDecayError::Config {
-                message: format!("cannot {operation}: active TraceDecay store is open read-only"),
-            });
-        }
-
-        if self.is_fallback() {
-            let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
-            let serving = self.serving_branch.as_deref().unwrap_or("default branch");
-            let hint = self.active_branch.as_deref().map_or_else(
-                || " Check out a tracked branch before writing.".to_string(),
-                |branch| format!(" Run `tracedecay branch add {branch}` before writing."),
-            );
-
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "cannot {operation}: active branch '{active}' is served from fallback branch \
-                     '{serving}'.{hint}"
-                ),
-            });
-        }
-
-        // Branch-drift guard. A long-running MCP server resolves its branch DB
-        // once at open time and caches `serving_branch`. If the working tree
-        // switched branches since then, this instance still holds the *old*
-        // branch's DB — a write would persist the new branch's files into the
-        // wrong DB. Re-read the live branch and refuse when it no longer matches
-        // the branch we serve. Single-DB mode (no branch metadata) leaves
-        // `serving_branch == None` and is exempt: there is only one DB (#2).
-        if let Some(serving) = self.serving_branch.as_deref() {
-            let live = branch::current_branch(&self.project_root);
-            if live.as_deref() != Some(serving) {
-                let live_name = live.as_deref().unwrap_or("detached HEAD");
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "cannot {operation}: index is open for branch '{serving}' but the working \
-                         tree is now on '{live_name}'. Reopen tracedecay so it serves '{live_name}' \
-                         (e.g. restart the MCP server)."
-                    ),
-                });
-            }
-        }
-
-        Ok(())
+    /// A fresh branch memo rooted at this instance's project root.
+    ///
+    /// Create one at a request or write-gate entry and thread it through every
+    /// drift check and gate that request performs, so a single `gix` HEAD read
+    /// (or, for a linked worktree, a single `git` spawn) serves all of them.
+    /// Never store it: a checkout must be visible to the next request.
+    #[must_use]
+    pub fn branch_memo(&self) -> branch::BranchMemo {
+        branch::BranchMemo::new(&self.project_root)
     }
 
     /// Returns `true` when the live git branch differs from the branch this
     /// instance resolved at open time (and branch tracking is active).
     ///
-    /// A long-running MCP server resolves its branch DB once at open time; a
-    /// mid-session `git checkout` makes the cached DB stale. Callers detect
-    /// that here and reopen the correct branch DB via
+    /// A long-running MCP server resolves its branch provenance once at open
+    /// time; a mid-session `git checkout` leaves it scoped to the previous
+    /// branch's publication epoch. Callers detect that here and reopen onto
+    /// the live branch via
     /// [`reopen_for_current_branch`](Self::reopen_for_current_branch) before
     /// serving reads or writes. The comparison is against the open-time branch
     /// (`active_branch`), so reopening clears the drift even when the new
-    /// branch is untracked and legitimately falls back to an ancestor DB —
-    /// avoiding a reopen loop. Returns `false` in single-DB mode (no branch
-    /// metadata), where every branch maps to the same DB.
+    /// branch is untracked and legitimately falls back to an ancestor's
+    /// provenance — avoiding a reopen loop. Returns `false` when the store
+    /// publishes no branch metadata at all, where there is no branch identity
+    /// to drift from.
     pub fn branch_drifted(&self) -> bool {
+        self.branch_drifted_with(&self.branch_memo())
+    }
+
+    /// [`branch_drifted`](Self::branch_drifted) against a branch resolution
+    /// this request already made.
+    ///
+    /// `serving_branch` is `Some` exactly when the store published branch
+    /// metadata, so an untracked store still short-circuits without resolving
+    /// anything.
+    pub fn branch_drifted_with(&self, live_branch: &branch::BranchMemo) -> bool {
         if self.serving_branch.is_none() {
             return false;
         }
-        branch::current_branch(&self.project_root).as_deref() != self.active_branch.as_deref()
+        live_branch.resolve_for(&self.project_root).as_deref() != self.active_branch.as_deref()
     }
 
     /// Reopens this project for the live git branch, returning a fresh instance
     /// bound to the correct branch DB. Use after [`branch_drifted`](Self::branch_drifted)
     /// reports drift so subsequent reads and writes target the right DB.
     pub async fn reopen_for_current_branch(&self) -> Result<Self> {
-        Self::open_with_options(&self.project_root, self.open_options.clone()).await
+        Self::open_with_registered_configuration(
+            &self.project_root,
+            self.open_options.clone(),
+            self.store_layout.clone(),
+            self.configuration_runtime.registered_database(),
+            self.profile_database.clone(),
+            Arc::clone(&self.store_runtime_registry),
+        )
+        .await
     }
 
-    /// Recompute the on-disk path to the `SQLite` DB this instance is
-    /// serving. Useful for diagnostics (e.g. WAL/SHM size sampling) —
-    /// returns the same path that `Database::open` was called with.
+    /// On-disk path to the `SQLite` DB this instance is serving. Useful for
+    /// diagnostics (e.g. WAL/SHM size sampling) — returns the same path that
+    /// `Database::open` was called with.
+    ///
+    /// The inputs (`project_root`, `store_layout.data_root`, and
+    /// `serving_branch`) are immutable for the lifetime of a `TraceDecay`
+    /// instance — branch changes are served by a freshly constructed
+    /// instance rather than mutating an existing one — so the resolved path
+    /// is memoized in `db_path_cache` after the first call instead of
+    /// re-reading and re-parsing branch metadata from disk on every call.
     pub fn db_path(&self) -> PathBuf {
-        let (path, _, _) = Self::resolve_db_for_branch(
-            &self.project_root,
-            &self.store_layout.data_root,
-            self.serving_branch.as_deref(),
-        );
-        path
+        self.db_path_cache
+            .get_or_init(|| {
+                let (path, _, _) = Self::resolve_db_for_branch(
+                    &self.project_root,
+                    &self.store_layout.data_root,
+                    self.serving_branch.as_deref(),
+                );
+                path
+            })
+            .clone()
     }
 
     pub fn store_layout(&self) -> &StoreLayout {
         &self.store_layout
     }
 
-    pub(crate) fn open_options(&self) -> TraceDecayOpenOptions {
-        self.open_options.clone()
+    pub(crate) fn retained_store_runtime_registry(
+        &self,
+    ) -> std::sync::Arc<
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    > {
+        std::sync::Arc::clone(&self.store_runtime_registry)
+    }
+
+    pub(crate) fn retained_project_store_db(&self) -> Result<Database> {
+        if self.db.canonical_database_path() != self.store_layout.graph_db_path {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "mounted project database '{}' differs from canonical StoreLayout locator '{}'",
+                    self.db.canonical_database_path().display(),
+                    self.store_layout.graph_db_path.display()
+                ),
+            });
+        }
+        Ok(self.db.clone())
     }
 
     pub async fn open_project_store_db(&self) -> Result<Database> {
@@ -174,22 +140,19 @@ impl TraceDecay {
                     .to_string(),
             });
         }
-        let authority = crate::db::DatabaseAuthority::for_runtime(
-            &self.store_layout.graph_db_path,
-            "open diagnostics project store",
-        )?;
-        let (db, _) = Database::open(&self.store_layout.graph_db_path, &authority).await?;
-        Ok(db)
+        self.retained_project_store_db()
     }
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
-        let authority = crate::db::DatabaseAuthority::for_runtime(
-            &self.store_layout.graph_db_path,
-            "open diagnostics project store read-only",
-        )?;
-        let (db, _) =
-            Database::open_read_only(&self.store_layout.graph_db_path, &authority).await?;
-        Ok(db)
+        let database = self.retained_project_store_db()?;
+        if database.is_writable() {
+            return Err(TraceDecayError::Config {
+                message:
+                    "cannot issue a read-only project store client from a writable database lease"
+                        .to_string(),
+            });
+        }
+        Ok(database)
     }
 
     fn build_branch_diagnostics(
@@ -378,43 +341,6 @@ impl TraceDecay {
             branches,
             warnings,
         }
-    }
-
-    pub fn project_branch_diagnostics(project_root: &Path) -> BranchDiagnostics {
-        let store_layout = storage::resolve_layout_for_current_profile(project_root)
-            .unwrap_or_else(|_| {
-                let profile_root = storage::default_profile_root()
-                    .unwrap_or_else(|_| std::path::PathBuf::from(crate::config::TRACEDECAY_DIR));
-                storage::default_profile_sharded_layout(project_root, &profile_root).unwrap_or_else(
-                    |_| {
-                        storage::profile_sharded_layout(
-                            project_root,
-                            &profile_root,
-                            &storage::EnrollmentMarker {
-                                project_id: storage::default_profile_project_id(project_root),
-                                storage_mode: storage::StorageMode::ProfileSharded,
-                            },
-                        )
-                        .unwrap_or_else(|err| {
-                            panic!("default profile project id must be valid: {err}")
-                        })
-                    },
-                )
-            });
-        let current_branch = branch::current_branch(project_root);
-        let (serving_db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
-            project_root,
-            &store_layout.data_root,
-            current_branch.as_deref(),
-        );
-        Self::build_branch_diagnostics(
-            project_root,
-            &store_layout.data_root,
-            current_branch,
-            serving_branch,
-            fallback_warning,
-            serving_db_path,
-        )
     }
 
     pub fn branch_diagnostics(&self) -> BranchDiagnostics {

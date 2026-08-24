@@ -44,7 +44,7 @@ fn canonical_tool_name(raw: &str) -> String {
 fn every_mcp_tool_is_invocable_via_cli_full_name() {
     // The CLI accepts the fully-qualified `tracedecay_<suffix>` name and must
     // resolve it back to the exact same definition.
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     assert!(!tools.is_empty());
     for tool in &tools {
         let resolved = canonical_tool_name(&tool.name);
@@ -62,7 +62,7 @@ fn every_mcp_tool_is_invocable_via_cli_full_name() {
 fn every_mcp_tool_is_invocable_via_cli_short_name() {
     // The ergonomic form drops the `tracedecay_` prefix. `tracedecay tool
     // <suffix>` must reach the same definition.
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for tool in &tools {
         let short = tool
             .name
@@ -90,7 +90,7 @@ fn every_mcp_tool_is_invocable_via_cli_short_name() {
 fn cli_tool_names_are_unique_after_canonicalization() {
     // Two tools canonicalizing to the same name would make one of them
     // unreachable from the CLI (the `find` returns the first match).
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let mut seen = std::collections::HashSet::new();
     for tool in &tools {
         let canonical = canonical_tool_name(&tool.name);
@@ -105,7 +105,7 @@ fn cli_tool_names_are_unique_after_canonicalization() {
 fn cli_aliases_do_not_shadow_real_tools() {
     // An alias source that also names a real tool suffix would hijack that
     // tool's CLI invocation. Guard the aliases stay purely legacy synonyms.
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for (alias_src, _target) in NAME_ALIASES {
         let collides = tools
             .iter()
@@ -120,7 +120,7 @@ fn cli_aliases_do_not_shadow_real_tools() {
 
 #[test]
 fn every_tool_description_is_non_empty_and_within_cap() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for tool in &tools {
         let desc = tool.description.trim();
         assert!(

@@ -1,16 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use libsql::{Connection, params};
 use serde_json::{Map, Value, json};
 
-use crate::SessionMessageRecord;
-
-fn message_storage_text(content: &Value) -> String {
-    content.as_str().map_or_else(
-        || serde_json::to_string(content).unwrap_or_else(|_| content.to_string()),
-        str::to_string,
-    )
-}
+use crate::retrieval_content::projected_content_hash;
+use crate::runtime::SessionMessageRecord;
+use crate::runtime::shared::message_storage_text;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlValue, params};
 
 use super::compression_decision::{
     self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
@@ -19,7 +15,7 @@ use super::compression_decision::{
 };
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
-use super::types::LcmExtractionResult;
+use super::types::{LcmExtractionResult, LcmRelationProjectionStatus};
 use super::{
     LCM_DEFAULT_FRESH_TAIL_COUNT, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
@@ -28,7 +24,6 @@ use super::{
     payload, raw, replay_transactions, security, util,
 };
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
-const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
 const PRESERVED_TODO_CONTEXT_PREFIX: &str =
     "[Your active task list was preserved across context compression]";
 const PRESERVED_OBJECTIVE_CONTEXT_PREFIX: &str =
@@ -37,7 +32,17 @@ const CONTEXT_RECOVERY_HINT_SUFFIX: &str = "If the replay after compression is m
 
 struct IngestedActiveMessages {
     replay_messages: Vec<Value>,
-    changed_replay: bool,
+}
+
+/// Per-message state resolved before the ingest loop so the loop does not
+/// issue one round trip per message.
+struct PreparedActiveMessage {
+    role: String,
+    original_content: Value,
+    storage_text: String,
+    /// `None` for messages replayed as-is (already summarized, or ignored by
+    /// the configured message patterns).
+    message_id: Option<String>,
 }
 
 struct ExistingActiveMessageState {
@@ -64,7 +69,6 @@ struct CompressionTransactionWriteResult {
     created_summaries: Vec<LcmSummaryNode>,
     frontier: LcmLifecycleState,
     remaining_backlog: Vec<LcmRawMessage>,
-    fallback_used: bool,
 }
 
 struct CompressionTransactionContext {
@@ -77,26 +81,22 @@ struct CompressionTransactionContext {
 }
 
 pub async fn update_lifecycle(
-    conn: &Connection,
+    conn: &impl Executor,
     update: LcmLifecycleUpdate,
 ) -> Result<LcmLifecycleState, LcmError> {
-    util::with_immediate_tx(conn, async {
-        upsert_lifecycle_state(conn, &update).await?;
-        replace_maintenance_debt(
-            conn,
-            &update.provider,
-            &update.conversation_id,
-            &update.maintenance_debt,
-        )
-        .await?;
-        Ok(())
-    })
+    upsert_lifecycle_state(conn, &update).await?;
+    replace_maintenance_debt(
+        conn,
+        &update.provider,
+        &update.conversation_id,
+        &update.maintenance_debt,
+    )
     .await?;
     lifecycle_state(conn, &update.provider, &update.conversation_id).await
 }
 
 pub async fn lifecycle_state(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<LcmLifecycleState, LcmError> {
@@ -125,14 +125,13 @@ pub async fn lifecycle_state(
 /// Records a compression-boundary session start, mirroring hermes-lcm
 /// `_continue_compression_boundary`.
 ///
-/// Hermes carries all LCM data over when the host's `old_session_id` matches
-/// the bound session (finalize + reassign of messages, DAG nodes, and
-/// externalized payloads, engine.py:1902-1923); when it does not, the boundary
-/// skips carry-over and starts a short compression cooldown so the new session
-/// does not cascade straight back into compression while pressure is still
-/// unrelieved.
+/// When the host's `old_session_id` matches the bound session, `TraceDecay`
+/// appends a lifecycle boundary link and leaves message, summary, and payload
+/// ownership unchanged. A mismatched boundary starts a short compression
+/// cooldown so the new session does not cascade straight back into compression
+/// while pressure is still unrelieved.
 pub async fn record_session_boundary(
-    conn: &Connection,
+    conn: &impl Executor,
     request: LcmSessionBoundaryRequest,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
     match compression_decision::boundary_transition_decision(
@@ -143,7 +142,7 @@ pub async fn record_session_boundary(
             Ok(session_boundary_response(false, "not_compression_boundary"))
         }
         compression_decision::BoundaryTransitionDecision::CarryOver { old_session_id } => {
-            carry_over_session_boundary(conn, &request, &old_session_id).await
+            link_session_boundary(conn, &request, &old_session_id).await
         }
         compression_decision::BoundaryTransitionDecision::StartCooldown { boundary_skip_at } => {
             conn.execute(
@@ -170,51 +169,27 @@ pub async fn record_session_boundary(
     }
 }
 
-/// Carries all LCM data forward across a matching-bound compression boundary,
-/// mirroring the hermes-lcm happy path: finalize the old session, then
-/// transactionally reassign raw messages, DAG nodes, and externalized payload
-/// ownership to the new session id and rebind lifecycle state to it.
-async fn carry_over_session_boundary(
-    conn: &Connection,
+/// Records an immutable boundary link across a matching-bound compression
+/// transition. Historical messages, summary nodes, payloads, and source
+/// lifecycle rows retain their original owner.
+async fn link_session_boundary(
+    conn: &impl Executor,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    util::with_immediate_tx(
-        conn,
-        carry_over_in_transaction(conn, request, old_session_id),
-    )
-    .await
+    link_in_transaction(conn, request, old_session_id).await
 }
 
-async fn carry_over_in_transaction(
-    conn: &Connection,
+async fn link_in_transaction(
+    conn: &impl Executor,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
     ensure_session(conn, &request.provider, &request.session_id).await?;
-    let mut target_rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2",
-            params![request.provider.as_str(), request.session_id.as_str()],
-        )
-        .await?;
-    let target_row = target_rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("carry-over guard query returned no rows".to_string()))?;
-    let target_message_count: i64 = target_row.get(0)?;
-    if target_message_count > 0 {
-        return Err(LcmError::Db(format!(
-            "compression boundary carry-over requires an empty target session; session {} already has {} raw message(s)",
-            request.session_id, target_message_count
-        )));
-    }
     let old_state =
         lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
-    // Mirrors hermes-lcm: the carried frontier is the strongest durable
-    // marker recorded for the source session.
+    // The link carries only frozen lifecycle coordinates. Authority rows keep
+    // their source-session identity.
     let carried_frontier = [
         old_state.current_frontier_store_id,
         old_state.last_finalized_frontier_store_id,
@@ -222,18 +197,6 @@ async fn carry_over_in_transaction(
     .into_iter()
     .flatten()
     .max();
-
-    raw::reassign_session_messages(conn, &request.provider, old_session_id, &request.session_id)
-        .await?;
-    dag::reassign_session_nodes(conn, &request.provider, old_session_id, &request.session_id)
-        .await?;
-    payload::reassign_session_payloads(
-        conn,
-        &request.provider,
-        old_session_id,
-        &request.session_id,
-    )
-    .await?;
 
     let update = LcmLifecycleUpdate {
         provider: request.provider.clone(),
@@ -252,13 +215,6 @@ async fn carry_over_in_transaction(
         &update.maintenance_debt,
     )
     .await?;
-    // Every LCM call keys conversation_id = session_id in this port, so the
-    // old conversation row is fully superseded by the rebound one above.
-    conn.execute(
-        "DELETE FROM lcm_lifecycle_state WHERE provider = ?1 AND conversation_id = ?2",
-        params![request.provider.as_str(), old_session_id],
-    )
-    .await?;
 
     Ok(session_boundary_response(
         true,
@@ -275,7 +231,7 @@ fn session_boundary_response(recorded: bool, reason: &str) -> LcmSessionBoundary
 }
 
 async fn boundary_cooldown_active(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<bool, LcmError> {
@@ -286,7 +242,7 @@ async fn boundary_cooldown_active(
 }
 
 async fn load_boundary_skip_at(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<Option<i64>, LcmError> {
@@ -304,7 +260,7 @@ async fn load_boundary_skip_at(
     })
 }
 
-async fn current_unixepoch(conn: &Connection) -> Result<i64, LcmError> {
+async fn current_unixepoch(conn: &impl QueryExecutor) -> Result<i64, LcmError> {
     let mut rows = conn.query("SELECT unixepoch()", ()).await?;
     let row = rows
         .next()
@@ -314,8 +270,7 @@ async fn current_unixepoch(conn: &Connection) -> Result<i64, LcmError> {
 }
 
 pub async fn preflight(
-    conn: &Connection,
-    storage_root: &Path,
+    conn: &impl QueryExecutor,
     request: LcmPreflightRequest,
 ) -> Result<LcmPreflightResponse, LcmError> {
     let mut request = request;
@@ -334,30 +289,19 @@ pub async fn preflight(
             status: "ok".to_string(),
             should_compress: false,
             reason: reason.to_string(),
-            replay_messages: request.messages,
+            replay_messages: Vec::new(),
         });
     }
 
-    ensure_session(conn, &request.provider, &request.session_id).await?;
-    let ingested = ingest_active_messages_in_transaction(
-        conn,
-        storage_root,
-        &request.provider,
-        &request.session_id,
-        &request.messages,
-        &request.ignore_message_patterns,
-    )
-    .await?;
     let conversation_id = request.session_id.clone();
-    // Mirrors hermes-lcm `should_compress_preflight`: the boundary-skip
-    // cooldown is checked after ingest (preflight stays lossless) and blocks
-    // every compression trigger, including changed-replay and forced overflow.
     if boundary_cooldown_active(conn, &request.provider, &conversation_id).await? {
+        let raw_messages =
+            load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
         return Ok(LcmPreflightResponse {
             status: "ok".to_string(),
             should_compress: false,
             reason: "compression_boundary_cooldown".to_string(),
-            replay_messages: ingested.replay_messages,
+            replay_messages: canonical_replay_messages(&raw_messages),
         });
     }
     let existing_frontier = lifecycle_state_or_default(
@@ -367,8 +311,14 @@ pub async fn preflight(
         &request.session_id,
     )
     .await?;
-    let raw_messages =
+    let mut raw_messages =
         load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+    if raw_messages.is_empty()
+        && let Some(bound_session_id) = existing_frontier.last_finalized_session_id.as_deref()
+    {
+        raw_messages =
+            load_raw_messages_for_session(conn, &request.provider, bound_session_id).await?;
+    }
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
@@ -381,24 +331,29 @@ pub async fn preflight(
         frontier: &existing_frontier,
         backlog: &window.backlog,
     });
-    let should_compress = ingested.changed_replay || decision.should_compress;
-    let reason = if ingested.changed_replay {
-        "ingest_protection_changed_replay"
-    } else {
-        decision.reason
-    };
     Ok(LcmPreflightResponse {
         status: "ok".to_string(),
-        should_compress,
-        reason: reason.to_string(),
-        replay_messages: ingested.replay_messages,
+        should_compress: decision.should_compress,
+        reason: decision.reason.to_string(),
+        replay_messages: canonical_replay_messages(&raw_messages),
     })
 }
 
+fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
+    let replay = raw_messages
+        .iter()
+        .map(replay_transactions::raw_replay_message)
+        .collect::<Vec<_>>();
+    replay_transactions::normalize_replay_tool_pairs(&replay)
+}
+
+#[hotpath::measure]
 pub async fn compress(
-    conn: &Connection,
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: LcmCompressionRequest,
+    payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
     let mut request = request;
     request.max_assembly_tokens =
@@ -419,7 +374,7 @@ pub async fn compress(
             &request.session_id,
         )
         .await?;
-        return Ok(compression_response(
+        return Ok(record_compression_gauges(compression_response(
             "ok",
             reason,
             Vec::new(),
@@ -427,28 +382,20 @@ pub async fn compress(
             frontier,
             None,
             request.max_assembly_tokens,
-        ));
+        )));
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-
-    let ingested = match ingest_active_messages(
+    let ingested = ingest_active_messages(
         conn,
         storage_root,
         &request.provider,
         &request.session_id,
         &request.messages,
         &request.ignore_message_patterns,
+        payload_rollback,
     )
-    .await
-    {
-        Ok(ingested) => ingested,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-    };
+    .await?;
 
     let summarizer = CompressionSummarizerAdapter::from_mode(request.summarizer.clone());
 
@@ -469,56 +416,25 @@ pub async fn compress(
             None,
             request.max_assembly_tokens,
         );
-        return match conn.execute("COMMIT", ()).await {
-            Ok(_) => Ok(response),
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LcmError::Db(err.to_string()))
-            }
-        };
+        return Ok(record_compression_gauges(response));
     }
 
-    let response = match compress_in_transaction(conn, request, &summarizer).await {
-        Ok(response) => response,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-    };
-
-    match conn.execute("COMMIT", ()).await {
-        Ok(_) => Ok(response),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(LcmError::Db(err.to_string()))
-        }
-    }
+    Ok(record_compression_gauges(
+        compress_in_transaction(conn, publisher, request, &summarizer).await?,
+    ))
 }
 
-async fn ingest_active_messages_in_transaction(
-    conn: &Connection,
-    storage_root: &Path,
-    provider: &str,
-    session_id: &str,
-    messages: &[Value],
-    ignore_message_patterns: &[String],
-) -> Result<IngestedActiveMessages, LcmError> {
-    util::with_immediate_tx(
-        conn,
-        ingest_active_messages(
-            conn,
-            storage_root,
-            provider,
-            session_id,
-            messages,
-            ignore_message_patterns,
-        ),
-    )
-    .await
+fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
+    crate::runtime::pipeline_metrics::record_lcm_compression(
+        response.summary_nodes_created,
+        response.compression_attempts,
+    );
+    response
 }
 
 async fn compress_in_transaction(
-    conn: &Connection,
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -527,7 +443,7 @@ async fn compress_in_transaction(
         return Ok(response);
     }
     if let Some(response) =
-        no_backlog_compression_response(conn, &request, summarizer, &context).await?
+        no_backlog_compression_response(conn, publisher, &request, summarizer, &context).await?
     {
         return Ok(response);
     }
@@ -538,11 +454,11 @@ async fn compress_in_transaction(
         return Ok(response);
     }
 
-    persist_and_replay_backlog_compression(conn, request, summarizer, context).await
+    persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context).await
 }
 
 async fn prepare_compression_context(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
 ) -> Result<CompressionTransactionContext, LcmError> {
     let conversation_id = request.session_id.clone();
@@ -611,7 +527,8 @@ fn frontier_changed_response(
 }
 
 async fn no_backlog_compression_response(
-    conn: &Connection,
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: &CompressionTransactionContext,
@@ -626,6 +543,7 @@ async fn no_backlog_compression_response(
     }
     if let Some(response) = condense_summary_nodes_if_ready(
         conn,
+        publisher,
         request,
         summarizer,
         &context.conversation_id,
@@ -663,7 +581,7 @@ async fn no_backlog_compression_response(
 }
 
 async fn overflow_recovery_no_backlog_response(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
     context: &CompressionTransactionContext,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -706,7 +624,7 @@ async fn overflow_recovery_no_backlog_response(
 }
 
 async fn backlog_below_threshold_response(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
     context: &CompressionTransactionContext,
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
@@ -775,7 +693,8 @@ fn auxiliary_summary_response(
 }
 
 async fn persist_and_replay_backlog_compression(
-    conn: &Connection,
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: CompressionTransactionContext,
@@ -787,6 +706,7 @@ async fn persist_and_replay_backlog_compression(
     };
     let write_result = persist_compression_transaction_writes(
         conn,
+        publisher,
         CompressionTransactionWriteRequest {
             request: &request,
             conversation_id: &context.conversation_id,
@@ -831,8 +751,6 @@ async fn persist_and_replay_backlog_compression(
     let mut status = "ok";
     let mut reason = if context.plan.forced_overflow_recovery {
         "forced_overflow_recovery"
-    } else if write_result.fallback_used {
-        "compressed_backlog_with_fallback_summary"
     } else {
         "compressed_backlog"
     };
@@ -846,13 +764,10 @@ async fn persist_and_replay_backlog_compression(
     let compression_attempts = write_result.created_summaries.len();
     let summary_nodes = write_result.created_summaries;
 
-    let retry_status = if context.plan.forced_overflow_recovery {
-        Some("critical_pressure_catch_up")
-    } else if write_result.fallback_used {
-        Some("fallback_summary")
-    } else {
-        None
-    };
+    let retry_status = context
+        .plan
+        .forced_overflow_recovery
+        .then_some("critical_pressure_catch_up");
 
     Ok(compression_response_with_attempt_state(
         CompressionResponseParts {
@@ -870,14 +785,14 @@ async fn persist_and_replay_backlog_compression(
         },
         CompressionAttemptState {
             compression_attempts,
-            fallback_used: write_result.fallback_used,
             retry_status,
         },
     ))
 }
 
 async fn persist_compression_transaction_writes(
-    conn: &Connection,
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     write: CompressionTransactionWriteRequest<'_>,
 ) -> Result<CompressionTransactionWriteResult, LcmError> {
     let pass_limit = if write.forced_overflow_recovery {
@@ -887,7 +802,6 @@ async fn persist_compression_transaction_writes(
     };
     let mut remaining_backlog = write.backlog.to_vec();
     let mut created_summaries = Vec::new();
-    let mut fallback_used = false;
     let mut new_frontier = write.existing_frontier.current_frontier_store_id;
 
     while !remaining_backlog.is_empty() && created_summaries.len() < pass_limit {
@@ -903,21 +817,14 @@ async fn persist_compression_transaction_writes(
             write.request.max_source_messages,
         );
         let selected_backlog = remaining_backlog[..selected_len].to_vec();
-        let source_tokens = source_token_count(&selected_backlog);
-        let (pass_summary_text, pass_fallback_used) = rescuing_summary_text(
-            write.summary_text.to_string(),
-            &selected_backlog,
-            source_tokens,
-        );
-        fallback_used |= pass_fallback_used;
 
-        let summary = dag::insert_summary_node_in_transaction(
-            conn,
+        let summary = dag::insert_summary_node(
+            publisher,
             summary_draft(
                 &write.request.provider,
                 write.conversation_id,
                 &write.request.session_id,
-                &pass_summary_text,
+                write.summary_text,
                 write.route.clone(),
                 write.extraction_result.as_ref(),
                 &selected_backlog,
@@ -958,35 +865,11 @@ async fn persist_compression_transaction_writes(
         created_summaries,
         frontier: lifecycle_state(conn, &update.provider, &update.conversation_id).await?,
         remaining_backlog,
-        fallback_used,
     })
 }
 
-pub async fn maintenance_debt_count(
-    conn: &Connection,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let session_value = util::opt_text(session_id);
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_maintenance_debt d
-             JOIN lcm_lifecycle_state s
-               ON s.provider = d.provider AND s.conversation_id = d.conversation_id
-             WHERE d.provider = ?1 AND (?2 IS NULL OR s.current_session_id = ?2)",
-            params![provider, session_value],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("maintenance debt count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
-}
-
 async fn upsert_lifecycle_state(
-    conn: &Connection,
+    conn: &impl Executor,
     update: &LcmLifecycleUpdate,
 ) -> Result<(), LcmError> {
     conn.execute(
@@ -1015,7 +898,7 @@ async fn upsert_lifecycle_state(
 }
 
 async fn replace_maintenance_debt(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     conversation_id: &str,
     debts: &[LcmMaintenanceDebt],
@@ -1048,7 +931,7 @@ async fn replace_maintenance_debt(
 }
 
 async fn load_maintenance_debt(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<Vec<LcmMaintenanceDebt>, LcmError> {
@@ -1070,7 +953,7 @@ async fn load_maintenance_debt(
 }
 
 async fn lifecycle_state_or_default(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
     session_id: &str,
@@ -1195,7 +1078,7 @@ struct ReplayWindowParts<'a> {
 /// summary node is replayed (budgeted highest depth first), and the raw tail
 /// is trimmed under the effective assembly cap.
 async fn assemble_replay_context(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     anchor_source: &[LcmRawMessage],
@@ -1217,7 +1100,7 @@ async fn assemble_replay_context(
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
 async fn assemble_overflow_recovery_replay(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     anchor_source: &[LcmRawMessage],
@@ -1233,20 +1116,20 @@ async fn assemble_overflow_recovery_replay(
         anchor_source,
         max_assembly_tokens,
     );
-    if candidate.len() == anchors.len() {
-        if let Some(last_unit) = replay_transactions::replay_units(&raws).last() {
-            let mut replay = anchors
+    if candidate.len() == anchors.len()
+        && let Some(last_unit) = replay_transactions::replay_units(&raws).last()
+    {
+        let mut replay = anchors
+            .iter()
+            .map(|message| replay_transactions::raw_replay_message(message))
+            .collect::<Vec<_>>();
+        replay.extend(
+            last_unit
+                .messages
                 .iter()
-                .map(|message| replay_transactions::raw_replay_message(message))
-                .collect::<Vec<_>>();
-            replay.extend(
-                last_unit
-                    .messages
-                    .iter()
-                    .map(|message| replay_transactions::raw_replay_message(message)),
-            );
-            return Ok(replay_transactions::normalize_replay_tool_pairs(&replay));
-        }
+                .map(|message| replay_transactions::raw_replay_message(message)),
+        );
+        return Ok(replay_transactions::normalize_replay_tool_pairs(&replay));
     }
     Ok(candidate)
 }
@@ -1291,7 +1174,7 @@ fn assemble_replay_messages(
         Some(cap) => {
             let used = anchors
                 .iter()
-                .map(|message| estimate_tokens(&message.content))
+                .map(|message| crate::lcm::lcm_budget_tokens(&message.content))
                 .sum::<i64>();
             let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
             let mut summary_budget = (cap - used - tail_tokens).max(0);
@@ -1301,7 +1184,7 @@ fn assemble_replay_messages(
                         if already_preserved {
                             return Some((store_id, part, already_preserved));
                         }
-                        let part_tokens = estimate_tokens(&part);
+                        let part_tokens = crate::lcm::lcm_budget_tokens(&part);
                         if part_tokens <= summary_budget {
                             summary_budget -= part_tokens;
                             Some((store_id, part, already_preserved))
@@ -1471,7 +1354,7 @@ fn select_budget_summaries(
     let mut selected = vec![false; summaries.len()];
     let mut used = 0i64;
     for idx in by_depth {
-        let summary_tokens = estimate_tokens(&summaries[idx].node.summary_text);
+        let summary_tokens = crate::lcm::lcm_budget_tokens(&summaries[idx].node.summary_text);
         if used + summary_tokens > summary_budget {
             continue;
         }
@@ -1507,7 +1390,6 @@ fn compression_response(
         },
         CompressionAttemptState {
             compression_attempts: 0,
-            fallback_used: false,
             retry_status: None,
         },
     )
@@ -1526,7 +1408,6 @@ struct CompressionResponseParts<'a> {
 #[derive(Clone, Copy)]
 struct CompressionAttemptState<'a> {
     compression_attempts: usize,
-    fallback_used: bool,
     retry_status: Option<&'a str>,
 }
 
@@ -1545,11 +1426,15 @@ fn compression_response_with_attempt_state(
     } = parts;
     let CompressionAttemptState {
         compression_attempts,
-        fallback_used,
         retry_status,
     } = attempt_state;
     let replay_token_estimate = replay_token_estimate(&replay_messages);
     let context_recovery_hint = context_recovery_hint(&summary_nodes);
+    let relation_projection_status = if summary_nodes.is_empty() {
+        LcmRelationProjectionStatus::NotApplicable
+    } else {
+        LcmRelationProjectionStatus::Pending
+    };
     LcmCompressionResponse {
         status: status.to_string(),
         reason: reason.to_string(),
@@ -1559,9 +1444,10 @@ fn compression_response_with_attempt_state(
         replay_token_estimate,
         replay_over_budget: replay_exceeds_budget(replay_token_estimate, max_assembly_tokens),
         compression_attempts,
-        fallback_used,
+        fallback_used: false,
         context_recovery_hint,
         retry_status: retry_status.map(str::to_string),
+        relation_projection_status,
         frontier,
         summary_request,
     }
@@ -1578,7 +1464,7 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
 fn replay_token_estimate(messages: &[Value]) -> i64 {
     messages
         .iter()
-        .map(|message| estimate_tokens(&message_content(message)))
+        .map(|message| crate::lcm::lcm_budget_tokens(&message_content(message)))
         .sum()
 }
 
@@ -1623,7 +1509,7 @@ fn summary_draft(
         summary_text: summary_text.to_string(),
         source_refs,
         source_token_count,
-        summary_token_count: estimate_tokens(summary_text),
+        summary_token_count: crate::lcm::lcm_budget_tokens(summary_text),
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} raw messages", backlog.len())),
@@ -1666,7 +1552,7 @@ fn condensation_draft(
         summary_text: summary_text.to_string(),
         source_refs,
         source_token_count,
-        summary_token_count: estimate_tokens(summary_text),
+        summary_token_count: crate::lcm::lcm_budget_tokens(summary_text),
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} summary nodes", children.len())),
@@ -1679,8 +1565,10 @@ fn condensation_draft(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn condense_summary_nodes_if_ready(
-    conn: &Connection,
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     conversation_id: &str,
@@ -1719,18 +1607,8 @@ async fn condense_summary_nodes_if_ready(
     }
 
     let summary_text = summary_invocation.summary_text.clone();
-    let source_tokens = children
-        .iter()
-        .map(|node| node.summary_token_count)
-        .sum::<i64>();
-    let source_texts = children
-        .iter()
-        .map(|node| node.summary_text.clone())
-        .collect::<Vec<_>>();
-    let (summary_text, fallback_used) =
-        rescuing_summary_text_from_texts(summary_text, &source_texts, source_tokens);
-    let summary = dag::insert_summary_node_in_transaction(
-        conn,
+    let summary = dag::insert_summary_node(
+        publisher,
         condensation_draft(
             &request.provider,
             conversation_id,
@@ -1758,11 +1636,6 @@ async fn condense_summary_nodes_if_ready(
     )
     .await?;
     let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
-    let reason = if fallback_used {
-        "condensed_summary_nodes_with_fallback_summary"
-    } else {
-        "condensed_summary_nodes"
-    };
     // Mirrors hermes-lcm: `_assemble_context` always follows
     // `_maybe_condense`, so a condensation-only pass still returns the
     // assembled active context instead of an empty replay.
@@ -1781,7 +1654,7 @@ async fn condense_summary_nodes_if_ready(
     .await?;
     Ok(Some(compression_response(
         "ok",
-        reason,
+        "condensed_summary_nodes",
         vec![summary],
         replay_messages,
         frontier,
@@ -1791,7 +1664,7 @@ async fn condense_summary_nodes_if_ready(
 }
 
 async fn load_condensation_candidates(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     fan_in: usize,
@@ -1871,67 +1744,56 @@ async fn load_condensation_candidates(
 }
 
 async fn ingest_active_messages(
-    conn: &Connection,
+    conn: &impl Executor,
     storage_root: &Path,
     provider: &str,
     session_id: &str,
     messages: &[Value],
     ignore_message_patterns: &[String],
+    payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<IngestedActiveMessages, LcmError> {
     let mut replay_messages = Vec::with_capacity(messages.len());
-    let mut changed_replay = false;
     let mut next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
     let compiled_ignore_patterns = security::compile_message_patterns(ignore_message_patterns);
+    let prepared = prepare_active_messages(
+        conn,
+        provider,
+        session_id,
+        messages,
+        &compiled_ignore_patterns,
+    )
+    .await?;
+    let prefetched_message_ids = prepared
+        .iter()
+        .filter_map(|prepared| prepared.message_id.clone())
+        .collect::<Vec<_>>();
+    let prefetched_states =
+        existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
+    // Message ids written by an earlier iteration are re-read from the
+    // database so a repeated id still sees the row this loop just wrote.
+    let mut rewritten_message_ids = HashSet::new();
 
-    for (idx, message) in messages.iter().enumerate() {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("user")
-            .to_string();
-        let original_content = message_content_value(message);
-        let storage_text = message_storage_text(&original_content);
-        let search_text = message_content(message);
-        if message
-            .get("lcm_summary_node_id")
-            .and_then(Value::as_str)
-            .is_some_and(|node_id| !node_id.is_empty())
-        {
+    for (message, prepared) in messages.iter().zip(prepared) {
+        let PreparedActiveMessage {
+            role,
+            original_content,
+            storage_text,
+            message_id,
+        } = prepared;
+        let Some(message_id) = message_id else {
             let mut replay = message.clone();
             replay["role"] = Value::String(role);
             replay_messages.push(replay);
             continue;
-        }
-        if security::ignore_message_reason_with_compiled(&search_text, &compiled_ignore_patterns)
-            .is_some()
-        {
-            let mut replay = message.clone();
-            replay["role"] = Value::String(role);
-            replay_messages.push(replay);
-            continue;
-        }
-        let explicit_message_id = message
-            .get("id")
-            .or_else(|| message.get("message_id"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let stored_message_id = match (explicit_message_id.as_ref(), message.get("store_id")) {
-            (None, Some(store_id)) => match store_id.as_i64() {
-                Some(store_id) => {
-                    message_id_for_store_id(conn, provider, session_id, store_id).await?
-                }
-                None => None,
-            },
-            _ => None,
         };
-        let message_id = explicit_message_id
-            .or(stored_message_id)
-            .unwrap_or_else(|| {
-                deterministic_message_id(provider, session_id, idx, &role, &storage_text)
-            });
-        let existing_state = existing_active_message_state(conn, provider, &message_id).await?;
-        let ordinal = if let Some(existing) = existing_state.as_ref() {
+        let rewritten_state;
+        let existing_state = if rewritten_message_ids.contains(&message_id) {
+            rewritten_state = existing_active_message_state(conn, provider, &message_id).await?;
+            rewritten_state.as_ref()
+        } else {
+            prefetched_states.get(&message_id)
+        };
+        let ordinal = if let Some(existing) = existing_state {
             existing.ordinal
         } else {
             next_available_ordinal += 1;
@@ -1942,8 +1804,8 @@ async fn ingest_active_messages(
         replay["role"] = Value::String(role.clone());
         replay["content"] = original_content.clone();
         let initial_metadata_json = active_message_metadata(message, &replay);
-        let expected_content_hash = raw::sha256_hex(&storage_text);
-        if let Some(existing) = existing_state.as_ref() {
+        let expected_content_hash = projected_content_hash(&storage_text);
+        if let Some(existing) = existing_state {
             let matches_stored_row = existing.ordinal == ordinal
                 && existing.content_hash == expected_content_hash
                 && existing.metadata_json.as_deref() == Some(initial_metadata_json.as_str())
@@ -1978,27 +1840,31 @@ async fn ingest_active_messages(
             source_offset: None,
             metadata_json: Some(initial_metadata_json.clone()),
         };
-        let upsert = raw::upsert_raw_message_with_payload(conn, storage_root, &record).await?;
+        let upsert = raw::upsert_raw_message_with_payload_tracked(
+            conn,
+            storage_root,
+            &record,
+            payload_rollback,
+        )
+        .await?;
+        rewritten_message_ids.insert(message_id.clone());
         let raw = super::schema::load_raw_message(conn, provider, &message_id)
-            .await
+            .await?
             .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
         let replay_content =
             replay_content_value(&original_content, &raw, upsert.projection_text.as_str());
-        if replay_content != original_content || raw.storage_kind == LcmStorageKind::External {
-            changed_replay = true;
-        }
         replay["content"] = replay_content;
         if let Some(tool_calls) = replay.get("tool_calls").cloned() {
-            let protected_tool_calls = raw::protect_replay_field_value(
+            let protected_tool_calls = raw::protect_replay_field_value_tracked(
                 conn,
                 storage_root,
                 &record,
                 "tool_calls",
                 &tool_calls,
+                payload_rollback,
             )
             .await?;
             if protected_tool_calls != tool_calls {
-                changed_replay = true;
                 replay["tool_calls"] = protected_tool_calls;
             }
         }
@@ -2010,30 +1876,134 @@ async fn ingest_active_messages(
         replay_messages.push(replay);
     }
 
-    Ok(IngestedActiveMessages {
-        replay_messages,
-        changed_replay,
-    })
+    Ok(IngestedActiveMessages { replay_messages })
 }
 
-async fn message_id_for_store_id(
-    conn: &Connection,
+/// Resolves role, content, and message id for every ingest candidate up front
+/// so the ingest loop performs in-memory lookups instead of one query per
+/// message.
+async fn prepare_active_messages(
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
-    store_id: i64,
-) -> Result<Option<String>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT message_id
+    messages: &[Value],
+    compiled_ignore_patterns: &security::CompiledPatternSet,
+) -> Result<Vec<PreparedActiveMessage>, LcmError> {
+    struct DraftActiveMessage {
+        role: String,
+        original_content: Value,
+        storage_text: String,
+        replay_as_is: bool,
+        explicit_message_id: Option<String>,
+        store_id: Option<i64>,
+    }
+
+    let mut drafts = Vec::with_capacity(messages.len());
+    let mut lookup_store_ids = Vec::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user")
+            .to_string();
+        let original_content = message_content_value(message);
+        let storage_text = message_storage_text(&original_content);
+        let search_text = message_content(message);
+        let replay_as_is = message
+            .get("lcm_summary_node_id")
+            .and_then(Value::as_str)
+            .is_some_and(|node_id| !node_id.is_empty())
+            || security::ignore_message_reason_with_compiled(
+                &search_text,
+                compiled_ignore_patterns,
+            )
+            .is_some();
+        let explicit_message_id = (!replay_as_is)
+            .then(|| {
+                message
+                    .get("id")
+                    .or_else(|| message.get("message_id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+            .flatten();
+        let store_id = (!replay_as_is && explicit_message_id.is_none())
+            .then(|| message.get("store_id").and_then(Value::as_i64))
+            .flatten();
+        if let Some(store_id) = store_id {
+            lookup_store_ids.push(store_id);
+        }
+        drafts.push(DraftActiveMessage {
+            role,
+            original_content,
+            storage_text,
+            replay_as_is,
+            explicit_message_id,
+            store_id,
+        });
+    }
+
+    let stored_message_ids =
+        message_ids_for_store_ids(conn, provider, session_id, &lookup_store_ids).await?;
+    let mut prepared = Vec::with_capacity(drafts.len());
+    for (idx, draft) in drafts.into_iter().enumerate() {
+        let message_id = (!draft.replay_as_is).then(|| {
+            draft
+                .explicit_message_id
+                .or_else(|| {
+                    draft
+                        .store_id
+                        .and_then(|store_id| stored_message_ids.get(&store_id).cloned())
+                })
+                .unwrap_or_else(|| {
+                    deterministic_message_id(
+                        provider,
+                        session_id,
+                        idx,
+                        &draft.role,
+                        &draft.storage_text,
+                    )
+                })
+        });
+        prepared.push(PreparedActiveMessage {
+            role: draft.role,
+            original_content: draft.original_content,
+            storage_text: draft.storage_text,
+            message_id,
+        });
+    }
+    Ok(prepared)
+}
+
+async fn message_ids_for_store_ids(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    session_id: &str,
+    store_ids: &[i64],
+) -> Result<HashMap<i64, String>, LcmError> {
+    let mut message_ids = HashMap::new();
+    for chunk in store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = util::sql_in_placeholders(chunk.len());
+        let sql = format!(
+            "SELECT store_id, message_id
              FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
-            params![provider, session_id, store_id],
-        )
-        .await?;
-    Ok(match rows.next().await? {
-        Some(row) => Some(row.get(0)?),
-        None => None,
-    })
+             WHERE provider = ? AND session_id = ? AND store_id IN ({placeholders})"
+        );
+        let mut values = vec![
+            SqlValue::Text(provider.to_string()),
+            SqlValue::Text(session_id.to_string()),
+        ];
+        values.extend(chunk.iter().copied().map(SqlValue::Integer));
+        let mut rows = conn.query(&sql, values).await?;
+        while let Some(row) = rows.next().await? {
+            message_ids.insert(row.get(0)?, row.get(1)?);
+        }
+    }
+    Ok(message_ids)
 }
 
 fn message_content_value(message: &Value) -> Value {
@@ -2106,7 +2076,7 @@ fn active_replay_for_metadata(replay: &Value) -> Value {
 }
 
 async fn update_active_replay_metadata(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     message_id: &str,
     metadata_json: &str,
@@ -2122,7 +2092,7 @@ async fn update_active_replay_metadata(
 }
 
 async fn ensure_session(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     session_id: &str,
 ) -> Result<(), LcmError> {
@@ -2144,7 +2114,7 @@ async fn ensure_session(
 }
 
 async fn existing_active_message_state(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     message_id: &str,
 ) -> Result<Option<ExistingActiveMessageState>, LcmError> {
@@ -2171,8 +2141,45 @@ async fn existing_active_message_state(
         .transpose()
 }
 
+/// Batch form of [`existing_active_message_state`] for the ingest prefetch.
+async fn existing_active_message_states(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    message_ids: &[String],
+) -> Result<HashMap<String, ExistingActiveMessageState>, LcmError> {
+    let mut states = HashMap::new();
+    for chunk in message_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = util::sql_in_placeholders(chunk.len());
+        let sql = format!(
+            "SELECT message_id, session_id, role, timestamp, ordinal, content_hash, metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ? AND message_id IN ({placeholders})"
+        );
+        let mut values = vec![SqlValue::Text(provider.to_string())];
+        values.extend(chunk.iter().cloned().map(SqlValue::Text));
+        let mut rows = conn.query(&sql, values).await?;
+        while let Some(row) = rows.next().await? {
+            states.insert(
+                row.get(0)?,
+                ExistingActiveMessageState {
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    timestamp: row.get(3)?,
+                    ordinal: row.get(4)?,
+                    content_hash: row.get(5)?,
+                    metadata_json: row.get(6)?,
+                },
+            );
+        }
+    }
+    Ok(states)
+}
+
 async fn next_ordinal(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
 ) -> Result<i64, LcmError> {
@@ -2192,7 +2199,7 @@ async fn next_ordinal(
 }
 
 async fn load_raw_messages_for_session(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessage>, LcmError> {
@@ -2209,7 +2216,7 @@ async fn load_raw_messages_for_session(
         .await?;
     let mut messages = Vec::new();
     while let Some(row) = rows.next().await? {
-        messages.push(raw::raw_message_from_row(&row)?);
+        messages.push(raw::verified_raw_message_from_row(&row)?);
     }
     Ok(messages)
 }
@@ -2245,7 +2252,7 @@ fn deterministic_message_id(
 ) -> String {
     format!(
         "active_{}",
-        raw::sha256_hex(&format!(
+        projected_content_hash(&format!(
             "{provider}\0{session_id}\0{idx}\0{role}\0{content}"
         ))
     )
@@ -2259,14 +2266,10 @@ fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
     })
 }
 
-fn estimate_tokens(text: &str) -> i64 {
-    text.split_whitespace().count().max(1) as i64
-}
-
 fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
     backlog
         .iter()
-        .map(|message| estimate_tokens(&message.content))
+        .map(|message| crate::lcm::lcm_budget_tokens(&message.content))
         .sum::<i64>()
 }
 
@@ -2278,47 +2281,6 @@ fn debt_for_deferred_backlog(deferred_backlog: &[LcmRawMessage]) -> Vec<LcmMaint
         }],
         _ => Vec::new(),
     }
-}
-
-fn rescuing_summary_text(
-    summary_text: String,
-    backlog: &[LcmRawMessage],
-    source_token_count: i64,
-) -> (String, bool) {
-    let source_texts = backlog
-        .iter()
-        .map(|message| message.content.clone())
-        .collect::<Vec<_>>();
-    rescuing_summary_text_from_texts(summary_text, &source_texts, source_token_count)
-}
-
-fn rescuing_summary_text_from_texts(
-    summary_text: String,
-    source_texts: &[String],
-    source_token_count: i64,
-) -> (String, bool) {
-    if source_token_count < MIN_SUMMARY_RESCUE_SOURCE_TOKENS
-        || estimate_tokens(&summary_text) < source_token_count
-    {
-        return (summary_text, false);
-    }
-    (
-        deterministic_fallback_summary(source_texts, source_token_count),
-        true,
-    )
-}
-
-fn deterministic_fallback_summary(source_texts: &[String], source_token_count: i64) -> String {
-    if source_token_count <= 4 {
-        return "summary".to_string();
-    }
-    let take_limit = ((source_token_count as usize) / 2).saturating_sub(4).max(1);
-    let words = source_texts
-        .iter()
-        .flat_map(|text| text.split_whitespace())
-        .take(take_limit)
-        .collect::<Vec<_>>();
-    format!("[deterministic LCM summary: {}]", words.join(" "))
 }
 
 fn debt_to_db(debt: &LcmMaintenanceDebt) -> (String, &'static str, Option<i64>, Option<i64>) {
@@ -2348,5 +2310,25 @@ fn debt_from_db(
         _ => Err(LcmError::Db(format!(
             "invalid maintenance debt kind: {debt_kind}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use crate::runtime::lcm::LcmSummarizerMode;
+
+    #[test]
+    fn authoritative_summary_text_is_never_replaced_by_an_extractive_fallback() {
+        let summary = "Exact native host summary. ".repeat(400);
+        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
+            summary_text: summary.clone(),
+            route: Some("native_host".to_string()),
+        });
+
+        let invocation = adapter
+            .persisted_summary_invocation()
+            .expect("non-empty authoritative summary should persist");
+        assert_eq!(invocation.summary_text, summary);
     }
 }
