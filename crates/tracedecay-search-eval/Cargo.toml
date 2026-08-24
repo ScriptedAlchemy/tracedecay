@@ -50,5 +50,4 @@ tracedecay-search-eval = { path = ".", features = ["evaluator-corpus-languages"]
 # The self dev-dependency enables corpus language tiers for this crate's own
 # tests; assets/ holds checked-in eval fixture corpora, not crate sources.
 [package.metadata.cargo-shear]
-ignored = ["tracedecay-search-eval"]
 ignored-paths = ["assets/**"]

@@ -116,10 +116,7 @@ url = "2"
 [dev-dependencies]
 axum = "0.8"
 dirs = "6"
-filetime = "0.2"
 fs2 = "0.4"
-jsonschema = { version = "0.46.8", default-features = false }
-regex = "1.12.3"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
@@ -133,6 +130,14 @@ xattr = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
+
+# `fs2` is consumed only by `tests/common/fixture.rs` (shared at the repo
+# root and pulled into this crate's integration test binaries via a
+# relative `#[path]`, not by any file under this crate's own directory
+# tree), so cargo-shear's per-crate scan cannot see the use and reports a
+# false positive.
+[package.metadata.cargo-shear]
+ignored = ["fs2"]
 
 [build-dependencies]
 logo-art = "0.2"
