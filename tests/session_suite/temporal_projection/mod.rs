@@ -404,7 +404,7 @@ fn assertion_with_kind(
     hasher.update(
         format!(
             "session-temporal-assertion-v1\0{}\0{}\0{}",
-            subject.occurrence_id.as_str(),
+            subject.retrieval_anchor_id.as_str(),
             kind.as_str(),
             object.retrieval_anchor_id.as_str()
         )

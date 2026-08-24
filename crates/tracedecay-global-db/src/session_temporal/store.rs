@@ -77,6 +77,24 @@ impl<'a> GlobalDbSessionTemporalStore<'a> {
             .await
     }
 
+    pub async fn persist_session_refresh_projection_batch_controlled(
+        &self,
+        progress: SessionRefreshProgressV1,
+        batch: SessionTemporalProjectionBatchV1,
+        execution_control: ExecutionControl,
+    ) -> SessionStoreResult<(
+        SessionRefreshProgressV1,
+        SessionTemporalProjectionBatchReceiptV1,
+    )> {
+        self.db
+            .persist_session_refresh_projection_batch_controlled_result(
+                progress,
+                batch,
+                execution_control,
+            )
+            .await
+    }
+
     pub async fn session_refresh_recovery(
         &self,
         session_id: &tracedecay_domain::SessionId,

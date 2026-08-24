@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 use tracedecay_application::clock::now_micros;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -22,11 +23,14 @@ use tracedecay_domain::configuration::{
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::configuration::GlobalDbConfigurationControlStore;
+use crate::global_db::configuration::{
+    GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
+    ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
+};
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
@@ -1031,6 +1035,57 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
         configuration,
         registered_database: database,
     })
+}
+
+/// Resolve the daemon-wide worker selection from the exact registered
+/// `ProfileSessions` authority, initializing only a genuinely fresh profile
+/// store from the canonical registry default.
+pub(crate) async fn read_or_initialize_profile_code_index_worker_selection(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+) -> Result<CodeIndexWorkerSelectionV1> {
+    read_or_initialize_profile_code_index_worker_configuration(database, profile_id)
+        .await
+        .map(|configuration| configuration.selection)
+}
+
+pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+) -> Result<ProfileCodeIndexWorkerConfigurationV1> {
+    let store =
+        ProfileCodeIndexWorkerConfigurationStore::new_registered(database.as_ref(), profile_id)
+            .map_err(map_configuration_error)?;
+    store
+        .read_or_initialize(now_micros())
+        .await
+        .map_err(map_configuration_error)
+}
+
+pub(crate) fn profile_code_index_worker_mutation(
+    database: &RegisteredGlobalDb,
+    profile_id: &UserProfileId,
+    selection: CodeIndexWorkerSelectionV1,
+) -> Result<tracedecay_usecases::configuration::DirectConfigurationMutation> {
+    ProfileCodeIndexWorkerConfigurationStore::new_registered(database, profile_id)
+        .and_then(|store| store.mutation(selection))
+        .map_err(map_configuration_error)
+}
+
+pub(crate) async fn commit_profile_code_index_worker_selection(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+    authority: &tracedecay_usecases::configuration::ConfigurationMutationAuthority,
+    selection: CodeIndexWorkerSelectionV1,
+    expected_revision: &ConfigurationRevisionId,
+) -> Result<ProfileCodeIndexWorkerCommitV1> {
+    let store =
+        ProfileCodeIndexWorkerConfigurationStore::new_registered(database.as_ref(), profile_id)
+            .map_err(map_configuration_error)?;
+    store
+        .commit_selection(authority, selection, expected_revision)
+        .await
+        .map_err(map_configuration_error)
 }
 
 async fn open_runtime_configuration_from_store(

@@ -192,6 +192,7 @@ impl TranscriptSource for CursorEventSource {
 
 const CURSOR_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 
+#[derive(Clone, Copy)]
 struct CursorJsonlAdmitState {
     generation: u64,
     namespace_replacement: bool,
@@ -236,7 +237,7 @@ fn admit_cursor_jsonl_observations<'a>(
                 generation: scan.generation,
                 namespace_replacement: scan.replacement_rescan,
             },
-            |state, bytes, range, source_offset| {
+            |state, bytes, range, source_offset, _prepared, _hints| {
                 let mut stable_record_id = None;
                 let mut unsupported_record = false;
                 let parsed = parse_normalized_observation_record_v1(

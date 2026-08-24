@@ -49,8 +49,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::daemon) fn resident_memory(&self) -> &Arc<ProcessResidentMemoryV1> {
-        &self._resident_memory
+    pub(in crate::daemon) fn process_resident_memory(&self) -> Arc<ProcessResidentMemoryV1> {
+        Arc::clone(&self._resident_memory)
     }
 }

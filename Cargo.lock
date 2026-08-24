@@ -6143,6 +6143,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
@@ -6478,6 +6479,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "url",
 ]
 

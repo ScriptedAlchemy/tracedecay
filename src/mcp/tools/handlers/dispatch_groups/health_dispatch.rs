@@ -13,6 +13,7 @@ use super::admitted_graph_query;
 
 /// Dispatch code-health and session-baseline tools (`tracedecay_health`,
 /// `tracedecay_test_risk`, `tracedecay_runtime`, ...).
+#[hotpath::measure(label = "mcp.dispatch.health")]
 pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
     tool_name: &str,
     cg: &TraceDecay,

@@ -76,3 +76,4 @@ test-helpers = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

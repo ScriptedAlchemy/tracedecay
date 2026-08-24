@@ -52,6 +52,21 @@ pub(crate) fn gc_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
         .collect()
 }
 
+/// Prefilter patterns for text that still holds a *live* placeholder naming
+/// `payload_ref`.
+///
+/// A live placeholder is a bracket whose lowercased text starts with one of
+/// [`LIVE_PREFIX_REWRITES`] and carries `ref=<payload_ref>` after that prefix,
+/// so `%prefix%ref%` matches every row a tombstone rewrite could change. It
+/// matches strictly fewer rows than a bare `%ref%`, which also drags in inline
+/// bodies and already-tombstoned placeholders that the rewrite leaves alone.
+pub(crate) fn live_prefix_ref_like_patterns(payload_ref: &str) -> Vec<String> {
+    LIVE_PREFIX_REWRITES
+        .iter()
+        .map(|(prefix, _)| format!("%{prefix}%{payload_ref}%"))
+        .collect()
+}
+
 pub(crate) fn live_prefix_like_patterns() -> Vec<String> {
     LIVE_PREFIX_REWRITES
         .iter()

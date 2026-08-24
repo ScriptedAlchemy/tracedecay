@@ -181,6 +181,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let (sanitized_bytes, sensitivity_level, receipt_id) =
             privacy::sanitize_code_file(&descriptor.language, raw_bytes)?;
         let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
+        let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
         let occurrence = file_occurrence_id(
             &self.repository_id,
             &self.worktree_id,
@@ -203,6 +204,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             },
             receipt_id,
             retained: shared,
+            retained_reservation,
         }))
     }
 
@@ -256,6 +258,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut captured_files = Vec::new();
         let mut sanitization_receipts = BTreeSet::new();
         let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
+        let mut retained_reservations = Vec::new();
         let mut changed_paths = BTreeSet::new();
         let mut withheld_sources = Vec::new();
         for entry in entries {
@@ -284,6 +287,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                             continue;
                         }
                         Err(error) => {
+                            if matches!(
+                                &error,
+                                CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission(_)
+                            ) {
+                                return Err(
+                                    CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                                );
+                            }
                             tracing::warn!(
                                 error = %error,
                                 path = %logical_path,
@@ -296,6 +307,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             };
             changed_paths.insert(logical_path);
             sanitization_receipts.insert(candidate.receipt_id);
+            if let Some(reservation) = candidate.retained_reservation {
+                retained_reservations.push(reservation);
+            }
             retained_bytes.push(candidate.retained);
             files.push(candidate.file);
             captured_files.push(candidate.captured);
@@ -350,6 +364,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
+            retained_reservations,
         })
     }
 
@@ -358,6 +373,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSearchUnavailableReasonV1> {
+        self.ensure_worker_plan()
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
+        let _worker_memory = self.reserve_worker_memory().map_err(|error| match error {
+            CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_) => {
+                CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+            }
+            _ => CodeIndexSearchUnavailableReasonV1::Internal,
+        })?;
         let captured = self.capture_exact_git_tree_snapshot(source, control)?;
         let CapturedSnapshotV1 {
             snapshot,
@@ -365,6 +388,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes: _retained_bytes,
+            retained_reservations: _retained_reservations,
         } = captured;
         // Retained-history generations live inside the active publication
         // pointer, so they need an active generation to ride on. A store with

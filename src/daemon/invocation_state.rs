@@ -26,7 +26,7 @@ mod project_invocation;
 /// session remains daemon-owned across client connections until it is detached
 /// or expires.
 #[derive(Clone)]
-pub(super) struct DaemonInvocationState {
+pub(crate) struct DaemonInvocationState {
     pub(super) lsp_session_registry: Arc<tokio::sync::Mutex<LspSessionRegistry>>,
     pub(super) service: DaemonInvocationService,
     pub(super) github_credential_lifecycle:
@@ -76,6 +76,32 @@ impl Default for DaemonInvocationState {
 impl DaemonInvocationState {
     pub(super) fn invocation_service(&self) -> DaemonInvocationService {
         self.service.clone()
+    }
+
+    /// Mount the profile-owned background-worker plan before any projectless
+    /// session or host-admission work can start. The exact ProfileSessions
+    /// shard is the persisted user-profile authority; project configuration
+    /// must never win this process-wide installation by opening first.
+    pub(crate) async fn install_profile_worker_plan(
+        &self,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        profile_id: &tracedecay_domain::configuration::UserProfileId,
+    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
+        let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
+            database, profile_id,
+        )
+        .await?;
+        let resident_memory = self.code_index_schedulers.process_resident_memory();
+        let resident_snapshot = resident_memory.snapshot();
+        tracedecay_code_index::parallelism::install_worker_plan(
+            configured,
+            resident_snapshot
+                .limit_bytes
+                .saturating_sub(resident_snapshot.used_bytes),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("code-index worker plan refused: {error}"),
+        })
     }
 
     pub(super) async fn retire_remote_deleted_project(
@@ -913,17 +939,12 @@ mod resident_memory_tests {
     fn invocation_state_and_code_index_registry_share_one_process_resident_authority() {
         let state = DaemonInvocationState::default();
         let cloned = state.clone();
+        let state_memory = state.code_index_schedulers.process_resident_memory();
+        let cloned_memory = cloned.code_index_schedulers.process_resident_memory();
 
-        assert!(Arc::ptr_eq(
-            state.code_index_schedulers.resident_memory(),
-            cloned.code_index_schedulers.resident_memory(),
-        ));
+        assert!(Arc::ptr_eq(&state_memory, &cloned_memory));
         assert_eq!(
-            state
-                .code_index_schedulers
-                .resident_memory()
-                .snapshot()
-                .limit_bytes,
+            state_memory.snapshot().limit_bytes,
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
                 .get(),
         );

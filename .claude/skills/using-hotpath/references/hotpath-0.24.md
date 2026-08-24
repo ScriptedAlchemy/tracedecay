@@ -8,20 +8,25 @@ Use a distinct process and target directory for each lane. Keep product/default 
 
 ```bash
 CARGO_TARGET_DIR=target/hotpath-off \
-  cargo build --locked --profile perf --bin tracedecay \
+  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production
 
 RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-timing \
-  cargo build --locked --profile perf --bin tracedecay \
+  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath,hotpath-mcp
 
 RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-alloc \
-  cargo build --locked --profile perf --bin tracedecay \
+  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath-alloc,hotpath-mcp
 
 RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-cpu \
-  cargo build --locked --profile perf --bin tracedecay \
+  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath-cpu,hotpath-mcp
+
+RUSTFLAGS='--cfg tokio_unstable' CARGO_TARGET_DIR=target/hotpath-all \
+  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
+  --no-default-features \
+  --features production,hotpath,hotpath-alloc,hotpath-cpu,hotpath-mcp
 ```
 
 `tokio_unstable` adds blocking-pool, local-queue, steal/poll, remote-schedule, and I/O-driver runtime metrics. Basic Tokio metrics work without it.
@@ -53,7 +58,22 @@ HOTPATH_MCP_PORT=6771 \
 target/hotpath-timing/perf/tracedecay daemon run
 ```
 
-The report is emitted when the single `HotpathGuard` drops. `process::exit` skips it.
+The Cargo feature set is the profiling activation authority. A feature-enabled
+binary starts Hotpath collection for every invocation; use a feature-off
+production binary when profiling must be absent. Without either
+`HOTPATH_OUTPUT_PATH` or an explicit `HOTPATH_OUTPUT_FORMAT`, TraceDecay defaults
+the format to `none`: live metrics and MCP stay available, but no exit table is
+appended to a CLI stream. Hook commands never write reports to protocol stdout;
+set `HOTPATH_OUTPUT_PATH` to collect a hook exit report.
+The report is emitted when the single process-boundary `HotpathGuard` drops;
+TraceDecay's CLI and hook dispatch return an `ExitCode` so the guard always gets
+that shutdown boundary.
+
+Hotpath 0.24 keys async timing by static source location. TraceDecay therefore
+uses one static `mcp.tool_call` lifetime plus static dispatch-family spans, and
+records the exact canonical tool as the bounded `mcp.tool.name` value. A
+dynamic future label at one callsite is not per-tool timing: the first observed
+label would name every later call at that source location.
 
 Important environment groups:
 

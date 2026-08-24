@@ -2185,6 +2185,122 @@
       ],
       "type": "object"
     },
+    "CodeIndexWorkerLimitingReasonV1": {
+      "enum": [
+        "automatic_all_cores",
+        "automatic_half_cores",
+        "resident_memory",
+        "configured_exact",
+        "environment_override"
+      ],
+      "type": "string"
+    },
+    "CodeIndexWorkerSelectionV1": {
+      "description": "Profile-level worker-count intent for the process-wide code-index pool.\n`Automatic` delegates the concrete count to runtime resource admission;\n`Exact` persists an operator-requested positive worker count.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "automatic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "exact",
+              "type": "string"
+            },
+            "workers": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "mode",
+            "workers"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CodeIndexWorkerSettingsPatch": {
+      "additionalProperties": false,
+      "description": "Dedicated profile-session worker patch. Its CAS token is never a project\nconfiguration revision, so it cannot be mixed with [`UserSettingsPatch`].",
+      "properties": {
+        "code_index_workers": {
+          "$ref": "#/$defs/CodeIndexWorkerSelectionV1"
+        },
+        "expected_revision_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision_id",
+        "idempotency_key",
+        "code_index_workers"
+      ],
+      "type": "object"
+    },
+    "CodeIndexWorkerStatusV1": {
+      "additionalProperties": false,
+      "properties": {
+        "available_logical_cpus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "configured": {
+          "$ref": "#/$defs/CodeIndexWorkerSelectionV1"
+        },
+        "effective_workers": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environment_override_workers": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limiting_reason": {
+          "$ref": "#/$defs/CodeIndexWorkerLimitingReasonV1"
+        },
+        "memory_safe_workers": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "configured",
+        "environment_override_workers",
+        "effective_workers",
+        "available_logical_cpus",
+        "memory_safe_workers",
+        "limiting_reason"
+      ],
+      "type": "object"
+    },
     "CodeIndexWorktreeFreshnessV1": {
       "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
@@ -15286,7 +15402,7 @@
     "ProjectEditableSettingsV1": {
       "properties": {
         "context_scout": {
-          "description": "Rendered from the effective Plan 20 `context_scout.settings.v1` value;\nthe dashboard holds no Scout state of its own.",
+          "description": "Rendered from the effective `context_scout.settings.v1` value;\nthe dashboard holds no Scout state of its own.",
           "type": "boolean"
         },
         "exclude": {
@@ -17878,7 +17994,7 @@
       "type": "object"
     },
     "StorageFindingSourceStateV1": {
-      "description": "Whether one Plan 38 producer had enough source evidence to report a real\nresult. This is source coverage, not a health grade: `Real` can describe a\nclean observation or a problem finding.",
+      "description": "Whether one storage finding producer had enough source evidence to report\na real result. This is source coverage, not a health grade: `Real` can\ndescribe a clean observation or a problem finding.",
       "enum": [
         "real",
         "partial",
@@ -19557,6 +19673,27 @@
     },
     "UserSettingsPayloadV1": {
       "properties": {
+        "code_index_worker_configuration_revision_id": {
+          "type": "string"
+        },
+        "code_index_worker_configuration_snapshot_id": {
+          "description": "Independent ProfileSessions revision for the code-index worker\nresource. It is intentionally not interchangeable with the ordinary\nuser settings revision above.",
+          "type": "string"
+        },
+        "code_index_worker_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexWorkerStatusV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The admitted process-wide plan. A persisted selection may differ until\nthe daemon restarts, so unavailable is carried as `null` rather than\nfabricated from the saved preference."
+        },
+        "code_index_workers": {
+          "$ref": "#/$defs/CodeIndexWorkerSelectionV1"
+        },
         "configuration_revision_id": {
           "type": "string"
         },
@@ -19592,7 +19729,11 @@
         "legacy_config_read_only",
         "configuration_snapshot_id",
         "configuration_revision_id",
+        "code_index_worker_configuration_snapshot_id",
+        "code_index_worker_configuration_revision_id",
         "upload_enabled",
+        "code_index_workers",
+        "code_index_worker_status",
         "watcher_debounce",
         "extraction_timeout_secs",
         "installed_agents"
@@ -20690,7 +20831,7 @@
     },
     "WorkCalibratedSizingV1": {
       "additionalProperties": false,
-      "description": "Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately\nper Plan 06 :84-85; `support_floor` carries the governing floor into the record.",
+      "description": "Calibrated sizing. Emitted ONLY when support >= floor. Every field is\nnamed separately (Plan 06); `support_floor` carries the governing floor\ninto the record.",
       "properties": {
         "band": {
           "$ref": "#/$defs/WorkOrdinalBandV1",
@@ -23597,7 +23738,7 @@
       "type": "string"
     },
     "WorkPlacementBlockerV1": {
-      "description": "Exactly the conditions Plan 32 names as blocking admission or removal.",
+      "description": "Closed set of conditions that block admission or removal.",
       "oneOf": [
         {
           "const": "dirty_tracked_files",
@@ -23737,7 +23878,7 @@
           "type": "boolean"
         },
         "unique_commits": {
-          "description": "Commits in the target reachable from nowhere else.\n\n`None` means reachability was not measured, and it blocks removal\nexactly as a positive count does: Plan 32 forbids cleaning when the\nstate is \"unknown\", so an unmeasured target is retained rather than\nassumed worthless. Only removal consults this; admission does not.",
+          "description": "Commits in the target reachable from nowhere else.\n\n`None` means reachability was not measured, and it blocks removal\nexactly as a positive count does: an unmeasured target is \"unknown\"\nand is retained rather than assumed worthless. Only removal consults\nthis; admission does not.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -23900,7 +24041,7 @@
       "description": "The exact placement a caller asked for.",
       "properties": {
         "in_place_acknowledged": {
-          "description": "Set only for `CleanInPlace`: the caller states it accepts running in\nits own checkout. Plan 32 calls this \"explicitly acknowledged\".",
+          "description": "Set only for `CleanInPlace`: the caller states it accepts running in\nits own checkout. Acknowledgement is explicit, never inferred.",
           "type": "boolean"
         },
         "kind": {
@@ -25035,7 +25176,7 @@
       "type": "object"
     },
     "WorkProductSelectionScopeV1": {
-      "description": "The exact owner-relative relation set selected for a canonical Work graph.\n\nThis identity lives in the domain because Plan 32 attempt admission must\nretain it byte-for-byte through provider settlement. Reconstructing it\nfrom a project context would conflate explicit no-Git work with a scoped\nrepository relation.",
+      "description": "The exact owner-relative relation set selected for a canonical Work graph.\n\nThis identity lives in the domain because attempt admission must retain\nit byte-for-byte through provider settlement. Reconstructing it from a\nproject context would conflate explicit no-Git work with a scoped\nrepository relation.",
       "oneOf": [
         {
           "properties": {
@@ -26176,7 +26317,7 @@
       "type": "object"
     },
     "WorkRunControlStateV1": {
-      "description": "The published control state of one run.\n\nThere is no `Cancelled` here: cancellation is an attempt-level authority\nthat Plan 32 already owns through the lease fence, and duplicating it as a\nrun state would create a second place a run could be \"over\".",
+      "description": "The published control state of one run.\n\nThere is no `Cancelled` here: cancellation is an attempt-level authority\nowned through the lease fence, and duplicating it as a run state would\ncreate a second place a run could be \"over\".",
       "oneOf": [
         {
           "const": "running",
@@ -28752,6 +28893,9 @@
     "settings": {
       "$ref": "#/$defs/SettingsPayloadV1"
     },
+    "settings_code_index_worker_patch": {
+      "$ref": "#/$defs/CodeIndexWorkerSettingsPatch"
+    },
     "settings_project_patch": {
       "$ref": "#/$defs/ProjectSettingsPatch"
     },
@@ -28994,6 +29138,7 @@
     "settings",
     "settings_project_patch",
     "settings_user_patch",
+    "settings_code_index_worker_patch",
     "observatory",
     "costs",
     "graph_call_chain",

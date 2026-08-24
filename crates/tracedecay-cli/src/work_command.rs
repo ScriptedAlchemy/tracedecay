@@ -7,7 +7,10 @@ use tracedecay_application::ApplicationResult;
 
 use crate::cli::WorkInvocationArgs;
 
+#[hotpath::measure(label = "cli.work")]
 pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay::errors::Result<()> {
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
     let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;

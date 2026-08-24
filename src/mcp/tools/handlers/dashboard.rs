@@ -1,11 +1,16 @@
 //! Handler for the `tracedecay_dashboard` MCP tool.
 //!
-//! Starts (or stops) the project dashboard HTTP server as a managed background
-//! tokio task inside the running MCP server process. Idempotent: returns the
-//! existing URL if already running for this process. Supports optional `stop`
-//! action to shut down a previously-started instance.
+//! Starts (or stops) a project dashboard HTTP server as a managed background
+//! tokio task inside the running daemon process. One daemon process can serve
+//! several distinct enrolled projects, so dashboards are tracked per
+//! canonicalized project root: idempotent per project (returns the existing
+//! URL if already running for that project's root), and a second project
+//! binds its own listener rather than silently reusing the first project's
+//! server. Supports optional `stop` action to shut down the calling project's
+//! previously-started instance.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -14,7 +19,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
-    ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
+    CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
@@ -28,11 +33,131 @@ use super::support::generic_tool_result;
 
 use crate::dashboard::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
-    DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyError,
+    DashboardApplicationRuntime, DashboardAutomationWriter,
+    DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
+    DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
+    DashboardCodeIndexWorkerSettingsFuture, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
-    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture, DashboardStateCompositionV1,
-    bind_dashboard, build_state_with_automation_reconciler, router, validate_dashboard_host,
+    DashboardHttpRequestControlV1, DashboardProfileCodeIndexWorkerSettingsPort,
+    DashboardScopeSetReadFuture, DashboardStateCompositionV1, bind_dashboard,
+    build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
+
+#[derive(Clone)]
+struct DashboardProfileCodeIndexWorkerSettingsAdapter {
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: UserProfileId,
+    project_root: PathBuf,
+    registrar: crate::daemon::DaemonConfigurationRuntimeRegistrar,
+}
+
+impl DashboardProfileCodeIndexWorkerSettingsAdapter {
+    fn new(
+        database: RegisteredGlobalDbLeaseV1,
+        profile_id: UserProfileId,
+        project_root: PathBuf,
+        service: &crate::daemon::DaemonInvocationService,
+    ) -> Self {
+        Self {
+            database,
+            profile_id,
+            project_root,
+            registrar: crate::daemon::DaemonConfigurationRuntimeRegistrar::new(service),
+        }
+    }
+}
+
+pub(crate) fn compose_dashboard_profile_code_index_worker_settings(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: UserProfileId,
+    project_root: PathBuf,
+    service: &crate::daemon::DaemonInvocationService,
+) -> Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort> {
+    Arc::new(DashboardProfileCodeIndexWorkerSettingsAdapter::new(
+        database,
+        profile_id,
+        project_root,
+        service,
+    ))
+}
+
+impl DashboardProfileCodeIndexWorkerSettingsPort
+    for DashboardProfileCodeIndexWorkerSettingsAdapter
+{
+    fn read<'a>(&'a self) -> DashboardCodeIndexWorkerSettingsFuture<'a> {
+        let database = self.database.clone();
+        let profile_id = self.profile_id.clone();
+        Box::pin(async move {
+            crate::config::read_or_initialize_profile_code_index_worker_configuration(
+                database,
+                &profile_id,
+            )
+            .await
+            .map(dashboard_code_index_worker_configuration)
+            .map_err(|_| DashboardCodeIndexWorkerSettingsErrorV1::Unavailable)
+        })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        selection: CodeIndexWorkerSelectionV1,
+        expected_revision: ConfigurationRevisionId,
+        idempotency_key: ConfigurationIdempotencyKey,
+    ) -> DashboardCodeIndexWorkerSettingsCommitFuture<'a> {
+        let database = self.database.clone();
+        let profile_id = self.profile_id.clone();
+        let project_root = self.project_root.clone();
+        let registrar = self.registrar.clone();
+        Box::pin(async move {
+            let request_id = crate::request_identity::mint_global_request_id(
+                crate::request_identity::GlobalRequestSurface::DashboardSettings,
+            )
+            .map_err(|_| DashboardCodeIndexWorkerSettingsErrorV1::Unavailable)?;
+            let committed = registrar
+                .commit_profile_code_index_worker_selection(
+                    &project_root,
+                    database.clone(),
+                    &profile_id,
+                    request_id.as_str(),
+                    selection,
+                    expected_revision.clone(),
+                    idempotency_key,
+                )
+                .await;
+            match committed {
+                Ok(committed) => Ok(DashboardCodeIndexWorkerSettingsCommitV1 {
+                    current: dashboard_code_index_worker_configuration(committed.current),
+                }),
+                Err(_) => {
+                    let current =
+                        crate::config::read_or_initialize_profile_code_index_worker_configuration(
+                            database,
+                            &profile_id,
+                        )
+                        .await
+                        .map_err(|_| DashboardCodeIndexWorkerSettingsErrorV1::Unavailable)?;
+                    if current.revision_id != expected_revision {
+                        Err(DashboardCodeIndexWorkerSettingsErrorV1::RevisionConflict {
+                            actual_revision_id: current.revision_id.as_str().to_owned(),
+                        })
+                    } else {
+                        Err(DashboardCodeIndexWorkerSettingsErrorV1::Unavailable)
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn dashboard_code_index_worker_configuration(
+    configuration: crate::global_db::configuration::ProfileCodeIndexWorkerConfigurationV1,
+) -> DashboardCodeIndexWorkerConfigurationV1 {
+    DashboardCodeIndexWorkerConfigurationV1 {
+        configuration_snapshot_id: configuration.snapshot_id.as_str().to_owned(),
+        configuration_revision_id: configuration.revision_id.as_str().to_owned(),
+        code_index_workers: configuration.selection,
+    }
+}
 
 struct DashboardInvocationExecutorAdapter {
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
@@ -361,6 +486,7 @@ fn dashboard_configuration_unavailable(
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
     url: String,
+    addr: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<Result<()>>,
     completed: Arc<tokio::sync::Notify>,
@@ -382,22 +508,27 @@ impl Drop for DashboardTaskCompletion {
     }
 }
 
-/// Global manager for at most one dashboard per MCP server process.
-/// Uses `OnceLock` + inner `Mutex` so it can be initialized on first use from async.
-static DASHBOARD_MANAGER: std::sync::OnceLock<tokio::sync::Mutex<Option<RunningDashboard>>> =
-    std::sync::OnceLock::new();
+/// Global manager for the daemon's hosted dashboards, keyed by each
+/// project's canonicalized root. One daemon process routes tool calls for
+/// several enrolled projects, so a single un-keyed slot here would make a
+/// second project's `start` silently answer with the first project's URL
+/// (see the module doc comment). Uses `OnceLock` + inner `Mutex` so it can be
+/// initialized on first use from async.
+static DASHBOARD_MANAGER: std::sync::OnceLock<
+    tokio::sync::Mutex<HashMap<PathBuf, RunningDashboard>>,
+> = std::sync::OnceLock::new();
 
-fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
-    DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(None))
+fn get_manager() -> &'static tokio::sync::Mutex<HashMap<PathBuf, RunningDashboard>> {
+    DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
 
-async fn take_finished_dashboard() -> Option<RunningDashboard> {
+async fn take_finished_dashboard_for(project_root: &Path) -> Option<RunningDashboard> {
     let mut manager = get_manager().lock().await;
     if manager
-        .as_ref()
+        .get(project_root)
         .is_some_and(|dashboard| dashboard.task.is_finished())
     {
-        manager.take()
+        manager.remove(project_root)
     } else {
         None
     }
@@ -420,13 +551,16 @@ async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) ->
     }
 }
 
-/// Stops the process-local dashboard and joins its serving task. Once the
+/// Stops one project's dashboard and joins its serving task. Once the
 /// deadline expires the task is aborted, but its handle stays retained until
 /// the cancellation has actually joined.
-pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> Result<()> {
+pub(crate) async fn shutdown_dashboard_for_until(
+    project_root: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
     {
         let mut manager = get_manager().lock().await;
-        let Some(dashboard) = manager.as_mut() else {
+        let Some(dashboard) = manager.get_mut(project_root) else {
             return Ok(());
         };
         dashboard.request_shutdown();
@@ -434,12 +568,12 @@ pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> 
 
     let mut exceeded_deadline = false;
     loop {
-        if let Some(dashboard) = take_finished_dashboard().await {
+        if let Some(dashboard) = take_finished_dashboard_for(project_root).await {
             return join_dashboard(dashboard, exceeded_deadline).await;
         }
         let completed = {
             let manager = get_manager().lock().await;
-            let Some(dashboard) = manager.as_ref() else {
+            let Some(dashboard) = manager.get(project_root) else {
                 return Ok(());
             };
             Arc::clone(&dashboard.completed)
@@ -447,7 +581,7 @@ pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> 
         let notified = completed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if let Some(dashboard) = take_finished_dashboard().await {
+        if let Some(dashboard) = take_finished_dashboard_for(project_root).await {
             return join_dashboard(dashboard, exceeded_deadline).await;
         }
         if exceeded_deadline {
@@ -459,12 +593,44 @@ pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> 
             () = notified.as_mut() => {}
             () = tokio::time::sleep_until(deadline) => {
                 let mut manager = get_manager().lock().await;
-                if let Some(dashboard) = manager.as_mut() {
+                if let Some(dashboard) = manager.get_mut(project_root) {
                     dashboard.task.abort();
                 }
                 exceeded_deadline = true;
             }
         }
+    }
+}
+
+pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
+    shutdown_dashboard_for_until(
+        project_root,
+        tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE,
+    )
+    .await
+}
+
+/// Stops every dashboard currently hosted by this daemon process, regardless
+/// of which project started it. Used for whole-daemon shutdown; per-project
+/// requests (the `tracedecay_dashboard` `stop` action) use
+/// [`shutdown_dashboard_for`] instead so one project's stop never takes down
+/// another project's dashboard.
+pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> Result<()> {
+    let project_roots: Vec<PathBuf> = {
+        let manager = get_manager().lock().await;
+        manager.keys().cloned().collect()
+    };
+    let mut first_error = None;
+    for project_root in project_roots {
+        if let Err(error) = shutdown_dashboard_for_until(&project_root, deadline).await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -484,6 +650,7 @@ pub(super) async fn handle_dashboard(
     code_graph_read_admission: Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     code_graph_projection_read_port: Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    registered_profile_session_db: Option<RegisteredGlobalDbLeaseV1>,
     daemon_user_profile_id: Option<UserProfileId>,
     daemon_profile_root: Option<PathBuf>,
     session_retrieval: Option<
@@ -520,12 +687,23 @@ pub(super) async fn handle_dashboard(
 
     match action {
         "stop" => {
+            let project_root =
+                cg.project_root()
+                    .canonicalize()
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "dashboard project root '{}' is unavailable: {error}",
+                            cg.project_root().display()
+                        ),
+                    })?;
             let previous_url = {
                 let manager = get_manager().lock().await;
-                manager.as_ref().map(|dashboard| dashboard.url.clone())
+                manager
+                    .get(&project_root)
+                    .map(|dashboard| dashboard.url.clone())
             };
             let payload = if let Some(previous_url) = previous_url {
-                shutdown_dashboard().await?;
+                shutdown_dashboard_for(&project_root).await?;
                 json!({ "status": "stopped", "previous_url": previous_url })
             } else {
                 json!({ "status": "not_running" })
@@ -533,7 +711,19 @@ pub(super) async fn handle_dashboard(
             Ok(dashboard_tool_result(cg, &args, &payload))
         }
         "start" | "" => {
-            if let Some(finished) = take_finished_dashboard().await {
+            // Canonicalized once up front: it is both the manager key (each
+            // enrolled project gets its own dashboard slot) and, later, the
+            // invariant check against the retained project server's root.
+            let requested_root =
+                cg.project_root()
+                    .canonicalize()
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "dashboard project root '{}' is unavailable: {error}",
+                            cg.project_root().display()
+                        ),
+                    })?;
+            if let Some(finished) = take_finished_dashboard_for(&requested_root).await {
                 join_dashboard(finished, false).await?;
             }
             let host = args
@@ -552,18 +742,29 @@ pub(super) async fn handle_dashboard(
             let manager = get_manager();
             let mut guard = manager.lock().await;
 
-            if let Some(handle) = guard.as_ref() {
+            if let Some(handle) = guard.get(&requested_root) {
                 let status = if handle.shutdown.is_some() {
                     "already_running"
                 } else {
                     "stopping"
                 };
+                // The lookup is keyed by this project's own canonicalized
+                // root, so the reused server always serves *this* project —
+                // only the host/port the caller asked for may differ from
+                // what is actually bound. `port == 0` means "any port is
+                // fine", so it can never be dishonored.
+                let requested_port_honored = port == 0 || port == handle.addr.port();
                 return Ok(dashboard_tool_result(
                     cg,
                     &args,
                     &json!({
                         "status": status,
-                        "url": handle.url
+                        "url": handle.url,
+                        "host": handle.addr.ip().to_string(),
+                        "port": handle.addr.port(),
+                        "requested_host": host,
+                        "requested_port": port,
+                        "requested_port_honored": requested_port_honored,
                     }),
                 ));
             }
@@ -606,15 +807,6 @@ pub(super) async fn handle_dashboard(
                         retained_graph.project_root().display()
                     ),
                 })?;
-            let requested_root =
-                cg.project_root()
-                    .canonicalize()
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!(
-                            "dashboard project root '{}' is unavailable: {error}",
-                            cg.project_root().display()
-                        ),
-                    })?;
             if retained_root != requested_root {
                 return Err(TraceDecayError::project_route(
                     "project_route_unavailable",
@@ -662,6 +854,17 @@ pub(super) async fn handle_dashboard(
                     });
                 }
             };
+            let profile_code_index_worker_settings = registered_profile_session_db
+                .zip(daemon_user_profile_id.clone())
+                .zip(daemon_invocation_service.clone())
+                .map(|((database, profile_id), service)| {
+                    compose_dashboard_profile_code_index_worker_settings(
+                        database,
+                        profile_id,
+                        retained_cg.project_root().to_path_buf(),
+                        &service,
+                    )
+                });
             // The profile write resolves its configuration layer through the
             // profile identity the daemon handshake bound, which every
             // daemon-owned server carries. Reading it from the project-session
@@ -706,6 +909,7 @@ pub(super) async fn handle_dashboard(
                     code_graph_read_admission,
                     code_graph_projection_read_port,
                     registered_project_session_db,
+                    profile_code_index_worker_settings,
                     lcm_read_authority,
                     git_correlation_read_authority,
                     delivery_read_authority,
@@ -749,12 +953,16 @@ pub(super) async fn handle_dashboard(
                     })
             });
 
-            *guard = Some(RunningDashboard {
-                url: url.clone(),
-                shutdown: Some(shutdown_tx),
-                task,
-                completed,
-            });
+            guard.insert(
+                requested_root,
+                RunningDashboard {
+                    url: url.clone(),
+                    addr,
+                    shutdown: Some(shutdown_tx),
+                    task,
+                    completed,
+                },
+            );
 
             Ok(dashboard_tool_result(
                 cg,

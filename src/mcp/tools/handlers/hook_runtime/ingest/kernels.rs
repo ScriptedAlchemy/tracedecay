@@ -284,16 +284,22 @@ async fn capture_codex_profile(
     let global_db = ctx.global_db()?;
     let session_id = required_str(ctx.args, "session_id")?.to_string();
     let roots = registered_project_roots(global_db).await?;
-    let stats = tracedecay_sessions::runtime::try_ingest_user_codex_sessions_with_db_and_admission(
-        profile_root,
-        Some(session_id),
-        roots,
-        ctx.facade,
-    )
-    .await
-    .map_err(|error| map_transcript_ingest_error(&error))?;
+    let outcome =
+        tracedecay_sessions::runtime::try_ingest_user_codex_sessions_with_db_and_admission(
+            profile_root,
+            Some(session_id),
+            roots,
+            ctx.facade,
+            Some(
+                ctx.max_new_bytes
+                    .unwrap_or(tracedecay_sessions::runtime::codex::CODEX_HOOK_MAX_NEW_BYTES),
+            ),
+        )
+        .await
+        .map_err(|error| map_transcript_ingest_error(&error))?;
     Ok(TranscriptCaptureOutcome {
-        messages_upserted: stats.messages_upserted,
+        messages_upserted: outcome.stats.messages_upserted,
+        source_deferred: outcome.source_deferred,
         ..TranscriptCaptureOutcome::default()
     })
 }

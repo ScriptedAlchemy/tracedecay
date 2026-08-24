@@ -142,6 +142,13 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
         .or(Some(1))
 }
 
+#[cfg(any(feature = "hotpath", test))]
+pub(crate) fn is_hook_protocol_invocation(args: &[OsString]) -> bool {
+    args.get(1)
+        .and_then(|value| value.to_str())
+        .is_some_and(|command| command.starts_with("hook-"))
+}
+
 pub(crate) fn is_native_hook_command(command: &Commands) -> bool {
     matches!(command, Commands::HookPreToolUse) || capture_source_for_command(command).is_some()
 }

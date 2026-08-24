@@ -5,7 +5,7 @@ use tracedecay_store::{
 };
 
 use super::{
-    LedgerDisposition, LedgerError, checkpoint, idempotency, inbox, outbox,
+    LedgerDisposition, LedgerError, checkpoint, idempotency, inbox, outbox, prune,
     sqlite::{LedgerTransaction, Submission, encode_json},
 };
 
@@ -75,6 +75,11 @@ fn record_with_bookkeeping(
     };
     let receipt_json = encode_json(&receipt, "original_receipt_json")?;
     checkpoint::persist(transaction, &submission, &checkpoint, &receipt)?;
+    // The persisted checkpoint is the authority for which records are now
+    // unreachable, so pruning reads it after persist. Every commit makes one
+    // bounded cleanup pass; the record inserted below is current and cannot be
+    // selected by that pass.
+    prune::prune_superseded(transaction, &metadata.shard_id)?;
     idempotency::insert(transaction, &submission, &receipt, &receipt_json)?;
     match bookkeeping {
         RuntimeBookkeeping::None => {}

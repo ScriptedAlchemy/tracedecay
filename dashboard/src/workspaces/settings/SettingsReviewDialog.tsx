@@ -31,6 +31,7 @@ export function SettingsReviewDialog({
 }) {
   const review = settingsReviewOf(state);
   const scope = review?.scope ?? 'project';
+  const scopeLabel = settingsScopeLabel(scope);
   const confirmed = settingsConfirmationHeld(state);
   const applying = state.status === 'submitting';
   const resolvable = state.status === 'conflicted' || state.status === 'review_superseded';
@@ -42,7 +43,7 @@ export function SettingsReviewDialog({
           <div className="flex items-start justify-between gap-3">
             <div>
               <Dialog.Title className="text-base font-semibold tracking-tight">
-                Review {scope} settings change
+                Review {scopeLabel} change
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-xs text-text-muted">
                 Only the validated changed fields below will be sent. The held revision is checked
@@ -65,6 +66,13 @@ export function SettingsReviewDialog({
           </div>
           {review ? (
             <div className="mt-4 grid gap-3">
+              {'code_index_workers' in review.patch ? (
+                <p className="border border-state-unsupported-schema bg-surface-0 p-3 text-xs text-text-secondary">
+                  Code-index worker changes are applied after the daemon restarts. The running
+                  worker plan remains in force until then; if current admission limits are
+                  unavailable, an exact selection is evaluated at restart.
+                </p>
+              ) : null}
               <pre className="max-h-56 overflow-auto border border-edge-subtle bg-surface-0 p-3 text-2xs text-text-secondary">
                 {JSON.stringify(review.patch, null, 2)}
               </pre>
@@ -97,7 +105,7 @@ export function SettingsReviewDialog({
                     disabled={!confirmed || applying}
                     onClick={onApply}
                   >
-                    {applying ? `Applying ${scope} settings` : `Apply ${scope} settings`}
+                    {applying ? `Applying ${scopeLabel}` : `Apply ${scopeLabel}`}
                   </button>
                 )}
               </div>
@@ -107,6 +115,21 @@ export function SettingsReviewDialog({
       </Dialog.Portal>
     </Dialog.Root>
   );
+}
+
+function settingsScopeLabel(scope: NonNullable<ReturnType<typeof settingsReviewOf>>['scope']): string {
+  switch (scope) {
+    case 'project':
+      return 'project settings';
+    case 'user':
+      return 'user settings';
+    case 'code_index_workers':
+      return 'code-index worker selection';
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
 }
 
 /**

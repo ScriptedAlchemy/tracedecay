@@ -176,6 +176,54 @@ fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
     ));
 }
 
+/// A configured budget must move the thresholds the controller actually
+/// decides on, not merely be stored beside them. A WAL span that is idle under
+/// the contract default has to become soft pressure under a tightened budget,
+/// and hard pressure at the tightened hard limit.
+#[test]
+fn a_configured_wal_budget_moves_the_controller_thresholds() {
+    let budget = tracedecay_store::WalBudgetV1 {
+        soft_limit_bytes: 4 * 1024 * 1024,
+        hard_limit_bytes: 16 * 1024 * 1024,
+    };
+    budget.validate().expect("tightened budget is well formed");
+    let config = CheckpointConfig::from(&budget);
+    let mut controller = WriterCheckpointController::new(
+        FakeDriver::with_reports([report(false, 100, 100), report(true, 100, 40)]),
+        config,
+    )
+    .expect("fake driver configures");
+
+    assert_eq!(
+        controller
+            .evaluate(budget.soft_limit_bytes - 1, CheckpointBlockers::default())
+            .unwrap(),
+        CheckpointDecision::BelowSoftLimit {
+            wal_bytes: budget.soft_limit_bytes - 1,
+        }
+    );
+    // Idle under the 32 MiB contract default; soft pressure under this budget.
+    assert!(matches!(
+        controller
+            .evaluate(budget.soft_limit_bytes, CheckpointBlockers::default())
+            .unwrap(),
+        CheckpointDecision::Complete {
+            pressure: WalPressure::Soft,
+            ..
+        }
+    ));
+    assert!(matches!(
+        controller
+            .evaluate(budget.hard_limit_bytes, CheckpointBlockers::default())
+            .unwrap(),
+        CheckpointDecision::Pending {
+            pressure: WalPressure::Hard,
+            hard_drain_required: true,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn controller_reports_inventory_without_owning_snapshot_state() {
     let blockers = inventory("lease.soft");

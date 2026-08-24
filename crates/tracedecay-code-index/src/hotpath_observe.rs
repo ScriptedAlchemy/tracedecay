@@ -8,6 +8,8 @@
 
 #[cfg(test)]
 use std::cell::Cell;
+#[cfg(not(test))]
+use std::marker::PhantomData;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::AtomicU64;
 #[cfg(any(feature = "hotpath", test))]
@@ -139,6 +141,9 @@ impl WorkerBusyGuard {
         #[cfg(test)]
         self.coordinating.set(true);
         WorkerPoolCoordinationGuard {
+            #[cfg(not(test))]
+            _worker: PhantomData,
+            #[cfg(test)]
             worker: self,
             #[cfg(feature = "hotpath")]
             started: Instant::now(),
@@ -162,6 +167,9 @@ impl Drop for WorkerBusyGuard {
 }
 
 pub(crate) struct WorkerPoolCoordinationGuard<'a> {
+    #[cfg(not(test))]
+    _worker: PhantomData<&'a WorkerBusyGuard>,
+    #[cfg(test)]
     worker: &'a WorkerBusyGuard,
     #[cfg(feature = "hotpath")]
     started: Instant,
@@ -178,8 +186,6 @@ impl Drop for WorkerPoolCoordinationGuard<'_> {
         }
         #[cfg(test)]
         self.worker.coordinating.set(false);
-        #[cfg(not(any(feature = "hotpath", test)))]
-        let _ = self.worker;
     }
 }
 
