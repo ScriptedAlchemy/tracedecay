@@ -52,6 +52,9 @@ pub(super) async fn production_project_server(
 ) -> Result<ProductionProjectComposition> {
     let project_open_started = Instant::now();
     project_open_cancellation_checkpoint(cancellation)?;
+    invocation
+        .configuration_runtime_registrar()
+        .ensure_worker_plan()?;
     ensure_registered_project_route(
         store_administration,
         canonical_project_path,

@@ -123,8 +123,8 @@ impl Default for SemanticResourceCeilings {
             max_model_bytes: 700 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
             max_resident_bytes: 2 * 1024 * 1024 * 1024,
-            // Intra-op width is a numerics knob (it can change how a GEMM is
-            // partitioned), so it stays pinned and host-independent.
+            // The artifact admits this maximum. The installed background CPU
+            // authority narrows the native runtime on smaller hosts.
             max_threads: embedding_parallelism::DEFAULT_INTRA_THREADS,
             // Concurrent sessions are pure sizing: each one is an independent
             // invocation of the same graph over the same tensor shape. Default
@@ -641,6 +641,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                     let encoder = RuntimeChunkVectorEncoderV1::new(
                         Arc::clone(&candidate),
                         Arc::clone(&progress),
+                        authority.execution_max_threads(),
                     );
                     let batch_units = batch.request.changes.added_or_changed.len() as u64;
                     let prepared = prepare_vector_generation_async(
@@ -976,6 +977,7 @@ struct RuntimeChunkVectorEncoderV1<R: EmbeddingRuntime> {
     /// exactly as it did before.
     sessions: Vec<PooledSession<R, SystemMonotonicClock>>,
     width: usize,
+    intra_threads: usize,
     completed_units: u64,
 }
 
@@ -986,15 +988,19 @@ where
     fn new(
         runtime: Arc<SemanticRuntimeService<R>>,
         progress: Arc<SemanticRuntimeScheduleCancellationV1>,
+        configured_intra_threads: u32,
     ) -> Self {
+        let intra_threads =
+            embedding_parallelism::embedding_intra_threads(configured_intra_threads);
         Self {
             runtime,
             progress,
             sessions: Vec::new(),
             width: embedding_parallelism::embedding_session_width(
-                embedding_parallelism::DEFAULT_INTRA_THREADS,
+                configured_intra_threads,
                 u32::MAX,
             ),
+            intra_threads,
             completed_units: 0,
         }
     }
@@ -1111,8 +1117,11 @@ where
         }
         self.ensure_sessions(1)?;
         let progress = Arc::clone(&self.progress);
+        let intra_threads = self.intra_threads;
         let (encoded, units) =
-            encode_group_with_session(&mut self.sessions[0], key, chunks, progress.as_ref())?;
+            tracedecay_code_index::parallelism::with_background_cpu_permits(intra_threads, || {
+                encode_group_with_session(&mut self.sessions[0], key, chunks, progress.as_ref())
+            })?;
         self.completed_units = self.completed_units.saturating_add(units);
         self.progress.set_completed_units(self.completed_units);
         Ok(encoded)
@@ -1148,15 +1157,26 @@ where
         let sessions = self.ensure_sessions(groups.len())?;
         if sessions <= 1 || groups.len() == 1 {
             let progress = Arc::clone(&self.progress);
+            let intra_threads = self.intra_threads;
             let mut encoded = Vec::with_capacity(groups.len());
             let mut units = 0u64;
             for group in groups {
                 let (vectors, group_units) =
-                    encode_group_with_session(&mut self.sessions[0], key, group, progress.as_ref())
-                        .inspect_err(|_| {
-                            self.completed_units = self.completed_units.saturating_add(units);
-                            self.progress.set_completed_units(self.completed_units);
-                        })?;
+                    tracedecay_code_index::parallelism::with_background_cpu_permits(
+                        intra_threads,
+                        || {
+                            encode_group_with_session(
+                                &mut self.sessions[0],
+                                key,
+                                group,
+                                progress.as_ref(),
+                            )
+                        },
+                    )
+                    .inspect_err(|_| {
+                        self.completed_units = self.completed_units.saturating_add(units);
+                        self.progress.set_completed_units(self.completed_units);
+                    })?;
                 units = units.saturating_add(group_units);
                 encoded.push(vectors);
             }
@@ -1168,24 +1188,35 @@ where
         let stripe_len = groups.len().div_ceil(sessions);
         let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
         let progress = Arc::clone(&self.progress);
-        let mut stripe_results: Vec<EncodedStripeResultV1> = embedding_parallelism::install(|| {
-            use rayon::prelude::*;
-            stripes
-                .par_iter()
-                .zip(self.sessions.par_iter_mut())
-                .map(|(stripe, session)| {
-                    let mut encoded = Vec::with_capacity(stripe.len());
-                    let mut units = 0u64;
-                    for group in stripe.iter() {
-                        let (vectors, group_units) =
-                            encode_group_with_session(session, key, group, progress.as_ref())?;
-                        units = units.saturating_add(group_units);
-                        encoded.push(vectors);
-                    }
-                    Ok((encoded, units))
-                })
-                .collect()
-        });
+        let intra_threads = self.intra_threads;
+        let mut stripe_results: Vec<EncodedStripeResultV1> =
+            embedding_parallelism::install(|| {
+                use rayon::prelude::*;
+                stripes
+                    .par_iter()
+                    .zip(self.sessions.par_iter_mut())
+                    .map(|(stripe, session)| {
+                        tracedecay_code_index::parallelism::with_background_cpu_permits(
+                            intra_threads,
+                            || {
+                                let mut encoded = Vec::with_capacity(stripe.len());
+                                let mut units = 0u64;
+                                for group in stripe.iter() {
+                                    let (vectors, group_units) = encode_group_with_session(
+                                        session,
+                                        key,
+                                        group,
+                                        progress.as_ref(),
+                                    )?;
+                                    units = units.saturating_add(group_units);
+                                    encoded.push(vectors);
+                                }
+                                Ok((encoded, units))
+                            },
+                        )
+                    })
+                    .collect()
+            })?;
 
         let mut encoded = Vec::with_capacity(groups.len());
         let mut units = 0u64;

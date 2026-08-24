@@ -32,15 +32,13 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
     let profile_root = crate::storage::default_profile_root().expect("default profile root");
     let profile_identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let profile_sessions = runtime
+        .session_registry_for_test()
+        .profile_sessions()
+        .await
+        .expect("profile sessions authority");
     invocation
-        .install_profile_worker_plan(
-            runtime
-                .registered_database_arc(
-                    tracedecay_usecases::host_admission::HostAdmissionScope::Profile,
-                )
-                .expect("profile sessions authority"),
-            profile_identity.profile_id(),
-        )
+        .install_profile_worker_plan(profile_sessions, profile_identity.profile_id())
         .await
         .expect("daemon bootstrap worker plan");
     invocation

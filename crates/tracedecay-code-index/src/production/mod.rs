@@ -288,12 +288,19 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 /// tradeoff for having no barrier. Cancellation still short-circuits, because
 /// every per-file closure checkpoints the execution control first and
 /// returns immediately once the reconcile is cancelled.
+///
+/// Per-unit work parses arbitrary user source, so a panic in one unit is
+/// contained here and converted into that unit's typed
+/// [`crate::parallelism::CodeIndexParallelismErrorV1::WorkerPanic`]. Letting
+/// it unwind out of the pool instead aborted the whole fan-out and surfaced in
+/// the daemon only as an opaque `JoinError`, so a single malformed file took
+/// down every other file's work in the same generation.
 #[hotpath::measure]
 fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
 where
     T: Sync,
     R: Send,
-    E: Send,
+    E: From<crate::parallelism::CodeIndexParallelismErrorV1> + Send,
     F: Fn(&T, &crate::hotpath_observe::WorkerBusyGuard) -> Result<R, E> + Sync,
 {
     let queue = crate::hotpath_observe::PendingWorkQueue::new(items.len());
@@ -302,16 +309,32 @@ where
     // what keeps the nested chunk-level fan-out inside the reservation
     // instead of spilling onto rayon's global (all-cores) pool.
     crate::parallelism::install(|| {
-        let run = |item| {
-            let worker = queue.start_worker();
-            operation(item, &worker)
+        let run = |(index, item): (usize, &T)| -> Result<R, E> {
+            crate::parallelism::with_background_cpu_permit(|| {
+                let worker = queue.start_worker();
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(item, &worker)))
+                    .unwrap_or_else(|payload| {
+                        Err(E::from(
+                            crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+                                index, &*payload,
+                            ),
+                        ))
+                    })
+            })
         };
         if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
-            return items.iter().map(&run).collect();
+            return items.iter().enumerate().map(&run).collect();
         }
-        let results: Vec<Result<R, E>> = items.par_iter().map(&run).collect::<Vec<Result<R, E>>>();
+        // Collecting every unit's result before short-circuiting keeps the
+        // reported failure the lowest-index one, panic or not.
+        let results: Vec<Result<R, E>> = items
+            .par_iter()
+            .enumerate()
+            .map(&run)
+            .collect::<Vec<Result<R, E>>>();
         results.into_iter().collect()
     })
+    .map_err(E::from)?
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1108,6 +1131,8 @@ pub enum CodeIndexProductionErrorV1 {
     Publication(#[from] CodeIndexPublicationStoreErrorV1),
     #[error("code-index contract failed: {0}")]
     Contract(String),
+    #[error("code-index parallel worker runtime failed: {0}")]
+    Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
 }
 
 /// Production owner for one repository and one atomic publication authority.

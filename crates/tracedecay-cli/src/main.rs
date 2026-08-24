@@ -148,7 +148,7 @@ impl Drop for Spinner {
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
-const MAX_BLOCKING_THREADS: usize = 32;
+const MIN_SERVING_BLOCKING_RESERVE: usize = 4;
 const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
 const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
 const RAYON_NUM_THREADS_ENV: &str = "RAYON_NUM_THREADS";
@@ -157,6 +157,51 @@ fn async_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, usize::from)
         .clamp(1, MAX_ASYNC_WORKER_THREADS)
+}
+
+/// Keep enough bounded blocking workers to run every admitted background CPU
+/// unit plus serving work that does not consume that CPU budget. Before the
+/// profile-scoped worker plan is installed, using the host width is the safe
+/// upper bound for any later exact plan. The result is host-bounded: it is at
+/// most `available + MIN_SERVING_BLOCKING_RESERVE`.
+fn tokio_blocking_thread_limit() -> usize {
+    let available = std::thread::available_parallelism().map_or(1, usize::from);
+    let effective = tracedecay::code_index::parallelism::installed_worker_status()
+        .map(|status| usize::from(status.effective_workers))
+        .unwrap_or(available);
+    tokio_blocking_thread_limit_from(available, effective)
+}
+
+fn tokio_blocking_thread_limit_from(available: usize, effective_workers: usize) -> usize {
+    let available = available.max(1);
+    let effective_workers = effective_workers.clamp(1, available);
+    let serving_reserve = available
+        .saturating_sub(effective_workers)
+        .max(MIN_SERVING_BLOCKING_RESERVE);
+    effective_workers.saturating_add(serving_reserve)
+}
+
+#[cfg(test)]
+mod blocking_thread_limit_tests {
+    use super::*;
+
+    #[test]
+    fn blocking_limit_covers_effective_width_and_serving_reserve() {
+        assert_eq!(tokio_blocking_thread_limit_from(96, 48), 96);
+        assert_eq!(tokio_blocking_thread_limit_from(96, 96), 100);
+        assert_eq!(tokio_blocking_thread_limit_from(8, 8), 12);
+    }
+
+    #[test]
+    fn blocking_limit_is_bounded_by_host_width_plus_reserve() {
+        for available in 1..=256 {
+            for effective in 1..=available {
+                let limit = tokio_blocking_thread_limit_from(available, effective);
+                assert!(limit >= effective + MIN_SERVING_BLOCKING_RESERVE);
+                assert!(limit <= available + MIN_SERVING_BLOCKING_RESERVE);
+            }
+        }
+    }
 }
 
 fn daemon_cpu_threads_from(
@@ -204,11 +249,6 @@ fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay::errors::Re
             .map(|(source, value)| (*source, value.as_str())),
     )
     .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
-    tracedecay_code_index::parallelism::install_daemon_worker_ceiling(threads).map_err(
-        |error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to install daemon indexing worker ceiling: {error}"),
-        },
-    )?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|index| format!("tracedecay-cpu-{index}"))
@@ -287,21 +327,20 @@ fn async_main() -> tracedecay::errors::Result<()> {
     // the host, so which command is running has to be known before anything
     // is allowed to write there.
     tracedecay::daemon::install_stderr_tracing(stderr_tracing_default(cli.command.as_ref()));
-    // Rayon otherwise creates one worker per logical CPU on first use. On
-    // large hosts that pool competes with Tokio, SQLite, and per-index pools,
-    // amplifying worktree warmup into CPU and memory contention. The daemon
-    // owns one bounded global pool; one-shot CLI commands retain Rayon's
-    // normal behavior. Operators can raise the default without a rebuild.
+    // Bound only Rayon's global pool for daemon workloads that actually use
+    // it. Code indexing owns a separately planned pool shared by semantic
+    // projection, so changing this ceiling cannot silently narrow that budget.
     hotpath::measure_block!(
         "daemon_cpu_pool_install",
         install_daemon_cpu_pool(cli.command.as_ref())
     )?;
     let worker_threads = async_worker_threads();
+    let blocking_threads = tokio_blocking_thread_limit();
     let runtime = hotpath::measure_block!("tokio_runtime_build", {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(worker_threads)
-            .max_blocking_threads(MAX_BLOCKING_THREADS)
+            .max_blocking_threads(blocking_threads)
             .thread_stack_size(ASYNC_STACK_BYTES)
             .build()
             .map_err(|e| tracedecay::errors::TraceDecayError::Config {
@@ -312,7 +351,7 @@ fn async_main() -> tracedecay::errors::Result<()> {
     // Process-level runtime shape only. Request, project-server, history, and
     // projection gauges belong on those authorities — not this bootstrap.
     hotpath::gauge!("tokio_worker_threads").set(worker_threads);
-    hotpath::gauge!("tokio_blocking_threads").set(MAX_BLOCKING_THREADS);
+    hotpath::gauge!("tokio_blocking_threads").set(blocking_threads);
     let command_family = cli.command.as_ref().map_or("none", |command| {
         CommandFamily::for_command(command).as_profile_label()
     });
@@ -844,8 +883,47 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
                 .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                     message: "daemon dashboard response omitted URL".to_string(),
                 })?;
-            println!("tracedecay dashboard listening on {url}");
-            eprintln!("Serving project {}", project_path.display());
+            // The daemon keys hosted dashboards by canonicalized project
+            // root, so any response reached here always serves this
+            // project; only the requested host/port may differ from what is
+            // actually bound (an idle dashboard for this same project was
+            // already listening before this request was sent).
+            let status = result
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("started");
+            match status {
+                "already_running" | "stopping" => {
+                    println!("tracedecay dashboard already listening on {url}");
+                    eprintln!("Serving project {}", project_path.display());
+                    let port_honored = result
+                        .get("requested_port_honored")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
+                    if !port_honored {
+                        let requested_port = result
+                            .get("requested_port")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(u64::from(port));
+                        let bound_port = result
+                            .get("port")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or_default();
+                        eprintln!(
+                            "Note: --port {requested_port} was not honored; a dashboard for this project was already running on port {bound_port}."
+                        );
+                    }
+                    if status == "stopping" {
+                        eprintln!(
+                            "Note: the existing dashboard is shutting down; this URL may stop responding shortly."
+                        );
+                    }
+                }
+                _ => {
+                    println!("tracedecay dashboard listening on {url}");
+                    eprintln!("Serving project {}", project_path.display());
+                }
+            }
             if open {
                 match open::that(url) {
                     Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),

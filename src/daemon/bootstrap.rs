@@ -137,6 +137,7 @@ pub async fn run_foreground(
         );
         return Ok(());
     }
+    install_profile_worker_plan(&store_administration, &invocation).await?;
     let (listener, endpoint) = BrokerListener::bind(authority.endpoint()).await?;
     authority.publish_endpoint(&endpoint)?;
     log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
@@ -529,6 +530,7 @@ async fn run_foreground_unix(
         );
         return Ok(());
     }
+    install_profile_worker_plan(&engine.store_administration, &engine.invocation).await?;
     let socket_path = match authority.endpoint() {
         transport::DaemonEndpoint::Unix(path) => path.clone(),
         transport::DaemonEndpoint::Loopback(_) => {
@@ -764,6 +766,27 @@ async fn run_foreground_unix(
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
     endpoint_cleanup
+}
+
+/// Install the daemon-wide worker authority from the profile's exact
+/// ProfileSessions configuration before publishing a transport endpoint.
+/// Account-deletion-only boots return before this point and never start
+/// projectless capture work.
+async fn install_profile_worker_plan(
+    store_administration: &StoreAdministration,
+    invocation: &DaemonInvocationState,
+) -> Result<()> {
+    let profile_id = store_administration
+        .profile_identity()?
+        .profile_id()
+        .clone();
+    let database = store_administration
+        .registered_profile_session_database()
+        .await?;
+    invocation
+        .install_profile_worker_plan(database, &profile_id)
+        .await?;
+    Ok(())
 }
 
 /// How long the accept loop pauses after a non-connection accept failure so a

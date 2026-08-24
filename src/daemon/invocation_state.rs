@@ -939,17 +939,12 @@ mod resident_memory_tests {
     fn invocation_state_and_code_index_registry_share_one_process_resident_authority() {
         let state = DaemonInvocationState::default();
         let cloned = state.clone();
+        let state_memory = state.code_index_schedulers.process_resident_memory();
+        let cloned_memory = cloned.code_index_schedulers.process_resident_memory();
 
-        assert!(Arc::ptr_eq(
-            state.code_index_schedulers.resident_memory(),
-            cloned.code_index_schedulers.resident_memory(),
-        ));
+        assert!(Arc::ptr_eq(&state_memory, &cloned_memory));
         assert_eq!(
-            state
-                .code_index_schedulers
-                .resident_memory()
-                .snapshot()
-                .limit_bytes,
+            state_memory.snapshot().limit_bytes,
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
                 .get(),
         );

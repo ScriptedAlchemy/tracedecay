@@ -107,6 +107,56 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
 }
 
 #[tokio::test]
+async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
+    let root = TempDir::new().unwrap();
+    let profile_root = root.path().join("profile");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "projectless-host-admission-worker-plan-test",
+    )
+    .unwrap();
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .unwrap();
+    let profile_registered = registry.profile_sessions().await.unwrap();
+    let invocation = crate::daemon::DaemonInvocationState::default();
+
+    let status = invocation
+        .install_profile_worker_plan(profile_registered.clone(), identity.profile_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        tracedecay_code_index::parallelism::installed_worker_status(),
+        Some(status)
+    );
+
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        profile_registered.as_ref(),
+    ));
+    let outcome = facade
+        .capture_observation(host_capture_request(
+            ObservationScopeV1::Profile,
+            "host.projectless-worker-plan",
+        ))
+        .await
+        .unwrap();
+    let CaptureObservationOutcome::AcceptedForReplay { outcome, .. } = outcome else {
+        panic!("registered projectless capture must commit through the mounted process authority");
+    };
+    assert!(
+        matches!(*outcome, ObservationPersistOutcome::Committed(_)),
+        "fresh projectless capture must be durably committed"
+    );
+}
+
+#[tokio::test]
 async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stably() {
     let root = TempDir::new().unwrap();
     let repository_root = root.path().join("repository");
