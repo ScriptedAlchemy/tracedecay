@@ -11,6 +11,7 @@
 
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension};
 
 use super::ToolDefinition;
@@ -427,8 +428,42 @@ pub fn get_tool_definitions()
     Ok(definitions)
 }
 
+/// Counts how many times the maximal registry was actually assembled.
+///
+/// The registry is deterministic, so a correct cache builds it exactly once
+/// per process no matter how many `tools/list` requests arrive.
+#[cfg(test)]
+pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The maximal registry, assembled once per process and cloned per caller.
+///
+/// Every input is static for the life of the process: the application catalog
+/// is a `LazyLock` snapshot and `ast_grep_available()` is a `OnceLock` host
+/// probe. Nothing session-scoped is frozen here — the per-session passes
+/// (`apply_context_budget`, `apply_context_warming_budget`, and the
+/// profile/capability filtering in
+/// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*
+/// this returns, after the cache.
 pub(super) fn get_maximal_tool_definitions()
 -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    // The error type is not `Clone`, and a failure here is a deterministic
+    // catalog/schema defect rather than a transient condition, so the cache
+    // retains the rendered message and replays it.
+    static MAXIMAL_DEFINITIONS: LazyLock<std::result::Result<Vec<ToolDefinition>, String>> =
+        LazyLock::new(|| build_maximal_tool_definitions().map_err(|error| error.to_string()));
+    match &*MAXIMAL_DEFINITIONS {
+        Ok(definitions) => Ok(definitions.clone()),
+        Err(message) => Err(super::dispatch::McpDispatchMetadataError::Initialization(
+            message.clone(),
+        )),
+    }
+}
+
+fn build_maximal_tool_definitions()
+-> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    #[cfg(test)]
+    MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let application_registry =
         tracedecay_application::mcp_executable_binding_registry().map_err(|error| {
             super::dispatch::McpDispatchMetadataError::Initialization(error.to_string())

@@ -199,6 +199,10 @@ have no finish line, so they stay paced:
   them defer or shrink a slice while agents are actively querying. Results
   are identical; only pacing changes.
 
+The historical half of the session-refresh sweep does none of this today; see
+"Open breach: historical transcript ingest violates Principle 2" below for the
+measurement and for why the answer is not a wider or narrower worker pool.
+
 ### 3. Hash where data is born, never where it is served
 
 Content digests (payload references, canonical record digests) are computed
@@ -339,6 +343,87 @@ box: the reserved slice, not a slower indexer, is what holds the line.
 cost, not indexing interference. Peak daemon RSS on this host is ~13.6GB with
 no indexing at all, well over the 6GB gate budget — a live, separate breach
 of Principle 5 that this measurement did not introduce.
+
+## Open breach: historical transcript ingest violates Principle 2
+
+Principle 2 says long CPU slices "run in `spawn_blocking` chunks, never on the
+request runtime's workers for unbounded stretches", and names projection
+refresh as an open-ended sweep that must stay paced. Measurement contradicts
+both for the *historical* half of that sweep.
+
+Reproduce with `scripts/profile-tokio-worker-balance.sh`, which reads Hotpath's
+metrics server and needs no product code change. The numbers below are one
+60-second window on a 96-core host, `--profile perf`, features
+`production,hotpath,hotpath-mcp`, `--cfg tokio_unstable`, against an isolated
+profile root under `/tmp` with one registered 3,114-file corpus:
+
+```
+window 60.0s   workers 16   blocking threads 8 (7 idle)
+async pool busy 91.92s = 1.53 cores   steals 14
+
+ wrk    busy_ms   share%      polls    us/poll   steals     parks
+  14      61824    67.26       6926     8926.4        2     13084
+  12      13398    14.58      10979     1220.3        2     21509
+   6       8814     9.59       7343     1200.3        2     15314
+  15       5892     6.41       9293      634.0        4     17940
+  10       1990     2.16       3452      576.5        4      6424
+   (workers 0-5, 7-9, 11, 13 ran zero polls)
+
+top-2 busy share  81.84%
+workers with any busy time  5/16
+
+in-poll execution by labelled future (excludes every .await):
+   cores    poll_s     polls    us/poll  label
+    1.49     89.68     35648     2515.7  session_temporal_refresh.history
+```
+
+`total_poll_duration_ns` is wall time strictly inside `Future::poll`, so an
+`.await` cannot contribute to it. One label therefore accounts for 89.68s of
+the pool's 91.92s of busy time — **97.6% of everything the request runtime's
+async workers did was synchronous execution belonging to
+`session_temporal_refresh.history`**, at 2.5ms per poll and a worst-worker
+occupancy of 8.9ms per poll. A 325-second run of the same scenario shows the
+same shape: 5 of 16 workers carry 98.5% of busy time, the reserved indexing
+pool consumes 4.22 CPU-seconds over the whole run, and cumulative steal counts
+stay in single digits.
+
+### The skew is a symptom; do not resize the pool
+
+The concentration is not a scheduling defect and it is not fixed by changing
+`async_worker_threads()`. `session_history_refresh` runs as exactly two
+long-lived tasks — one project-scoped ingestor and one profile-scoped one — so
+runnable async concurrency is 2, not 16. Work-stealing has nothing to steal
+(14 steals in 60s), and no pool width redistributes a slice that a worker is
+already inside: a poll is not preemptible until it returns.
+
+The width is in fact why the breach has not surfaced as a latency regression.
+Eleven of sixteen workers ran zero polls in the sampled minute, so an arriving
+request always finds a parked worker rather than queueing behind a 9ms poll.
+Narrowing the pool to "match" the observed concurrency would delete exactly
+that headroom and convert a benign skew into a real tail. The measurement to
+watch is microseconds per poll, not busy share.
+
+### Where the fix has to land
+
+The cost is CPU placement, not balance: this work belongs off the request
+runtime, in the same sense the indexing pool already is. Fixing it means
+restructuring the ingest pass, not adding a yield — the pass is an async
+pipeline whose synchronous slices sit *between* store awaits, so a yield point
+redistributes the slices across workers without moving a single cycle off the
+serving pool, and `spawn_blocking` cannot wrap the pass as a whole because it
+is a future, not a closure. The work has to be batched into blocking chunks at
+a boundary that owns its data.
+
+Leaf attribution is not yet pinned down, and the obvious instrument cannot pin
+it: Tokio names async worker threads and blocking-pool threads with the same
+`thread_name_fn`, so `perf --comms` cannot separate the two pools. Under that
+combined thread-name family the largest single product symbol during ingest is
+`privacy::rules::contains_ignore_ascii_case` (5.16% of whole-process cycles,
+~7.4% for the privacy-detector family), which is a plausible in-poll leaf
+because redaction is pure CPU over transcript text — but the SQLite parser
+symbols in the same family belong to `ReadSnapshot::query`, which already uses
+`spawn_blocking` and is correctly placed. Naming the exact leaf needs a
+`#[hotpath::measure]` inside the pass or `HOTPATH_FOCUS`, not a thread filter.
 
 ## Open breach: the vector-generation store violates Principle 5
 
