@@ -327,7 +327,12 @@ async fn raw_like_grep_hits(
     if query_plan.like_terms.is_empty() {
         return Ok(Vec::new());
     }
-    let fetch_limit = compute_like_fallback_fetch_limit(limit, query_plan);
+    // The caller owns the fetch budget (see `grep`'s `rerank_fetch_limit`), and
+    // it is spent exactly once. The FTS siblings already bind `limit` straight
+    // to the SQL `LIMIT`; expanding it a second time here made the rows a page
+    // costs depend on which index path SQLite happened to take, and every row
+    // past `limit` was discarded by the truncation below anyway.
+    let fetch_limit = limit;
 
     let mut values = Vec::new();
     let mut filters = Vec::new();
@@ -395,7 +400,8 @@ async fn summary_like_grep_hits(
     if query_plan.like_terms.is_empty() {
         return Ok(Vec::new());
     }
-    let fetch_limit = compute_like_fallback_fetch_limit(limit, query_plan);
+    // See `raw_like_grep_hits`: the caller's budget is the whole budget.
+    let fetch_limit = limit;
 
     let mut values = Vec::new();
     let mut filters = Vec::new();

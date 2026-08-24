@@ -68,6 +68,27 @@ TEST_CHECKSUMS="$tmpdir/SHA256SUMS" \
   "$INSTALLER"
 
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ ! -e "$tmpdir/install/libonnxruntime.so.1" ]]
+
+# Linux release archives also contain the $ORIGIN-linked ONNX companion.
+# The installer must place it beside the binary, not leave it in the
+# extracted temp directory that the EXIT trap deletes.
+printf 'onnx-runtime\n' >"$tmpdir/archive/libonnxruntime.so.1"
+ln -sfn libonnxruntime.so.1 "$tmpdir/archive/libonnxruntime.so"
+tar -czf "$tmpdir/tracedecay-v9.8.7-x86_64-linux.tar.gz" \
+  -C "$tmpdir/archive" tracedecay libonnxruntime.so.1 libonnxruntime.so
+(
+  cd "$tmpdir"
+  sha256sum tracedecay-v9.8.7-x86_64-linux.tar.gz >SHA256SUMS
+)
+PATH="$tmpdir/bin:$PATH" \
+TRACEDECAY_INSTALL_DIR="$tmpdir/install-with-runtime" \
+TEST_ARCHIVE="$tmpdir/tracedecay-v9.8.7-x86_64-linux.tar.gz" \
+TEST_CHECKSUMS="$tmpdir/SHA256SUMS" \
+  "$INSTALLER"
+[[ "$("$tmpdir/install-with-runtime/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ "$(cat "$tmpdir/install-with-runtime/libonnxruntime.so.1")" == "onnx-runtime" ]]
+[[ "$(readlink "$tmpdir/install-with-runtime/libonnxruntime.so")" == "libonnxruntime.so.1" ]]
 
 expect_installer_failure() {
   local checksums=$1
