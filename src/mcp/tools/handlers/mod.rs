@@ -235,6 +235,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_profile_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
@@ -310,6 +311,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             project_registry_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
+            registered_profile_session_db: None,
             registered_savings_db: None,
             dashboard_session_retrieval_service: None,
             dashboard_session_retrieval_identity: None,

@@ -941,6 +941,7 @@ pub(super) async fn dispatch_session_workflow_tools(
                 options.code_graph_read_admission_port.clone(),
                 options.code_graph_projection_read_port.clone(),
                 options.registered_project_session_db.clone(),
+                options.registered_profile_session_db.clone(),
                 options.daemon_user_profile_id.clone(),
                 options.profile_root.map(std::path::Path::to_path_buf),
                 options.dashboard_session_retrieval_service.clone(),

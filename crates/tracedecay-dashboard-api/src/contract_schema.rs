@@ -64,7 +64,9 @@ use super::projects::{ProjectContextPayloadV1, ProjectsPayloadV1};
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::remote_status_api::RemoteOperationalStatusPayloadV1;
 use super::savings_api::{SavingsOverviewPayloadV1, SavingsSessionsPayloadV1};
-use super::settings_api::{ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch};
+use super::settings_api::{
+    CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch,
+};
 use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 use super::work_api::registered_route_contracts as registered_work_route_contracts;
@@ -118,6 +120,7 @@ struct DashboardContractCatalogV1 {
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
     settings_user_patch: UserSettingsPatch,
+    settings_code_index_worker_patch: CodeIndexWorkerSettingsPatch,
     observatory: ObservatoryReadModelV1,
     costs: CostsReadModelV1,
     graph_call_chain: StructureReadV1<CallChainMeasurementV1>,
@@ -272,6 +275,36 @@ mod tests {
     #[test]
     fn registered_dashboard_route_responses_are_contracted() {
         render_dashboard_contract_schema().expect("render validated dashboard contracts");
+    }
+
+    #[test]
+    fn profile_code_index_worker_patch_contract_is_registered_and_closed() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        let patch = definitions
+            .get("CodeIndexWorkerSettingsPatch")
+            .expect("profile worker patch contract");
+        assert_eq!(patch["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["settings_code_index_worker_patch"]["$ref"],
+            "#/$defs/CodeIndexWorkerSettingsPatch"
+        );
+
+        let selection = definitions
+            .get("CodeIndexWorkerSelectionV1")
+            .and_then(|definition| definition["oneOf"].as_array())
+            .expect("strict worker selection branches");
+        assert!(
+            selection
+                .iter()
+                .all(|branch| branch["additionalProperties"] == false)
+        );
     }
 
     #[test]

@@ -37,8 +37,10 @@ import type { SettingsMutationResult } from './settingsMutation.ts';
 
 const ROUTES: SettingsRoutes = {
   readUrl: '/api/settings',
+  codeIndexWorkerReadUrl: '/api/settings',
   projectPatchUrl: '/api/settings/project',
   userPatchUrl: '/api/settings/user',
+  codeIndexWorkerPatchUrl: '/api/settings/user/code-index-workers',
 };
 
 const AUTHORITY = fixtureAuthority();
@@ -81,6 +83,37 @@ describe('settings editor: reaching a confirmed change', () => {
       readUrl: '/api/settings',
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
+    });
+  });
+
+  it('holds a worker-only change against the independent ProfileSessions revision', () => {
+    const submitting = expectSubmitting(
+      run(
+        initialSettingsEditorState(AUTHORITY),
+        {
+          type: 'code_index_workers_drafted',
+          values: {
+            ...AUTHORITY.codeIndexWorkers,
+            code_index_workers: { mode: 'exact', workers: 4 },
+          },
+        },
+        {
+          type: 'review_requested',
+          scope: 'code_index_workers',
+          idempotencyKey: IDEMPOTENCY_KEY,
+        },
+        { type: 'confirmation_set', confirmed: true },
+        { type: 'submit_started' },
+      ),
+    );
+
+    expect(settingsSubmission(submitting, ROUTES)).toEqual({
+      scope: 'code_index_workers',
+      expectedRevisionId: 'profile-worker-rev-7',
+      idempotencyKey: IDEMPOTENCY_KEY,
+      readUrl: '/api/settings',
+      patchUrl: '/api/settings/user/code-index-workers',
+      patch: { code_index_workers: { mode: 'exact', workers: 4 } },
     });
   });
 });
