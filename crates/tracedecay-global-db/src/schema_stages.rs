@@ -8,8 +8,8 @@ use super::schema_contract::{
 use super::{
     configuration, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
-    observability_rollup, observation, observation_projection, project_registry, session_temporal,
-    stack_delivery,
+    global_db_operation_message, observability_rollup, observation, observation_projection,
+    project_registry, session_temporal, stack_delivery,
 };
 use tracedecay_runtime_core::{
     db::{
@@ -692,8 +692,14 @@ async fn install_registered_schema_stages(
         .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
 
     ensure_authority_audit_checkpoint_schema(transaction).await?;
-    if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
-        session_temporal::install_session_temporal_schema(transaction).await?;
+    match temporal_admission {
+        session_temporal::SessionTemporalSchemaAdmission::Fresh => {
+            session_temporal::install_session_temporal_schema(transaction).await?;
+        }
+        session_temporal::SessionTemporalSchemaAdmission::ReleasedV3 => {
+            session_temporal::migrate_released_v3_session_temporal_schema(transaction).await?;
+        }
+        session_temporal::SessionTemporalSchemaAdmission::Current => {}
     }
     observation::ensure_observation_schema(transaction).await?;
     observation_projection::ensure_observation_projection_schema(transaction)
@@ -704,8 +710,14 @@ async fn install_registered_schema_stages(
         "initialize registered external source state",
     )
     .await?;
-    if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
+    if temporal_admission != session_temporal::SessionTemporalSchemaAdmission::Current {
         ensure_authority_invariant_schema(transaction).await?;
+        if !authority_invariant_triggers_intact(transaction).await? {
+            return Err(global_db_operation_message(
+                "initialize registered global database schema",
+                "final authority triggers were not restored before schema commit",
+            ));
+        }
     }
 
     tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(transaction)

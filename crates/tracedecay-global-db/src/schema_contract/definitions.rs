@@ -74,6 +74,95 @@ macro_rules! table {
     };
 }
 
+pub(super) const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3: Table = table!(
+    "session_temporal_projection_receipts",
+    [
+        column("session_id", "TEXT", true, None, 1),
+        column("generation", "INTEGER", true, None, 2),
+        column("batch_ordinal", "INTEGER", true, None, 3),
+        column("batch_digest", "TEXT", true, None, 0),
+        column("frozen_watermarks_json", "TEXT", true, None, 0),
+        column("source_through", "INTEGER", true, None, 0),
+        column("projection_through", "INTEGER", true, None, 0),
+        column("occurrence_count", "INTEGER", true, None, 0),
+        column("occurrence_digest", "TEXT", true, None, 0),
+        column("dimension_count", "INTEGER", true, None, 0),
+        column("dimension_digest", "TEXT", true, None, 0),
+        column("copy_count", "INTEGER", true, None, 0),
+        column("copy_digest", "TEXT", true, None, 0),
+        column("assertion_count", "INTEGER", true, None, 0),
+        column("assertion_digest", "TEXT", true, None, 0),
+        column("supersession_count", "INTEGER", true, None, 0),
+        column("supersession_digest", "TEXT", true, None, 0),
+        column("current_count", "INTEGER", true, None, 0),
+        column("current_digest", "TEXT", true, None, 0),
+        column("fts_count", "INTEGER", true, None, 0),
+        column("fts_digest", "TEXT", true, None, 0),
+        column("committed_at", "INTEGER", true, None, 0),
+    ],
+    [
+        foreign_key(
+            "session_id",
+            "session_temporal_generations",
+            "session_id",
+            "CASCADE"
+        ),
+        foreign_key_sequence(
+            "generation",
+            "session_temporal_generations",
+            "generation",
+            "CASCADE",
+            1
+        ),
+    ]
+);
+
+const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V4: Table = table!(
+    "session_temporal_projection_receipts",
+    [
+        column("session_id", "TEXT", true, None, 1),
+        column("generation", "INTEGER", true, None, 2),
+        column("batch_ordinal", "INTEGER", true, None, 3),
+        column("batch_digest", "TEXT", true, None, 0),
+        column("frozen_watermarks_json", "TEXT", true, None, 0),
+        column("source_through", "INTEGER", true, None, 0),
+        column("projection_through", "INTEGER", true, None, 0),
+        column("occurrence_count", "INTEGER", true, None, 0),
+        column("occurrence_digest", "TEXT", true, None, 0),
+        column("dimension_count", "INTEGER", true, None, 0),
+        column("dimension_digest", "TEXT", true, None, 0),
+        column("copy_count", "INTEGER", true, None, 0),
+        column("copy_digest", "TEXT", true, None, 0),
+        column("assertion_count", "INTEGER", true, None, 0),
+        column("assertion_digest", "TEXT", true, None, 0),
+        column("supersession_count", "INTEGER", true, None, 0),
+        column("supersession_digest", "TEXT", true, None, 0),
+        column("current_count", "INTEGER", true, None, 0),
+        column("current_digest", "TEXT", true, None, 0),
+        column("fts_count", "INTEGER", true, None, 0),
+        column("fts_digest", "TEXT", true, None, 0),
+        column("committed_at", "INTEGER", true, None, 0),
+        column("batch_item_count", "INTEGER", true, Some("0"), 0),
+        column("committed_item_count", "INTEGER", true, Some("0"), 0),
+        column("committed_copy_count", "INTEGER", true, Some("0"), 0),
+    ],
+    [
+        foreign_key(
+            "session_id",
+            "session_temporal_generations",
+            "session_id",
+            "CASCADE"
+        ),
+        foreign_key_sequence(
+            "generation",
+            "session_temporal_generations",
+            "generation",
+            "CASCADE",
+            1
+        ),
+    ]
+);
+
 pub(super) const TABLES: &[Table] = &[
     table!(
         "projects",
@@ -1145,51 +1234,7 @@ pub(super) const TABLES: &[Table] = &[
         ],
         []
     ),
-    table!(
-        "session_temporal_projection_receipts",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("batch_ordinal", "INTEGER", true, None, 3),
-            column("batch_digest", "TEXT", true, None, 0),
-            column("frozen_watermarks_json", "TEXT", true, None, 0),
-            column("source_through", "INTEGER", true, None, 0),
-            column("projection_through", "INTEGER", true, None, 0),
-            column("batch_item_count", "INTEGER", true, None, 0),
-            column("committed_item_count", "INTEGER", true, None, 0),
-            column("committed_copy_count", "INTEGER", true, None, 0),
-            column("occurrence_count", "INTEGER", true, None, 0),
-            column("occurrence_digest", "TEXT", true, None, 0),
-            column("dimension_count", "INTEGER", true, None, 0),
-            column("dimension_digest", "TEXT", true, None, 0),
-            column("copy_count", "INTEGER", true, None, 0),
-            column("copy_digest", "TEXT", true, None, 0),
-            column("assertion_count", "INTEGER", true, None, 0),
-            column("assertion_digest", "TEXT", true, None, 0),
-            column("supersession_count", "INTEGER", true, None, 0),
-            column("supersession_digest", "TEXT", true, None, 0),
-            column("current_count", "INTEGER", true, None, 0),
-            column("current_digest", "TEXT", true, None, 0),
-            column("fts_count", "INTEGER", true, None, 0),
-            column("fts_digest", "TEXT", true, None, 0),
-            column("committed_at", "INTEGER", true, None, 0),
-        ],
-        [
-            foreign_key(
-                "session_id",
-                "session_temporal_generations",
-                "session_id",
-                "CASCADE"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_temporal_generations",
-                "generation",
-                "CASCADE",
-                1
-            ),
-        ]
-    ),
+    SESSION_TEMPORAL_PROJECTION_RECEIPTS_V4,
     table!(
         "session_temporal_observation_effects",
         [
