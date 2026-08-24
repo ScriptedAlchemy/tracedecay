@@ -107,6 +107,7 @@ pub(in crate::daemon) struct SessionTemporalRefreshSchedulerRegistry {
     shutdown_guard: tokio::sync::Mutex<()>,
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
+    codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
 }
 
 impl Default for SessionTemporalRefreshSchedulerRegistry {
@@ -120,6 +121,9 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
             shutdown_guard: tokio::sync::Mutex::new(()),
             project_lifecycle: tokio::sync::Mutex::new(()),
             retired_project_owners: std::sync::Mutex::new(HashSet::new()),
+            codex_discovery: Arc::new(
+                tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default(),
+            ),
         }
     }
 }
@@ -157,6 +161,19 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
 }
 
 impl SessionTemporalRefreshSchedulerRegistry {
+    pub(in crate::daemon) fn configure_codex_preparation_resources(
+        &self,
+        memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+    ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<()> {
+        self.codex_discovery.configure_preparation_resources(memory)
+    }
+
+    pub(in crate::daemon) fn codex_discovery(
+        &self,
+    ) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
+        Arc::clone(&self.codex_discovery)
+    }
+
     fn spawn_entry(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -354,12 +371,15 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .history
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            if retained.is_none() {
+            let installed = retained.is_none();
+            if installed {
                 *retained = Some(history);
                 entry.state.mark_history_pending();
             }
             drop(retained);
-            entry.state.wake_history();
+            if installed {
+                entry.state.wake_history();
+            }
         }
         wake
     }
@@ -376,12 +396,15 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .history
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            if retained.is_none() {
+            let installed = retained.is_none();
+            if installed {
                 *retained = Some(history);
                 entry.state.mark_history_pending();
             }
             drop(retained);
-            entry.state.wake_history();
+            if installed {
+                entry.state.wake_history();
+            }
         }
         wake
     }

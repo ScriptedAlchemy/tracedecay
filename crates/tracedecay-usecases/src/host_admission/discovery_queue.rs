@@ -61,6 +61,72 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
+    pub(super) async fn replace_parse_offset(
+        &self,
+        scope: &ObservationScopeV1,
+        path: &str,
+        expected: tracedecay_global_db::ParseOffset,
+        next: tracedecay_global_db::ParseOffset,
+    ) -> Result<(), HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .replace_parse_offset_result(path, expected, next)
+            .await
+            .map_err(|error| {
+                tracing::warn!(?error, "registered host parse-offset replacement failed");
+                if matches!(
+                    error,
+                    tracedecay_global_db::TranscriptPersistenceError::Conflict { .. }
+                ) {
+                    HostAdmissionOutcome::parse_offset_conflict()
+                } else {
+                    HostAdmissionOutcome::registered_authority_unavailable()
+                }
+            })
+    }
+
+    pub(super) async fn replace_parse_offset_pair(
+        &self,
+        scope: &ObservationScopeV1,
+        first: (
+            &str,
+            tracedecay_global_db::ParseOffset,
+            tracedecay_global_db::ParseOffset,
+        ),
+        second: (
+            &str,
+            tracedecay_global_db::ParseOffset,
+            tracedecay_global_db::ParseOffset,
+        ),
+    ) -> Result<(), HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .replace_parse_offset_pair_result(first, second)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    ?error,
+                    "registered host parse-offset pair replacement failed"
+                );
+                if matches!(
+                    error,
+                    tracedecay_global_db::TranscriptPersistenceError::PairConflict { .. }
+                ) {
+                    HostAdmissionOutcome::parse_offset_conflict()
+                } else {
+                    HostAdmissionOutcome::registered_authority_unavailable()
+                }
+            })
+    }
+
     pub(super) async fn enqueue_discovery_paths(
         &self,
         scope: &ObservationScopeV1,

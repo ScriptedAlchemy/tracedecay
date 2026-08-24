@@ -523,7 +523,7 @@ pub async fn capture_kimi_observations(
         let progress = admit_jsonl_observations(
             request,
             |_| (),
-            move |(), bytes, range, _| {
+            move |(), bytes, range, _, _prepared, _hints| {
                 let native_id = kimi_capture::native_record_id(&session_id, range)
                     .map_err(|_| invalid_frame())?;
                 match parse_normalized_observation_record_v1(

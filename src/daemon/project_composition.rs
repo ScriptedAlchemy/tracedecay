@@ -563,6 +563,9 @@ pub(super) async fn production_project_server(
                             canonical_project_path.to_path_buf(),
                             code_search_project_id.clone(),
                             transcript_source_home.clone(),
+                            store_administration
+                                .session_temporal_refresh_schedulers()
+                                .codex_discovery(),
                         ),
                     ),
                 )
@@ -578,6 +581,9 @@ pub(super) async fn production_project_server(
                             registry_db.clone(),
                             profile_identity.clone(),
                             transcript_source_home.clone(),
+                            store_administration
+                                .session_temporal_refresh_schedulers()
+                                .codex_discovery(),
                         ),
                     ),
                 )

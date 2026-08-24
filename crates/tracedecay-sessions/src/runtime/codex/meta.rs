@@ -2,12 +2,15 @@
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
 
 /// Session metadata read from a rollout's leading `session_meta` line.
+#[derive(Clone)]
 pub struct CodexMeta {
     pub cwd: PathBuf,
     pub session_id: String,
@@ -21,9 +24,45 @@ pub struct CodexMeta {
     pub thread_source: Option<String>,
 }
 
+#[derive(Clone)]
 pub(super) struct CodexMetaWithProvenance {
     pub meta: CodexMeta,
     pub native_thread_id: Option<String>,
+    source_frame_bytes: usize,
+}
+
+impl CodexMetaWithProvenance {
+    pub(super) fn retained_bytes(&self) -> u64 {
+        // The parsed native JSON tree can retain substantially more allocator
+        // memory than its encoding. Keep the same conservative 32x structural
+        // factor as prepared JSONL pages, plus the owned model/path/id fields.
+        let structural = self.source_frame_bytes.saturating_mul(32);
+        let owned = crate::runtime::source::path_byte_len(&self.meta.cwd)
+            .saturating_add(self.meta.session_id.capacity())
+            .saturating_add(self.meta.model.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                self.meta
+                    .parent_session_id
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(self.meta.agent_id.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                self.meta
+                    .agent_nickname
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(self.meta.agent_role.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.meta.thread_source.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.native_thread_id.as_ref().map_or(0, String::capacity));
+        u64::try_from(
+            std::mem::size_of::<Self>()
+                .saturating_add(structural)
+                .saturating_add(owned),
+        )
+        .unwrap_or(u64::MAX)
+    }
 }
 
 pub struct CodexTurnContext {
@@ -38,6 +77,13 @@ pub(super) fn session_meta(path: &Path) -> Option<CodexMeta> {
 }
 
 pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
+    #[cfg(test)]
+    {
+        let reads = SESSION_META_READS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        let mut reads = reads.lock().unwrap_or_else(|error| error.into_inner());
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        *reads.entry(key).or_default() += 1;
+    }
     let file = std::fs::File::open(path).ok()?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     for _ in 0..4 {
@@ -48,13 +94,32 @@ pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithP
                     continue;
                 };
                 if let Some(meta) = session_meta_with_provenance_from_record(&value, path) {
-                    return Some(meta);
+                    return Some(CodexMetaWithProvenance {
+                        source_frame_bytes: frames.record().len(),
+                        ..meta
+                    });
                 }
             }
             RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. } => {}
         }
     }
     None
+}
+
+#[cfg(test)]
+static SESSION_META_READS: OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn session_meta_read_count_for_test(path: &Path) -> usize {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    SESSION_META_READS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&key)
+        .copied()
+        .unwrap_or_default()
 }
 
 pub fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
@@ -124,6 +189,7 @@ fn session_meta_with_provenance_from_record(
             thread_source,
         },
         native_thread_id,
+        source_frame_bytes: 0,
     })
 }
 

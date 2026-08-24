@@ -111,6 +111,13 @@ pub async fn run_foreground(
         StoreAdministration::default().with_profile_identity(authority.profile_identity().clone());
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation = DaemonInvocationState::default();
+    store_administration
+        .configure_codex_preparation_resources(
+            invocation.code_index_schedulers.process_resident_memory(),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to configure Codex preparation resources: {error}"),
+        })?;
     invocation.configure_github_read_only_credentials(authority.profile_identity());
     store_administration.install_remote_recovery_project_lifecycle(
         invocation.clone(),
@@ -491,6 +498,17 @@ async fn run_foreground_unix(
     let engine = DaemonEngine::default()
         .with_profile_identity(authority.profile_identity().clone())
         .with_http_application_registry(http_application_registry.clone());
+    engine
+        .store_administration
+        .configure_codex_preparation_resources(
+            engine
+                .invocation
+                .code_index_schedulers
+                .process_resident_memory(),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to configure Codex preparation resources: {error}"),
+        })?;
     engine
         .store_administration
         .install_remote_recovery_project_lifecycle(

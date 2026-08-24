@@ -12,6 +12,93 @@ fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("test byte count is non-zero")
 }
 
+#[test]
+fn process_shared_reservation_uses_same_ceiling_and_releases_exactly() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let component = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
+    let mut reservation = authority
+        .reserve_process_shared(component, bytes(80))
+        .expect("process-shared reservation");
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        80
+    );
+    assert!(
+        authority
+            .reserve_process_shared(component, bytes(30))
+            .is_err()
+    );
+
+    reservation.shrink_to(40).unwrap();
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        40
+    );
+    drop(reservation);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let keyed = key("project-a", "worktree-a", "generation-a", "semantic-index");
+    let shared = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
+    let _keyed_reservation = authority
+        .reserve(keyed.clone(), bytes(60))
+        .expect("keyed reservation");
+    let _shared_reservation = authority
+        .reserve_process_shared(shared, bytes(40))
+        .expect("process-shared reservation fills the common ceiling");
+
+    let error = authority
+        .reserve_process_shared(shared, bytes(1))
+        .expect_err("neither ownership kind can overcommit the process ceiling");
+    assert_eq!(
+        error,
+        ResidentMemoryAdmissionFailureV1 {
+            used_bytes: 100,
+            requested_bytes: 1,
+            limit_bytes: 100,
+        }
+    );
+    let snapshot = authority.snapshot();
+    assert_eq!(snapshot.used_bytes, 100);
+    assert_eq!(snapshot.charge_for(&keyed), 60);
+    assert_eq!(snapshot.process_shared_charge_for(shared), 40);
+}
+
+#[test]
+fn same_component_process_shared_reservations_shrink_and_release_independently() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let component = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
+    let mut first = authority
+        .reserve_process_shared(component, bytes(30))
+        .expect("first process-shared reservation");
+    let second = authority
+        .reserve_process_shared(component, bytes(50))
+        .expect("second process-shared reservation");
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        80
+    );
+
+    first.shrink_to(10).expect("first reservation shrinks");
+    let after_shrink = authority.snapshot();
+    assert_eq!(after_shrink.used_bytes, 60);
+    assert_eq!(after_shrink.process_shared_charge_for(component), 60);
+
+    drop(second);
+    let after_second_drop = authority.snapshot();
+    assert_eq!(after_second_drop.used_bytes, 10);
+    assert_eq!(after_second_drop.process_shared_charge_for(component), 10);
+
+    drop(first);
+    let released = authority.snapshot();
+    assert_eq!(released.used_bytes, 0);
+    assert_eq!(released.process_shared_charge_for(component), 0);
+    assert!(released.process_shared_charges.is_empty());
+}
+
 fn key(
     project: &str,
     worktree: &str,
