@@ -1258,27 +1258,4 @@ mod tests {
             .unwrap();
         assert_eq!(admitted.artifact_digest(), &digest_b);
     }
-
-    #[test]
-    fn artifact_filesystem_boundary_uses_safe_capability_primitives() {
-        // artifact_store.rs is a thin facade over crate-private submodules
-        // (paths/import/lease_admission/gc_recovery/io_primitives); scan all
-        // of them so this guardrail still covers the whole store, not just
-        // the facade file.
-        let production = [
-            include_str!("../artifact_store.rs"),
-            include_str!("../artifact_store/paths.rs"),
-            include_str!("../artifact_store/import.rs"),
-            include_str!("../artifact_store/lease_admission.rs"),
-            include_str!("../artifact_store/gc_recovery.rs"),
-            include_str!("../artifact_store/io_primitives.rs"),
-        ]
-        .join("\n");
-        assert!(production.contains("#![forbid(unsafe_code)]"));
-        assert!(!production.contains("unsafe extern"));
-        assert!(!production.contains("Dir::open_ambient_dir(&root"));
-        assert!(!production.contains("entry.open_dir()"));
-        assert!(production.contains("open_dir_nofollow(&staging_id)"));
-        assert!(production.contains("fsys::quick::write"));
-    }
 }

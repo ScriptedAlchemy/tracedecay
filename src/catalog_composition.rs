@@ -102,6 +102,7 @@ pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, Catalog
     assemble_application_catalog().map(|(snapshot, _handlers)| snapshot)
 }
 
+#[hotpath::measure]
 fn assemble_application_catalog()
 -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
     let mut contributions = application_catalog_contributions()?;

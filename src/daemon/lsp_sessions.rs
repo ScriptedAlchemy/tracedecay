@@ -2,10 +2,6 @@
 //!
 //! Records which LSP sessions one connection opened so they are all released
 //! when it goes away, and authorizes the workspace a request may reach.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 

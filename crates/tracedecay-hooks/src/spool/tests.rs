@@ -393,6 +393,55 @@ fn matching_torn_append_tail_is_truncated_and_sequence_is_reused() {
     );
 }
 
+/// The released build persisted `append_intent.frame` as a JSON byte array and
+/// `SPOOL_META_VERSION` is still 1, so an upgraded binary must still decode and
+/// reconcile a crash-era intent. Refusing it would strand the spool behind a
+/// reset that discards the pending hook event.
+#[test]
+fn released_byte_array_append_intent_recovers_after_upgrade() {
+    let root = TestDir::new("recovery-byte-array-intent");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    let payload = canonical_json_bytes(&envelope(2, 9)).unwrap();
+    let frame = encode_frame(2, UtcMicros(10), [9; 32], &payload).unwrap();
+    let mut meta = spool.meta.clone();
+    meta.append_intent = Some(append_intent(2, spool.physical_len, &frame).unwrap());
+    write_meta(&root.0, &meta).unwrap();
+    // Rewrite the persisted intent in the exact released encoding: one JSON
+    // integer per frame byte instead of the base64 string this build writes.
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
+    persisted["append_intent"]["frame"] = serde_json::json!(frame);
+    assert!(
+        persisted["append_intent"]["frame"].is_array(),
+        "the fixture must persist the released byte-array form"
+    );
+    fs::write(meta_path(&root.0), serde_json::to_vec(&persisted).unwrap()).unwrap();
+    let mut output = std::fs::OpenOptions::new()
+        .append(true)
+        .open(records_path(&root.0))
+        .unwrap();
+    let torn_len = 100.min(frame.len() - 1);
+    output.write_all(&frame[..torn_len]).unwrap();
+    output.sync_all().unwrap();
+    drop(output);
+    drop(spool);
+
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
+
+    assert_eq!(report.truncated_partial_tail_bytes, torn_len as u64);
+    assert_eq!(spool.meta.next_sequence, 2);
+    assert_eq!(
+        spool
+            .append(envelope(2, 9), &binding(), UtcMicros(20))
+            .unwrap()
+            .sequence,
+        2
+    );
+}
+
 #[test]
 fn fair_replay_is_fifo_per_session_and_round_robin_across_sessions() {
     let root = TestDir::new("fair");

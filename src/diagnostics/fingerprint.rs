@@ -18,15 +18,16 @@ pub(super) struct DiagnosticsFileFingerprint {
 
 impl DiagnosticsFingerprint {
     pub(super) async fn capture(project_root: &Path, scope: &Scope) -> Result<Self> {
-        let paths = diagnostics_input_paths(project_root, scope)?;
         let project_root = project_root.to_path_buf();
-        let fingerprint =
-            tokio::task::spawn_blocking(move || Self::from_paths(&project_root, paths))
-                .await
-                .map_err(|err| TraceDecayError::Config {
-                    message: format!("failed to join diagnostics fingerprint task: {err}"),
-                })?;
-        Ok(fingerprint)
+        let scope = scope.clone();
+        tokio::task::spawn_blocking(move || {
+            let paths = diagnostics_input_paths(&project_root, &scope)?;
+            Ok(Self::from_paths(&project_root, paths))
+        })
+        .await
+        .map_err(|err| TraceDecayError::Config {
+            message: format!("failed to join diagnostics fingerprint task: {err}"),
+        })?
     }
 
     fn from_paths(project_root: &Path, paths: Vec<PathBuf>) -> Self {

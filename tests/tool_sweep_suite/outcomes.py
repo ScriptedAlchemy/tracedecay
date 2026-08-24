@@ -101,18 +101,6 @@ def expected_state(response: dict[str, Any]) -> str | None:
     return None
 
 
-def search_node_id(response: dict[str, Any]) -> str | None:
-    value = first_value(response, {"node_id", "id"})
-    if isinstance(value, str) and value:
-        return value
-    for text in text_blocks(response):
-        # `tracedecay_search` renders the graph identity beneath each result.
-        for candidate in re.findall(r"^\s*`([^`\n]+)`(?:\s*·.*)?$", text, re.MULTILINE):
-            if candidate and not candidate.startswith("tracedecay_"):
-                return candidate
-    return None
-
-
 def response_handle(response: dict[str, Any]) -> str | None:
     value = first_value(response, {"handle"})
     if isinstance(value, str) and value:

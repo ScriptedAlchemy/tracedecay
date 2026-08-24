@@ -50,6 +50,78 @@ impl GraphCancellation for NeverCancelled {
     }
 }
 
+fn active_session_sync_deadline() -> Deadline {
+    Deadline::new(UtcMicros(
+        tracedecay_application::now_micros()
+            .0
+            .saturating_add(60_000_000),
+    ))
+    .expect("active session-sync deadline")
+}
+
+#[tokio::test]
+async fn session_sync_interruption_wait_wakes_on_request_cancellation() {
+    let service = DaemonSessionSyncService::default();
+    let cancellation = CancellationSignal::active("session-sync.event-cancellation").unwrap();
+    let waiter_service = service.clone();
+    let waiter_cancellation = cancellation.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_service
+            .wait_for_interruption_parts(&waiter_cancellation, &active_session_sync_deadline())
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    cancellation.cancel(tracedecay_application::now_micros());
+
+    let interruption = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("request cancellation must wake the session-sync waiter")
+        .expect("session-sync waiter task");
+    assert!(matches!(interruption, SessionSyncInterruption::Cancelled));
+}
+
+#[tokio::test]
+async fn session_sync_interruption_wait_wakes_on_daemon_shutdown() {
+    let service = DaemonSessionSyncService::default();
+    let cancellation = CancellationSignal::active("session-sync.event-shutdown").unwrap();
+    let waiter_service = service.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_service
+            .wait_for_interruption_parts(&cancellation, &active_session_sync_deadline())
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    SessionSyncServicePort::shutdown(&service).await;
+
+    let interruption = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("daemon shutdown must wake the session-sync waiter")
+        .expect("session-sync waiter task");
+    assert!(matches!(interruption, SessionSyncInterruption::Shutdown));
+}
+
+#[tokio::test]
+async fn session_sync_interruption_wait_uses_the_request_deadline() {
+    let service = DaemonSessionSyncService::default();
+    let cancellation = CancellationSignal::active("session-sync.event-deadline").unwrap();
+    let deadline = Deadline::new(UtcMicros(
+        tracedecay_application::now_micros()
+            .0
+            .saturating_add(20_000),
+    ))
+    .unwrap();
+
+    let interruption = tokio::time::timeout(
+        Duration::from_secs(1),
+        service.wait_for_interruption_parts(&cancellation, &deadline),
+    )
+    .await
+    .expect("request deadline must wake the session-sync waiter");
+    assert!(matches!(interruption, SessionSyncInterruption::TimedOut));
+}
+
 #[test]
 fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() {
     let result = git_sync_work_result(

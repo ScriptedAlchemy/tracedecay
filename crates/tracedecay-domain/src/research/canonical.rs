@@ -7,6 +7,23 @@ use super::canonical_sink::BufferedSink;
 use super::canonical_value::write_canonical;
 use super::error::DomainError;
 use super::id::ManifestDigest;
+use crate::canonical_text::encode_tagged_lowercase_hex;
+
+impl ManifestDigest {
+    /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes — the
+    /// one constructor for digest material, so call sites never re-roll their
+    /// own `format!`/hex loop over an already-computed hash.
+    pub fn from_sha256_bytes(digest: &[u8]) -> Result<Self, DomainError> {
+        Self::new(encode_tagged_lowercase_hex("sha256:", digest))
+    }
+
+    /// All-zero SHA-256 digest (`sha256:` followed by 64 `0` digits).
+    ///
+    /// Used as the unsigned placeholder while sealing a digest-bearing record.
+    pub fn zero() -> Result<Self, DomainError> {
+        Self::from_sha256_bytes(&[0u8; 32])
+    }
+}
 
 pub(super) type CanonicalError = serde_json::Error;
 pub(super) type CanonicalResult<T = ()> = Result<T, CanonicalError>;
@@ -36,7 +53,7 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, Domai
     let mut sink = BufferedSink::new(Sha256::new());
     canonical_serializer::serialize_canonical(value, &mut sink)?;
     let digest = sink.finish().finalize();
-    manifest_digest_from_sha256(&digest)
+    ManifestDigest::from_sha256_bytes(&digest)
 }
 
 /// Serialize once to canonical JSON and return those bytes with their canonical
@@ -49,19 +66,8 @@ pub fn canonical_json_bytes_and_sha256<T: Serialize>(
 ) -> Result<(Vec<u8>, ManifestDigest), DomainError> {
     let bytes = canonical_json_bytes(value)?;
     let digest_bytes = Sha256::digest(&bytes);
-    let digest = manifest_digest_from_sha256(&digest_bytes)?;
+    let digest = ManifestDigest::from_sha256_bytes(&digest_bytes)?;
     Ok((bytes, digest))
-}
-
-fn manifest_digest_from_sha256(digest: &[u8]) -> Result<ManifestDigest, DomainError> {
-    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}")
-            .map_err(|error| DomainError::CanonicalSerialization(error.to_string()))?;
-    }
-    ManifestDigest::new(encoded)
 }
 
 #[cfg(test)]

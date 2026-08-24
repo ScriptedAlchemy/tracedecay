@@ -57,9 +57,9 @@ impl CodeIndexObservabilityV1 {
         }
     }
 
-    /// Offers the Plan 26 retrieval-pipeline families projected from one
-    /// completed query composition to the bounded producer, non-blocking on
-    /// the query hot path.
+    /// Offers the retrieval-pipeline families projected from one completed
+    /// query composition to the bounded producer, non-blocking on the query
+    /// hot path.
     pub(in crate::daemon) fn record_retrieval_composition(
         &self,
         authorized: &AuthorizedQueryFallbackV1,

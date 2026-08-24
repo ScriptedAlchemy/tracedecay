@@ -20,11 +20,8 @@ use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+use crate::common::canonical_existing_path as canonical_temp_path;
 use crate::home_env_lock::HOME_ENV_LOCK;
-
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
 
 fn git_cli_path(path: &Path) -> PathBuf {
     #[cfg(windows)]

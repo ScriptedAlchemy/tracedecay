@@ -2,13 +2,6 @@
 //!
 //! Truncation, offsets, and typed omissions are decided here so the registered
 //! database adapters keep only snapshot, hydration, and transaction ownership.
-//!
-//! Moved down from root `src/application/session/lcm/render.rs`. Its only
-//! callers were the registered adapters in this module, and the top-of-stack
-//! use-case layer (now `tracedecay-usecases`, see that crate's `lib.rs` for
-//! why it is not `tracedecay-application`) depends on `global_db`, so leaving
-//! the shaping above this crate would have been a cycle. Root re-exports
-//! these names through its `tracedecay_global_db::*` shim.
 
 use tracedecay_domain::HydrationStateV1;
 

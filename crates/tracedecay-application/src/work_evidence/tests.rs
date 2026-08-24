@@ -509,7 +509,7 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
     assert!(result.redacted);
     assert!(result.omissions.is_empty());
     assert!(result.continuations.is_empty());
-    assert_eq!(reads.load(Ordering::SeqCst), 5);
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
     let requests = sessions.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].selection, selection());
@@ -523,6 +523,28 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
     assert_eq!(requests[0].source, provider_session());
     assert_eq!(requests[0].temporal, TemporalModeV1::Forensic);
     assert_eq!(requests[0].continuation, None);
+}
+
+#[tokio::test]
+async fn limit_omissions_are_counted_without_repeating_identical_rows() {
+    let sessions = Sessions::default();
+    let (service, reads) = task_session_service(&sessions);
+    let mut request = request();
+    request.page_size = 1;
+
+    let result = service.retrieve(&context(), request).await.unwrap();
+
+    assert_eq!(result.coverage.selected, 2);
+    assert_eq!(result.coverage.omitted, 1);
+    assert_eq!(result.coverage.state, WorkEvidenceCoverageStateV1::Partial);
+    assert_eq!(
+        result.omissions,
+        vec![WorkEvidenceOmissionV1 {
+            relation: "task_evidence".to_owned(),
+            reason: WorkEvidenceOmissionReasonV1::LimitReached,
+        }]
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

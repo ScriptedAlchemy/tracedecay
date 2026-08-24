@@ -7,6 +7,8 @@
 //! `analytics_events` so one durable table answers adoption questions, using
 //! per-file byte cursors in `parse_offsets` to stay idempotent across runs.
 
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -265,9 +267,7 @@ fn import_cursor_key(path: &Path) -> String {
 }
 
 fn read_from_offset(path: &Path, offset: u64) -> Result<String, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file =
-        std::fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
+    let mut file = File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|err| format!("seek {}: {err}", path.display()))?;
     let mut text = String::new();
@@ -319,10 +319,3 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
         .map(str::to_string)
 }
-
-// The CLI entry points that used to close this file (`run_analytics_sync`,
-// `run_analytics_diagnostics`, `call_admin_cli`, `analytics_sync_with_db`,
-// `analytics_diagnostics_with_db`) stayed in the root binary: they drive
-// `daemon::DaemonHandshake`, `dashboard::analytics_api` and the observability
-// read models, none of which sit below this crate. Only the durable
-// hook-JSONL importer moved down.

@@ -31,6 +31,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 
 use super::config_error;
 pub use crate::automation::managed_skills::managed_skill_root;
@@ -270,12 +272,12 @@ impl FileProvenance {
         self.managed_by.as_deref() == Some(MATERIALIZED_SKILL_MANAGED_BY)
     }
 
-    /// Legacy (pre-package-hash, PR #362) fork check: the recorded
-    /// `content-hash` was the body-only hash, so a file is a fork when the body
-    /// on disk no longer hashes to it. Only meaningful for the body-hash domain;
-    /// callers first try [`recompute_on_disk_package`] for the package-hash
-    /// domain (PR #366+). A managed file missing a content-hash is treated as
-    /// forked so we never silently overwrite something we cannot verify.
+    /// Legacy (pre-package-hash) fork check: the recorded `content-hash` was
+    /// the body-only hash, so a file is a fork when the body on disk no longer
+    /// hashes to it. Only meaningful for the body-hash domain; callers first
+    /// try [`recompute_on_disk_package`] for the package-hash domain. A managed
+    /// file missing a content-hash is treated as forked so we never silently
+    /// overwrite something we cannot verify.
     fn is_legacy_forked(&self) -> bool {
         match (&self.content_hash, &self.body_hash) {
             (Some(recorded), Some(actual)) => recorded != actual,
@@ -339,7 +341,7 @@ fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> 
 }
 
 /// Recomputes the package hash of a manifest-less managed package directly from
-/// disk (PR #366+ package-hash domain). Reconstructs the render placeholder by
+/// disk (package-hash domain). Reconstructs the render placeholder by
 /// swapping the recorded `content-hash` back to `<package-hash>`, folds in the
 /// on-disk support files exactly as [`ManagedSkill::materialized_package_hash`]
 /// does, and — when the result matches the recorded hash — returns a re-derived
@@ -349,8 +351,6 @@ fn recompute_on_disk_package(
     dir: &Path,
     provenance: &FileProvenance,
 ) -> Result<Option<MaterializationManifest>> {
-    use sha2::{Digest, Sha256};
-
     let Some(recorded) = provenance.content_hash.as_deref() else {
         return Ok(None);
     };
@@ -386,7 +386,7 @@ fn recompute_on_disk_package(
         hasher.update(bytes);
         files.insert(key, hash_bytes(bytes));
     }
-    let recomputed = format!("sha256:{}", hex::encode(hasher.finalize()));
+    let recomputed = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
     if recomputed != recorded {
         return Ok(None);
     }
@@ -421,8 +421,7 @@ fn on_disk_body_markdown(contents: &str) -> Option<String> {
 }
 
 fn hash_body(body: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())))
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(body.as_bytes()))
 }
 
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
@@ -504,8 +503,7 @@ impl Drop for PackageLock {
 }
 
 fn package_lock_path(package_dir: &Path) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    let key = hex::encode(Sha256::digest(package_dir.to_string_lossy().as_bytes()));
+    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
     std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
 }
 
@@ -1307,8 +1305,7 @@ fn prune_skill_dir(scope: &MaterializationScope, slug: &str) {
 /// Short, stable disambiguator derived from a full skill id, used to suffix a
 /// host slug when two distinct ids collide on the same base slug.
 fn short_id_hash(skill_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(skill_id.as_bytes()))[..8].to_string()
+    sha256_hex(skill_id.as_bytes())[..8].to_string()
 }
 
 /// Assigns a host slug to every active skill, disambiguating collisions.

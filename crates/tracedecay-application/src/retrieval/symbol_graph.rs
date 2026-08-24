@@ -212,7 +212,6 @@ pub struct SymbolSearchPrimitiveRequest {
 }
 
 impl SymbolSearchPrimitiveRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }
@@ -228,7 +227,6 @@ pub struct ExactSymbolRequest {
 }
 
 impl ExactSymbolRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }
@@ -245,7 +243,6 @@ pub struct SignatureSearchRequest {
 }
 
 impl SignatureSearchRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }
@@ -267,7 +264,6 @@ pub struct ImplementationsRequest {
 }
 
 impl ImplementationsRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }
@@ -283,7 +279,6 @@ pub struct TypeHierarchyRequest {
 }
 
 impl TypeHierarchyRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }
@@ -300,7 +295,6 @@ pub struct GraphRelationRequest {
 }
 
 impl GraphRelationRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }
@@ -316,7 +310,6 @@ pub struct GraphImpactPrimitiveRequest {
 }
 
 impl GraphImpactPrimitiveRequest {
-    /// Validate this request before dispatching it to a primitive port.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
     }

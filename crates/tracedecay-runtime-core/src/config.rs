@@ -19,21 +19,17 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
 
-/// Returns the project marker directory for the given project root.
-///
 /// New runtime storage lives in the user-level profile shard. The project root
 /// only carries lightweight marker/config files under `.tracedecay/`.
 pub fn get_tracedecay_dir(project_root: &Path) -> PathBuf {
     project_root.join(TRACEDECAY_DIR)
 }
 
-/// Name of the project marker directory for this project root.
 pub fn active_data_dir_name(project_root: &Path) -> &'static str {
     let _ = project_root;
     TRACEDECAY_DIR
 }
 
-/// Database filename appropriate for the given data directory.
 pub fn db_filename(data_dir: &Path) -> &'static str {
     let _ = data_dir;
     DB_FILENAME

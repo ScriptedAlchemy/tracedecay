@@ -14,9 +14,8 @@
 //! are mounted. Every payload and read operation an application actually
 //! constructs today routes through here: facts, observations and cursor
 //! advances, diagnostics, evidence assembly, external sources, retrieval-anchor
-//! dispositions and derivatives. Three
-//! surfaces are wired and tested but not yet constructed by any production
-//! caller, and are retained as the landing zone for their migration:
+//! dispositions and derivatives. Three surfaces are wired and tested here;
+//! their live writers remain elsewhere:
 //!
 //! - the profile/configuration family
 //!   ([`RepositoryWritePayloadV1::Configuration`] and every
@@ -77,9 +76,6 @@ pub use semantic_vector_staging::{
     SEMANTIC_VECTOR_STAGING_SCHEMA, SemanticVectorStagingExactSqlStorage,
 };
 
-// The read operation/result contract now lives in `tracedecay-store`. Re-export
-// the moved types so existing `repository::` paths keep resolving across the
-// workspace.
 pub use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
     EffectsReadOperationV1, EffectsReadResultV1, ExternalSourceReadOperationV1,
@@ -95,6 +91,7 @@ pub struct ConcreteRepositoryWriteExecutor {
 }
 
 impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
+    #[hotpath::measure]
     fn execute(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -109,6 +106,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             }
             RepositoryWritePayloadV1::Observation(write) => {
                 self.project.execute_observation_write(savepoint, write)
+            }
+            RepositoryWritePayloadV1::ObservationBatch(writes) => {
+                self.project.execute_observation_batch(savepoint, writes)
             }
             RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => self
                 .project
@@ -131,6 +131,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::ExternalSource(commit) => self
                 .project
                 .execute_external_source_write(savepoint, commit),
+            RepositoryWritePayloadV1::ExternalSourceBatch(commits) => self
+                .project
+                .execute_external_source_batch(savepoint, commits),
             RepositoryWritePayloadV1::ExternalSourceProjection(projection) => self
                 .project
                 .execute_external_source_projection_write(savepoint, projection),
@@ -163,6 +166,7 @@ pub struct ConcreteRepositoryReadExecutor {
 }
 
 impl ConcreteRepositoryReadExecutor {
+    #[hotpath::measure]
     pub fn execute(
         &mut self,
         snapshot: &Transaction<'_>,

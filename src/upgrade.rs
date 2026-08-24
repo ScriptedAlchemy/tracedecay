@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
@@ -149,7 +151,7 @@ fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
 }
 
 fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
-    let actual = hex::encode(Sha256::digest(bytes));
+    let actual = sha256_hex(bytes);
     if actual == expected {
         return Ok(());
     }
@@ -701,7 +703,6 @@ fn update_scoop_metadata(new_version: &str) {
         return;
     }
 
-    // Update the `current` directory junction.
     let current = app_dir.join("current");
     if let Err(err) = std::fs::remove_dir(&current) {
         eprintln!(
@@ -1003,7 +1004,7 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
     let download = preflight_asset_check(&latest, target_is_beta)?;
 
     // Channel switches do not yet run the post-update refresh chain, so the
-    // installed path is unused here (tracked as a follow-up on PR #193).
+    // installed path is unused here.
     let _ = perform_upgrade(&latest, &download, &method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
@@ -1227,9 +1228,8 @@ mod tests {
     // operations resolve that relative path from CWD instead of the
     // symlink's parent, causing ENOENT.
     //
-    // Our fix: canonicalize the exe path before passing it to self_update.
-    // These tests verify the canonicalization works correctly for every
-    // symlink layout we've seen in the wild.
+    // Canonicalize the exe path before passing it to self_update. These
+    // tests cover every symlink layout we've seen in the wild.
 
     #[cfg(unix)]
     mod symlink_upgrade_regression {
@@ -1237,8 +1237,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         use std::path::PathBuf;
 
-        /// Helper: create a fake binary file in a Homebrew-style Cellar layout.
-        /// Returns (cellar_binary_path, symlink_path, tmp_guard).
+        /// Homebrew-style Cellar layout: `(cellar_binary, symlink, tmp_guard)`.
         fn homebrew_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
             let tmp = tempfile::tempdir().unwrap();
             // Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
@@ -1276,8 +1275,8 @@ mod tests {
 
         #[test]
         fn relative_read_link_fails_from_wrong_cwd() {
-            // This is the exact bug: read_link returns a relative path, and
-            // metadata() resolves it from CWD rather than the symlink's parent.
+            // read_link returns a relative path, and metadata() resolves it
+            // from CWD rather than the symlink's parent.
             let (_real, link, _tmp) = homebrew_layout();
             let target = fs::read_link(&link).unwrap();
 
@@ -1305,9 +1304,8 @@ mod tests {
 
         #[test]
         fn canonical_path_differs_from_symlink_path() {
-            // This is the key property our fix relies on: after canonicalization,
-            // the path differs from the symlink path, which makes self_update
-            // choose the Move code path instead of the buggy self_replace path.
+            // After canonicalization the path differs from the symlink path,
+            // so self_update chooses Move instead of self_replace.
             let (_real, link, _tmp) = homebrew_layout();
             let canonical = link.canonicalize().unwrap();
             assert_ne!(

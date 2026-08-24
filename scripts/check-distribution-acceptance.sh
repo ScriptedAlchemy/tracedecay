@@ -146,9 +146,9 @@ assert_required_assets() {
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
-    "benchmarks/claude-observation/workload-v1.json"
+    "benchmark_data/claude-observation/workload-v1.json"
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
-    "benchmarks/search-quality/query-fallback-report-v1.json"
+    "benchmark_data/search-quality/query-fallback-report-v1.json"
   )
 
   for required in "${root_assets[@]}"; do
@@ -199,13 +199,25 @@ assert_code_extraction_assets() {
 verify_feature_wiring() {
   local source_manifest=$1
   local packaged_manifest=$2
-  local semantic_source_manifest=$3
-  local semantic_packaged_manifest=$4
+  local code_index_source_manifest=$3
+  local code_index_packaged_manifest=$4
+  local extraction_source_manifest=$5
+  local extraction_packaged_manifest=$6
+  local semantic_source_manifest=$7
+  local semantic_packaged_manifest=$8
+  local cargo_config=$9
   python3 "$repo/scripts/check-distribution-feature-wiring.py" \
     --root-source "$source_manifest" \
     --root-packaged "$packaged_manifest" \
+    --code-index-source "$code_index_source_manifest" \
+    --code-index-packaged "$code_index_packaged_manifest" \
+    --extraction-source "$extraction_source_manifest" \
+    --extraction-packaged "$extraction_packaged_manifest" \
     --semantic-source "$semantic_source_manifest" \
-    --semantic-packaged "$semantic_packaged_manifest"
+    --semantic-packaged "$semantic_packaged_manifest" \
+    --check-extraction-manifest "$extraction_packaged_manifest" \
+    --cargo-config "$cargo_config" \
+    --offline
 }
 
 while (($#)); do
@@ -350,10 +362,12 @@ done <"$package_table"
 
 for required_package in \
   tracedecay \
+  tracedecay-cli \
   tracedecay-application \
   tracedecay-api \
   tracedecay-tool-catalog \
   tracedecay-lsp \
+  tracedecay-code-index \
   tracedecay-code-extraction \
   tracedecay-query \
   tracedecay-semantic; do
@@ -361,7 +375,9 @@ for required_package in \
     die "workspace package required by the distribution gate was not produced: $required_package"
 done
 root_package=${package_dirs[tracedecay]}
+cli_package=${package_dirs[tracedecay-cli]}
 lsp_package=${package_dirs[tracedecay-lsp]}
+code_index_package=${package_dirs[tracedecay-code-index]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
 query_package=${package_dirs[tracedecay-query]}
 semantic_package=${package_dirs[tracedecay-semantic]}
@@ -369,11 +385,6 @@ catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
 assert_required_assets "$root_package"
 assert_code_extraction_assets "$code_extraction_package"
-verify_feature_wiring \
-  "$repo/Cargo.toml" \
-  "$root_package/Cargo.toml" \
-  "$repo/crates/tracedecay-semantic/Cargo.toml" \
-  "$semantic_package/Cargo.toml"
 
 patch_config="$work/packaged-crates.toml"
 python3 - "$metadata" "$packages" >"$patch_config" <<'PY'
@@ -387,11 +398,38 @@ members = set(metadata["workspace_members"])
 packages = pathlib.Path(sys.argv[2])
 print("[patch.crates-io]")
 for package in sorted(metadata["packages"], key=lambda value: value["name"]):
-    if package["id"] not in members or package["name"] == "tracedecay":
+    if package["id"] not in members:
         continue
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
 PY
+
+verify_feature_wiring \
+  "$repo/Cargo.toml" \
+  "$root_package/Cargo.toml" \
+  "$repo/crates/tracedecay-code-index/Cargo.toml" \
+  "$code_index_package/Cargo.toml" \
+  "$repo/crates/tracedecay-code-extraction/Cargo.toml" \
+  "$code_extraction_package/Cargo.toml" \
+  "$repo/crates/tracedecay-semantic/Cargo.toml" \
+  "$semantic_package/Cargo.toml" \
+  "$patch_config"
+
+echo "distribution acceptance: compiling packaged CLI with production features"
+cargo build \
+  --manifest-path "$cli_package/Cargo.toml" \
+  --release \
+  --no-default-features \
+  --features production \
+  --bin tracedecay \
+  --config "$patch_config"
+executable_suffix=""
+if [[ ${OS:-} == "Windows_NT" ]]; then
+  executable_suffix=".exe"
+fi
+packaged_cli_bin="$target_directory/release/tracedecay${executable_suffix}"
+[[ -x $packaged_cli_bin ]] ||
+  die "packaged tracedecay CLI build did not produce $packaged_cli_bin"
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
 cargo nextest run \
@@ -461,7 +499,8 @@ CARGO_NET_OFFLINE=true cargo nextest run \
   --no-tests=fail
 
 echo "distribution acceptance: checking packaged MCP tool behavior"
-CARGO_NET_OFFLINE=true cargo nextest run \
+TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
+  CARGO_NET_OFFLINE=true cargo nextest run \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \
@@ -502,7 +541,7 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with production features"
 cargo install \
-  --path "$root_package" \
+  --path "$cli_package" \
   --root "$install_root" \
   --no-default-features \
   --features production \

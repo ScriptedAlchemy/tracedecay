@@ -1,7 +1,7 @@
 //! Deterministic fixed-point fusion stage contracts (Plan 15 pipeline steps
-//! 4-8; Plan 25: `src/query/retrieval/fusion.rs` operates on compact
-//! candidates with deterministic fixed-point contributions, complete
-//! comparator provenance, and source/file caps).
+//! 4-8; Plan 25). Fusion operates on compact candidates with deterministic
+//! fixed-point contributions, complete comparator provenance, and source/file
+//! caps.
 //!
 //! RRF may be evaluated as a profile candidate inside this generic
 //! fixed-point framework; no constant or weight is production authority
@@ -14,8 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use thiserror::Error;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CandidateContribution, CandidateSetDigest, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FusedCandidate, FusionProfile,
@@ -24,6 +25,7 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId,
     RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind,
     RetrieverOutcome, SanitizerRevision, SourceFreshness, SourceOccurrenceId, UtcMicros,
+    canonical_sha256,
 };
 use zeroize::Zeroizing;
 
@@ -258,9 +260,9 @@ impl RetrievalCursorKeyringV1 {
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
         mac.update(&bytes);
-        let mac = QueryMac::new(format!(
-            "hmac-sha256:{}",
-            hex::encode(mac.finalize().into_bytes())
+        let mac = QueryMac::new(encode_tagged_lowercase_hex(
+            "hmac-sha256:",
+            &mac.finalize().into_bytes(),
         ))?;
         Ok(QueryDigest::new(
             self.privacy_domain.clone(),
@@ -285,9 +287,9 @@ impl RetrievalCursorKeyringV1 {
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
         mac.update(&bytes);
-        let mac = QueryMac::new(format!(
-            "hmac-sha256:{}",
-            hex::encode(mac.finalize().into_bytes())
+        let mac = QueryMac::new(encode_tagged_lowercase_hex(
+            "hmac-sha256:",
+            &mac.finalize().into_bytes(),
         ))?;
         Ok(QueryDigest::new(
             self.privacy_domain.clone(),
@@ -406,8 +408,8 @@ impl RetrievalCursorKeyringV1 {
     }
 }
 
-/// Failures of the fusion stage. Fusion never substitutes or simulates a
-/// missing lane; it composes the typed outcomes it is given.
+/// Fusion never substitutes or simulates a missing lane; it composes the typed
+/// outcomes it is given.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum FusionStageError {
     #[error("a required exact or lexical lane outcome is unavailable")]
@@ -578,6 +580,7 @@ impl CompositionKernel {
         self.compose_required(input, policy, &[lane])
     }
 
+    #[hotpath::measure(label = "query.fusion")]
     fn compose_required(
         &self,
         input: &FusionStageInput,
@@ -608,6 +611,8 @@ impl CompositionKernel {
 
         let mut all_dedupe_decisions = dedupe_decisions;
         all_dedupe_decisions.append(&mut copy_decisions);
+        hotpath::gauge!("query.fusion.candidates").set(ranked_candidates.len());
+        hotpath::gauge!("query.fusion.results").set(ranked_candidates.len());
         Ok(CompositionOutputV1 {
             profile_id: input.profile.profile_id.clone(),
             ranked_candidates,
@@ -645,6 +650,7 @@ impl CompositionKernel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "query.stream.paginate")]
     pub fn paginate_at(
         &self,
         request: &RetrievalRequest,
@@ -661,8 +667,6 @@ impl CompositionKernel {
             ));
         }
 
-        let snapshot_digest = request.snapshot.compute_digest()?;
-        let candidate_set_digest = digest_candidate_set(&output.ranked_candidates)?;
         let start = match cursor {
             Some(cursor) => {
                 keyring.verify_cursor(cursor)?;
@@ -670,18 +674,6 @@ impl CompositionKernel {
                     return Err(RetrievalError::CursorExpired);
                 }
                 cursor.validate()?;
-                let query_digest = keyring
-                    .digest_query_for(&cursor.key_id, cursor.key_epoch, request, query_view)
-                    .map_err(|_| RetrievalError::CursorSetMismatch)?;
-                validate_cursor(
-                    cursor,
-                    request,
-                    output,
-                    &query_digest,
-                    &snapshot_digest,
-                    &candidate_set_digest,
-                    &self.ranking_revision,
-                )?;
                 cursor.next_ordinal as usize
             }
             None => 0,
@@ -694,24 +686,46 @@ impl CompositionKernel {
             .saturating_add(page_size)
             .min(output.ranked_candidates.len());
         let ranked_candidates = output.ranked_candidates[start..end].to_vec();
-        let cursor = if end < output.ranked_candidates.len() {
-            let query_digest = keyring
-                .digest_active_query(request, query_view)
-                .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
-            Some(build_cursor(
-                request,
-                output,
-                query_digest,
-                snapshot_digest,
-                candidate_set_digest,
-                self.ranking_revision.clone(),
-                end as u32,
-                now,
-                keyring,
-            )?)
+        let needs_set_digest = cursor.is_some() || end < output.ranked_candidates.len();
+        let cursor = if needs_set_digest {
+            let snapshot_digest = request.snapshot.compute_digest()?;
+            let candidate_set_digest = digest_candidate_set(&output.ranked_candidates)?;
+            if let Some(cursor) = cursor {
+                let query_digest = keyring
+                    .digest_query_for(&cursor.key_id, cursor.key_epoch, request, query_view)
+                    .map_err(|_| RetrievalError::CursorSetMismatch)?;
+                validate_cursor(
+                    cursor,
+                    request,
+                    output,
+                    &query_digest,
+                    &snapshot_digest,
+                    &candidate_set_digest,
+                    &self.ranking_revision,
+                )?;
+            }
+            if end < output.ranked_candidates.len() {
+                let query_digest = keyring
+                    .digest_active_query(request, query_view)
+                    .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
+                Some(build_cursor(
+                    request,
+                    output,
+                    query_digest,
+                    snapshot_digest,
+                    candidate_set_digest,
+                    self.ranking_revision.clone(),
+                    end as u32,
+                    now,
+                    keyring,
+                )?)
+            } else {
+                None
+            }
         } else {
             None
         };
+        hotpath::gauge!("query.stream.results").set(ranked_candidates.len());
         Ok(CompositionPageV1 {
             ranked_candidates,
             cursor,
@@ -886,6 +900,7 @@ impl DeterministicFixedPointFusion {
         }
     }
 
+    #[hotpath::measure(label = "query.fusion.compact")]
     fn fuse_compact(
         &self,
         profile: &FusionProfile,
@@ -1160,17 +1175,9 @@ fn attach_same_source_decisions(
 pub fn digest_candidate_set(
     candidates: &[RankedCandidate],
 ) -> Result<CandidateSetDigest, RetrievalError> {
-    digest_value("tracedecay.retrieval-candidate-set.v1", candidates)
-        .and_then(|value| CandidateSetDigest::new(value).map_err(RetrievalError::from))
-}
-
-fn digest_value<T: Serialize + ?Sized>(
-    domain: &'static str,
-    value: &T,
-) -> Result<String, RetrievalError> {
-    let bytes = serde_json::to_vec(&(domain, value))
+    let digest = canonical_sha256(&("tracedecay.retrieval-candidate-set.v1", candidates))
         .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    CandidateSetDigest::new(digest.as_str()).map_err(RetrievalError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1292,9 +1299,9 @@ fn keyed_mac(
     let mut mac = Hmac::<Sha256>::new_from_slice(secret)
         .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
     mac.update(authenticated);
-    QueryMac::new(format!(
-        "hmac-sha256:{}",
-        hex::encode(mac.finalize().into_bytes())
+    QueryMac::new(encode_tagged_lowercase_hex(
+        "hmac-sha256:",
+        &mac.finalize().into_bytes(),
     ))
     .map_err(QueryDigestAuthenticationError::from)
 }

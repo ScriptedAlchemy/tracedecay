@@ -1,9 +1,8 @@
 //! Shared construction of the surface bindings every catalog contribution
 //! declares.
 //!
-//! Each contribution module used to spell out the same `SurfaceBindingInputV1`
-//! literal inside its own per-surface loop, so the wire spelling of a surface
-//! and the default binding shape were both restated a dozen times.
+//! Shared so each contribution does not restate the wire spelling of a surface
+//! and the default binding shape in its own per-surface loop.
 
 use tracedecay_tool_catalog::{
     BindingId, BindingStatus, BindingSurface, CapabilityId, ProtocolRevisionRange,

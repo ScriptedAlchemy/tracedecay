@@ -112,6 +112,18 @@ impl DatabaseRuntimeClientV1 {
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
         self.guard.runtime().dispatch_read(request, probe)
     }
+
+    /// Exact rusqlite writer/reader telemetry for this guarded client.
+    ///
+    /// Delegates to the production lease retained by the client token.
+    /// Repository-backed publications return the rusqlite-runtime snapshot.
+    /// Driver stubs and test attachments return `None`.
+    #[must_use]
+    pub fn writer_telemetry_snapshot(
+        &self,
+    ) -> Option<crate::store_runtime::registry::RepositoryRuntimePhysicalSnapshot> {
+        self.guard.runtime().writer_telemetry_snapshot()
+    }
 }
 
 /// Non-cloneable map authority for one stable database publication. It owns
@@ -442,6 +454,7 @@ impl DatabaseOwnerV1 {
     /// Issues one independently counted client facade with this owner's
     /// original access policy. Cloning the returned `Database` shares both
     /// its issuance token and access mode.
+    #[hotpath::measure]
     pub fn issue_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(self.state.access)
     }
@@ -451,6 +464,7 @@ impl DatabaseOwnerV1 {
     /// A read-write owner may reduce an issued client to read-only, while an
     /// owner published read-only remains read-only. No client can elevate its
     /// access mode after issuance.
+    #[hotpath::measure]
     pub fn issue_read_only_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(DatabaseAccessMode::ReadOnly)
     }
@@ -522,6 +536,7 @@ impl DatabaseOwnerV1 {
         self.state.inner.registered_verified_locator()
     }
 
+    #[hotpath::measure]
     pub fn reserve_retirement(
         &self,
     ) -> Result<DatabaseOwnerRetirementReservationV1, DatabaseOwnerErrorV1> {

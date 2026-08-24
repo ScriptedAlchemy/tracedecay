@@ -95,23 +95,9 @@ pub fn env_flag(name: &str) -> bool {
 /// Byte-for-byte the root `config::brand_env`, kept local because the branded
 /// prefix is a naming rule with no dependencies — reaching up to root
 /// `src/config.rs` for one `std::env::var` call would be the only reason this
-/// crate needed the composition root. Collapse the two once the kernel owns
-/// the brand prefix.
+/// crate needed the composition root.
 pub(crate) fn brand_env(suffix: &str) -> Option<String> {
     std::env::var(format!("TRACEDECAY_{suffix}")).ok()
-}
-
-/// Rough token count for `text`, four characters to the token.
-///
-/// Mirrors the root `context::read_modes::estimate_tokens` heuristic. LCM
-/// summary drafts and transcript rows record this number, so it has to be the
-/// same arithmetic on both sides of the split; it is deliberately duplicated
-/// rather than reached for, since `context::read_modes` is an MCP read handler
-/// that pulls in the whole root graph database.
-#[must_use]
-pub fn estimate_tokens(text: &str) -> u32 {
-    let chars = text.chars().count();
-    chars.div_ceil(4).min(u32::MAX as usize) as u32
 }
 
 /// Whether user-level global accounting (the cross-project `savings_ledger`
@@ -139,7 +125,6 @@ pub fn global_accounting_mode() -> AccountingMode {
     AccountingMode::Default
 }
 
-/// Convenience wrapper over [`global_accounting_mode`].
 pub fn global_accounting_enabled() -> bool {
     global_accounting_mode().enabled()
 }

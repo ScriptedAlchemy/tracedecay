@@ -290,295 +290,309 @@ pub async fn overview(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>> {
-    let Some(Extension(control)) = control else {
-        return Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            "dashboard HTTP request admission is unavailable",
-        ));
-    };
-    let read_control = fact_read_control(&control);
-    let limit = coerce_limit(params.limit, 25, memory_service::MEMORY_FACT_LIMIT_MAXIMUM);
-    let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
-    let Ok(fact_limit) = usize::try_from(limit) else {
-        return Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            "memory fact limit is outside the platform range",
-        ));
-    };
-    let Ok(initial_relation_limit) = usize::try_from(graph_limit) else {
-        return Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            "memory graph limit is outside the platform range",
-        ));
-    };
-
-    let mut reads = BTreeMap::from([
-        (
-            "facts".to_owned(),
-            MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
-        ),
-        (
-            "entities".to_owned(),
-            MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
-        ),
-        (
-            "graph".to_owned(),
-            MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
-        ),
-    ]);
-    let mut holographic = MemoryHolographicPayloadV1 {
-        path: state.mem_db_path.clone(),
-        exists: true,
-        overview: None,
-        facts: Vec::new(),
-        entities: Vec::new(),
-        graph: memory_service::MemoryGraphPayloadV1 {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            coverage: DashboardCoverageV1::unknown(),
-            fact_universe_count: 0,
-            fact_candidates_examined: 0,
-            unavailable_fact_candidates: 0,
-            root_count: 0,
-            relation_limit: initial_relation_limit,
-            relation_count: 0,
-        },
-        error: String::new(),
-        reads: BTreeMap::new(),
-        facts_coverage: memory_service::MemoryFactsCoverageV1 {
-            completeness: DashboardCoverageCompletenessV1::Partial,
-            limit: fact_limit,
-            graph: None,
-            examined: None,
-            eligible: None,
-        },
-    };
-    let mut overview_ready = false;
-    match memory_service::overview_payload(&state, &read_control).await {
-        Ok(payload) => match serde_json::from_value::<MemoryOverviewSummaryV1>(payload) {
-            Ok(payload) => {
-                holographic.overview = Some(payload);
-                overview_ready = true;
-            }
-            Err(error) => {
-                holographic.error = format!("Failed to decode memory summary: {error}");
-            }
-        },
-        Err(error) => {
-            holographic.error = error;
-        }
-    }
-    if let Some(state) = request_terminal_state(&control) {
-        reads.insert(
-            "facts".to_owned(),
-            MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
-        );
-    } else {
-        match memory_service::fetch_facts(&state, &params.q, limit, &read_control).await {
-            Ok(facts) => {
-                let rows = facts
-                    .rows
-                    .into_iter()
-                    .map(serde_json::from_value::<MemoryFactRowV1>)
-                    .collect::<Result<Vec<_>, _>>();
-                match rows {
-                    Ok(rows) => {
-                        holographic.facts = rows;
-                        let read_status = facts_read_status(&facts.coverage);
-                        holographic.facts_coverage = facts.coverage;
-                        reads.insert("facts".to_owned(), read_status);
-                    }
-                    Err(error) => {
-                        reads.insert(
-                            "facts".to_owned(),
-                            read_failure_status(
-                                &control,
-                                Some("fact_contract_decode_failed"),
-                                error.to_string(),
-                            ),
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                reads.insert(
-                    "facts".to_owned(),
-                    read_failure_status(&control, None, error),
-                );
-            }
-        }
-    }
-    if let Some(state) = request_terminal_state(&control) {
-        reads.insert(
-            "entities".to_owned(),
-            MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
-        );
-    } else {
-        match memory_service::fetch_entities(&state, limit, &read_control).await {
-            Ok(entities) => {
-                let rows = entities
-                    .rows
-                    .into_iter()
-                    .map(serde_json::from_value::<MemoryEntityRowV1>)
-                    .collect::<Result<Vec<_>, _>>();
-                match rows {
-                    Ok(rows) => {
-                        holographic.entities = rows;
-                        reads.insert(
-                            "entities".to_owned(),
-                            if entities.bounded {
-                                MemoryReadStatusV1 {
-                                    state: DashboardDomainStateV1::Partial,
-                                    code: Some("entity_limit_reached".to_owned()),
-                                    error: None,
-                                }
-                            } else {
-                                MemoryReadStatusV1::new(DashboardDomainStateV1::Ready)
-                            },
-                        );
-                    }
-                    Err(error) => {
-                        reads.insert(
-                            "entities".to_owned(),
-                            read_failure_status(
-                                &control,
-                                Some("entity_contract_decode_failed"),
-                                error.to_string(),
-                            ),
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                reads.insert(
-                    "entities".to_owned(),
-                    read_failure_status(&control, None, error),
-                );
-            }
-        }
-    }
-    if let Some(state) = request_terminal_state(&control) {
-        reads.insert(
-            "graph".to_owned(),
-            MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
-        );
-    } else {
-        match memory_service::graph_payload(&state, &params.q, graph_limit, &control, &read_control)
-            .await
-        {
-            Ok(graph) => {
-                let read_status = graph_read_status(&graph.coverage);
-                holographic.graph = graph;
-                reads.insert("graph".to_owned(), read_status);
-            }
-            Err(error) => {
-                reads.insert(
-                    "graph".to_owned(),
-                    MemoryReadStatusV1::failed(error.state(), Some(error.code()), error.message()),
-                );
-            }
-        }
-    }
-    holographic.reads = reads;
-    let request_timed_out = request_deadline_elapsed(&control);
-    let request_cancelled = control.cancellation().is_cancelled();
-    let ready_read_count = holographic
-        .reads
-        .values()
-        .filter(|read| read.state == DashboardDomainStateV1::Ready)
-        .count();
-    let facts_complete = matches!(
-        holographic.facts_coverage.completeness,
-        DashboardCoverageCompletenessV1::Complete
-    );
-    let graph_complete = holographic.graph.coverage.is_complete();
-    let exact_complete = overview_ready && ready_read_count == 3;
-    let domain_state = if request_timed_out {
-        DashboardDomainStateV1::TimedOut
-    } else if request_cancelled {
-        DashboardDomainStateV1::Cancelled
-    } else if exact_complete {
-        DashboardDomainStateV1::Ready
-    } else if overview_ready || ready_read_count != 0 {
-        DashboardDomainStateV1::Partial
-    } else {
-        holographic
-            .reads
-            .get("graph")
-            .map_or(DashboardDomainStateV1::Error, |read| read.state)
-    };
-    let coverage = if exact_complete && !request_timed_out && !request_cancelled {
-        DashboardCoverageV1::complete(4, "applicable_memory_read_sources")
-    } else {
-        let mut coverage = DashboardCoverageV1::unknown();
-        if request_timed_out {
-            coverage
-                .omission_reasons
-                .push("request_deadline_elapsed".into());
-        } else if request_cancelled {
-            coverage.omission_reasons.push("request_cancelled".into());
-        }
-        if !overview_ready {
-            coverage
-                .omission_reasons
-                .push("overview_read_failed".into());
-        }
-        for read in ["facts", "entities", "graph"] {
-            if holographic
-                .reads
-                .get(read)
-                .is_none_or(|status| status.state != DashboardDomainStateV1::Ready)
-            {
-                coverage
-                    .omission_reasons
-                    .push(format!("{read}_read_incomplete"));
-            }
-        }
-        if !facts_complete {
-            coverage.omission_reasons.push("fact_rows_bounded".into());
-        }
-        if !graph_complete
-            && holographic
-                .reads
-                .get("graph")
-                .is_some_and(|status| status.state == DashboardDomainStateV1::Ready)
-        {
-            coverage.omission_reasons.push("graph_rows_bounded".into());
-        }
-        coverage
-    };
-    let freshness =
-        if !request_timed_out && !request_cancelled && overview_ready && ready_read_count == 3 {
-            DashboardFreshnessV1::fresh_now()
-        } else {
-            DashboardFreshnessV1::unknown()
-        };
-    let providers = match serde_json::from_value(memory_service::providers_payload()) {
-        Ok(providers) => providers,
-        Err(error) => {
+    hotpath::measure_block!("dashboard.memory.overview", {
+        let Some(Extension(control)) = control else {
             return Json(DashboardEnvelopeV1::error(
                 scope_from_state(&state),
                 None,
-                format!("Failed to encode memory provider contract: {error}"),
+                "dashboard HTTP request admission is unavailable",
             ));
+        };
+        let read_control = fact_read_control(&control);
+        let limit = coerce_limit(params.limit, 25, memory_service::MEMORY_FACT_LIMIT_MAXIMUM);
+        let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
+        let Ok(fact_limit) = usize::try_from(limit) else {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                "memory fact limit is outside the platform range",
+            ));
+        };
+        let Ok(initial_relation_limit) = usize::try_from(graph_limit) else {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                "memory graph limit is outside the platform range",
+            ));
+        };
+
+        let mut reads = BTreeMap::from([
+            (
+                "facts".to_owned(),
+                MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
+            ),
+            (
+                "entities".to_owned(),
+                MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
+            ),
+            (
+                "graph".to_owned(),
+                MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
+            ),
+        ]);
+        let mut holographic = MemoryHolographicPayloadV1 {
+            path: state.mem_db_path.clone(),
+            exists: true,
+            overview: None,
+            facts: Vec::new(),
+            entities: Vec::new(),
+            graph: memory_service::MemoryGraphPayloadV1 {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                coverage: DashboardCoverageV1::unknown(),
+                fact_universe_count: 0,
+                fact_candidates_examined: 0,
+                unavailable_fact_candidates: 0,
+                root_count: 0,
+                relation_limit: initial_relation_limit,
+                relation_count: 0,
+            },
+            error: String::new(),
+            reads: BTreeMap::new(),
+            facts_coverage: memory_service::MemoryFactsCoverageV1 {
+                completeness: DashboardCoverageCompletenessV1::Partial,
+                limit: fact_limit,
+                graph: None,
+                examined: None,
+                eligible: None,
+            },
+        };
+        let mut overview_ready = false;
+        match memory_service::overview_payload(&state, &read_control).await {
+            Ok(payload) => match serde_json::from_value::<MemoryOverviewSummaryV1>(payload) {
+                Ok(payload) => {
+                    holographic.overview = Some(payload);
+                    overview_ready = true;
+                }
+                Err(error) => {
+                    holographic.error = format!("Failed to decode memory summary: {error}");
+                }
+            },
+            Err(error) => {
+                holographic.error = error;
+            }
         }
-    };
-    let payload = MemoryOverviewPayloadV1 {
-        providers,
-        query: params.q,
-        limit,
-        holographic,
-    };
-    Json(DashboardEnvelopeV1::new(
-        scope_from_state(&state),
-        domain_state,
-        coverage,
-        freshness,
-        Some(payload),
-    ))
+        if let Some(state) = request_terminal_state(&control) {
+            reads.insert(
+                "facts".to_owned(),
+                MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
+            );
+        } else {
+            match memory_service::fetch_facts(&state, &params.q, limit, &read_control).await {
+                Ok(facts) => {
+                    let rows = facts
+                        .rows
+                        .into_iter()
+                        .map(serde_json::from_value::<MemoryFactRowV1>)
+                        .collect::<Result<Vec<_>, _>>();
+                    match rows {
+                        Ok(rows) => {
+                            holographic.facts = rows;
+                            let read_status = facts_read_status(&facts.coverage);
+                            holographic.facts_coverage = facts.coverage;
+                            reads.insert("facts".to_owned(), read_status);
+                        }
+                        Err(error) => {
+                            reads.insert(
+                                "facts".to_owned(),
+                                read_failure_status(
+                                    &control,
+                                    Some("fact_contract_decode_failed"),
+                                    error.to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    reads.insert(
+                        "facts".to_owned(),
+                        read_failure_status(&control, None, error),
+                    );
+                }
+            }
+        }
+        if let Some(state) = request_terminal_state(&control) {
+            reads.insert(
+                "entities".to_owned(),
+                MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
+            );
+        } else {
+            match memory_service::fetch_entities(&state, limit, &read_control).await {
+                Ok(entities) => {
+                    let rows = entities
+                        .rows
+                        .into_iter()
+                        .map(serde_json::from_value::<MemoryEntityRowV1>)
+                        .collect::<Result<Vec<_>, _>>();
+                    match rows {
+                        Ok(rows) => {
+                            holographic.entities = rows;
+                            reads.insert(
+                                "entities".to_owned(),
+                                if entities.bounded {
+                                    MemoryReadStatusV1 {
+                                        state: DashboardDomainStateV1::Partial,
+                                        code: Some("entity_limit_reached".to_owned()),
+                                        error: None,
+                                    }
+                                } else {
+                                    MemoryReadStatusV1::new(DashboardDomainStateV1::Ready)
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            reads.insert(
+                                "entities".to_owned(),
+                                read_failure_status(
+                                    &control,
+                                    Some("entity_contract_decode_failed"),
+                                    error.to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    reads.insert(
+                        "entities".to_owned(),
+                        read_failure_status(&control, None, error),
+                    );
+                }
+            }
+        }
+        if let Some(state) = request_terminal_state(&control) {
+            reads.insert(
+                "graph".to_owned(),
+                MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
+            );
+        } else {
+            match memory_service::graph_payload(
+                &state,
+                &params.q,
+                graph_limit,
+                &control,
+                &read_control,
+            )
+            .await
+            {
+                Ok(graph) => {
+                    let read_status = graph_read_status(&graph.coverage);
+                    holographic.graph = graph;
+                    reads.insert("graph".to_owned(), read_status);
+                }
+                Err(error) => {
+                    reads.insert(
+                        "graph".to_owned(),
+                        MemoryReadStatusV1::failed(
+                            error.state(),
+                            Some(error.code()),
+                            error.message(),
+                        ),
+                    );
+                }
+            }
+        }
+        holographic.reads = reads;
+        let request_timed_out = request_deadline_elapsed(&control);
+        let request_cancelled = control.cancellation().is_cancelled();
+        let ready_read_count = holographic
+            .reads
+            .values()
+            .filter(|read| read.state == DashboardDomainStateV1::Ready)
+            .count();
+        let facts_complete = matches!(
+            holographic.facts_coverage.completeness,
+            DashboardCoverageCompletenessV1::Complete
+        );
+        let graph_complete = holographic.graph.coverage.is_complete();
+        let exact_complete = overview_ready && ready_read_count == 3;
+        let domain_state = if request_timed_out {
+            DashboardDomainStateV1::TimedOut
+        } else if request_cancelled {
+            DashboardDomainStateV1::Cancelled
+        } else if exact_complete {
+            DashboardDomainStateV1::Ready
+        } else if overview_ready || ready_read_count != 0 {
+            DashboardDomainStateV1::Partial
+        } else {
+            holographic
+                .reads
+                .get("graph")
+                .map_or(DashboardDomainStateV1::Error, |read| read.state)
+        };
+        let coverage = if exact_complete && !request_timed_out && !request_cancelled {
+            DashboardCoverageV1::complete(4, "applicable_memory_read_sources")
+        } else {
+            let mut coverage = DashboardCoverageV1::unknown();
+            if request_timed_out {
+                coverage
+                    .omission_reasons
+                    .push("request_deadline_elapsed".into());
+            } else if request_cancelled {
+                coverage.omission_reasons.push("request_cancelled".into());
+            }
+            if !overview_ready {
+                coverage
+                    .omission_reasons
+                    .push("overview_read_failed".into());
+            }
+            for read in ["facts", "entities", "graph"] {
+                if holographic
+                    .reads
+                    .get(read)
+                    .is_none_or(|status| status.state != DashboardDomainStateV1::Ready)
+                {
+                    coverage
+                        .omission_reasons
+                        .push(format!("{read}_read_incomplete"));
+                }
+            }
+            if !facts_complete {
+                coverage.omission_reasons.push("fact_rows_bounded".into());
+            }
+            if !graph_complete
+                && holographic
+                    .reads
+                    .get("graph")
+                    .is_some_and(|status| status.state == DashboardDomainStateV1::Ready)
+            {
+                coverage.omission_reasons.push("graph_rows_bounded".into());
+            }
+            coverage
+        };
+        let freshness = hotpath::measure_block!("dashboard.freshness.projection", {
+            if !request_timed_out && !request_cancelled && overview_ready && ready_read_count == 3 {
+                DashboardFreshnessV1::fresh_now()
+            } else {
+                DashboardFreshnessV1::unknown()
+            }
+        });
+        crate::observe::record_freshness_state(freshness.state);
+        let providers = match serde_json::from_value(memory_service::providers_payload()) {
+            Ok(providers) => providers,
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    format!("Failed to encode memory provider contract: {error}"),
+                ));
+            }
+        };
+        let payload = MemoryOverviewPayloadV1 {
+            providers,
+            query: params.q,
+            limit,
+            holographic,
+        };
+        Json(DashboardEnvelopeV1::new(
+            scope_from_state(&state),
+            domain_state,
+            coverage,
+            freshness,
+            Some(payload),
+        ))
+    })
 }
 
 /// `GET /api/plugins/holographic/status` — canonical facts and derived-algebra health.
@@ -586,35 +600,37 @@ pub async fn status(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>> {
-    let Some(Extension(control)) = control else {
-        return Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            "dashboard HTTP request admission is unavailable",
-        ));
-    };
-    let result = memory_status_payload(&state, &fact_read_control(&control)).await;
-    if let Some(state_label) = request_terminal_state(&control) {
-        return Json(read_error_envelope(
-            scope_from_state(&state),
-            &control,
-            None,
-            terminal_read_code(state_label).1,
-        ));
-    }
-    match result {
-        Ok(payload) => Json(DashboardEnvelopeV1::ready(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(1, "memory_stores"),
-            Some(payload),
-        )),
-        Err(error) => Json(read_error_envelope(
-            scope_from_state(&state),
-            &control,
-            None,
-            format!("Failed to compute memory status: {error}"),
-        )),
-    }
+    hotpath::measure_block!("dashboard.memory.status", {
+        let Some(Extension(control)) = control else {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                "dashboard HTTP request admission is unavailable",
+            ));
+        };
+        let result = memory_status_payload(&state, &fact_read_control(&control)).await;
+        if let Some(state_label) = request_terminal_state(&control) {
+            return Json(read_error_envelope(
+                scope_from_state(&state),
+                &control,
+                None,
+                terminal_read_code(state_label).1,
+            ));
+        }
+        match result {
+            Ok(payload) => Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(1, "memory_stores"),
+                Some(payload),
+            )),
+            Err(error) => Json(read_error_envelope(
+                scope_from_state(&state),
+                &control,
+                None,
+                format!("Failed to compute memory status: {error}"),
+            )),
+        }
+    })
 }
 
 /// `GET /api/plugins/holographic/fact/{fact_id}` — full fact detail.
@@ -627,58 +643,62 @@ pub async fn fact_detail(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(fact_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>> {
-    let Some(Extension(control)) = control else {
-        return Json(DashboardEnvelopeV1::error(
-            scope_from_state(&state),
-            None,
-            "dashboard HTTP request admission is unavailable",
-        ));
-    };
-    let fact_id = match owned_fact_id(&state, fact_id) {
-        Ok(fact_id) => fact_id,
-        Err(error) => {
+    hotpath::measure_block!("dashboard.memory.fact_detail", {
+        let Some(Extension(control)) = control else {
             return Json(DashboardEnvelopeV1::error(
                 scope_from_state(&state),
                 None,
-                format!("invalid canonical fact id: {error}"),
+                "dashboard HTTP request admission is unavailable",
+            ));
+        };
+        let fact_id = match owned_fact_id(&state, fact_id) {
+            Ok(fact_id) => fact_id,
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    format!("invalid canonical fact id: {error}"),
+                ));
+            }
+        };
+        let result =
+            memory_service::fact_detail_payload(&state, fact_id, &fact_read_control(&control))
+                .await;
+        if let Some(state_label) = request_terminal_state(&control) {
+            return Json(read_error_envelope(
+                scope_from_state(&state),
+                &control,
+                None,
+                terminal_read_code(state_label).1,
             ));
         }
-    };
-    let result =
-        memory_service::fact_detail_payload(&state, fact_id, &fact_read_control(&control)).await;
-    if let Some(state_label) = request_terminal_state(&control) {
-        return Json(read_error_envelope(
-            scope_from_state(&state),
-            &control,
-            None,
-            terminal_read_code(state_label).1,
-        ));
-    }
-    match result {
-        Ok(Some(payload)) => match serde_json::from_value::<MemoryFactDetailPayloadV1>(payload) {
-            Ok(payload) => Json(DashboardEnvelopeV1::ready(
+        match result {
+            Ok(Some(payload)) => match serde_json::from_value::<MemoryFactDetailPayloadV1>(payload)
+            {
+                Ok(payload) => Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(1, "facts"),
+                    Some(payload),
+                )),
+                Err(error) => Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    format!("Failed to encode memory fact detail contract: {error}"),
+                )),
+            },
+            Ok(None) => Json(DashboardEnvelopeV1::complete_zero_findings(
                 scope_from_state(&state),
                 DashboardCoverageV1::complete(1, "facts"),
-                Some(payload),
-            )),
-            Err(error) => Json(DashboardEnvelopeV1::error(
-                scope_from_state(&state),
                 None,
-                format!("Failed to encode memory fact detail contract: {error}"),
             )),
-        },
-        Ok(None) => Json(DashboardEnvelopeV1::complete_zero_findings(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(1, "facts"),
-            None,
-        )),
-        Err(error) => Json(read_error_envelope(
-            scope_from_state(&state),
-            &control,
-            None,
-            error,
-        )),
-    }
+            Err(error) => Json(read_error_envelope(
+                scope_from_state(&state),
+                &control,
+                None,
+                error,
+            )),
+        }
+    })
 }
 
 /// `GET /api/plugins/holographic/fact/{fact_id}/trust-history` — append-only
@@ -688,49 +708,52 @@ pub async fn fact_trust_history(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(fact_id): JsonPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(Extension(control)) = control else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(http_detail(
-                "dashboard HTTP request admission is unavailable",
-            )),
-        );
-    };
-    let fact_id = match owned_fact_id(&state, fact_id) {
-        Ok(fact_id) => fact_id,
-        Err(error) => {
+    hotpath::measure_block!("dashboard.memory.trust_history", {
+        let Some(Extension(control)) = control else {
             return (
-                StatusCode::BAD_REQUEST,
-                Json(http_detail(&format!("invalid canonical fact id: {error}"))),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(http_detail(
+                    "dashboard HTTP request admission is unavailable",
+                )),
+            );
+        };
+        let fact_id = match owned_fact_id(&state, fact_id) {
+            Ok(fact_id) => fact_id,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(http_detail(&format!("invalid canonical fact id: {error}"))),
+                );
+            }
+        };
+        let fact_id_label = fact_id.as_str().to_owned();
+        let result =
+            fact_trust_history_payload(&state, fact_id, &fact_read_control(&control)).await;
+        if let Some(state) = request_terminal_state(&control) {
+            let (code, detail) = terminal_read_code(state);
+            return (
+                if state == DashboardDomainStateV1::TimedOut {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::REQUEST_TIMEOUT
+                },
+                Json(json!({"detail": detail, "code": code})),
             );
         }
-    };
-    let fact_id_label = fact_id.as_str().to_owned();
-    let result = fact_trust_history_payload(&state, fact_id, &fact_read_control(&control)).await;
-    if let Some(state) = request_terminal_state(&control) {
-        let (code, detail) = terminal_read_code(state);
-        return (
-            if state == DashboardDomainStateV1::TimedOut {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::REQUEST_TIMEOUT
-            },
-            Json(json!({"detail": detail, "code": code})),
-        );
-    }
-    match result {
-        Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("fact not found: {fact_id_label}"))),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!(
-                "Failed to load trust history for fact {fact_id_label}: {e}"
-            ))),
-        ),
-    }
+        match result {
+            Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(http_detail(&format!("fact not found: {fact_id_label}"))),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(http_detail(&format!(
+                    "Failed to load trust history for fact {fact_id_label}: {e}"
+                ))),
+            ),
+        }
+    })
 }
 
 /// `GET /api/plugins/holographic/projection` — 2D PCA of phase vectors,
@@ -740,34 +763,40 @@ pub async fn projection(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<ProjectionParams>,
 ) -> Json<Value> {
-    let Some(Extension(control)) = control else {
-        return Json(json!({
-            "exists": true,
-            "dim": 0,
-            "limit": 0,
-            "method": "none",
-            "points": [],
-            "error": "dashboard HTTP request admission is unavailable",
-        }));
-    };
-    let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
-    let payload =
-        memory_service::projection_payload(&state, &params.q, limit, &fact_read_control(&control))
-            .await;
-    if let Some(state) = request_terminal_state(&control) {
-        let (code, error) = terminal_read_code(state);
-        return Json(json!({
-            "exists": true,
-            "dim": 0,
-            "limit": limit,
-            "method": "none",
-            "points": [],
-            "state": state,
-            "code": code,
-            "error": error,
-        }));
-    }
-    Json(payload)
+    hotpath::measure_block!("dashboard.memory.projection", {
+        let Some(Extension(control)) = control else {
+            return Json(json!({
+                "exists": true,
+                "dim": 0,
+                "limit": 0,
+                "method": "none",
+                "points": [],
+                "error": "dashboard HTTP request admission is unavailable",
+            }));
+        };
+        let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
+        let payload = memory_service::projection_payload(
+            &state,
+            &params.q,
+            limit,
+            &fact_read_control(&control),
+        )
+        .await;
+        if let Some(state) = request_terminal_state(&control) {
+            let (code, error) = terminal_read_code(state);
+            return Json(json!({
+                "exists": true,
+                "dim": 0,
+                "limit": limit,
+                "method": "none",
+                "points": [],
+                "state": state,
+                "code": code,
+                "error": error,
+            }));
+        }
+        Json(payload)
+    })
 }
 
 /// `GET /api/plugins/holographic/similarity` — pairwise phase-cosine
@@ -777,48 +806,50 @@ pub async fn similarity(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<Value> {
-    let Some(Extension(control)) = control else {
-        return Json(json!({
-            "exists": true,
-            "dim": 0,
-            "count": 0,
-            "limit": 0,
-            "min_similarity": null,
-            "total_pairs": 0,
-            "score_distribution": empty_score_distribution(),
-            "pairs": [],
-            "error": "dashboard HTTP request admission is unavailable",
-        }));
-    };
-    let min_similarity = memory_service::coerce_similarity_score(
-        params.min_similarity,
-        SIMILARITY_DEFAULT_THRESHOLD,
-    );
-    let pair_cap = coerce_limit(params.limit, 25, SIMILARITY_PAIR_CAP) as usize;
-    let payload = memory_service::similarity_payload(
-        &state,
-        min_similarity,
-        pair_cap,
-        &fact_read_control(&control),
-    )
-    .await;
-    if let Some(state) = request_terminal_state(&control) {
-        let (code, error) = terminal_read_code(state);
-        return Json(json!({
-            "exists": true,
-            "dim": 0,
-            "count": 0,
-            "limit": pair_cap,
-            "min_similarity": min_similarity,
-            "total_pairs": 0,
-            "score_distribution": empty_score_distribution(),
-            "pairs": [],
-            "state": state,
-            "code": code,
-            "error": error,
-        }));
-    }
-    Json(payload)
+    hotpath::measure_block!("dashboard.memory.similarity", {
+        let Some(Extension(control)) = control else {
+            return Json(json!({
+                "exists": true,
+                "dim": 0,
+                "count": 0,
+                "limit": 0,
+                "min_similarity": null,
+                "total_pairs": 0,
+                "score_distribution": empty_score_distribution(),
+                "pairs": [],
+                "error": "dashboard HTTP request admission is unavailable",
+            }));
+        };
+        let min_similarity = memory_service::coerce_similarity_score(
+            params.min_similarity,
+            SIMILARITY_DEFAULT_THRESHOLD,
+        );
+        let pair_cap = coerce_limit(params.limit, 25, SIMILARITY_PAIR_CAP) as usize;
+        let payload = memory_service::similarity_payload(
+            &state,
+            min_similarity,
+            pair_cap,
+            &fact_read_control(&control),
+        )
+        .await;
+        if let Some(state) = request_terminal_state(&control) {
+            let (code, error) = terminal_read_code(state);
+            return Json(json!({
+                "exists": true,
+                "dim": 0,
+                "count": 0,
+                "limit": pair_cap,
+                "min_similarity": min_similarity,
+                "total_pairs": 0,
+                "score_distribution": empty_score_distribution(),
+                "pairs": [],
+                "state": state,
+                "code": code,
+                "error": error,
+            }));
+        }
+        Json(payload)
+    })
 }
 
 /// `GET /api/plugins/holographic/oplog` — recent canonical memory operations,
@@ -828,28 +859,31 @@ pub async fn oplog(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {
-    let Some(Extension(control)) = control else {
-        return Json(json!({
-            "events": [],
-            "count": 0,
-            "limit": 0,
-            "error": "dashboard HTTP request admission is unavailable",
-        }));
-    };
-    let limit = coerce_limit(params.limit, 50, 300);
-    let payload = memory_service::oplog_payload(&state, limit, &fact_read_control(&control)).await;
-    if let Some(state) = request_terminal_state(&control) {
-        let (code, error) = terminal_read_code(state);
-        return Json(json!({
-            "events": [],
-            "count": 0,
-            "limit": limit,
-            "state": state,
-            "code": code,
-            "error": error,
-        }));
-    }
-    Json(payload)
+    hotpath::measure_block!("dashboard.memory.oplog", {
+        let Some(Extension(control)) = control else {
+            return Json(json!({
+                "events": [],
+                "count": 0,
+                "limit": 0,
+                "error": "dashboard HTTP request admission is unavailable",
+            }));
+        };
+        let limit = coerce_limit(params.limit, 50, 300);
+        let payload =
+            memory_service::oplog_payload(&state, limit, &fact_read_control(&control)).await;
+        if let Some(state) = request_terminal_state(&control) {
+            let (code, error) = terminal_read_code(state);
+            return Json(json!({
+                "events": [],
+                "count": 0,
+                "limit": limit,
+                "state": state,
+                "code": code,
+                "error": error,
+            }));
+        }
+        Json(payload)
+    })
 }
 
 #[cfg(test)]

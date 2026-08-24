@@ -767,6 +767,7 @@ pub enum RepositoryWritePayloadV1 {
     Configuration(Box<ConfigurationCommitV1>),
     Fact(Box<FactWriteBatch>),
     Observation(Box<AnchoredObservationWrite>),
+    ObservationBatch(Box<[AnchoredObservationWrite]>),
     ObservationCursorAdvance(Box<ObservationCursorAdvance>),
     RemoteObservationReplay(Box<RemoteObservationReplayWriteV1>),
     RemoteWriterFenceInstall(Box<RemoteWriterFenceInstallV1>),
@@ -774,6 +775,7 @@ pub enum RepositoryWritePayloadV1 {
     DiagnosticSupersession(Box<DiagnosticGenerationSupersessionV1>),
     EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
     ExternalSource(Box<SourceCommitV1>),
+    ExternalSourceBatch(Box<[SourceCommitV1]>),
     ExternalSourceProjection(Box<SourceProjectionCommitV1>),
     ExternalSourceAcquisition(Box<SourceAcquisitionQueueCasV1>),
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
@@ -790,6 +792,7 @@ impl RepositoryWritePayloadV1 {
             Self::Configuration(_) => "commit configuration",
             Self::Fact(_) => "commit fact lineage",
             Self::Observation(_) => "commit observation",
+            Self::ObservationBatch(_) => "commit observation batch",
             Self::ObservationCursorAdvance(_) => "advance observation source cursor",
             Self::RemoteObservationReplay(_) => "replay remote observation",
             Self::RemoteWriterFenceInstall(_) => "install remote writer fence",
@@ -797,6 +800,7 @@ impl RepositoryWritePayloadV1 {
             Self::DiagnosticSupersession(_) => "supersede diagnostic generation",
             Self::EvidenceAssembly(_) => "publish evidence assembly",
             Self::ExternalSource(_) => "commit external source",
+            Self::ExternalSourceBatch(_) => "commit external source batch",
             Self::ExternalSourceProjection(_) => "project external source",
             Self::ExternalSourceAcquisition(_) => "schedule external source acquisition",
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
@@ -816,6 +820,7 @@ impl RepositoryWritePayloadV1 {
         match self {
             Self::Configuration(_) => "profile",
             Self::Observation(_)
+            | Self::ObservationBatch(_)
             | Self::ObservationCursorAdvance(_)
             | Self::RemoteObservationReplay(_)
             | Self::RemoteWriterFenceInstall(_) => "observation",
@@ -826,6 +831,7 @@ impl RepositoryWritePayloadV1 {
             | Self::RetrievalAnchorDisposition(_)
             | Self::RetrievalAnchorDerivative(_) => "project",
             Self::ExternalSource(_)
+            | Self::ExternalSourceBatch(_)
             | Self::ExternalSourceProjection(_)
             | Self::ExternalSourceAcquisition(_) => "external_source",
             Self::GitIndexTransaction(_) => "code",
@@ -839,6 +845,9 @@ impl RepositoryWritePayloadV1 {
             Self::Observation(write) => {
                 observation_scope_matches(write.observation().scope(), scope)
             }
+            Self::ObservationBatch(writes) => writes
+                .iter()
+                .all(|write| observation_scope_matches(write.observation().scope(), scope)),
             Self::ObservationCursorAdvance(advance) => {
                 observation_scope_matches(advance.next_cursor().scope(), scope)
             }
@@ -875,6 +884,19 @@ impl RepositoryWritePayloadV1 {
                     StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
                 )
             ),
+            Self::ExternalSourceBatch(commits) => commits.iter().all(|commit| {
+                matches!(
+                    (&commit.binding().owner, scope),
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Project(_),
+                        StoreShardScopeV1::Project { .. }
+                            | StoreShardScopeV1::ProjectSessions { .. },
+                    ) | (
+                        tracedecay_domain::SourceBindingOwnerV1::Profile(_),
+                        StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                    )
+                )
+            }),
             Self::ExternalSourceProjection(projection) => matches!(
                 (&projection.source_frontier().binding().owner, scope),
                 (
@@ -949,6 +971,15 @@ impl RepositoryWritePayloadV1 {
                     payload: self.name(),
                 }
             }),
+            Self::ExternalSourceBatch(commits) => {
+                if commits.is_empty() || commits.iter().any(|commit| commit.validate().is_err()) {
+                    Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             Self::ExternalSourceProjection(projection) => projection.validate().map_err(|_| {
                 StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                     payload: self.name(),
@@ -966,8 +997,14 @@ impl RepositoryWritePayloadV1 {
             }),
             Self::RemoteObservationReplay(write) => write.validate(),
             Self::RemoteWriterFenceInstall(install) => install.validate(),
+            Self::ObservationBatch(writes) if writes.is_empty() => {
+                Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                })
+            }
             Self::Fact(_)
             | Self::Observation(_)
+            | Self::ObservationBatch(_)
             | Self::ObservationCursorAdvance(_)
             | Self::Diagnostics(_) => Ok(()),
         }
@@ -1057,6 +1094,32 @@ impl RepositoryOperationEnvelopeV1 {
                 ) => profile_id == &self.metadata.shard_id.profile_id,
                 _ => false,
             };
+            if !exact_owner {
+                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                    operation: self.payload.family_name(),
+                    shard_family: "external_source",
+                });
+            }
+        }
+        if let RepositoryWritePayloadV1::ExternalSourceBatch(commits) = &self.payload {
+            let exact_owner = commits.iter().all(|commit| {
+                match (&commit.binding().owner, &self.metadata.shard_id.scope) {
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
+                        StoreShardScopeV1::Project {
+                            project_id: shard_project,
+                        }
+                        | StoreShardScopeV1::ProjectSessions {
+                            project_id: shard_project,
+                        },
+                    ) => project_id == shard_project,
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
+                        StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                    ) => profile_id == &self.metadata.shard_id.profile_id,
+                    _ => false,
+                }
+            });
             if !exact_owner {
                 return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
                     operation: self.payload.family_name(),

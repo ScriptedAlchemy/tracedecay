@@ -820,7 +820,7 @@ async fn settle_worker(
         }
         if clean_shutdown_observed && (!had_pending || progress.first_error.is_some()) {
             let sequence = state.next_sequence.fetch_add(1, Ordering::AcqRel);
-            // TelemetryDrop is Plan 26's reserved terminal carrier. A zero
+            // TelemetryDrop is the reserved terminal carrier. A zero
             // lower bound seals this sequence without asserting a drop.
             let zero_terminal = telemetry_drop_envelope(
                 DropRange {

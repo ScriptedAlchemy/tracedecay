@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
@@ -34,7 +35,7 @@ import { ChannelAbsence, ViewCaption } from './WorkViewChannel.tsx';
  *   A figure is drawn only from `channel.available`. There is no fallback
  *   branch, no `?? 0`, and no default. An absent channel renders its state chip
  *   and its sentence through `ChannelAbsence`, which is the same mark the four
- *   11c projections use for the same purpose — so an absence on this ledger
+ *   Work projections use for the same purpose — so an absence on this ledger
  *   reads as the absence a reader has already learned elsewhere on the page.
  *
  *   A meter is drawn only beside a figure that exists. A zero-length bar under
@@ -58,7 +59,10 @@ export function WorkTopologyAccounting({
   graph: WorkGraphReading;
   metrics?: WorkResult<ExecutionTopologyMetricsV1> | undefined;
 }) {
-  const reading = workTopologyAccounting(attemptList, graph, topology, metrics);
+  const reading = useMemo(
+    () => workTopologyAccounting(attemptList, graph, topology, metrics),
+    [attemptList, graph, topology, metrics],
+  );
   return (
     <Panel legend="Execution-topology accounting" elevation="well">
       <div className="flex min-w-0 flex-col gap-3">

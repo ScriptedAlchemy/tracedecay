@@ -210,267 +210,39 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
                 RetryDirective::Never,
             ));
         }
-        let execution_context = || RetainedSurfaceExecutionContextV1 {
+        let execution_context = RetainedSurfaceExecutionContextV1 {
             request_context: context,
             cancellation_signal: cancellation,
             operation: &operation,
             observed_at,
         };
-        let outcome = async {
-            match request {
-                RetainedSurfaceRequestV1::FactStoreCurate(request) => {
-                    if !request.validate() {
-                        Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
-                    } else {
-                        self.ports
-                            .automation
-                            .as_ref()
-                            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                            .execute_fact_store_curate(execution_context(), request)
-                            .await
+        let outcome = match classify_retained_surface_request(request) {
+            RetainedSurfaceDispatch::Automation(request) => {
+                if !request.validate() {
+                    Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+                } else {
+                    match self.ports.automation.as_ref() {
+                        Some(port) => {
+                            port.execute_fact_store_curate(execution_context, request)
+                                .await
+                        }
+                        None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
                     }
                 }
-                RetainedSurfaceRequestV1::FactStoreAdd(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreAdd(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreSearch(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreSearch(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreProbe(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreProbe(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreRelated(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreRelated(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreReason(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreReason(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreContradict(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreContradict(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreGet(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreGet(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreUpdate(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreUpdate(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreRemove(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreRemove(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactStoreList(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactStoreList(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::FactFeedback(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::FactFeedback(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::MemoryStatus(request) => {
-                    self.ports
-                        .memory
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_memory(
-                            execution_context(),
-                            RetainedMemoryRequestV1::MemoryStatus(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::SessionRefresh(request) => {
-                    self.ports
-                        .session
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_session(
-                            execution_context(),
-                            RetainedSessionRequestV1::SessionRefresh(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::MessageSearch(request) => {
-                    self.ports
-                        .session
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_session(
-                            execution_context(),
-                            RetainedSessionRequestV1::MessageSearch(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::SessionsFor(request) => {
-                    self.ports
-                        .session
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_session(
-                            execution_context(),
-                            RetainedSessionRequestV1::SessionsFor(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::Workflows(request) => {
-                    self.ports
-                        .session
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_session(
-                            execution_context(),
-                            RetainedSessionRequestV1::Workflows(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmStatus(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(execution_context(), RetainedLcmRequestV1::Status(request))
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmDoctor(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(execution_context(), RetainedLcmRequestV1::Doctor(request))
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmLoadSession(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(
-                            execution_context(),
-                            RetainedLcmRequestV1::LoadSession(request),
-                        )
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmGrep(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(execution_context(), RetainedLcmRequestV1::Grep(request))
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmDescribe(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(execution_context(), RetainedLcmRequestV1::Describe(request))
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmExpand(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(execution_context(), RetainedLcmRequestV1::Expand(request))
-                        .await
-                }
-                RetainedSurfaceRequestV1::LcmExpandQuery(request) => {
-                    self.ports
-                        .lcm
-                        .as_ref()
-                        .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
-                        .execute_lcm(
-                            execution_context(),
-                            RetainedLcmRequestV1::ExpandQuery(request),
-                        )
-                        .await
-                }
             }
+            RetainedSurfaceDispatch::Memory(request) => match self.ports.memory.as_ref() {
+                Some(port) => port.execute_memory(execution_context, request).await,
+                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+            },
+            RetainedSurfaceDispatch::Session(request) => match self.ports.session.as_ref() {
+                Some(port) => port.execute_session(execution_context, request).await,
+                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+            },
+            RetainedSurfaceDispatch::Lcm(request) => match self.ports.lcm.as_ref() {
+                Some(port) => port.execute_lcm(execution_context, request).await,
+                None => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+            },
         }
-        .await
         .map_err(retained_surface_execution_problem)?;
         ensure_post_execution_cancellation(request.operation(), cancellation)?;
         if outcome_matches_operation(request.operation(), &outcome) {
@@ -480,6 +252,92 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
                 "application.retained.invalid-outcome",
                 "The retained authority returned an outcome with the wrong effect class.",
             ))
+        }
+    }
+}
+
+enum RetainedSurfaceDispatch<'a> {
+    Automation(&'a FactStoreCurateRequestV1),
+    Memory(RetainedMemoryRequestV1<'a>),
+    Session(RetainedSessionRequestV1<'a>),
+    Lcm(RetainedLcmRequestV1<'a>),
+}
+
+fn classify_retained_surface_request(
+    request: &RetainedSurfaceRequestV1,
+) -> RetainedSurfaceDispatch<'_> {
+    match request {
+        RetainedSurfaceRequestV1::FactStoreCurate(request) => {
+            RetainedSurfaceDispatch::Automation(request)
+        }
+        RetainedSurfaceRequestV1::FactStoreAdd(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreAdd(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreSearch(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreSearch(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreProbe(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreProbe(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreRelated(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreRelated(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreReason(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreReason(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreContradict(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreContradict(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreGet(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreGet(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreUpdate(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreUpdate(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreRemove(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreRemove(request))
+        }
+        RetainedSurfaceRequestV1::FactStoreList(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreList(request))
+        }
+        RetainedSurfaceRequestV1::FactFeedback(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactFeedback(request))
+        }
+        RetainedSurfaceRequestV1::MemoryStatus(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::MemoryStatus(request))
+        }
+        RetainedSurfaceRequestV1::SessionRefresh(request) => {
+            RetainedSurfaceDispatch::Session(RetainedSessionRequestV1::SessionRefresh(request))
+        }
+        RetainedSurfaceRequestV1::MessageSearch(request) => {
+            RetainedSurfaceDispatch::Session(RetainedSessionRequestV1::MessageSearch(request))
+        }
+        RetainedSurfaceRequestV1::SessionsFor(request) => {
+            RetainedSurfaceDispatch::Session(RetainedSessionRequestV1::SessionsFor(request))
+        }
+        RetainedSurfaceRequestV1::Workflows(request) => {
+            RetainedSurfaceDispatch::Session(RetainedSessionRequestV1::Workflows(request))
+        }
+        RetainedSurfaceRequestV1::LcmStatus(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::Status(request))
+        }
+        RetainedSurfaceRequestV1::LcmDoctor(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::Doctor(request))
+        }
+        RetainedSurfaceRequestV1::LcmLoadSession(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::LoadSession(request))
+        }
+        RetainedSurfaceRequestV1::LcmGrep(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::Grep(request))
+        }
+        RetainedSurfaceRequestV1::LcmDescribe(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::Describe(request))
+        }
+        RetainedSurfaceRequestV1::LcmExpand(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::Expand(request))
+        }
+        RetainedSurfaceRequestV1::LcmExpandQuery(request) => {
+            RetainedSurfaceDispatch::Lcm(RetainedLcmRequestV1::ExpandQuery(request))
         }
     }
 }

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+mod observe;
 pub mod operations;
 pub mod remote_client;
 mod request_control;

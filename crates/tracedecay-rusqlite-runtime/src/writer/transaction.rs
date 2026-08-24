@@ -3,7 +3,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, Savepoint, Transaction, TransactionBehavior};
@@ -17,7 +17,10 @@ use crate::{
     admission::QueueItem,
     connection,
     read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
-    telemetry::{WriterBatchMetrics, WriterTelemetry},
+    telemetry::{
+        LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
+        WriterTransactionMetrics, WriterTransactionOutcome, take_observed_vm,
+    },
 };
 
 use super::{
@@ -46,28 +49,71 @@ struct Processed {
     fatal: Option<StorageRuntimeErrorV1>,
 }
 
+/// When a batch left the queue, and how long it had waited to get there.
+///
+/// Both are fixed at the dequeue boundary and are only ever reported together,
+/// so they travel as one value rather than as two positional arguments that
+/// could be transposed.
+#[derive(Clone, Copy)]
+pub(super) struct BatchTiming {
+    pub(super) dequeued_at: Instant,
+    pub(super) queue_wait_micros: u64,
+}
+
+/// The writer actor's shared reporting handles.
+///
+/// None of these varies per batch — they are the actor's, not the batch's —
+/// and every batch reports through all three, so passing them as one borrow
+/// keeps the per-batch arguments to the things that actually differ per batch.
+#[derive(Clone, Copy)]
+pub(super) struct WriterReporting<'reporting> {
+    pub(super) telemetry: &'reporting WriterTelemetry,
+    pub(super) state: &'reporting AtomicU8,
+    pub(super) watermark_publisher: &'reporting CommittedWatermarkPublisher,
+}
+
+#[hotpath::measure]
 pub(super) fn process_batch(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
+    timing: BatchTiming,
     persistence: &mut dyn WriterPersistence,
-    telemetry: &WriterTelemetry,
-    state: &AtomicU8,
-    watermark_publisher: &CommittedWatermarkPublisher,
+    reporting: WriterReporting<'_>,
 ) {
-    let started = Instant::now();
-    let mut transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    {
+    let BatchTiming {
+        dequeued_at: started,
+        queue_wait_micros,
+    } = timing;
+    let WriterReporting {
+        telemetry,
+        state,
+        watermark_publisher,
+    } = reporting;
+    let command_count = u64::try_from(batch.items.len()).unwrap_or(u64::MAX);
+    let rows_before = connection.total_changes();
+    let lock_work = LockWorkScope::enter();
+    let mut transaction = match hotpath::measure_block!("rusqlite.writer.begin", {
+        connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    }) {
         Ok(transaction) => transaction,
         Err(error) => {
-            settle_batch_failure(
-                batch.items,
-                driver_failure(error, "begin writer transaction"),
+            let failure = driver_failure(error, "begin writer transaction");
+            record_transaction(
                 telemetry,
+                transaction_outcome(&failure),
+                command_count,
+                0,
+                started,
+                Duration::ZERO,
+                lock_work.take(),
             );
+            drop(lock_work);
+            settle_batch_failure(batch.items, failure, telemetry);
             return;
         }
     };
+    let lock_held_from = Instant::now();
     let mut prepared = Vec::new();
     let mut items = batch.items.into_iter();
     let mut fatal = None;
@@ -94,12 +140,25 @@ pub(super) fn process_batch(
             })),
         }));
         drop(transaction);
+        let lock_held = lock_held_from.elapsed();
+        record_transaction(
+            telemetry,
+            WriterTransactionOutcome::Error,
+            command_count,
+            connection.total_changes().saturating_sub(rows_before),
+            started,
+            lock_held,
+            lock_work.take(),
+        );
+        drop(lock_work);
         state.store(WriterState::Faulted as u8, Ordering::Release);
         telemetry.error();
         settle_prepared(
             prepared,
             Some(DriverFailure::Error(error)),
             started,
+            queue_wait_micros,
+            lock_held,
             telemetry,
         );
         return;
@@ -117,6 +176,16 @@ pub(super) fn process_batch(
         .collect::<Vec<_>>();
     if authority_denied.iter().any(|denied| *denied) {
         drop(transaction);
+        record_transaction(
+            telemetry,
+            WriterTransactionOutcome::RolledBack,
+            command_count,
+            connection.total_changes().saturating_sub(rows_before),
+            started,
+            lock_held_from.elapsed(),
+            lock_work.take(),
+        );
+        drop(lock_work);
         settle_authority_denied(prepared, authority_denied, telemetry);
         return;
     }
@@ -132,11 +201,21 @@ pub(super) fn process_batch(
         .collect::<Vec<_>>();
     if commit_denied.iter().any(|denied| *denied) {
         drop(transaction);
+        record_transaction(
+            telemetry,
+            WriterTransactionOutcome::RolledBack,
+            command_count,
+            connection.total_changes().saturating_sub(rows_before),
+            started,
+            lock_held_from.elapsed(),
+            lock_work.take(),
+        );
+        drop(lock_work);
         settle_commit_denied(prepared, commit_denied, telemetry);
         return;
     }
 
-    let commit_failure = match transaction.commit() {
+    let commit_failure = match hotpath::measure_block!("rusqlite.commit", transaction.commit()) {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
@@ -148,7 +227,28 @@ pub(super) fn process_batch(
             }
         },
     };
-    settle_prepared(prepared, commit_failure, started, telemetry);
+    let lock_held = lock_held_from.elapsed();
+    record_transaction(
+        telemetry,
+        commit_failure
+            .as_ref()
+            .map(transaction_outcome)
+            .unwrap_or(WriterTransactionOutcome::Committed),
+        command_count,
+        connection.total_changes().saturating_sub(rows_before),
+        started,
+        lock_held,
+        lock_work.take(),
+    );
+    drop(lock_work);
+    settle_prepared(
+        prepared,
+        commit_failure,
+        started,
+        queue_wait_micros,
+        lock_held,
+        telemetry,
+    );
 }
 
 fn publish_committed(
@@ -359,10 +459,12 @@ fn settle_prepared(
     prepared: Vec<PreparedRequest>,
     commit_failure: Option<DriverFailure>,
     started: Instant,
+    queue_wait_micros: u64,
+    lock_held: Duration,
     telemetry: &WriterTelemetry,
 ) {
     if commit_failure.is_none() {
-        record_commit(&prepared, started, telemetry);
+        record_commit(&prepared, started, queue_wait_micros, lock_held, telemetry);
     } else if matches!(commit_failure, Some(DriverFailure::Busy)) {
         telemetry.busy();
     } else {
@@ -451,7 +553,13 @@ fn settle_commit_denied(
     }
 }
 
-fn record_commit(prepared: &[PreparedRequest], started: Instant, telemetry: &WriterTelemetry) {
+fn record_commit(
+    prepared: &[PreparedRequest],
+    started: Instant,
+    queue_wait_micros: u64,
+    lock_held: Duration,
+    telemetry: &WriterTelemetry,
+) {
     let durable = prepared
         .iter()
         .filter_map(|prepared| match &prepared.result {
@@ -470,9 +578,6 @@ fn record_commit(prepared: &[PreparedRequest], started: Instant, telemetry: &Wri
     let bytes = durable.iter().fold(0_u64, |total, (prepared, _)| {
         total.saturating_add(prepared.item.admission_bytes())
     });
-    let queue_wait_micros = durable.iter().fold(0_u64, |longest, (prepared, _)| {
-        longest.max(micros(prepared.item.enqueued_at.elapsed()))
-    });
     telemetry.committed(
         sequence,
         WriterBatchMetrics {
@@ -482,11 +587,39 @@ fn record_commit(prepared: &[PreparedRequest], started: Instant, telemetry: &Wri
             batch_bytes: bytes,
             queue_wait_micros,
             transaction_micros: micros(started.elapsed()),
+            lock_held_micros: micros(lock_held),
         },
         durable
             .iter()
             .map(|(prepared, _)| (prepared.item.client_id().clone(), prepared.item.priority())),
     );
+}
+
+fn record_transaction(
+    telemetry: &WriterTelemetry,
+    outcome: WriterTransactionOutcome,
+    commands: u64,
+    rows: u64,
+    started: Instant,
+    lock_held: Duration,
+    lock_work: WriterLockWorkSnapshot,
+) {
+    telemetry.transaction_closed(WriterTransactionMetrics {
+        outcome,
+        commands,
+        rows,
+        lock_held_micros: micros(lock_held),
+        transaction_micros: micros(started.elapsed()),
+        sqlite_vm: take_observed_vm(),
+        lock_work,
+    });
+}
+
+fn transaction_outcome(failure: &DriverFailure) -> WriterTransactionOutcome {
+    match failure {
+        DriverFailure::Busy => WriterTransactionOutcome::Busy,
+        DriverFailure::Error(_) => WriterTransactionOutcome::Error,
+    }
 }
 
 #[cfg(test)]

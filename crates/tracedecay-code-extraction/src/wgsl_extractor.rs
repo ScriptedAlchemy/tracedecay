@@ -44,12 +44,18 @@ impl ExtractionState {
         }
     }
 
+    /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -155,10 +161,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // function_decl
-    // -------------------------------------------------------
-
     fn visit_function_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         let Some(header) = find_direct_child_by_kind(node, "function_header") else {
             return;
@@ -257,10 +259,6 @@ impl WgslExtractor {
         attrs
     }
 
-    // -------------------------------------------------------
-    // struct_decl
-    // -------------------------------------------------------
-
     fn visit_struct_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "ident")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
@@ -308,7 +306,6 @@ impl WgslExtractor {
             });
         }
 
-        // Visit struct members.
         if let Some(body) = find_direct_child_by_kind(node, "struct_body_decl") {
             state.node_stack.push((name, id));
             Self::visit_struct_members(state, body);
@@ -382,10 +379,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Global variables and constants
-    // -------------------------------------------------------
-
     fn visit_global_variable(state: &mut ExtractionState, node: TsNode<'_>) {
         // global_variable_decl: attribute* variable_decl ("=" expression)?
         // variable_decl: "var" variable_qualifier? variable_ident_decl
@@ -458,10 +451,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Type aliases
-    // -------------------------------------------------------
-
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         // type_alias_decl: "type" ident "=" type_decl
         let name = find_direct_child_by_kind(node, "ident")
@@ -512,10 +501,6 @@ impl WgslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Call site extraction
-    // -------------------------------------------------------
-
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -543,10 +528,6 @@ impl WgslExtractor {
             }
         }
     }
-
-    // -------------------------------------------------------
-    // Utility helpers
-    // -------------------------------------------------------
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {

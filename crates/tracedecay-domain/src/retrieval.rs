@@ -1,16 +1,8 @@
-//! Pure, versioned federated-retrieval kernel contracts for TraceDecay V2.
-//!
-//! Owning plans:
-//! [Plan 15](../../../../docs/plans/tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md)
-//! is the quality and composition authority for these types;
-//! [Plan 05](../../../../docs/plans/tracedecay-v2/05-query-crate.md) owns the
-//! query execution that composes them;
-//! [Plan 25](../../../../docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md)
-//! owns the query code-generation evidence that code adapters carry.
+//! Pure, versioned federated-retrieval kernel contracts.
 //!
 //! This module contains values and validation only. It performs no I/O,
 //! persistence, query execution, policy evaluation, host integration, or async
-//! work. Field names may change only together with the Plan 15 contract tests.
+//! work. Field names may change only together with the retrieval contract tests.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -31,8 +23,7 @@ use crate::research::{DomainError, SessionId, canonical_sha256};
 use crate::session::TemporalModeV1;
 
 /// Schema/domain separator for the independently hashed query fallback
-/// subpayload (Plan 15, "typed retrieval contract"). The digest field itself
-/// is excluded from the hashed bytes.
+/// subpayload. The digest field itself is excluded from the hashed bytes.
 pub const QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.query-fallback.v1";
 const RETRIEVAL_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.retrieval-scope.v1";
 const RETRIEVAL_SNAPSHOT_DIGEST_DOMAIN: &str = "tracedecay.retrieval-snapshot.v1";
@@ -214,12 +205,8 @@ pub enum RetrievalContractError {
     DigestMismatch,
     #[error("canonical serialization failed: {0}")]
     CanonicalSerialization(String),
-}
-
-impl From<DomainError> for RetrievalContractError {
-    fn from(error: DomainError) -> Self {
-        Self::CanonicalSerialization(error.to_string())
-    }
+    #[error(transparent)]
+    Domain(#[from] DomainError),
 }
 
 /// Runtime-backed retrieval lanes. Each lane is independently testable,
@@ -311,8 +298,8 @@ pub struct TemporalLaneEvidenceV1 {
     pub contributions: Vec<TemporalCandidateContributionV1>,
 }
 
-/// Deterministic fixed-point score in millionths (Plan 15: "deterministic
-/// fixed-point weighted fusion"). No floating point crosses this boundary.
+/// Deterministic fixed-point score in millionths. No floating point crosses
+/// this boundary.
 #[derive(
     Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -388,9 +375,8 @@ impl ScoreDomainCalibrationV1 {
     }
 }
 
-/// query scope is explicitly single-root (Plan 25: federation means composing
-/// independent evidence lanes within one authorized root; Plan 16 multi-root
-/// execution remains future work).
+/// Authorized retrieval scope is explicitly single-root. Federation means
+/// composing independent evidence lanes within one authorized root.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalScope {
@@ -427,7 +413,7 @@ pub struct SingleRootScopeV1 {
 }
 
 /// Frozen execution snapshot: watermarks, index generations, and authorization
-/// revision captured once and shared by every lane (Plan 15 pipeline step 1).
+/// revision captured once and shared by every lane.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalSnapshot {
@@ -455,8 +441,8 @@ impl RetrievalSnapshot {
     }
 }
 
-/// Per-request bounded work budget (Plan 15: deterministic per-lane work
-/// budgets/checkpoints plus global resource ceilings).
+/// Per-request bounded work budget: deterministic per-lane work
+/// budgets/checkpoints plus global resource ceilings.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalBudget {
@@ -492,8 +478,8 @@ pub struct RetrievalBudgetUsage {
     pub elapsed_micros: u64,
 }
 
-/// Public, sanitized budget usage: no lane-identifying counts (Plan 15:
-/// public bytes must not distinguish denied from absent evidence).
+/// Public, sanitized budget usage: no lane-identifying counts. Public bytes
+/// must not distinguish denied from absent evidence.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizedBudgetUsage {
@@ -501,8 +487,7 @@ pub struct SanitizedBudgetUsage {
     pub truncated: bool,
 }
 
-/// Typed lane failure (Plan 15 `RetrieverOutcome`). Denial is never surfaced
-/// as a distinct public state.
+/// Typed lane failure. Denial is never surfaced as a distinct public state.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "failure", content = "detail", rename_all = "snake_case")]
 pub enum RetrievalFailure {
@@ -536,7 +521,6 @@ pub enum RetrievalError {
     Contract(#[from] RetrievalContractError),
 }
 
-/// The typed query request shared by all lanes (Plan 15).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalRequest {
@@ -548,9 +532,9 @@ pub struct RetrievalRequest {
     pub budget: RetrievalBudget,
 }
 
-/// Source freshness is source- and retriever-specific (Plan 15: there is no
-/// global age-decay multiplier). Missing, stale, incompatible, and current
-/// are distinct states.
+/// Source freshness is source- and retriever-specific: there is no global
+/// age-decay multiplier. Missing, stale, incompatible, and current are
+/// distinct states.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceFreshness {
@@ -576,8 +560,8 @@ pub enum FreshnessCompatibilityV1 {
     Unknown,
 }
 
-/// Evidence role used by dedupe/diversity caps (Plan 15: independent
-/// corroboration and contradictions are preserved).
+/// Evidence role used by dedupe/diversity caps. Independent corroboration
+/// and contradictions are preserved.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceRole {
@@ -587,10 +571,9 @@ pub enum EvidenceRole {
     Context,
 }
 
-/// Proof that a typed field admitted a candidate to the exact tier (Plan 15:
-/// only the central exact-admission validator can mint this proof; retrievers
-/// cannot assign an exact tier). Construct it only through
-/// [`ExactAdmissionValidator`].
+/// Proof that a typed field admitted a candidate to the exact tier. Only the
+/// central exact-admission validator can mint this proof; retrievers cannot
+/// assign an exact tier. Construct it only through [`ExactAdmissionValidator`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactAdmissionProof {
@@ -658,10 +641,9 @@ impl ExactAdmissionProof {
     }
 }
 
-/// The typed fields eligible for exact admission (Plan 15: exact IDs,
-/// diagnostic codes and text, symbols, CLI flags, quoted literals, paths,
-/// config keys, tool names, commit identifiers, task/session IDs, protocol
-/// fields).
+/// The typed fields eligible for exact admission: exact IDs, diagnostic
+/// codes and text, symbols, CLI flags, quoted literals, paths, config keys,
+/// tool names, commit identifiers, task/session IDs, protocol fields.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ExactFieldV1 {
@@ -681,8 +663,7 @@ pub enum ExactFieldV1 {
 }
 
 /// The exact tiers, lexicographically ordered above all approximate
-/// candidates (Plan 15 pipeline step 6). Fusion derives this only from a
-/// validated [`ExactAdmissionProof`].
+/// candidates. Fusion derives this only from a validated [`ExactAdmissionProof`].
 #[derive(
     Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -694,9 +675,9 @@ pub enum ExactClass {
     Approximate,
 }
 
-/// A compact pre-hydration candidate (Plan 15). Retrieval, fusion, dedupe,
-/// and diversity operate on these anchors; payloads hydrate only for the
-/// selected result set.
+/// Compact pre-hydration candidate. Retrieval, fusion, dedupe, and diversity
+/// operate on these anchors; payloads hydrate only for the selected result
+/// set.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CompactCandidate {
@@ -734,9 +715,9 @@ impl CompactCandidate {
     }
 }
 
-/// One lane's committed candidate prefix plus its typed evidence (Plan 15:
-/// exactly one typed evidence value per returned `source_occurrence_id`;
-/// missing, extra, or duplicate evidence rejects the batch).
+/// One lane's committed candidate prefix plus its typed evidence. Exactly
+/// one typed evidence value per returned `source_occurrence_id`; missing,
+/// extra, or duplicate evidence rejects the batch.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrieverBatch<E> {
@@ -813,8 +794,8 @@ impl<E> RetrieverBatch<E> {
     }
 }
 
-/// Per-lane coverage counters (Plan 15: every lane reports examined,
-/// eligible, excluded, capped, and unknown coverage independently).
+/// Per-lane coverage counters. Every lane reports examined, eligible,
+/// excluded, capped, and unknown coverage independently.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrieverCoverage {
@@ -836,7 +817,7 @@ pub struct RetrieverContinuation {
     pub exhausted: bool,
 }
 
-/// Per-lane typed outcome (Plan 15). `Denied` exists only in sealed internal
+/// Per-lane typed outcome. `Denied` exists only in sealed internal
 /// outcomes; public statuses coalesce denied and absent evidence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "outcome", content = "value", rename_all = "snake_case")]
@@ -851,18 +832,18 @@ pub enum RetrieverOutcome<T> {
     Cancelled,
 }
 
-/// The single generic retriever port (Plan 15: `src/query/retrieval/ports.rs`
-/// owns the composition; this crate owns the pure contract). `R` is the
-/// lane's typed request; `E` is the lane's typed per-occurrence evidence.
+/// The single generic retriever port. Composition lives in the query
+/// adapters; this crate owns the pure contract. `R` is the lane's typed
+/// request; `E` is the lane's typed per-occurrence evidence.
 pub trait Retriever<R, E> {
     /// Retrieve one committed candidate prefix against the pinned snapshot.
     ///
-    /// Implementations are provided by root query adapters (Plan 05/Plan 15),
-    /// never by this crate.
+    /// Implementations are provided by root query adapters, never by this
+    /// crate.
     fn retrieve(&self, request: &R) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalError>;
 }
 
-/// The sole authority that may mint an [`ExactAdmissionProof`] (Plan 15).
+/// The sole authority that may mint an [`ExactAdmissionProof`].
 /// Implemented once, centrally; lane adapters consume proofs, they never
 /// construct them.
 pub trait ExactAdmissionValidator {
@@ -876,9 +857,9 @@ pub trait ExactAdmissionValidator {
     ) -> Result<Option<ExactAdmissionProof>, RetrievalError>;
 }
 
-/// One retriever's scored contribution to a fused candidate (Plan 15: every
-/// ranked candidate retains every retriever's raw score domain, ordinal rank,
-/// calibrated feature, weight, and weighted contribution).
+/// One retriever's scored contribution to a fused candidate. Every ranked
+/// candidate retains every retriever's raw score domain, ordinal rank,
+/// calibrated feature, weight, and weighted contribution.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateContribution {
@@ -894,9 +875,9 @@ pub struct CandidateContribution {
     pub weighted_contribution_micros: u64,
 }
 
-/// Structured occurrence provenance retained through fusion (Plan 15: fusion
+/// Structured occurrence provenance retained through fusion. Fusion
 /// preserves each exact `(source_occurrence_id, retriever_evidence_anchor)`
-/// pair; parallel unassociated provenance vectors are forbidden).
+/// pair; parallel unassociated provenance vectors are forbidden.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceProvenance {
@@ -969,8 +950,8 @@ pub struct RankedCandidate {
     pub final_ordinal: u32,
 }
 
-/// One recorded ranking decision (Plan 15: explanations are rendered from
-/// this provenance, never reconstructed from a final scalar score).
+/// One recorded ranking decision. Explanations are rendered from this
+/// provenance, never reconstructed from a final scalar score.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RankingDecision {
@@ -996,8 +977,8 @@ pub enum RankingDecisionKind {
 }
 
 /// A versioned fusion profile backed by an immutable locked evaluation
-/// result (Plan 15: no constant or weight is production authority before
-/// Plan 15 accepts it).
+/// result. No constant or weight is production authority before that
+/// evaluation accepts it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FusionProfile {
@@ -1011,9 +992,9 @@ pub struct FusionProfile {
     pub retrieval_budget: RetrievalBudget,
 }
 
-/// Profile-owned deterministic caps applied after fusion (Plan 15 pipeline
-/// step 9). A cap must carry its locked evaluation anchor; absent evidence
-/// leaves the cap disabled except resource-safety ceilings.
+/// Profile-owned deterministic caps applied after fusion. A cap must carry
+/// its locked evaluation anchor; absent evidence leaves the cap disabled
+/// except resource-safety ceilings.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiversityPolicy {
@@ -1028,8 +1009,8 @@ pub struct DiversityPolicy {
     pub per_evidence_role: Option<u32>,
 }
 
-/// Optional bounded rerank contract (Plan 15: exact tiers bypass the
-/// reranker; failure returns the exact pre-rerank order with a typed reason).
+/// Optional bounded rerank contract. Exact tiers bypass the reranker;
+/// failure returns the exact pre-rerank order with a typed reason.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RerankPolicy {
@@ -1043,8 +1024,8 @@ pub struct RerankPolicy {
     pub deadline_micros: Option<u64>,
 }
 
-/// Ephemeral authorized rerank view (Plan 15 pipeline step 10): only approved
-/// source-local text or token features, never cached or persisted.
+/// Ephemeral authorized rerank view: only approved source-local text or
+/// token features, never cached or persisted.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizedRerankView {
@@ -1055,8 +1036,8 @@ pub struct AuthorizedRerankView {
     pub approved_features: Vec<u8>,
 }
 
-/// Per-anchor hydration receipt (Plan 15: every contribution and hydration
-/// receipt keys back to one `OccurrenceProvenance`).
+/// Per-anchor hydration receipt. Every contribution and hydration receipt
+/// keys back to one `OccurrenceProvenance`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HydrationReceipt {
@@ -1068,10 +1049,10 @@ pub struct HydrationReceipt {
     pub freshness: SourceFreshness,
 }
 
-/// Authenticated retrieval cursor (Plan 15: binds the query snapshot, profile
-/// ID, authorized freshness digest, authorization revision, ordered candidate
-/// set digest, sanitized lane statuses, and lane checkpoints; resume uses the
-/// bound set or rejects, it never recomputes).
+/// Authenticated retrieval cursor. Binds the query snapshot, profile ID,
+/// authorized freshness digest, authorization revision, ordered candidate
+/// set digest, sanitized lane statuses, and lane checkpoints; resume uses
+/// the bound set or rejects, it never recomputes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticRetrievalContinuationV1 {
@@ -1208,9 +1189,8 @@ impl RetrievalCursor {
     }
 }
 
-/// Public per-lane status (Plan 15: coalesces denied and nonexistent
-/// evidence; omits unauthorized freshness, counts, timing, cap effects, and
-/// failure details).
+/// Public per-lane status. Coalesces denied and nonexistent evidence; omits
+/// unauthorized freshness, counts, timing, cap effects, and failure details.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicRetrieverStatus {
@@ -1220,9 +1200,8 @@ pub enum PublicRetrieverStatus {
     Stale,
 }
 
-/// Public status of an optional stage (Plan 15: deliberately no denied
-/// variant — denied and absent coalesce through the same sanitized
-/// unavailable shape).
+/// Public status of an optional stage. Deliberately no denied variant —
+/// denied and absent coalesce through the same sanitized unavailable shape.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", content = "detail", rename_all = "snake_case")]
 pub enum OptionalStagePublicStatus {
@@ -1245,9 +1224,8 @@ pub enum SanitizedStageFailure {
     Internal,
 }
 
-/// Semantic/rerank outcome reported outside the query fallback subpayload
-/// (Plan 15). It may never change the subpayload, its digest, or cursor
-/// identity.
+/// Semantic/rerank outcome reported outside the query fallback subpayload.
+/// It may never change the subpayload, its digest, or cursor identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticRerankOutcome {
@@ -1255,8 +1233,8 @@ pub struct SemanticRerankOutcome {
     pub rerank: OptionalStagePublicStatus,
 }
 
-/// The typed, independently hashed query fallback subpayload (Plan 15/SEMANTIC
-/// boundary). Canonical-encoded and hashed with
+/// The typed, independently hashed query fallback subpayload. Canonical-encoded
+/// and hashed with
 /// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
 /// from the hashed bytes. It contains the complete accepted
 /// exact+lexical+graph result — IDs, order, contributions, explanations,
@@ -1314,7 +1292,7 @@ impl QueryFallbackSubpayload {
     }
 
     /// Validate the query lane invariant: the subpayload covers only
-    /// `ExactLiteral`, `Lexical`, and `Graph` (Plan 15).
+    /// `ExactLiteral`, `Lexical`, and `Graph`.
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
         let actual_lanes: BTreeSet<_> =
             self.public_fallback_lane_coverage.keys().copied().collect();
@@ -1412,7 +1390,7 @@ fn compute_query_fallback_subpayload_digest(
     FallbackSubpayloadDigest::new(digest.as_str())
 }
 
-/// The assembled retrieval result (Plan 15 pipeline step 12).
+/// The assembled retrieval result.
 /// `internal_lane_outcomes` is sealed server-side audit data: excluded from
 /// fallback bytes/digest, cursors, public coverage, and cache keys.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -292,12 +292,24 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistration
     }
 }
 
+/// Maps the registry's two refusals into one per-runtime registration enum.
+/// Callers match on the per-runtime variants (and each carries its own error
+/// message), so the enums keep their own `AlreadyRegistered`/`RegistryClosed`
+/// shapes and only this mapping is shared.
+pub(super) fn registry_registration_refusal<E>(
+    error: ProjectRuntimeRegistryError,
+    already_registered: E,
+    registry_closed: E,
+) -> E {
+    match error {
+        ProjectRuntimeRegistryError::AlreadyRegistered => already_registered,
+        ProjectRuntimeRegistryError::Closed => registry_closed,
+    }
+}
+
 impl From<ProjectRuntimeRegistryError> for DaemonFeedbackRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        match error {
-            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
-            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
+        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
     }
 }
 
@@ -559,10 +571,7 @@ impl From<FeedbackCyclePublicationError> for DaemonAdvisoryRuntimeRegistrationEr
 
 impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        match error {
-            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
-            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
+        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
     }
 }
 
@@ -681,6 +690,85 @@ impl DaemonConfigurationRuntimeRegistrar {
         }
     }
 
+    /// Verify daemon bootstrap mounted the profile-scoped worker plan before
+    /// any project mode can schedule index, semantic, or session work. The
+    /// profile `ProfileSessions` configuration is the sole installer; project
+    /// registration must never invent or replace process CPU authority.
+    pub(crate) fn ensure_worker_plan(&self) -> Result<(), TraceDecayError> {
+        tracedecay_code_index::parallelism::installed_worker_status()
+            .map(|_| ())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "profile code-index worker plan was not installed during daemon bootstrap"
+                    .to_owned(),
+            })
+    }
+
+    /// Commit the daemon-wide worker selection through the exact retained
+    /// profile store, using the project registration only as the canonical
+    /// user-profile mutation grant authority. The project configuration store
+    /// is never used as a persistence sink for this setting.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn commit_profile_code_index_worker_selection(
+        &self,
+        project_root: &Path,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        profile_id: &UserProfileId,
+        request_id: &str,
+        selection: tracedecay_domain::configuration::CodeIndexWorkerSelectionV1,
+        expected_revision: ConfigurationRevisionId,
+        idempotency_key: ConfigurationIdempotencyKey,
+    ) -> Result<crate::global_db::configuration::ProfileCodeIndexWorkerCommitV1, TraceDecayError>
+    {
+        let registered = self
+            .service
+            .project_runtimes
+            .read::<RegisteredConfigurationRuntime, _, _>(project_root, Clone::clone)
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message:
+                    "profile worker configuration requires a registered project configuration grant"
+                        .to_owned(),
+            })?;
+        if registered.project_identity.profile_id() != profile_id
+            || !registered
+                .project_identity
+                .matches_project_root(project_root)
+        {
+            return Err(TraceDecayError::Config {
+                message:
+                    "profile worker configuration identity does not match the registered project"
+                        .to_owned(),
+            });
+        }
+        let mutation = crate::config::profile_code_index_worker_mutation(
+            database.as_ref(),
+            profile_id,
+            selection,
+        )?;
+        let observed_at = current_micros();
+        let authority = registered
+            .grants
+            .issue_direct(
+                request_id,
+                idempotency_key,
+                &mutation,
+                expected_revision.clone(),
+                registered.grants.expires_at,
+                observed_at,
+            )
+            .map_err(|_| TraceDecayError::Config {
+                message: "profile worker configuration grant was refused".to_owned(),
+            })?;
+        crate::config::commit_profile_code_index_worker_selection(
+            database,
+            profile_id,
+            &authority,
+            selection,
+            &expected_revision,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn register(
         &self,
@@ -693,6 +781,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         membership_digest: Option<ManifestDigest>,
         policy_manifest_digest: ManifestDigest,
     ) -> Result<(), TraceDecayError> {
+        self.ensure_worker_plan()?;
         if self
             .service
             .project_runtimes

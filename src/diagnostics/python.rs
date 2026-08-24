@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `pyright --outputjson` driver.
 //!
 //! pyright emits a structured JSON document with a `generalDiagnostics`

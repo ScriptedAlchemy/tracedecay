@@ -223,7 +223,6 @@ where
     Ok(joined)
 }
 
-/// Handles `tracedecay_diff_context` tool calls.
 pub(crate) async fn handle_diff_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -337,7 +336,6 @@ pub(crate) async fn handle_diff_context(
         touched_files,
     ))
 }
-/// Handles `tracedecay_changelog` tool calls.
 pub(crate) async fn handle_changelog(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -385,7 +383,6 @@ pub(crate) async fn handle_changelog(
             .push(symbol_value(symbol, true)?);
     }
 
-    // For each changed file, get current symbols from the graph
     let mut symbols_added: Vec<Value> = Vec::new();
     let mut symbols_modified: Vec<Value> = Vec::new();
     let mut modified: Vec<Value> = Vec::new();
@@ -434,7 +431,6 @@ pub(crate) async fn handle_changelog(
     ))
 }
 
-/// Handles `tracedecay_commit_context` tool calls.
 pub(crate) async fn handle_commit_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -463,10 +459,15 @@ pub(crate) async fn handle_commit_context(
 
     if changed_files.is_empty() {
         let project_root = cg.project_root().to_path_buf();
-        let recent_commits = blocking_git_span("rev-walk", move || {
-            git_recent_commits(&project_root, 5).unwrap_or_default()
-        })
-        .await?;
+        let recent_commits =
+            match blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5))
+                .await?
+            {
+                Ok(commits) => commits,
+                Err(e) => {
+                    return Ok(git_error_result(cg, &args, "log", &e));
+                }
+            };
         let output = json!({
             "changed_files": [],
             "symbols_by_role": {},
@@ -539,10 +540,12 @@ pub(crate) async fn handle_commit_context(
 
     let recent_commits = {
         let project_root = cg.project_root().to_path_buf();
-        blocking_git_span("rev-walk", move || {
-            git_recent_commits(&project_root, 5).unwrap_or_default()
-        })
-        .await?
+        match blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)).await? {
+            Ok(commits) => commits,
+            Err(e) => {
+                return Ok(git_error_result(cg, &args, "log", &e));
+            }
+        }
     };
 
     let total_symbols: usize = symbols_by_role.values().map(std::vec::Vec::len).sum();
@@ -740,7 +743,6 @@ fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     )
 }
 
-/// Handles `tracedecay_pr_context` tool calls.
 pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
     graph: F,

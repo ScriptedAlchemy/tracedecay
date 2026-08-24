@@ -6,7 +6,7 @@
 # the `claude-integration` CI job and runnable locally:
 #
 #   npm install --global @anthropic-ai/claude-code@<pinned>
-#   cargo build --bin tracedecay
+#   cargo build -p tracedecay-cli --bin tracedecay
 #   scripts/claude_stock_integration.sh
 #
 # Environment:
@@ -20,6 +20,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/stock-host.sh"
 # Global so the EXIT trap can still see it after `main` returns under `set -u`.
 stage=""
 
@@ -28,14 +29,9 @@ main() {
     local fake_home project marketplace
     local stage_output plugin_list details doctor_out
 
-    tracedecay_bin="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
-    tracedecay_bin="$(cd "$(dirname "$tracedecay_bin")" && pwd)/$(basename "$tracedecay_bin")"
+    tracedecay_bin="$(resolve_tracedecay_bin)"
     claude_bin="${CLAUDE_BIN:-$(command -v claude || true)}"
 
-    if [[ ! -x "$tracedecay_bin" ]]; then
-        echo "error: tracedecay binary not found at $tracedecay_bin (build with: cargo build --bin tracedecay)" >&2
-        return 1
-    fi
     if [[ -z "$claude_bin" || ! -x "$claude_bin" ]]; then
         echo "error: stock claude binary not found (set CLAUDE_BIN or npm install --global @anthropic-ai/claude-code)" >&2
         return 1
@@ -49,26 +45,14 @@ main() {
     fake_home="$stage/home"
     project="$stage/project"
     marketplace="$fake_home/.claude/plugins/marketplaces/tracedecay"
-    mkdir -p "$fake_home" "$project/src" "$stage/bin"
+    mkdir -p "$fake_home" "$project/src"
     trap 'rm -rf "$stage"' EXIT
 
-    # The installer records the PATH-resolved `tracedecay` in host
-    # registrations and deliberately refuses transient cargo-target binaries.
-    # Shim the binary under test into a neutral directory (the lifecycle
-    # acceptance suite's pattern) so an operator's installed release can never
-    # satisfy this gate.
-    ln "$tracedecay_bin" "$stage/bin/tracedecay" 2>/dev/null \
-        || cp "$tracedecay_bin" "$stage/bin/tracedecay"
-    chmod 0755 "$stage/bin/tracedecay"
-    tracedecay_bin="$stage/bin/tracedecay"
-    PATH="$stage/bin:$PATH"
-    export PATH
-    unset CARGO_TARGET_DIR
+    shim_tracedecay_bin "$tracedecay_bin" "$stage"
+    tracedecay_bin="$STOCK_HOST_TRACEDECAY_BIN"
 
     printf 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n' > "$project/src/lib.rs"
-    git -C "$project" init -q
-    git -C "$project" add -A
-    git -C "$project" -c user.email=ci@tracedecay -c user.name=ci commit -qm init
+    seed_throwaway_project "$project"
 
     # Stage the marketplace bundle. Claude Code owns marketplace registration
     # and enablement, so this step deliberately stops with handover guidance —

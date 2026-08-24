@@ -274,7 +274,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
     }
 }
 
-/// Production application operation for the linked Plan 20 configuration and
+/// Production application operation for the linked configuration and
 /// semantic-profile transition. Profile/evaluation/runtime values are resolved
 /// from durable accepted authority by immutable digest; transport callers
 /// cannot submit a `pass` label or executable profile directly.
@@ -1417,11 +1417,6 @@ mod tests {
         ));
         assert_eq!(authority.calls(), (1, 0, 0));
         assert_eq!(authority.published_snapshot(), None);
-    }
-
-    #[test]
-    fn operation_requires_durable_authority_and_configuration_runtime() {
-        std::hint::black_box(ProductionSemanticConfigurationOperationV1::new);
     }
 
     #[test]

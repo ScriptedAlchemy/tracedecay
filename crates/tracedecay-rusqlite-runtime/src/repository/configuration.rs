@@ -117,7 +117,7 @@ struct StoredAuditPayloadV1<'a> {
 }
 
 fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT revision_id
          FROM configuration_revisions AS candidate
          WHERE NOT EXISTS (
@@ -169,14 +169,13 @@ fn insert_revision(
         .effective_values
         .keys()
         .chain(revision.snapshot.provenance.keys())
-        .cloned()
         .collect::<BTreeSet<_>>();
     for key in keys {
-        let value = revision.snapshot.effective_values.get(&key).cloned();
+        let value = revision.snapshot.effective_values.get(key).cloned();
         let provenance = revision
             .snapshot
             .provenance
-            .get(&key)
+            .get(key)
             .cloned()
             .unwrap_or_default();
         let (layer_kind, layer_id) = snapshot_layer(&provenance);
@@ -333,7 +332,7 @@ fn read_revision(
         return Ok(None);
     };
 
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT key, schema_revision, typed_value
          FROM configuration_entries
          WHERE revision_id = ?1

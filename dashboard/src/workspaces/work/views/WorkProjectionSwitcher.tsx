@@ -5,8 +5,8 @@ import { cn } from '../../../ui/cn.ts';
 /**
  * The camera over the Work workspace.
  *
- * Plan 11's mandate, restated by 11c: one canonical selection, many
- * synchronized projections. The switcher moves the camera and never the
+ * One canonical selection, many synchronized projections. The switcher
+ * moves the camera and never the
  * selection — it writes `?view`, and the selected task stays in `?task` where
  * `useSelectedTask` owns it. Switching projection therefore keeps the task you
  * were reading, and a link carrying both parameters reopens the exact position.

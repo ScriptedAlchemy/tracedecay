@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{SessionId, UtcMicros};
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
@@ -344,13 +345,7 @@ async fn drain_hook_delivery_receipts(
 
     let mut settled = Vec::new();
     for receipt in receipts {
-        let receipt_hex = receipt
-            .receipt_id
-            .iter()
-            .fold(String::new(), |mut hex, byte| {
-                let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
-                hex
-            });
+        let receipt_hex = encode_lowercase_hex(&receipt.receipt_id);
         let source_receipt_ref = format!("hook:delivery:{receipt_hex}");
         if authority
             .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
@@ -386,7 +381,7 @@ async fn drain_all_hosts(
     data_root: &Path,
     delivery_settlements: &tracedecay_usecases::observability::DeliverySettlementAuthorityV1,
 ) {
-    for host in crate::hooks::NATIVE_HOOK_HOSTS {
+    for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
         for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
@@ -732,7 +727,7 @@ mod tests {
         publish_binding(root.path(), &binding, now);
         let mut edit = envelope(9, &binding);
         edit.protected_session_id =
-            crate::hooks::protected_native_session_id("session.native.replay");
+            tracedecay_agent_hosts::hooks::protected_native_session_id("session.native.replay");
         edit.event = HookEventV2::SavedEdit {
             file_id: [8; 16],
             changed_range_count: 1,
@@ -753,7 +748,9 @@ mod tests {
                         assert_eq!(worktree_id, [3; 16]);
                         assert_eq!(
                             protected_session_id,
-                            crate::hooks::protected_native_session_id("session.native.replay")
+                            tracedecay_agent_hosts::hooks::protected_native_session_id(
+                                "session.native.replay",
+                            )
                         );
                         Some(SessionId::new("session.native.replay".to_owned()).unwrap())
                     },
@@ -973,7 +970,8 @@ mod tests {
             .collect();
             let mut replayed = envelope(sequence as u8, &host_binding);
             replayed.producer = host;
-            replayed.protected_session_id = crate::hooks::protected_native_session_id(session);
+            replayed.protected_session_id =
+                tracedecay_agent_hosts::hooks::protected_native_session_id(session);
             replayed.ordering = HookOrderingV1::ProviderSequence(sequence);
             replayed.event = HookEventV2::SavedEdit {
                 file_id: [sequence as u8; 16],
@@ -988,7 +986,7 @@ mod tests {
                     assert_eq!(worktree_id, [3; 16]);
                     assert_eq!(
                         protected_session_id,
-                        crate::hooks::protected_native_session_id(session)
+                        tracedecay_agent_hosts::hooks::protected_native_session_id(session)
                     );
                     Some(SessionId::new(session.to_owned()).unwrap())
                 },

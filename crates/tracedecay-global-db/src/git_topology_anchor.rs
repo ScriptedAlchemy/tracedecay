@@ -1,4 +1,4 @@
-//! Mounted V2 Git-topology anchor authority over the canonical anchor table.
+//! Git-topology anchor authority over the canonical anchor table.
 
 use tracedecay_application::retrieval::{
     GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,

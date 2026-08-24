@@ -12,9 +12,7 @@
 //! What is *not* vendored is the engine. The bounded scan, the parse-before-scan
 //! structured layer, the entropy kernel, the typed findings and assessments, and
 //! the redaction merge all stay `TraceDecay`'s. Vendored rules are data feeding
-//! the same [`CredentialPattern`] the detector always consumed, which is why
-//! this change is invisible to `detect.rs`, `structured_text.rs`, and
-//! `memory::hygiene` beyond the error type.
+//! the same [`CredentialPattern`] the detector always consumed.
 //!
 //! Both documents are bound with [`include_str!`], so the ruleset is fixed at
 //! compile time: no filesystem read, no network, no ordering nondeterminism.

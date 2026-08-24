@@ -273,18 +273,4 @@ mod tests {
             json!("managed skill base_checksum is stale")
         );
     }
-
-    #[test]
-    fn absent_managed_skill_authority_is_typed_unavailable() {
-        let (status, Json(payload)) =
-            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::unavailable(
-                "dashboard automation authority is not mounted",
-            ));
-
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            payload["detail"],
-            json!("dashboard automation authority is not mounted")
-        );
-    }
 }

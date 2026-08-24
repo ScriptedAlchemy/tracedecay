@@ -6,6 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 use crate::DEFAULT_FASTEMBED_MODEL_ID;
 
@@ -220,7 +222,6 @@ fn jina_embeddings_v2_base_code() -> CatalogedFastEmbedModelV1 {
 
 /// Package digest identity over catalog pins (model + revision + members).
 pub fn catalog_package_digest(model: &CatalogedFastEmbedModelV1) -> String {
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.fastembed.catalog-package.v1\0");
     hasher.update(model.model_id.as_bytes());
@@ -236,7 +237,7 @@ pub fn catalog_package_digest(model: &CatalogedFastEmbedModelV1) -> String {
         hasher.update(member.sha256.as_bytes());
         hasher.update(b"\0");
     }
-    hex::encode(hasher.finalize())
+    encode_lowercase_hex(&hasher.finalize())
 }
 
 #[cfg(test)]

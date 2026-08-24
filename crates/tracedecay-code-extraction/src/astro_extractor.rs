@@ -28,7 +28,6 @@ use tree_sitter::Tree;
 pub struct AstroExtractor;
 
 impl AstroExtractor {
-    /// Extract nodes and edges from an Astro source file.
     pub fn extract_astro(file_path: &str, source: &str) -> ExtractionResult {
         let masked = Self::mask_non_frontmatter(source);
         TypeScriptExtractor::extract_typescript(file_path, &masked)
@@ -92,8 +91,15 @@ impl LanguageExtractor for AstroExtractor {
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor.extract_artifact(file_path, &masked)
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || {
+                let masked = Self::mask_non_frontmatter(source);
+                TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
+            },
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
     }
 
     fn extract_parsed(
@@ -116,6 +122,19 @@ impl LanguageExtractor for AstroExtractor {
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let masked = Self::mask_non_frontmatter(source);
         TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
+    }
+
+    /// The retained document already holds this extractor's mask as its parse
+    /// text, so reuse it instead of re-masking the whole source per pass.
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        _source: &str,
+        parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
     }
 }
 

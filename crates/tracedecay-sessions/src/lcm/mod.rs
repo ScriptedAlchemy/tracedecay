@@ -13,6 +13,10 @@ pub mod security;
 /// because the four of them must agree: a heuristic that only some callers
 /// adopt would let a session compress against one budget and be replayed
 /// against another.
-pub(crate) fn estimate_tokens(text: &str) -> i64 {
+///
+/// Named distinctly from the chars/4 `estimate_tokens` helpers in read-mode
+/// and global-db surfaces so those cannot be imported into this budget path
+/// by accident.
+pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
     text.split_whitespace().count().max(1) as i64
 }

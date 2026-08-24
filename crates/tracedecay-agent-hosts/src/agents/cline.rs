@@ -14,11 +14,10 @@ use crate::errors::Result;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
     McpUninstallPolicy, config_backup_path, install_mcp_server_entry, load_json_file,
-    load_json_file_strict, mcp_registration_entry, mcp_servers_registration_state,
-    report_mcp_registration, uninstall_mcp_server_entry,
+    load_json_file_strict, mcp_servers_registration_state, report_mcp_registration,
+    uninstall_mcp_server_entry,
 };
 
-/// Cline agent.
 pub struct ClineIntegration;
 
 /// Current Cline CLI/IDE user MCP settings path documented by Cline.
@@ -43,7 +42,7 @@ fn cline_settings_paths(home: &Path) -> [PathBuf; 2] {
 /// Cline accepts any `mcpServers.tracedecay` entry, so this deliberately skips
 /// the object-shape filter [`super::doctor_check_mcp_registration`] applies.
 fn settings_have_tracedecay(path: &Path) -> bool {
-    path.exists() && mcp_registration_entry(path, "mcpServers", load_json_file).is_some()
+    super::mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
 impl AgentIntegration for ClineIntegration {
@@ -95,6 +94,7 @@ impl AgentIntegration for ClineIntegration {
         }
     }
 
+    #[hotpath::measure(label = "cline_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -129,7 +129,7 @@ impl AgentIntegration for ClineIntegration {
                 "mcpServers",
                 load_json_file,
                 McpUninstallPolicy::default(),
-            );
+            )?;
         }
         Ok(())
     }
@@ -145,9 +145,6 @@ impl AgentIntegration for ClineIntegration {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Cline's primary `.cline/mcp.json` has the tracedecay MCP server
-/// registered, falling back to the legacy VS Code `cline_mcp_settings.json`.
-///
 /// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
 /// primary settings file is not a warning on its own: Cline falls through to
 /// the legacy VS Code extension path first and only then reports a failure.

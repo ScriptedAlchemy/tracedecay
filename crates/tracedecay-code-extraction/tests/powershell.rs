@@ -87,24 +87,20 @@ fn test_powershell_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!call_refs.is_empty(), "should have call refs");
-    // Write-Log calls Write-Host and Get-Date
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Write-Host"),
         "should find Write-Host call"
     );
-    // Test-Config calls Write-Log
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Write-Log"),
         "should find Write-Log call"
     );
-    // Connect-Server calls Test-Connection
     assert!(
         call_refs
             .iter()
             .any(|r| r.reference_name == "Test-Connection"),
         "should find Test-Connection call"
     );
-    // Main calls Test-Config
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Test-Config"),
         "should find Test-Config call"
@@ -150,7 +146,6 @@ fn test_powershell_docstrings() {
         test_config.docstring
     );
 
-    // Main should have a docstring.
     let main_fn = result
         .nodes
         .iter()
@@ -191,7 +186,6 @@ fn test_powershell_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 5 functions + 2 consts + 2 Use = 9 Contains edges
     assert!(
         contains.len() >= 9,
         "should have >= 9 Contains edges, got {}",

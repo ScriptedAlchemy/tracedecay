@@ -1,6 +1,3 @@
-//! `dispatch` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
-
 use super::*;
 
 fn lsp_deadline() -> Deadline {

@@ -150,10 +150,14 @@ function KnowledgeFacts() {
   // the same three values written slightly differently. Two spellings of one
   // computation is one place for them to drift apart, which on this plate would
   // mean a rail and a list disagreeing about the trust of the same facts.
-  const trust = composeTrustDistribution(
-    overviewData?.holographic.overview?.trust_histogram,
-    statusMemory,
-    overviewData?.holographic.facts,
+  const trust = useMemo(
+    () =>
+      composeTrustDistribution(
+        overviewData?.holographic.overview?.trust_histogram,
+        statusMemory,
+        overviewData?.holographic.facts,
+      ),
+    [overviewData, statusMemory],
   );
   const [selection, setSelection] = useState<{
     scopeKey: string;

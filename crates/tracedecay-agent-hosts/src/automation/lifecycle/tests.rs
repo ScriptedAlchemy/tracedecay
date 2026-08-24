@@ -35,7 +35,8 @@ fn session_reflector_malformed_output_projection_is_payload_free() {
             .collect(),
     );
 
-    let projection = failed_output_projection(AgentTaskKind::SessionReflector, "facts", &output);
+    let projection = failed_output_projection(AgentTaskKind::SessionReflector, "facts", &output)
+        .expect("failed output projection");
     let serialized = serde_json::to_string(&projection).expect("projection JSON");
 
     assert_eq!(

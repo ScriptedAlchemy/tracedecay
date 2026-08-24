@@ -47,13 +47,17 @@ fn decode_exact_meta(bytes: &[u8]) -> Result<HookSpoolMetaV1, HookSpoolError> {
     })
 }
 
+#[hotpath::measure]
 pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError> {
     let bytes = serde_json::to_vec(meta).map_err(|_| HookSpoolError::MetadataCorrupted)?;
     if bytes.len() > MAX_META_BYTES {
         return Err(HookSpoolError::MetadataCorrupted);
     }
-    shared_atomic_write(&meta_path(root), "meta", &bytes, DIRECTORY_POLICY)
-        .map_err(|_| HookSpoolError::Io)
+    hotpath::gauge!("hooks.spool.meta.bytes").set(bytes.len());
+    hotpath::measure_block!("hooks.spool.fsync.meta", {
+        shared_atomic_write(&meta_path(root), "meta", &bytes, DIRECTORY_POLICY)
+            .map_err(|_| HookSpoolError::Io)
+    })
 }
 
 pub(super) fn append_intent(

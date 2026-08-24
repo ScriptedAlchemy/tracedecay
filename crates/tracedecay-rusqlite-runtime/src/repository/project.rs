@@ -54,6 +54,17 @@ impl ProjectExecutor {
         Ok(())
     }
 
+    pub fn execute_observation_batch(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        writes: &[AnchoredObservationWrite],
+    ) -> rusqlite::Result<()> {
+        for write in writes {
+            self.execute_observation_write(savepoint, write)?;
+        }
+        Ok(())
+    }
+
     pub fn execute_remote_observation_replay(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -116,6 +127,17 @@ impl ProjectExecutor {
         commit: &SourceCommitV1,
     ) -> rusqlite::Result<()> {
         self.external_source.execute_write(savepoint, commit)
+    }
+
+    pub fn execute_external_source_batch(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        commits: &[SourceCommitV1],
+    ) -> rusqlite::Result<()> {
+        for commit in commits {
+            self.external_source.execute_write(savepoint, commit)?;
+        }
+        Ok(())
     }
 
     pub fn execute_external_source_projection_write(

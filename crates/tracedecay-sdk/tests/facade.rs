@@ -46,13 +46,6 @@ fn cancellation_types_are_the_canonical_application_types() {
 }
 
 #[test]
-fn remote_outcomes_are_the_canonical_application_types() {
-    let outcome: Option<remote::replay::RemoteReplayOutcomeV1> = None;
-    let canonical: Option<application::remote::replay::RemoteReplayOutcomeV1> = outcome;
-    let _: Option<remote::replay::RemoteReplayOutcomeV1> = canonical;
-}
-
-#[test]
 fn work_create_descriptor_matches_the_mounted_binding() {
     let registry = work::executable_binding_registry().expect("canonical Work registry");
     let binding = registry

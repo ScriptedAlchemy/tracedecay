@@ -17,8 +17,7 @@
 use schemars::generate::SchemaSettings;
 use serde_json::{Value, json};
 // Imported through the `git` module rather than the crate root: the root
-// re-export list does not carry this family, and widening it would mean editing
-// a file another lane is holding open.
+// re-export list does not carry this family.
 use tracedecay_application::git::{
     NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION, NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION,
     NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,

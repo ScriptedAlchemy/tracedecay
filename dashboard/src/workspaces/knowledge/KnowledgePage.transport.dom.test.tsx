@@ -10,8 +10,7 @@ import {
 import { KnowledgePage } from "./KnowledgePage.tsx";
 
 /**
- * HTTP fault injection for the Knowledge workspace (plan 11, "MSW covers
- * HTTP/SSE faults").
+ * HTTP fault injection for the Knowledge workspace.
  *
  * Knowledge is the subject for headline quantities. Its rail leads with the
  * fact count at display size — the single largest number the dashboard prints —

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Compile/type-check diagnostics, normalised across languages.
 //!
 //! 5.0 ships the Rust driver (`cargo check --message-format=json`) — the

@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
@@ -70,8 +71,11 @@ export function WorkTopologyView({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workTopologyReading(topology);
-  const titleJoin = snapshotTitlesBoundToTopology(snapshot, reading);
+  const reading = useMemo(() => workTopologyReading(topology), [topology]);
+  const titleJoin = useMemo(
+    () => snapshotTitlesBoundToTopology(snapshot, reading),
+    [snapshot, reading],
+  );
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-work-view="topology">

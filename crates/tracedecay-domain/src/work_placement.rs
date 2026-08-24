@@ -1,22 +1,18 @@
 //! Execution-placement lowering for admitted Work runs.
 //!
-//! Plan 32 (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,
-//! "Placement, topology, and safe Git effects") fixes the supported set:
-//! "no managed placement, explicitly acknowledged strictly clean in-place,
-//! linked worktree, or isolated local clone", and requires linked and isolated
-//! placements to be "canonical, exclusive, fenced, network-free where declared,
-//! and retained/quarantined rather than cleaned when dirty, conflicted,
-//! unknown, or uniquely valuable". Plan 24 ("Optional topology, placement,
-//! review, and integration") adds that placement is "an independent versioned
-//! relation attached to a work-item version" and that "changing any of them
-//! preserves TaskId".
+//! Supported placements are no managed placement, explicitly acknowledged
+//! strictly clean in-place, a linked worktree, or an isolated local clone.
+//! Linked and isolated placements are canonical, exclusive, fenced,
+//! network-free where declared, and retained or quarantined rather than
+//! cleaned when dirty, conflicted, unknown, or uniquely valuable. Placement
+//! is an independent versioned relation attached to a work-item version;
+//! changing it preserves TaskId.
 //!
-//! Three rules are structural here rather than documented:
+//! Three rules are structural:
 //!
 //! 1. **Release is not delete.** [`WorkPlacementV1::release`] publishes either
-//!    `Released` or `Quarantined`; it never reports a removal. The plan is
-//!    explicit that "retention expiry is eligibility for a fresh cleanup
-//!    preflight, not delete authority".
+//!    `Released` or `Quarantined`; it never reports a removal. Retention expiry
+//!    is eligibility for a fresh cleanup preflight, not delete authority.
 //! 2. **A blocker set is the reason, not a boolean.** Every refusal names the
 //!    exact typed blockers observed, so "we did not look" cannot be spelled the
 //!    same way as "nothing blocks".
@@ -92,7 +88,7 @@ impl WorkPlacementKindV1 {
     }
 }
 
-/// Exactly the conditions Plan 32 names as blocking admission or removal.
+/// Closed set of conditions that block admission or removal.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -161,7 +157,7 @@ pub struct WorkPlacementTargetV1 {
     /// Absolute root, present exactly when the kind manages one.
     root: Option<String>,
     /// Set only for `CleanInPlace`: the caller states it accepts running in
-    /// its own checkout. Plan 32 calls this "explicitly acknowledged".
+    /// its own checkout. Acknowledgement is explicit, never inferred.
     in_place_acknowledged: bool,
     /// The placement declares it needs no network. Declared, not detected.
     network_free: bool,
@@ -260,9 +256,9 @@ pub struct WorkPlacementObservationV1 {
     /// Commits in the target reachable from nowhere else.
     ///
     /// `None` means reachability was not measured, and it blocks removal
-    /// exactly as a positive count does: Plan 32 forbids cleaning when the
-    /// state is "unknown", so an unmeasured target is retained rather than
-    /// assumed worthless. Only removal consults this; admission does not.
+    /// exactly as a positive count does: an unmeasured target is "unknown"
+    /// and is retained rather than assumed worthless. Only removal consults
+    /// this; admission does not.
     pub unique_commits: Option<u32>,
     /// Whether the target could be read at all.
     pub readable: bool,
@@ -311,10 +307,9 @@ impl WorkPlacementObservationV1 {
     /// The typed blockers that forbid *removing* this placement's bytes.
     ///
     /// Removal is judged more strictly than admission, and deliberately so:
-    /// Plan 32 forbids cleaning "when dirty, conflicted, unknown, or uniquely
-    /// valuable", so dirt in a linked worktree — which does not block creating
-    /// one — does block deleting one. An unmanaged placement owns no bytes, so
-    /// it has nothing removal could destroy.
+    /// dirt in a linked worktree — which does not block creating one — does
+    /// block deleting one. An unmanaged placement owns no bytes, so it has
+    /// nothing removal could destroy.
     pub fn removal_blockers(
         &self,
         target: &WorkPlacementTargetV1,
@@ -463,8 +458,7 @@ impl WorkPlacementV1 {
     /// Gives the target up, or retains it when removal is blocked.
     ///
     /// A quarantine is not a failure to release: it is the release, with the
-    /// exact reasons the bytes were kept. Plan 32 forbids cleaning "when dirty,
-    /// conflicted, unknown, or uniquely valuable".
+    /// exact reasons the bytes were kept.
     pub fn release(
         &self,
         blockers: BTreeSet<WorkPlacementBlockerV1>,

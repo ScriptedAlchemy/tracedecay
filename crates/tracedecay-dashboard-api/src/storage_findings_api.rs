@@ -27,9 +27,9 @@ const STORAGE_KINDS: [DoctorStorageFindingKindV1; 5] = [
     DoctorStorageFindingKindV1::TableGrowth,
 ];
 
-/// Whether one Plan 38 producer had enough source evidence to report a real
-/// result. This is source coverage, not a health grade: `Real` can describe a
-/// clean observation or a problem finding.
+/// Whether one storage finding producer had enough source evidence to report
+/// a real result. This is source coverage, not a health grade: `Real` can
+/// describe a clean observation or a problem finding.
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageFindingSourceStateV1 {
@@ -204,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_without_admitted_reader_projects_all_kinds_as_unsupported() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) =
             crate::events_api::dashboard_state_fixture("project.dashboard-storage-findings").await;
 

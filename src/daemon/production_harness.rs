@@ -2,10 +2,6 @@
 //!
 //! Test and `test-transport` builds use this to drive the same composition the
 //! daemon runs, against one isolated profile-and-projects root.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 #[cfg(all(unix, any(test, feature = "test-transport")))]
 use super::bootstrap::set_owner_only_permissions;

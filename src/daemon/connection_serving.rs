@@ -3,10 +3,6 @@
 //! Covers the authenticated Unix socket path, the routed rmcp bridge, and the
 //! portable broker path. Each entry point owns framing, project-owner routing,
 //! and connection teardown for exactly one client.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
@@ -83,6 +79,7 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     .await
 }
 
+#[hotpath::measure]
 pub(super) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
@@ -543,6 +540,7 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,

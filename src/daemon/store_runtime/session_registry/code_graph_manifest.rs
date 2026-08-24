@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{ProjectId, RepositoryId};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
@@ -129,7 +130,7 @@ impl CheckedSealReader<'_> {
                     .to_owned(),
             });
         }
-        if hex::encode(self.digest.finalize()) != expected_digest {
+        if encode_lowercase_hex(&self.digest.finalize()) != expected_digest {
             return Err(GraphDbError::Corrupt {
                 message: "sealed code generation filename digest does not match its bytes"
                     .to_owned(),

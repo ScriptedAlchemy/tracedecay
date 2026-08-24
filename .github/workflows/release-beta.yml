@@ -80,17 +80,13 @@ jobs:
             --retained-output retained-asset-names \
             --github-output "$GITHUB_OUTPUT"
           mkdir retained-assets
-          while IFS= read -r asset; do
-            [[ -z "$asset" ]] && continue
-            gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-              --pattern "$asset" --dir retained-assets
-            gh attestation verify "retained-assets/$asset" \
-              --repo "${{ github.repository }}" \
-              --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
-              --source-ref "refs/tags/${RELEASE_TAG}" \
-              --source-digest "$source_sha" \
-              --deny-self-hosted-runners >/dev/null
-          done < retained-asset-names
+          scripts/verify-retained-release-assets.sh \
+            --tag "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
+            --source-digest "$source_sha" \
+            --asset-names retained-asset-names \
+            --download-dir retained-assets
 
   build:
     needs: validate
@@ -156,6 +152,11 @@ jobs:
           python3 .release-automation/scripts/resolve-release-source-profile.py \
             --source . \
             --github-output "$GITHUB_OUTPUT"
+          if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
+            echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
+          else
+            echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare target release runtime
         id: target-runtime
@@ -215,11 +216,14 @@ jobs:
         if: matrix.name == 'x86_64-linux'
         run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
 
+      # Runs before the default build so it never leaves an all-features
+      # binary (e.g. test-transport) on disk at the shared release output
+      # path for later packaging steps to pick up.
       - name: Verify all-feature release build compiles
-        run: cargo build --release --target ${{ matrix.target }} --all-features --locked
+        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
 
       - name: Build release binary for packaging
-        run: cargo build --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
+        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
 
       - name: Install modern Bash for distribution acceptance
         if: runner.os == 'macOS'
@@ -426,16 +430,15 @@ jobs:
             --asset-names remote-asset-names \
             --retained-output retained-asset-names \
             --github-output planner-output
+          scripts/verify-retained-release-assets.sh \
+            --tag "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
+            --source-digest "$SOURCE_SHA" \
+            --asset-names retained-asset-names \
+            --download-dir retained-assets
           while IFS= read -r asset; do
             [[ -z "$asset" ]] && continue
-            gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-              --pattern "$asset" --dir retained-assets
-            gh attestation verify "retained-assets/$asset" \
-              --repo "${{ github.repository }}" \
-              --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
-              --source-ref "refs/tags/${RELEASE_TAG}" \
-              --source-digest "$SOURCE_SHA" \
-              --deny-self-hosted-runners >/dev/null
             if [[ "$asset" == *.mcpb ]]; then
               cp "retained-assets/$asset" "mcpbs/$asset"
             else
@@ -529,11 +532,9 @@ jobs:
             --tag "$RELEASE_TAG" \
             --binaries verified-binaries \
             --mcpbs verified-mcpbs
-          for artifact in verified-binaries/* verified-mcpbs/*; do
-            gh attestation verify "$artifact" \
-              --repo "${{ github.repository }}" \
-              --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
-              --source-ref "refs/tags/${RELEASE_TAG}" \
-              --source-digest "${{ needs.validate.outputs.source_sha }}" \
-              --deny-self-hosted-runners >/dev/null
-          done
+          scripts/verify-retained-release-assets.sh \
+            --tag "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
+            --source-digest "${{ needs.validate.outputs.source_sha }}" \
+            --files verified-binaries/* verified-mcpbs/*

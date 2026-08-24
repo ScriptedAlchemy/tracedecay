@@ -25,10 +25,13 @@ use super::{
     REPLAY_READER_ACQUIRE_SLICE, TOMBSTONE_COLUMNS,
 };
 
+const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
+
 pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactSqlTransaction> {
+    let mut busy_attempts = 0_u32;
     loop {
         ensure_not_interrupted(context)?;
         match handle.begin_immediate() {
@@ -37,6 +40,10 @@ pub(super) fn begin(
                 return Ok(transaction);
             }
             Err(ExactSqlError::Busy) => {
+                busy_attempts = busy_attempts.saturating_add(1);
+                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
+                    return Err(GraphPublicationStoreErrorV1::Infrastructure);
+                }
                 std::thread::sleep(Duration::from_millis(1));
                 ensure_not_interrupted(context)?;
             }
@@ -85,6 +92,7 @@ pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactPublicationRead> {
+    let mut busy_attempts = 0_u32;
     loop {
         ensure_not_interrupted(context)?;
         match handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE) {
@@ -93,17 +101,23 @@ pub(super) fn begin_read(
                 return Ok(ExactPublicationRead::Snapshot(snapshot));
             }
             Err(ExactSqlError::Busy) => {
+                busy_attempts = busy_attempts.saturating_add(1);
+                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
                 ensure_not_interrupted(context)?;
             }
             Err(_) => {
                 ensure_not_interrupted(context)?;
-                return handle
-                    .begin_deferred()
-                    .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
-                    .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure);
+                break;
             }
         }
     }
+    handle
+        .begin_deferred()
+        .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
+        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
 pub(super) fn commit(transaction: ExactSqlTransaction) -> GraphPublicationStoreResultV1<()> {
@@ -316,11 +330,11 @@ pub(super) fn read_projection_page(
         ],
     )?
     .into_iter()
-    .map(|row| {
+    .map(|mut row| {
         Ok(GraphProjectionIdentityV1 {
             shard_id: request.shard_id.clone(),
-            namespace: GraphNamespaceV1::new(text_at(&row, 0)?).map_err(corrupt)?,
-            projection: GraphProjectionIdV1::new(text_at(&row, 1)?).map_err(corrupt)?,
+            namespace: GraphNamespaceV1::new(text_at(&mut row, 0)?).map_err(corrupt)?,
+            projection: GraphProjectionIdV1::new(text_at(&mut row, 1)?).map_err(corrupt)?,
         })
     })
     .collect()
@@ -412,20 +426,20 @@ pub(super) fn read_head(
             "verified graph projection has duplicate heads".to_owned(),
         ));
     }
-    let Some(row) = rows.pop() else {
+    let Some(mut row) = rows.pop() else {
         return Ok(None);
     };
     let head = decode_verified_head(RawVerifiedHead {
         sequence: integer_at(&row, 0)?,
-        recovered_digest: text_at(&row, 1)?,
-        shard_id: text_at(&row, 2)?,
-        namespace: text_at(&row, 3)?,
-        projection: text_at(&row, 4)?,
-        generation: text_at(&row, 5)?,
-        idempotency_key: text_at(&row, 6)?,
-        input_digest: text_at(&row, 7)?,
-        dependency_generation_closure_digest: text_at(&row, 8)?,
-        expected_recovered_digest: text_at(&row, 9)?,
+        recovered_digest: text_at(&mut row, 1)?,
+        shard_id: text_at(&mut row, 2)?,
+        namespace: text_at(&mut row, 3)?,
+        projection: text_at(&mut row, 4)?,
+        generation: text_at(&mut row, 5)?,
+        idempotency_key: text_at(&mut row, 6)?,
+        input_digest: text_at(&mut row, 7)?,
+        dependency_generation_closure_digest: text_at(&mut row, 8)?,
+        expected_recovered_digest: text_at(&mut row, 9)?,
     })?;
     let actual = EncodedProjection::new(&head.key.projection)?;
     if actual.shard_id != encoded.shard_id
@@ -525,13 +539,14 @@ pub(super) fn read_by_sequence(
     )
 }
 
-pub(super) fn next_replay_metadata(
+pub(super) fn replay_metadata_page(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
     after: u64,
-) -> GraphPublicationStoreResultV1<Option<(tracedecay_store::GraphPublicationSequenceV1, usize)>> {
+    limit: u16,
+) -> GraphPublicationStoreResultV1<Vec<(tracedecay_store::GraphPublicationSequenceV1, usize)>> {
     let after = sqlite_sequence_from_u64(after)?;
-    let mut rows = query(
+    let rows = query(
         transaction,
         "SELECT sequence,
                 length(canonical_replay_source) + direct_dependency_bytes
@@ -543,30 +558,65 @@ pub(super) fn next_replay_metadata(
                WHERE retired.replay_sequence = replay.sequence
            )
          ORDER BY sequence ASC
-         LIMIT 1"
+         LIMIT ?5"
             .to_owned(),
         vec![
             text(&encoded.shard_id),
             text(&encoded.namespace),
             text(&encoded.projection),
             ExactSqlValue::Integer(after),
+            ExactSqlValue::Integer(i64::from(limit)),
         ],
     )?;
-    if rows.len() > 1 {
+    rows.into_iter()
+        .map(|row| {
+            let sequence = sequence_from_i64(integer_at(&row, 0)?)?;
+            let payload_bytes = usize::try_from(integer_at(&row, 1)?).map_err(|_| {
+                GraphPublicationStoreErrorV1::Corrupt(
+                    "graph replay payload length is negative or exceeds usize".to_owned(),
+                )
+            })?;
+            Ok((sequence, payload_bytes))
+        })
+        .collect()
+}
+
+pub(super) fn read_replays_by_sequences(
+    transaction: &impl ExactQueryAuthority,
+    sequences: &[i64],
+) -> GraphPublicationStoreResultV1<Vec<GraphPublicationReplayRecordV1>> {
+    if sequences.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=sequences.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = query(
+        transaction,
+        format!(
+            "SELECT {REPLAY_COLUMNS} FROM graph_publication_replay_v1 AS replay
+             WHERE sequence IN ({placeholders})
+               AND NOT EXISTS (
+                   SELECT 1 FROM graph_publication_replay_tombstones_v1 AS retired
+                   WHERE retired.replay_sequence = replay.sequence
+               )
+             ORDER BY sequence ASC"
+        ),
+        sequences
+            .iter()
+            .copied()
+            .map(ExactSqlValue::Integer)
+            .collect(),
+    )?;
+    if rows.len() != sequences.len() {
         return Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph replay page metadata returned duplicate rows".to_owned(),
+            "enumerated graph replay disappeared in its read transaction".to_owned(),
         ));
     }
-    let Some(row) = rows.pop() else {
-        return Ok(None);
-    };
-    let sequence = sequence_from_i64(integer_at(&row, 0)?)?;
-    let payload_bytes = usize::try_from(integer_at(&row, 1)?).map_err(|_| {
-        GraphPublicationStoreErrorV1::Corrupt(
-            "graph replay payload length is negative or exceeds usize".to_owned(),
-        )
-    })?;
-    Ok(Some((sequence, payload_bytes)))
+    rows.into_iter()
+        .map(|row| decode_row(transaction, row))
+        .collect()
 }
 
 pub(super) fn insert_verified_dependencies(
@@ -782,15 +832,15 @@ fn read_dependencies(
         }
     }
     let mut dependencies = Vec::with_capacity(rows.len());
-    for row in rows {
+    for mut row in rows {
         dependencies.push(GraphDependencyGenerationIdentityV1::new(
             GraphProjectionIdentityV1 {
-                shard_id: serde_json::from_str::<StoreShardIdV1>(&text_at(&row, 1)?)
+                shard_id: serde_json::from_str::<StoreShardIdV1>(&text_at(&mut row, 1)?)
                     .map_err(corrupt)?,
-                namespace: GraphNamespaceV1::new(text_at(&row, 2)?).map_err(corrupt)?,
-                projection: GraphProjectionIdV1::new(text_at(&row, 3)?).map_err(corrupt)?,
+                namespace: GraphNamespaceV1::new(text_at(&mut row, 2)?).map_err(corrupt)?,
+                projection: GraphProjectionIdV1::new(text_at(&mut row, 3)?).map_err(corrupt)?,
             },
-            GraphGenerationIdV1::new(text_at(&row, 4)?).map_err(corrupt)?,
+            GraphGenerationIdV1::new(text_at(&mut row, 4)?).map_err(corrupt)?,
         ));
     }
     Ok(dependencies)
@@ -813,7 +863,7 @@ fn read_retained_source(
             "retired graph replay source identity is not unique".to_owned(),
         ));
     }
-    rows.pop().map(|row| blob_at(&row, 0)).transpose()
+    rows.pop().map(|mut row| blob_at(&mut row, 0)).transpose()
 }
 
 pub(super) fn one_replay(
@@ -846,24 +896,24 @@ pub(super) fn one_tombstone(
 
 pub(super) fn decode_row(
     transaction: &impl ExactQueryAuthority,
-    row: ExactSqlRow,
+    mut row: ExactSqlRow,
 ) -> GraphPublicationStoreResultV1<GraphPublicationReplayRecordV1> {
     let sequence = integer_at(&row, 0)?;
     decode_replay(
         RawReplay {
             sequence,
-            shard_id: text_at(&row, 1)?,
-            namespace: text_at(&row, 2)?,
-            projection: text_at(&row, 3)?,
-            generation: text_at(&row, 4)?,
-            idempotency_key: text_at(&row, 5)?,
-            input_digest: text_at(&row, 6)?,
-            dependency_generation_closure_digest: text_at(&row, 7)?,
+            shard_id: text_at(&mut row, 1)?,
+            namespace: text_at(&mut row, 2)?,
+            projection: text_at(&mut row, 3)?,
+            generation: text_at(&mut row, 4)?,
+            idempotency_key: text_at(&mut row, 5)?,
+            input_digest: text_at(&mut row, 6)?,
+            dependency_generation_closure_digest: text_at(&mut row, 7)?,
             direct_dependency_bytes: integer_at(&row, 8)?,
-            expected_prior_head: optional_text_at(&row, 9)?,
-            expected_recovered_digest: text_at(&row, 10)?,
-            canonical_replay_source_digest: text_at(&row, 11)?,
-            canonical_replay_source: blob_at(&row, 12)?,
+            expected_prior_head: optional_text_at(&mut row, 9)?,
+            expected_recovered_digest: text_at(&mut row, 10)?,
+            canonical_replay_source_digest: text_at(&mut row, 11)?,
+            canonical_replay_source: blob_at(&mut row, 12)?,
         },
         read_dependencies(transaction, sequence, false)?,
     )
@@ -871,23 +921,23 @@ pub(super) fn decode_row(
 
 pub(super) fn decode_tombstone_row(
     transaction: &impl ExactQueryAuthority,
-    row: ExactSqlRow,
+    mut row: ExactSqlRow,
 ) -> GraphPublicationStoreResultV1<GraphPublicationReplayTombstoneV1> {
     let sequence = integer_at(&row, 0)?;
     decode_tombstone(
         RawReplayTombstone {
             sequence,
-            shard_id: text_at(&row, 1)?,
-            namespace: text_at(&row, 2)?,
-            projection: text_at(&row, 3)?,
-            generation: text_at(&row, 4)?,
-            idempotency_key: text_at(&row, 5)?,
-            input_digest: text_at(&row, 6)?,
-            dependency_generation_closure_digest: text_at(&row, 7)?,
+            shard_id: text_at(&mut row, 1)?,
+            namespace: text_at(&mut row, 2)?,
+            projection: text_at(&mut row, 3)?,
+            generation: text_at(&mut row, 4)?,
+            idempotency_key: text_at(&mut row, 5)?,
+            input_digest: text_at(&mut row, 6)?,
+            dependency_generation_closure_digest: text_at(&mut row, 7)?,
             direct_dependency_bytes: integer_at(&row, 8)?,
-            expected_prior_head: optional_text_at(&row, 9)?,
-            expected_recovered_digest: text_at(&row, 10)?,
-            canonical_replay_source_digest: text_at(&row, 11)?,
+            expected_prior_head: optional_text_at(&mut row, 9)?,
+            expected_recovered_digest: text_at(&mut row, 10)?,
+            canonical_replay_source_digest: text_at(&mut row, 11)?,
             canonical_replay_source: read_retained_source(transaction, sequence)?,
         },
         read_dependencies(transaction, sequence, true)?,
@@ -895,19 +945,19 @@ pub(super) fn decode_tombstone_row(
 }
 
 pub(super) fn decode_metadata_row(
-    row: ExactSqlRow,
+    mut row: ExactSqlRow,
 ) -> GraphPublicationStoreResultV1<ReplayMetadata> {
     decode_replay_metadata(RawReplayMetadata {
         sequence: integer_at(&row, 0)?,
-        shard_id: text_at(&row, 1)?,
-        namespace: text_at(&row, 2)?,
-        projection: text_at(&row, 3)?,
-        generation: text_at(&row, 4)?,
-        idempotency_key: text_at(&row, 5)?,
-        input_digest: text_at(&row, 6)?,
-        dependency_generation_closure_digest: text_at(&row, 7)?,
-        expected_prior_head: optional_text_at(&row, 8)?,
-        expected_recovered_digest: text_at(&row, 9)?,
+        shard_id: text_at(&mut row, 1)?,
+        namespace: text_at(&mut row, 2)?,
+        projection: text_at(&mut row, 3)?,
+        generation: text_at(&mut row, 4)?,
+        idempotency_key: text_at(&mut row, 5)?,
+        input_digest: text_at(&mut row, 6)?,
+        dependency_generation_closure_digest: text_at(&mut row, 7)?,
+        expected_prior_head: optional_text_at(&mut row, 8)?,
+        expected_recovered_digest: text_at(&mut row, 9)?,
     })
 }
 
@@ -956,33 +1006,48 @@ pub(super) fn optional_integer_at(
     }
 }
 
-pub(super) fn text_at(row: &ExactSqlRow, index: usize) -> GraphPublicationStoreResultV1<String> {
-    match value_at(row, index)? {
-        ExactSqlValue::Text(value) => Ok(value.clone()),
-        _ => Err(GraphPublicationStoreErrorV1::Corrupt(
+pub(super) fn text_at(
+    row: &mut ExactSqlRow,
+    index: usize,
+) -> GraphPublicationStoreResultV1<String> {
+    match row.values.get_mut(index) {
+        Some(ExactSqlValue::Text(value)) => Ok(std::mem::take(value)),
+        Some(_) => Err(GraphPublicationStoreErrorV1::Corrupt(
             "graph publication text column has the wrong type".to_owned(),
+        )),
+        None => Err(GraphPublicationStoreErrorV1::Corrupt(
+            "graph publication row is truncated".to_owned(),
         )),
     }
 }
 
 pub(super) fn optional_text_at(
-    row: &ExactSqlRow,
+    row: &mut ExactSqlRow,
     index: usize,
 ) -> GraphPublicationStoreResultV1<Option<String>> {
-    match value_at(row, index)? {
-        ExactSqlValue::Null => Ok(None),
-        ExactSqlValue::Text(value) => Ok(Some(value.clone())),
-        _ => Err(GraphPublicationStoreErrorV1::Corrupt(
+    match row.values.get_mut(index) {
+        Some(ExactSqlValue::Null) => Ok(None),
+        Some(ExactSqlValue::Text(value)) => Ok(Some(std::mem::take(value))),
+        Some(_) => Err(GraphPublicationStoreErrorV1::Corrupt(
             "graph publication optional text column has the wrong type".to_owned(),
+        )),
+        None => Err(GraphPublicationStoreErrorV1::Corrupt(
+            "graph publication row is truncated".to_owned(),
         )),
     }
 }
 
-pub(super) fn blob_at(row: &ExactSqlRow, index: usize) -> GraphPublicationStoreResultV1<Vec<u8>> {
-    match value_at(row, index)? {
-        ExactSqlValue::Blob(value) => Ok(value.clone()),
-        _ => Err(GraphPublicationStoreErrorV1::Corrupt(
+pub(super) fn blob_at(
+    row: &mut ExactSqlRow,
+    index: usize,
+) -> GraphPublicationStoreResultV1<Vec<u8>> {
+    match row.values.get_mut(index) {
+        Some(ExactSqlValue::Blob(value)) => Ok(std::mem::take(value)),
+        Some(_) => Err(GraphPublicationStoreErrorV1::Corrupt(
             "graph publication blob column has the wrong type".to_owned(),
+        )),
+        None => Err(GraphPublicationStoreErrorV1::Corrupt(
+            "graph publication row is truncated".to_owned(),
         )),
     }
 }

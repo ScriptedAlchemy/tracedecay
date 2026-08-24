@@ -1,4 +1,4 @@
-//! query generation-aware Git query core (Plan 36, `query/21-git-query-core`).
+//! Generation-aware Git query core.
 //!
 //! This module is the typed query layer above the fixed read-only adapter in
 //! [`crate::git_intelligence`]. It composes the adapter's [`GitReadPort`] into
@@ -6,7 +6,7 @@
 //!
 //! - **Typed queries**: current status summary, scoped diff (working tree,
 //!   staged, or commit range), bounded history, path blame, and `HunkRef`
-//!   enumeration. Every result returns the Plan 36 domain values with their
+//!   enumeration. Every result returns the Git domain values with their
 //!   [`GitCoverageV1`] degradation attached; query-level truncation is folded
 //!   into the envelope coverage as [`GitDegradationV1::TruncatedOutput`].
 //! - **Generation-aware joins**: a [`GenerationBoundGitQueryV1`] names the
@@ -611,15 +611,32 @@ fn envelope<T>(value: T, mut coverage: GitCoverageV1, truncated: bool) -> GitQue
     }
 }
 
+/// Count serialized bytes without materializing the JSON copy the caller
+/// already holds for transport.
+struct CountingSink {
+    written: u64,
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Measure the serialized result against the query byte bound.
 fn check_bytes<T: Serialize>(bounds: &GitQueryBounds, value: &T) -> Result<(), GitQueryError> {
-    let actual = serde_json::to_vec(value)
-        .map_err(|error| GitQueryError::Serialization(error.to_string()))?
-        .len() as u64;
-    if actual > bounds.max_bytes {
+    let mut output = CountingSink { written: 0 };
+    serde_json::to_writer(&mut output, value)
+        .map_err(|error| GitQueryError::Serialization(error.to_string()))?;
+    if output.written > bounds.max_bytes {
         return Err(GitQueryError::ByteBoundExceeded {
             bound: bounds.max_bytes,
-            actual,
+            actual: output.written,
         });
     }
     Ok(())

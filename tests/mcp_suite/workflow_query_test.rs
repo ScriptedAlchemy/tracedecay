@@ -17,6 +17,7 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 
 use crate::common;
+use crate::support::extract_tool_result_json as extract_json;
 
 // Fixture identity, shared across the on-disk tree and the seeded DB rows.
 const SLUG: &str = "-home-zack-projects-fixture";
@@ -165,13 +166,6 @@ fn span(session_id: &str, branch: &str, worktree: &str, ts: i64) -> SpanObservat
         ts,
         source: SpanSource::Ingest,
     }
-}
-
-fn extract_json(result: &tracedecay::mcp::ToolResult) -> Value {
-    let text = result.value["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("tool result should carry text content: {}", result.value));
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result should be JSON: {e}\n{text}"))
 }
 
 /// Renders a tool call as markdown (no `format:"json"` override) so tests can

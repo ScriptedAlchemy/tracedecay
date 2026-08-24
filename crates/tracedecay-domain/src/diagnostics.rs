@@ -1,17 +1,16 @@
-//! Generation-bound diagnostic records (Plan 35, "Universal managed
-//! diagnostics"; query/12-diagnostic-persistence authority packet).
+//! Generation-bound diagnostic records.
 //!
 //! These are storage-neutral logical records: no store rows, no runtime, no
 //! transport. Every durable diagnostic is bound to an immutable
 //! code-intelligence generation, a canonical file occurrence with content
 //! digest and range encoding, and full producer provenance. Dirty LSP
 //! overlays can never be represented by this contract — overlay state is
-//! session-only and lives outside the durable record (Plan 35: "Dirty-overlay
-//! diagnostics are never sealed into a clean code-intelligence generation";
-//! "stale findings cannot cross snapshots").
+//! session-only and lives outside the durable record. Dirty-overlay
+//! diagnostics are never sealed into a clean code-intelligence generation;
+//! stale findings cannot cross snapshots.
 //!
 //! The code index refers to these records only through
-//! `GenerationDiagnosticAttachmentV1::diagnostic_anchor` (Plan 25); it never
+//! `GenerationDiagnosticAttachmentV1::diagnostic_anchor`; it never
 //! stores a duplicate diagnostic record.
 
 use schemars::JsonSchema;
@@ -29,16 +28,15 @@ use crate::research::{DomainError, canonical_sha256};
 
 /// Maximum byte length of the sanitized display message. Raw analyzer stderr,
 /// environment values, command lines, unsanitized source, and private host
-/// payloads are never diagnostic messages (Plan 35).
+/// payloads are never diagnostic messages.
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 4096;
 
-/// Maximum length of the stable producer diagnostic code.
 pub const MAX_DIAGNOSTIC_CODE_LEN: usize = 128;
 
 const DIAGNOSTIC_MESSAGE_DIGEST_DOMAIN: &str = "tracedecay.diagnostic-message.v1";
 
 /// Diagnostic severity. Source severity is preserved exactly; TraceDecay
-/// never raises severity because several producers agree (Plan 35).
+/// never raises severity because several producers agree.
 #[derive(
     Clone,
     Copy,
@@ -60,8 +58,8 @@ pub enum DiagnosticSeverityV1 {
     Hint,
 }
 
-/// The cataloged producer kinds that may publish durable diagnostics
-/// (Plan 35, "Diagnostic sources"). Runtime, storage, migration,
+/// The cataloged producer kinds that may publish durable diagnostics.
+/// Runtime, storage, migration,
 /// configuration, session, or daemon-health findings without a truthful
 /// source range are Doctor or application findings and never become
 /// `GenerationDiagnosticV1` records.
@@ -80,8 +78,8 @@ pub enum DiagnosticProducerKindV1 {
     AuthorizedExternalAnalyzer,
 }
 
-/// Evidence class for one diagnostic record (Plan 35: evidence class is part
-/// of canonical diagnostic identity).
+/// Evidence class for one diagnostic record. Evidence class is part of
+/// canonical diagnostic identity.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -100,8 +98,7 @@ pub enum DiagnosticEvidenceClassV1 {
 
 /// Producer provenance for one diagnostic. Diagnostic identity includes
 /// producer provenance: identical findings from the same logical producer and
-/// revision collapse; findings from distinct producers remain distinct
-/// (Plan 35, "Merge and publication semantics").
+/// revision collapse; findings from distinct producers remain distinct.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticProvenanceV1 {
@@ -126,8 +123,8 @@ impl DiagnosticProvenanceV1 {
 
 /// Current-vs-stale typing for a durable diagnostic record. Publication is
 /// version-monotone: a newer clean generation clears or supersedes the prior
-/// publication deterministically, and stale findings cannot cross snapshots
-/// (Plan 35). Stale and historical records remain queryable through
+/// publication deterministically, and stale findings cannot cross snapshots.
+/// Stale and historical records remain queryable through
 /// application APIs but are excluded from active publication.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -177,13 +174,13 @@ impl DiagnosticRecordStateV1 {
     }
 }
 
-/// One durable, generation-bound diagnostic record (Plan 35, "Canonical
-/// diagnostic identity"). Every field is part of canonical identity; the
+/// One durable, generation-bound diagnostic record. Every field is part of
+/// canonical identity; the
 /// display message remains sanitized product data.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationDiagnosticV1 {
-    /// Plan 13 anchor addressing this record. The code index's
+    /// Retrieval anchor addressing this record. The code index's
     /// `GenerationDiagnosticAttachmentV1::diagnostic_anchor` points here.
     pub diagnostic_anchor: RetrievalAnchorId,
     /// The immutable clean code-intelligence generation this record is bound
@@ -261,7 +258,7 @@ impl GenerationDiagnosticV1 {
 
     /// Returns a copy marked superseded by `successor_generation`. A record
     /// can only be superseded out of the current state, and a generation can
-    /// never supersede itself (version-monotone publication, Plan 35).
+    /// never supersede itself (version-monotone publication).
     pub fn supersede(&self, successor_generation: CodeGenerationId) -> Result<Self, DomainError> {
         successor_generation.validate()?;
         if successor_generation == self.generation_id {

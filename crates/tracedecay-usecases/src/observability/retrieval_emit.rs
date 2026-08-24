@@ -38,13 +38,14 @@ use tracedecay_domain::{
     AnalyticsConsentChangedV1, AnalyticsModeV1, ContextOutcomeObservedV1, CoverageStateV1,
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
     ObservabilityTerminalResultV1, RetrievalAblationObservedV1, RetrievalPlannerObservedV1,
-    RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1, canonical_sha256,
+    RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_query::retrieval::observation::{
     ObservedWithCoverageV1, RetrievalPipelineObservationV1,
 };
 
+use super::emit::{ObservabilityEnvelopeSpec, assemble_observability_envelope};
 use super::producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, ObservabilityProducerIdentityV1,
 };
@@ -74,80 +75,6 @@ fn boot_id() -> &'static str {
 fn next_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     SEQUENCE.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Shared envelope shape for this lane. Every family differs only in the
-/// fields named here, so a new family cannot invent its own identity,
-/// watermark, or retention discipline.
-struct EnvelopeSpec<'a> {
-    scope_ref: &'a str,
-    boot_id: &'a str,
-    producer_sequence: u64,
-    event_prefix: &'a str,
-    capability: &'a str,
-    operation: &'a str,
-    quantity: Option<f64>,
-    unit: Option<&'a str>,
-    terminal_result: Option<ObservabilityTerminalResultV1>,
-    producer_revision: &'a str,
-    configuration_revision: &'a str,
-    policy_revision: &'a str,
-    coverage: CoverageStateV1,
-    retention_class: ObservabilityRetentionClassV1,
-    observed_at_micros: i64,
-    payload: ObservabilityPayloadV1,
-}
-
-fn build_envelope(spec: EnvelopeSpec<'_>) -> Result<ObservabilityEnvelopeV1, &'static str> {
-    let digest = canonical_sha256(&(
-        spec.payload.event_kind(),
-        spec.boot_id,
-        spec.producer_sequence,
-        spec.scope_ref,
-        spec.operation,
-    ))
-    .map_err(|_| "observability_event_identity")?;
-    let event_id = format!(
-        "{prefix}:{digest}",
-        prefix = spec.event_prefix,
-        digest = digest.as_str()
-    );
-    let envelope = ObservabilityEnvelopeV1 {
-        event_id: event_id.clone(),
-        event_kind: spec.payload.event_kind().to_owned(),
-        schema_revision: SCHEMA_REVISION,
-        idempotency_key: event_id.clone(),
-        trace_id: event_id,
-        scope_ref: spec.scope_ref.to_owned(),
-        capability: spec.capability.to_owned(),
-        operation: spec.operation.to_owned(),
-        event_time_micros: spec.observed_at_micros,
-        observation_time_micros: spec.observed_at_micros,
-        valid_from_micros: Some(spec.observed_at_micros),
-        valid_until_micros: None,
-        quantity: spec.quantity,
-        unit: spec.unit.map(str::to_owned),
-        terminal_result: spec.terminal_result,
-        producer_revision: spec.producer_revision.to_owned(),
-        configuration_revision: spec.configuration_revision.to_owned(),
-        policy_revision: spec.policy_revision.to_owned(),
-        watermark: format!(
-            "{boot}:{sequence}",
-            boot = spec.boot_id,
-            sequence = spec.producer_sequence
-        ),
-        coverage: spec.coverage,
-        sampling_probability: None,
-        retention_class: spec.retention_class,
-        emitted_count: 1,
-        delayed_count: 0,
-        dropped_count: 0,
-        process_boot_id: spec.boot_id.to_owned(),
-        producer_sequence: spec.producer_sequence,
-        payload: spec.payload,
-    };
-    envelope.validate()?;
-    Ok(envelope)
 }
 
 fn contract_error(reason: &'static str) -> ApplicationContractError {
@@ -216,7 +143,7 @@ fn planner_envelope(
         ObservabilityTerminalResultV1::Succeeded
     });
     let admitted = observation.observation.admitted_lanes.len() as f64;
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -232,6 +159,7 @@ fn planner_envelope(
         coverage: observation.coverage,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::RetrievalPlanner(observation.observation),
     })
 }
@@ -248,7 +176,7 @@ fn retriever_envelope(
     // an unbounded label.
     let operation = observation.observation.retriever_kind.clone();
     let returned = observation.observation.returned_candidates as f64;
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -264,6 +192,7 @@ fn retriever_envelope(
         coverage: observation.coverage,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::Retriever(observation.observation),
     })
 }
@@ -281,7 +210,7 @@ fn synthesis_envelope(
         ObservabilityTerminalResultV1::Succeeded
     });
     let context = observation.observation.context_count as f64;
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -297,6 +226,7 @@ fn synthesis_envelope(
         coverage: observation.coverage,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::RetrievalSynthesis(observation.observation),
     })
 }
@@ -319,7 +249,7 @@ fn source_envelope(
     });
     let operation = observation.observation.source_kind.clone();
     let observed = observation.observation.observed as f64;
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -335,6 +265,7 @@ fn source_envelope(
         coverage: observation.coverage,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::RetrievalSource(observation.observation),
     })
 }
@@ -356,7 +287,7 @@ fn context_outcome_envelope(
             ObservabilityTerminalResultV1::Succeeded
         },
     );
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -372,6 +303,7 @@ fn context_outcome_envelope(
         coverage: observation.coverage,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::ContextOutcome(observation.observation),
     })
 }
@@ -386,7 +318,7 @@ fn ablation_envelope(
     let coverage = observation.coverage;
     let unit = observation.unit.clone();
     let delta = observation.candidate_value - observation.baseline_value;
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -402,6 +334,7 @@ fn ablation_envelope(
         coverage,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::RetrievalAblation(observation),
     })
 }
@@ -421,7 +354,7 @@ fn consent_envelope(
         AnalyticsModeV1::LocalOnly => "local_only",
         AnalyticsModeV1::AggregateShare => "aggregate_share",
     };
-    build_envelope(EnvelopeSpec {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,
         producer_sequence: sequence,
@@ -439,6 +372,7 @@ fn consent_envelope(
         coverage: CoverageStateV1::Known,
         retention_class: ObservabilityRetentionClassV1::ProductReceipt,
         observed_at_micros,
+        schema_revision: SCHEMA_REVISION,
         payload: ObservabilityPayloadV1::AnalyticsConsent(observation),
     })
 }

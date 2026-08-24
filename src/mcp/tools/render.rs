@@ -335,12 +335,32 @@ fn truncation_handle_status(
     }
 }
 
+/// Runs the synchronous response-handle disk write without stalling the async
+/// executor worker that renders the response.
+///
+/// The truncating render path is synchronous by design (it sits under dozens
+/// of sync handler helpers), but it usually executes on a tokio worker.
+/// `block_in_place` hands that worker's run queue to another thread for the
+/// duration of the write; it panics outside a multi-thread runtime, so the
+/// flavor is checked first and everything else (current-thread runtimes,
+/// plain threads) keeps the previous inline behavior. The remaining
+/// `block_in_place` panic case is a `LocalSet` on a multi-thread runtime,
+/// which this workspace does not use.
+fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 fn prepare_truncated_response_handle(
     project_root: Option<&Path>,
     text: &str,
 ) -> TruncatedResponseHandle {
     if let Some(root) = project_root {
-        match store_response_handle(root, text, current_timestamp()) {
+        match run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp())) {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
                 unavailable: None,
@@ -1078,7 +1098,6 @@ fn column_rank(col: &str) -> (usize, &str) {
 }
 
 fn render_object_array_records(md: &mut Md, arr: &[Value]) {
-    // Collect the union of keys.
     let mut cols: Vec<String> = Vec::new();
     for e in arr {
         if let Some(obj) = e.as_object() {

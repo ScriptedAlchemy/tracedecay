@@ -8,7 +8,7 @@ import {
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from './cn';
 
-/** Row list virtualization (plan 11 R62). Below the threshold the list renders
+/** Row list virtualization. Below the threshold the list renders
  * plainly — byte-identical DOM to a bare `.map()` so the common case keeps the
  * archetype's exact scroll/selection idiom. Above it, rows are windowed with
  * @tanstack/react-virtual so the mounted count stays bounded (a 36px row over
@@ -115,7 +115,10 @@ function VirtualRows<T>({
     estimateSize: () => estimateHeight,
     overscan,
     scrollMargin,
-    getItemKey: (index) => getKey(items[index] as T, index),
+    getItemKey: (index) => {
+      const item = items[index];
+      return item === undefined ? index : getKey(item, index);
+    },
   });
 
   return (
@@ -129,20 +132,24 @@ function VirtualRows<T>({
             position: 'relative',
           }}
         >
-          {virtualizer.getVirtualItems().map((row) => (
-            <div
-              key={row.key}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                transform: `translateY(${row.start - scrollMargin}px)`,
-              }}
-            >
-              {renderItem(items[row.index] as T, row.index)}
-            </div>
-          ))}
+          {virtualizer.getVirtualItems().map((row) => {
+            const item = items[row.index];
+            if (item === undefined) return null;
+            return (
+              <div
+                key={row.key}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${row.start - scrollMargin}px)`,
+                }}
+              >
+                {renderItem(item, row.index)}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

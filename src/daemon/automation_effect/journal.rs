@@ -1343,8 +1343,7 @@ fn read_terminal_sidecar_if_present(
         hasher.update(&buffer[..take]);
         remaining -= take as u64;
     }
-    let actual = ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
-        .map_err(contract_error)?;
+    let actual = ManifestDigest::from_sha256_bytes(&hasher.finalize()).map_err(contract_error)?;
     if actual != binding.digest {
         return Err(contract_error(
             "automation terminal sidecar digest conflicts with its journal binding",
@@ -1406,7 +1405,7 @@ impl TerminalDigestWriter {
         }
         Ok(DurableAutomationTerminalBinding {
             schema_version: 1,
-            digest: ManifestDigest::new(format!("sha256:{}", hex::encode(self.hasher.finalize())))
+            digest: ManifestDigest::from_sha256_bytes(&self.hasher.finalize())
                 .map_err(contract_error)?,
             payload_len: self.len,
         })

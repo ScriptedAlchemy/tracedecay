@@ -35,6 +35,7 @@ pub(super) fn check_cancelled(
     cancellation: &dyn GraphCancellation,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     if cancellation.is_cancelled() {
+        crate::hotpath_observe::vector_cancelled();
         Err(VectorGenerationStoreErrorV1::Cancelled)
     } else {
         Ok(())

@@ -235,6 +235,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_profile_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
@@ -310,6 +311,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             project_registry_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
+            registered_profile_session_db: None,
             registered_savings_db: None,
             dashboard_session_retrieval_service: None,
             dashboard_session_retrieval_identity: None,
@@ -369,7 +371,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
     scope_prefix: Option<&'a str>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    Box::pin(async move {
+    let application_executor_available = options.application_invocation_executor.is_some();
+    #[cfg(feature = "hotpath")]
+    let hotpath_tool_name = mcp_tool_hotpath_identity(tool_name, application_executor_available);
+    let dispatch = async move {
+        #[cfg(feature = "hotpath")]
+        hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
                 return Err(TraceDecayError::Config {
@@ -432,11 +439,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         let dispatch: std::pin::Pin<
                             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
                         > = Box::pin(dispatch_profile_retained_application_tool(
-                            operation,
-                            tool_name,
-                            cg,
-                            args,
-                            options.clone(),
+                            operation, tool_name, cg, args, options,
                         ));
                         return dispatch.await;
                     }
@@ -479,28 +482,19 @@ pub fn handle_tool_call_with_registry_options<'a>(
             ));
         }
         let selected_scope_prefix = scope_prefix;
-        let project_session_db = options
-            .registered_project_session_db
-            .as_ref()
-            .or(options.session_authorities.project);
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the
         // analysis group, whose binding row routes it to the local handler.
-        let dispatch_group = classify_mcp_tool_dispatch_group(
-            tool_name,
-            options.application_invocation_executor.is_some(),
-        );
+        let dispatch_group =
+            classify_mcp_tool_dispatch_group(tool_name, application_executor_available);
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             // Application-surface tools return before the root guard below.
             // Reject unavailable effects before parsing, routing, or invoking
             // the canonical application handler.
             ensure_mcp_dispatch_available(tool_name)?;
             return boxed_send(dispatch_application_surface_tools(
-                tool_name,
-                cg,
-                args,
-                options.clone(),
+                tool_name, cg, args, options,
             ))
             .await;
         }
@@ -513,9 +507,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 tool_name,
                 args,
                 options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
             ))
             .await;
         }
@@ -527,9 +521,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 tool_name,
                 args,
                 options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
             ))
             .await;
         }
@@ -541,9 +535,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 tool_name,
                 args,
                 options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
+                options.application_request_id,
+                options.application_deadline,
+                options.application_cancellation,
             ))
             .await;
         }
@@ -583,6 +577,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 std::time::Duration::ZERO,
             ));
         };
+        // The lease is cloned out of `options` (one field, not the whole
+        // struct) so the dispatch arms below can take `options` by value.
+        let project_session_db_lease = options.registered_project_session_db.clone();
+        let project_session_db = project_session_db_lease
+            .as_ref()
+            .or(options.session_authorities.project);
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {
@@ -591,7 +591,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         cg,
                         args,
                         selected_scope_prefix,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
@@ -604,12 +604,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         scope_prefix,
                         selected_scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
                 Some(McpToolDispatchGroup::Admin) => {
-                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Analysis) => {
                     boxed_send(dispatch_analysis_tools(
@@ -618,15 +618,15 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
                 Some(McpToolDispatchGroup::Git) => {
-                    boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Edit) => {
-                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Health) => {
                     boxed_send(dispatch_health_tools(
@@ -635,7 +635,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
@@ -646,19 +646,16 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         scope_prefix,
                         project_session_db,
-                        options.clone(),
+                        options,
                     ))
                     .await
                 }
                 Some(McpToolDispatchGroup::Memory) => {
-                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
+                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::SessionWorkflow) => {
                     boxed_send(dispatch_session_workflow_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        options.clone(),
+                        tool_name, cg, args, options,
                     ))
                     .await
                 }
@@ -692,7 +689,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 )),
             }
         }
-    })
+    };
+    Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
 }
 
 /// The single rejection every dispatch group returns for a name it does not own.
@@ -705,6 +703,21 @@ fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
 /// The `diagnostics_read` name that still carries the pre-application argument
 /// shape, and so the only one [`dispatch_analysis_tools`] can serve in-process.
 const DIAGNOSTICS_COMPATIBILITY_TOOL: &str = "tracedecay_diagnostics";
+
+#[cfg(any(feature = "hotpath", test))]
+fn mcp_tool_hotpath_identity(
+    tool_name: &str,
+    application_invocation_executor_available: bool,
+) -> &str {
+    if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+        || classify_mcp_tool_dispatch_group(tool_name, application_invocation_executor_available)
+            .is_some()
+    {
+        tool_name
+    } else {
+        "unknown"
+    }
+}
 
 fn classify_mcp_tool_dispatch_group(
     tool_name: &str,

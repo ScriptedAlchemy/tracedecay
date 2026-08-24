@@ -484,7 +484,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
                                 .map(Vec::as_slice)
                         })
                         .collect::<Option<Vec<_>>>()?;
-                    exact_graph_address(&self.worktree_root, &candidate.path, path_nodes, &ranges)
+                    exact_graph_address(path_nodes, &ranges)
                 })
                 .flatten();
             if candidate.warning_class == ProximityWarningClassV1::SameFile
@@ -786,15 +786,12 @@ fn graph_neighborhood(
 }
 
 fn exact_graph_address(
-    worktree_root: &Path,
-    path: &str,
     nodes: &[CodeGraphSymbolSummaryV1],
     session_ranges: &[&[SourceSpan]],
 ) -> Option<(SourceSpan, SymbolOccurrenceId)> {
     if session_ranges.len() < 2 {
         return None;
     }
-    let _ = (worktree_root, path);
     let mut resolved_symbol = None::<(&CodeGraphSymbolSummaryV1, SourceSpan)>;
     for ranges in session_ranges {
         if ranges.is_empty() {
@@ -969,13 +966,6 @@ mod tests {
 
     #[test]
     fn same_symbol_requires_each_typed_edit_range_to_resolve_to_that_symbol() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("src")).unwrap();
-        std::fs::write(
-            root.path().join("src/lib.rs"),
-            "fn alpha() {}\nfn beta() {}\n",
-        )
-        .unwrap();
         let nodes = vec![
             callable(
                 "symbol.alpha",
@@ -1002,8 +992,6 @@ mod tests {
         };
 
         let same = exact_graph_address(
-            root.path(),
-            "src/lib.rs",
             &nodes,
             &[std::slice::from_ref(&alpha), std::slice::from_ref(&alpha)],
         )
@@ -1011,14 +999,12 @@ mod tests {
         assert_eq!(same.1.as_str(), "symbol.alpha");
         assert!(
             exact_graph_address(
-                root.path(),
-                "src/lib.rs",
                 &nodes,
                 &[std::slice::from_ref(&alpha), std::slice::from_ref(&beta)],
             )
             .is_none()
         );
-        assert!(exact_graph_address(root.path(), "src/lib.rs", &nodes, &[&[], &[]]).is_none());
+        assert!(exact_graph_address(&nodes, &[&[], &[]]).is_none());
         assert_eq!(
             exact_warning_class(ProximityWarningClassV1::SameFile, true),
             ProximityWarningClassV1::SameSymbol

@@ -4,8 +4,9 @@ use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_agent_hosts::automation::runner::CombinedReviewAutomationOptions;
 use tracedecay_agent_hosts::automation::runner::{
     CombinedFailureTerminals, CombinedMemoryCompletedSkillFailure, CombinedRecordedFailure,
-    CombinedReflectorPartial, CombinedReviewDispatch, CombinedSkillPartial,
-    RetainedAutomationSettlementDisposition,
+    CombinedReflectorPartial, CombinedReviewDispatch, CombinedSkillPartial, RetainedAutomationRun,
+    RetainedAutomationSettlementDisposition, SessionReflectorAutomationRun,
+    SkillWriterAutomationRun,
     run_combined_review_with_backend_and_retrieval_for_retained_settlement,
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
@@ -219,6 +220,136 @@ impl CombinedEffectOutcome {
     }
 }
 
+trait ReplayLegSettlement {
+    fn into_ledger_settlement(
+        self,
+    ) -> (
+        tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+        Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+    );
+}
+
+impl ReplayLegSettlement for SkillWriterAutomationRun {
+    fn into_ledger_settlement(
+        self,
+    ) -> (
+        tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+        Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+    ) {
+        (self.ledger_record, self.committed_receipt)
+    }
+}
+
+impl ReplayLegSettlement for SessionReflectorAutomationRun {
+    fn into_ledger_settlement(
+        self,
+    ) -> (
+        tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+        Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+    ) {
+        (self.ledger_record, self.committed_receipt)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_single_replay_leg<Run>(
+    engine: &DaemonEngine,
+    project_id: &tracedecay_domain::ProjectId,
+    project_path: &Path,
+    first_error: &mut Option<crate::errors::TraceDecayError>,
+    replay_completed: bool,
+    executing_kind: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    control: &AutomationRunControl,
+    authority: AutomationEffectAuthority,
+    retained: RetainedAutomationRun<Run>,
+) -> CombinedEffectOutcome
+where
+    Run: ReplayLegSettlement,
+{
+    match retained.into_settlement_disposition() {
+        RetainedAutomationSettlementDisposition::Current {
+            result,
+            settlement_guard,
+        } => {
+            super::synchronize_scheduler_effect_control(control);
+            let terminal = match result {
+                Ok(run) => {
+                    let (ledger_record, committed_receipt) = run.into_ledger_settlement();
+                    authority
+                        .start_deferred_run_settlement_observed(
+                            ledger_record,
+                            committed_receipt,
+                            settlement_guard,
+                            Some(super::scheduler_run_observer(
+                                engine,
+                                project_id,
+                                project_path,
+                            )),
+                        )
+                        .wait()
+                        .await
+                        .map(|(terminal, _)| terminal)
+                }
+                Err(error) => authority
+                    .start_deferred_problem_settlement_observed(
+                        error,
+                        settlement_guard,
+                        Some(super::scheduler_run_observer(
+                            engine,
+                            project_id,
+                            project_path,
+                        )),
+                    )
+                    .wait()
+                    .await
+                    .map(|(problem, _)| AutomationSettledTerminal::Problem(problem)),
+            };
+            match terminal {
+                Ok(terminal) if replay_completed && terminal.is_completed() => {
+                    CombinedEffectOutcome::Completed
+                }
+                Ok(terminal) => {
+                    if let Some(problem) = terminal.problem() {
+                        super::log_daemon_event(
+                            "scheduler_task_application_problem",
+                            &super::scheduler_application_problem_log_fields(
+                                project_path,
+                                executing_kind,
+                                problem,
+                            ),
+                        );
+                    }
+                    CombinedEffectOutcome::Handled
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    CombinedEffectOutcome::Handled
+                }
+            }
+        }
+        RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+            reused,
+            settlement_guard,
+        } => {
+            if let Some(error) = super::effect_admission::abandon_reused_scheduler_skip(
+                engine,
+                project_id,
+                project_path,
+                executing_kind,
+                control,
+                authority,
+                reused,
+                settlement_guard,
+            )
+            .await
+            {
+                first_error.get_or_insert(error);
+            }
+            CombinedEffectOutcome::Handled
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
@@ -292,85 +423,18 @@ pub(super) async fn run_combined_scheduler_effect(
                 skill_options,
             )
             .await;
-            match retained.into_settlement_disposition() {
-                RetainedAutomationSettlementDisposition::Current {
-                    result,
-                    settlement_guard,
-                } => {
-                    super::synchronize_scheduler_effect_control(&skill_control);
-                    let terminal = match result {
-                        Ok(run) => skill
-                            .start_deferred_run_settlement_observed(
-                                run.ledger_record,
-                                run.committed_receipt,
-                                settlement_guard,
-                                Some(super::scheduler_run_observer(
-                                    engine,
-                                    project_id,
-                                    project_path,
-                                )),
-                            )
-                            .wait()
-                            .await
-                            .map(|(terminal, _)| terminal),
-                        Err(error) => skill
-                            .start_deferred_problem_settlement_observed(
-                                error,
-                                settlement_guard,
-                                Some(super::scheduler_run_observer(
-                                    engine,
-                                    project_id,
-                                    project_path,
-                                )),
-                            )
-                            .wait()
-                            .await
-                            .map(|(problem, _)| AutomationSettledTerminal::Problem(problem)),
-                    };
-                    match terminal {
-                        Ok(terminal) if replay_completed && terminal.is_completed() => {
-                            CombinedEffectOutcome::Completed
-                        }
-                        Ok(terminal) => {
-                            if let Some(problem) = terminal.problem() {
-                                super::log_daemon_event(
-                                    "scheduler_task_application_problem",
-                                    &super::scheduler_application_problem_log_fields(
-                                        project_path,
-                                        tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
-                                        problem,
-                                    ),
-                                );
-                            }
-                            CombinedEffectOutcome::Handled
-                        }
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                            CombinedEffectOutcome::Handled
-                        }
-                    }
-                }
-                RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
-                    reused,
-                    settlement_guard,
-                } => {
-                    if let Some(error) = super::effect_admission::abandon_reused_scheduler_skip(
-                        engine,
-                        project_id,
-                        project_path,
-                        tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
-                        &skill_control,
-                        *skill,
-                        reused,
-                        settlement_guard,
-                    )
-                    .await
-                    {
-                        first_error.get_or_insert(error);
-                    }
-                    CombinedEffectOutcome::Handled
-                }
-            }
+            settle_single_replay_leg(
+                engine,
+                project_id,
+                project_path,
+                first_error,
+                replay_completed,
+                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                &skill_control,
+                *skill,
+                retained,
+            )
+            .await
         }
         CombinedEffectAdmission::SkillReplay {
             run_id,
@@ -398,85 +462,18 @@ pub(super) async fn run_combined_scheduler_effect(
                     reflector_options,
                 )
                 .await;
-            match retained.into_settlement_disposition() {
-                RetainedAutomationSettlementDisposition::Current {
-                    result,
-                    settlement_guard,
-                } => {
-                    super::synchronize_scheduler_effect_control(&reflector_control);
-                    let terminal = match result {
-                        Ok(run) => reflector
-                            .start_deferred_run_settlement_observed(
-                                run.ledger_record,
-                                run.committed_receipt,
-                                settlement_guard,
-                                Some(super::scheduler_run_observer(
-                                    engine,
-                                    project_id,
-                                    project_path,
-                                )),
-                            )
-                            .wait()
-                            .await
-                            .map(|(terminal, _)| terminal),
-                        Err(error) => reflector
-                            .start_deferred_problem_settlement_observed(
-                                error,
-                                settlement_guard,
-                                Some(super::scheduler_run_observer(
-                                    engine,
-                                    project_id,
-                                    project_path,
-                                )),
-                            )
-                            .wait()
-                            .await
-                            .map(|(problem, _)| AutomationSettledTerminal::Problem(problem)),
-                    };
-                    match terminal {
-                        Ok(terminal) if replay_completed && terminal.is_completed() => {
-                            CombinedEffectOutcome::Completed
-                        }
-                        Ok(terminal) => {
-                            if let Some(problem) = terminal.problem() {
-                                super::log_daemon_event(
-                                    "scheduler_task_application_problem",
-                                    &super::scheduler_application_problem_log_fields(
-                                        project_path,
-                                        tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
-                                        problem,
-                                    ),
-                                );
-                            }
-                            CombinedEffectOutcome::Handled
-                        }
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                            CombinedEffectOutcome::Handled
-                        }
-                    }
-                }
-                RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
-                    reused,
-                    settlement_guard,
-                } => {
-                    if let Some(error) = super::effect_admission::abandon_reused_scheduler_skip(
-                        engine,
-                        project_id,
-                        project_path,
-                        tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
-                        &reflector_control,
-                        *reflector,
-                        reused,
-                        settlement_guard,
-                    )
-                    .await
-                    {
-                        first_error.get_or_insert(error);
-                    }
-                    CombinedEffectOutcome::Handled
-                }
-            }
+            settle_single_replay_leg(
+                engine,
+                project_id,
+                project_path,
+                first_error,
+                replay_completed,
+                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                &reflector_control,
+                *reflector,
+                retained,
+            )
+            .await
         }
         CombinedEffectAdmission::Execute {
             run_id,

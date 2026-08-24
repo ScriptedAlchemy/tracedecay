@@ -619,7 +619,7 @@ pub(super) fn get_maximal_tool_definitions()
     definitions.extend(native_worktree::native_worktree_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
-    add_format_property(&mut definitions);
+    add_format_property(&mut definitions)?;
     Ok(definitions)
 }
 
@@ -936,13 +936,22 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
     )
 }
 
-fn add_format_property(definitions: &mut [ToolDefinition]) {
+fn add_format_property(
+    definitions: &mut [ToolDefinition],
+) -> Result<(), super::dispatch::McpDispatchMetadataError> {
     for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
-        let properties = definition
+        let Some(properties) = definition
             .input_schema
             .get_mut("properties")
             .and_then(Value::as_object_mut)
-            .unwrap_or_else(|| panic!("{} must define object properties", definition.name));
+        else {
+            // Reachable on every tools/list and dispatch admission check, so a
+            // malformed definition must surface as the builders' typed error
+            // rather than a production panic.
+            return Err(super::dispatch::McpDispatchMetadataError::Initialization(
+                format!("{} must define object properties", definition.name),
+            ));
+        };
         properties.insert(
             "format".to_string(),
             json!({
@@ -952,6 +961,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) {
             }),
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]

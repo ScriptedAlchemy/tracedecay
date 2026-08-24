@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { type DomainStateKind, StateChip } from '../../../ui/StateChip.tsx';
 import { MeterRow, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -12,6 +13,7 @@ import {
   causalReadingState,
   workCausalReading,
 } from '../workViewsModel.ts';
+import { TaskChip } from './TaskChip.tsx';
 import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -21,8 +23,8 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * the loud reading is an edge whose dependent carries terminal evidence while
  * the dependency it names carries none. That dependency did not gate the work,
  * or it is not the dependency the plan says it is; either way the coupling
- * that actually held is not written down. Plan 11c calls that hidden coupling
- * in the plan itself, and it is the reading this projection exists to surface.
+ * that actually held is not written down. That hidden coupling in the plan
+ * itself is the reading this projection exists to surface.
  *
  * Half the field is missing. Observed execution order needs attempt
  * timestamps, and the field's other half — an edge that executed but was never
@@ -97,13 +99,20 @@ export function WorkCausalView({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workCausalReading(snapshot.projections, graph);
+  const reading = useMemo(
+    () => workCausalReading(snapshot.projections, graph),
+    [snapshot.projections, graph],
+  );
   const coverage = coverageReading(snapshot.coverage);
   // Titles come off the snapshot rather than the reading: the causal reading
   // carries identities only, and a task with no title here is a task the page
   // did not return.
-  const titles: ReadonlyMap<string, string> = new Map(
-    snapshot.projections.map((projection) => [projection.task_id, projection.title]),
+  const titles: ReadonlyMap<string, string> = useMemo(
+    () =>
+      new Map(
+        snapshot.projections.map((projection) => [projection.task_id, projection.title]),
+      ),
+    [snapshot.projections],
   );
 
   return (
@@ -571,26 +580,17 @@ function TaskMark({
   onSelect: (taskId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(taskId)}
-      aria-pressed={selected}
-      // 44px explicitly rather than a spacing utility: this app's root font
-      // size is 14px, so `min-h-11` computes to 38.5px and lands under the
-      // target size the accessibility gate measures.
-      className={cn(
-        'flex min-h-[44px] w-full min-w-0 flex-col justify-center gap-0.5 border px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected
-          ? 'border-accent bg-surface-3'
-          : 'border-edge-subtle bg-surface-1 hover:bg-surface-2',
-      )}
-      data-work-task={taskId}
+    <TaskChip
+      taskId={taskId}
+      selected={selected}
+      onSelect={onSelect}
+      variant="filled"
+      className="w-full"
     >
       {title === undefined ? null : (
         <span className="min-w-0 truncate text-2xs text-text-primary">{title}</span>
       )}
       <span className="min-w-0 truncate font-mono text-3xs text-text-muted">{taskId}</span>
-    </button>
+    </TaskChip>
   );
 }

@@ -3,13 +3,9 @@
 //! Entries are keyed only by typed shard identity and incarnation. Locator
 //! resolution starts after an opening entry wins singleflight, and publication
 //! retains exactly one concrete [`ShardRuntime`] for that binding.
-//!
-//! Dead-code allowance lives on the parent `store_runtime` module until every
-//! live open routes through this registry.
 // The typed failure stays by-value at this boundary; `resolver.rs` documents
 // the boxed alternative if the variant set grows further.
 #![allow(clippy::result_large_err)]
-#![allow(unused_imports)] // Re-exports remain the registry's crate-visible API surface.
 
 mod attachment;
 mod capacity;
@@ -27,11 +23,10 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tracedecay_domain::UtcMicros;
 use tracedecay_store::{
     AdmissionConfigV1, RuntimeMaintenanceStateV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1, StoreShardScopeV1,
@@ -41,6 +36,7 @@ use tracedecay_store::{
 use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
@@ -49,6 +45,7 @@ pub use attachment::{
     PublishedShardRuntime,
 };
 pub use capacity::StoreRuntimeRegistryConfig;
+#[cfg(test)]
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
@@ -60,8 +57,9 @@ pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
     StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
+#[cfg(test)]
+pub(crate) use open::StoreRuntimeOpenBegin;
 pub use open::StoreRuntimeOpenResult;
-pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin};
 pub use ports::{
     LifecycleShardRuntimePublisher, ResolvedStoreLocator, RuntimeLocatorRecord,
     ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeRegistryFuture,
@@ -71,6 +69,9 @@ pub use retirement::{
     DatabaseGraphOwnerRetirementHandoffV1, StoreRuntimeRetirementBlocker,
     StoreRuntimeRetirementCommit, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementRefusal,
     StoreRuntimeRetirementReservation, StoreRuntimeRetirementResult, StoreRuntimeRetirementTarget,
+};
+pub use tracedecay_rusqlite_runtime::repository::{
+    RepositoryRuntimePhysicalSnapshot, RepositoryWriterRuntimeSnapshot,
 };
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreRuntimeKey {
@@ -881,6 +882,15 @@ impl StoreRuntimeClientLease {
         self.validate_opened_file_identity(operation).map(|_| ())
     }
 
+    /// Exact rusqlite writer/reader telemetry for this retained attachment.
+    ///
+    /// Repository-backed publications return the rusqlite-runtime snapshot.
+    /// Driver stubs and test attachments return `None`.
+    #[must_use]
+    pub fn writer_telemetry_snapshot(&self) -> Option<RepositoryRuntimePhysicalSnapshot> {
+        self.inner.attachment.writer_telemetry_snapshot()
+    }
+
     pub(crate) fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
         self.inner.attachment.snapshot()
     }
@@ -1148,23 +1158,7 @@ impl StoreRuntimeClientLease {
         &self,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
-        // File identity is read authority, not write authority. Writable entry
-        // points revalidate the retained capability in
-        // `validate_database_write_authority`; read-only facades must remain
-        // usable after that writer scope is revoked.
-        let current_file_identity = crate::db::sqlite_generation_identity(self.locator().path())
-            .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: "could not verify the registered SQLite file identity".to_owned(),
-            })?;
-        let opened_file_identity = self.inner.opened_file_identity;
-        if current_file_identity != opened_file_identity {
-            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: "database file identity changed after registry attachment".to_owned(),
-            });
-        }
-        Ok(opened_file_identity)
+        self.inner.validate_opened_file_identity(operation)
     }
 
     pub fn dispatch_read(
@@ -1518,7 +1512,11 @@ struct StoreRuntimeRegistryInner {
     resolver: Arc<dyn StoreRuntimeResolver>,
     publisher: Arc<dyn ShardRuntimePublisher>,
     config: StoreRuntimeRegistryConfig,
-    state: Mutex<RegistryState>,
+    /// One process-wide lock guarding every registry entry, publication, and
+    /// pin token. Every lookup, open, lease, eviction, and destructive
+    /// reservation funnels through `lock_state`, so it is the coarsest lock in
+    /// the store runtime and the first place cross-shard queueing shows up.
+    state: ProfiledMutex<RegistryState>,
 }
 
 #[derive(Clone)]
@@ -1536,7 +1534,10 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config: StoreRuntimeRegistryConfig::default(),
-                state: Mutex::new(RegistryState::default()),
+                state: hotpath::mutex!(
+                    Mutex::new(RegistryState::default()),
+                    label = "runtime_core.store_runtime.registry_state"
+                ),
             }),
         }
     }
@@ -1564,7 +1565,10 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config,
-                state: Mutex::new(RegistryState::default()),
+                state: hotpath::mutex!(
+                    Mutex::new(RegistryState::default()),
+                    label = "runtime_core.store_runtime.registry_state"
+                ),
             }),
         })
     }
@@ -1781,7 +1785,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, RegistryState> {
+    fn lock_state(&self) -> ProfiledMutexGuard<'_, RegistryState> {
         self.inner
             .state
             .lock()

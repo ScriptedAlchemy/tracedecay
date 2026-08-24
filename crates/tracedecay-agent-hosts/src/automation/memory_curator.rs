@@ -80,6 +80,7 @@ pub struct MemoryCuratorAutomationRun {
     pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
+#[hotpath::measure(label = "automation_run_memory_curator")]
 pub async fn run_memory_curator_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -305,7 +306,7 @@ async fn run_memory_curator_for_store_with_publication(
     let llm_review = review_page.review;
     let allowed_facts = review_page.allowed_facts;
     let resume_after_fact_id = review_page.resume_after_fact_id;
-    let evidence_hash = Some(sha256_json(&llm_review));
+    let evidence_hash = Some(sha256_json(&llm_review)?);
     if llm_review.get("status").and_then(Value::as_str) != Some("needs_llm_review") {
         let reason = match llm_review.get("status").and_then(Value::as_str) {
             Some("unavailable") => "similarity_authority_unavailable",

@@ -2,12 +2,17 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
-use tracedecay_store::SnapshotLeaseIdV1;
+use tracedecay_store::{
+    SnapshotLeaseIdV1, WAL_HARD_LIMIT_BYTES, WAL_SOFT_LIMIT_BYTES, WalBudgetV1,
+};
 
 use crate::RuntimeWriteAuthorityStage;
 
-pub(crate) const DEFAULT_SOFT_WAL_BYTES: u64 = 32 * 1024 * 1024;
-pub(crate) const DEFAULT_HARD_WAL_BYTES: u64 = 256 * 1024 * 1024;
+/// The checkpoint controller's thresholds are the store contract's WAL budget.
+/// Re-deriving them here rather than restating the numbers keeps a single
+/// authority for what the operator is allowed to configure.
+pub(crate) const DEFAULT_SOFT_WAL_BYTES: u64 = WAL_SOFT_LIMIT_BYTES;
+pub(crate) const DEFAULT_HARD_WAL_BYTES: u64 = WAL_HARD_LIMIT_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CheckpointConfig {
@@ -20,6 +25,20 @@ impl Default for CheckpointConfig {
         Self {
             soft_wal_bytes: DEFAULT_SOFT_WAL_BYTES,
             hard_wal_bytes: DEFAULT_HARD_WAL_BYTES,
+        }
+    }
+}
+
+/// The configured budget is the checkpoint policy. `WalBudgetV1::validate`
+/// already rejects a zero soft limit and a hard limit that is not above it, and
+/// `AdmissionConfigV1::validate` caps both against the contract ceilings, so
+/// this conversion is total; [`CheckpointConfig::validate`] re-checks it at
+/// controller construction rather than trusting the caller.
+impl From<&WalBudgetV1> for CheckpointConfig {
+    fn from(budget: &WalBudgetV1) -> Self {
+        Self {
+            soft_wal_bytes: budget.soft_limit_bytes,
+            hard_wal_bytes: budget.hard_limit_bytes,
         }
     }
 }

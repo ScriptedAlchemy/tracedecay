@@ -2,9 +2,8 @@
 //!
 //! Like the graph authority suite next to it, this drives the REAL composition
 //! — the application's `WorkProductEvidenceServiceV1` and
-//! `WorkHistoryServiceV1` over the registered exact-SQL storage — because the
-//! defect being closed here is that both ports had test doubles and nothing
-//! else. A suite that supplied its own port would reproduce that defect.
+//! `WorkHistoryServiceV1` over the registered exact-SQL storage, with no port
+//! doubles. A suite that supplied its own port would not exercise this path.
 //!
 //! Every fact asserted below was WRITTEN by a mutation earlier in the same
 //! test: the evidence link ids, anchors, digests, and event sequences are the

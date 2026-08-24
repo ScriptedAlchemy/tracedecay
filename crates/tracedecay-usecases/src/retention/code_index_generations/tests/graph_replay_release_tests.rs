@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use super::*;
 
 #[test]
@@ -369,8 +372,6 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
 #[cfg(unix)]
 #[test]
 fn graph_release_queue_rejects_symlink_evidence() {
-    use std::os::unix::fs::symlink;
-
     let (store, _) = fixture_store(4);
     let plan = plan_next_code_generation_retention_cancellable(
         store.path(),

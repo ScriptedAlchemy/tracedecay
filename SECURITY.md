@@ -24,7 +24,7 @@ When a vulnerability is found, the fix is shipped as a new release — there are
 
 ### What tracedecay stores
 
-tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tracedecay/` data directories are still honored. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
+tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
 
 - Symbol names, signatures, and docstrings
 - File paths, sizes, and content hashes
@@ -35,7 +35,7 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate tracedecayd counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
+The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
 
 ### Network access
 
@@ -64,7 +64,7 @@ Outbound connections are limited to:
 | `api.github.com` | Check for releases and, for explicitly configured review sources, verify and perform repository reads | Public requests by default; optional read-only credential from the OS keyring | Public checks are best effort; configured private access fails closed when credentials or permissions cannot be verified |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
 | `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
-| `tracedecay-counter.enzinol.workers.dev` | Aggregate tracedecayd counter (endpoint keeps its pre-rename name) | None | Silently ignored |
+| `tracedecay-counter.enzinol.workers.dev` | Aggregate token-savings counter | None | Silently ignored |
 
 Provider usage and pricing do not add an outbound connection. `tracedecay cost`
 reads immutable provider-native usage observations and the deterministic bundled
@@ -141,13 +141,13 @@ tracedecay installs **no background daemon, system service, or autostart process
 The codebase contains minimal `unsafe`, used in two cross-platform places:
 
 - **Memory-mapped monitor ring buffer** (`src/monitor.rs`) — `memmap2` maps `~/.tracedecay/monitor.mmap`, the shared buffer the `tracedecay monitor` TUI reads
-- **Tree-sitter FFI** (`src/extraction/ts_provider.rs`) — constructing the bundled WGSL grammar from its raw C entry point
+- **Tree-sitter FFI** (`crates/tracedecay-code-extraction/src/ts_provider.rs`) — constructing the bundled WGSL grammar from its raw C entry point
 
 The Windows-elevation `unsafe` documented in earlier versions was removed alongside the daemon in 6.0.0.
 
 ## Best Practices
 
-- Add `.tracedecay/` (and, for projects indexed before the rename, `.tracedecay/`) to your `.gitignore` to avoid committing local store markers or repo-local databases.
+- Add `.tracedecay/` to your `.gitignore` to avoid committing local store markers or repo-local databases.
 - If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.

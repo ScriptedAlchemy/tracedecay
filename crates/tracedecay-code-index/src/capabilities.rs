@@ -1,13 +1,13 @@
-//! Capability-manifest emission port (Plan 25): the mandatory base
-//! capability manifest pins code generation, chunk schema/chunker and
-//! language-descriptor revisions, available grains and exact-term fields,
-//! supported languages, graph edge-authority classes, privacy domain/key
-//! epoch, source coverage, exclusions, partial states, and manifest digest.
+//! Capability-manifest emission port: the mandatory base capability manifest
+//! pins code generation, chunk schema/chunker and language-descriptor
+//! revisions, available grains and exact-term fields, supported languages,
+//! graph edge-authority classes, privacy domain/key epoch, source coverage,
+//! exclusions, partial states, and manifest digest.
 //!
 //! Consumers must reject a missing, incompatible, mixed-generation, or
-//! unauthorized base manifest before candidate production. Plan 31's
-//! optional semantic manifest augments this base; its absence cannot block
-//! authorized lexical/graph retrieval.
+//! unauthorized base manifest before candidate production. The optional
+//! semantic manifest augments this base; its absence cannot block authorized
+//! lexical/graph retrieval.
 
 use std::collections::BTreeMap;
 
@@ -36,8 +36,7 @@ pub enum CapabilityEmissionErrorV1 {
     Contract(String),
 }
 
-/// The capability-manifest emitter contract (Plan 25:
-/// `src/code_index/capabilities.rs` emits `CodeIndexCapabilityManifestV1`).
+/// The capability-manifest emitter contract.
 pub trait CodeIndexCapabilityEmitter {
     /// Emit the base capability manifest for one sealed generation.
     fn emit(
@@ -46,9 +45,9 @@ pub trait CodeIndexCapabilityEmitter {
     ) -> Result<CodeIndexCapabilityManifestV1, CapabilityEmissionErrorV1>;
 }
 
-/// The consumer-side validation contract for a base manifest (Plan 25:
-/// reject missing, incompatible, mixed-generation, or unauthorized
-/// manifests before candidate production).
+/// The consumer-side validation contract for a base manifest: reject missing,
+/// incompatible, mixed-generation, or unauthorized manifests before candidate
+/// production.
 pub trait CodeIndexCapabilityValidator {
     /// Validate that `manifest` authorizes candidate production under
     /// `projection` for `generation`.
@@ -60,14 +59,14 @@ pub trait CodeIndexCapabilityValidator {
     ) -> Result<(), CapabilityEmissionErrorV1>;
 }
 
-/// Domain separator for the generation seal's expected digest (Plan 25: the
-/// seal is computed over every generation field except the seal itself).
+/// Domain separator for the generation seal's expected digest. The seal is
+/// computed over every generation field except the seal itself.
 pub const GENERATION_SEAL_SEPARATOR: &str = "tracedecay.code-generation-seal.v1";
 
 /// The chunk schema revision pinned by this implementation.
 pub const CHUNK_SCHEMA_REVISION_V1: &str = "code-search-chunk.v1";
 
-/// The exact-term kinds the query chunker emits (Plan 25 extraction evidence).
+/// The exact-term kinds the query chunker emits.
 pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] = &[
     ExactTechnicalTermKindV1::WholeSymbol,
     ExactTechnicalTermKindV1::QualifiedName,
@@ -121,10 +120,9 @@ struct LegacySealPayload<'a> {
     parent_generation: &'a Option<CodeGenerationId>,
 }
 
-/// The canonical expected digest a generation planner must seal (Plan 25:
-/// seal the generation before handing rows and the expected digest to the
-/// store publication port). The emitter verifies this digest before
-/// emitting capabilities for the generation.
+/// The canonical expected digest a generation planner must seal before handing
+/// rows and the expected digest to the store publication port. The emitter
+/// verifies this digest before emitting capabilities for the generation.
 pub fn expected_seal_digest(
     generation: &CodeGenerationManifestV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -364,8 +362,7 @@ impl CodeIndexCapabilityValidator for BaseCapabilityValidator {
             return Err(CapabilityEmissionErrorV1::MixedGeneration);
         }
         if projection.kind == ProjectionKindV1::Embedding {
-            // Plan 31's semantic manifest augments this base; the base
-            // manifest alone never authorizes embedding projections.
+            // The base manifest alone never authorizes embedding projections.
             return Err(CapabilityEmissionErrorV1::Contract(
                 "embedding projections require the semantic capability manifest".to_owned(),
             ));
@@ -506,11 +503,9 @@ mod tests {
                 .available_grains
                 .contains(&CodeSearchChunkGrainV1::SymbolMember)
         );
-        // Canonical grain order.
         let mut sorted = manifest.available_grains.clone();
         sorted.sort();
         assert_eq!(manifest.available_grains, sorted);
-        // The manifest digest recomputes over the manifest minus the digest.
         assert_eq!(
             capability_manifest_digest(&manifest).expect("digest recomputes"),
             manifest.manifest_digest
@@ -583,7 +578,6 @@ mod tests {
         let validator =
             BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 7);
 
-        // Wrong generation.
         let other = CodeGenerationId::new("generation.other").expect("valid id");
         assert_eq!(
             validator.validate_for_candidates(
@@ -594,7 +588,6 @@ mod tests {
             Err(CapabilityEmissionErrorV1::MixedGeneration)
         );
 
-        // Tampered manifest (coverage edited after the digest was pinned).
         let mut tampered = manifest.clone();
         tampered.source_coverage.files_eligible = 11;
         assert!(matches!(
@@ -606,7 +599,6 @@ mod tests {
             Err(CapabilityEmissionErrorV1::Contract(_))
         ));
 
-        // Embedding projections are not authorized by the base manifest.
         assert!(matches!(
             validator.validate_for_candidates(
                 &generation.generation_id,
@@ -616,7 +608,6 @@ mod tests {
             Err(CapabilityEmissionErrorV1::Contract(_))
         ));
 
-        // Unauthorized privacy domain.
         let no_domains = BaseCapabilityValidator::new();
         assert_eq!(
             no_domains.validate_for_candidates(
@@ -627,7 +618,6 @@ mod tests {
             Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
         );
 
-        // Key epoch above the authorized maximum.
         let stale_epoch =
             BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 6);
         assert_eq!(

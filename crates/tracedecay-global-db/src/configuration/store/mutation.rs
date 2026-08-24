@@ -16,9 +16,9 @@ use super::codec::{
 };
 use super::read::{
     current_revision_id_from_executor, read_change_plan_from_executor, read_revision_from_executor,
-    validate_snapshot_registry_completeness,
+    validate_snapshot_registry_completeness_with_registry,
 };
-use super::revision::insert_revision;
+use super::revision::insert_revision_with_registry;
 use super::{
     ACCESS_RULES_SETTING_KEY, AccessPolicyDigest, ActorId, CandidateDispositionV1, ChangePlanId,
     ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
@@ -298,6 +298,25 @@ pub(super) async fn commit_configuration_transaction(
     fault_after_revision: bool,
     sealed_target_reference: Option<&[u8]>,
 ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
+    let registry = ConfigurationRegistry::core()
+        .map_err(|error| invalid_store_data(format!("load configuration registry: {error}")))?;
+    commit_configuration_transaction_with_registry(
+        transaction,
+        commit,
+        fault_after_revision,
+        sealed_target_reference,
+        &registry,
+    )
+    .await
+}
+
+pub(super) async fn commit_configuration_transaction_with_registry(
+    transaction: &impl Executor,
+    commit: &ConfigurationCommitV1,
+    fault_after_revision: bool,
+    sealed_target_reference: Option<&[u8]>,
+    registry: &ConfigurationRegistry,
+) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
     if let Some(stored) = receipt_for_idempotency_from_transaction(
         transaction,
         &commit.receipt.actor_id,
@@ -323,7 +342,7 @@ pub(super) async fn commit_configuration_transaction(
         }
     }
 
-    insert_revision(transaction, &commit.next_revision).await?;
+    insert_revision_with_registry(transaction, &commit.next_revision, registry).await?;
     if fault_after_revision {
         return Err(invalid_store_data(
             "injected configuration commit crash after revision",
@@ -511,7 +530,8 @@ pub(super) fn apply_direct_mutation_to_snapshot(
     )?;
     let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
         .map_err(ConfigurationError::validation)?;
-    validate_snapshot_registry_completeness(&snapshot).map_err(map_store_error)?;
+    validate_snapshot_registry_completeness_with_registry(&snapshot, registry)
+        .map_err(map_store_error)?;
     Ok(snapshot)
 }
 
@@ -837,6 +857,26 @@ pub async fn commit_direct_in_transaction<E>(
 where
     E: QueryExecutor + Executor + Sync,
 {
+    commit_direct_in_transaction_with_registry(
+        transaction,
+        authority,
+        mutation,
+        expected_revision,
+        &ConfigurationRegistry::core().map_err(ConfigurationError::validation)?,
+    )
+    .await
+}
+
+pub(super) async fn commit_direct_in_transaction_with_registry<E>(
+    transaction: &E,
+    authority: &ConfigurationMutationAuthority,
+    mutation: &DirectConfigurationMutation,
+    expected_revision: &ConfigurationRevisionId,
+    registry: &ConfigurationRegistry,
+) -> Result<ConfigurationDirectCommitOutcomeV1, ConfigurationError>
+where
+    E: QueryExecutor + Executor + Sync,
+{
     authority.validate_integrity()?;
     expected_revision
         .validate()
@@ -870,7 +910,7 @@ where
         &current.snapshot,
         mutation,
         &next_revision_id,
-        &ConfigurationRegistry::core().map_err(ConfigurationError::validation)?,
+        registry,
     )?;
     let audit_target = redacted_direct_audit_target(mutation)?;
     let (commit, sealed_target_reference) = build_configuration_commit(
@@ -894,11 +934,12 @@ where
         },
     )
     .await?;
-    let receipt = commit_configuration_transaction(
+    let receipt = commit_configuration_transaction_with_registry(
         transaction,
         &commit,
         false,
         Some(&sealed_target_reference),
+        registry,
     )
     .await
     .map_err(map_store_error)?;

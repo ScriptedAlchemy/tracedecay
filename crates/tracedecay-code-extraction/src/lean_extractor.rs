@@ -184,8 +184,7 @@ impl LeanExtractor {
             // `open`, `attribute`, `notation`, `mixfix`, `macro_rules`,
             // `variable`, `universe`, `prelude`, `elab`, `syntax`,
             // `hash_command`, `export`, `builtin_initialize` are out of
-            // scope for now — they don't define named graph entities we
-            // currently track.
+            // scope — they don't define named graph entities we track.
             _ => {}
         }
     }

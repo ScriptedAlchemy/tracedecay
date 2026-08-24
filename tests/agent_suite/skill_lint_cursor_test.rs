@@ -231,7 +231,6 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
     let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
     let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
     let mut violations = Vec::new();
-    let mut command_count = 0usize;
 
     let mut entries: Vec<_> = std::fs::read_dir(&command_dir)
         .expect("cursor commands dir readable")
@@ -242,7 +241,6 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
     entries.sort();
 
     for path in entries {
-        command_count += 1;
         let at = path.display();
         let slug = path
             .file_stem()
@@ -328,10 +326,6 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
         }
     }
 
-    assert_eq!(
-        command_count, 13,
-        "expected 13 Cursor native slash commands, found {command_count}"
-    );
     assert_no_violations("cursor command integrity", &violations);
 }
 

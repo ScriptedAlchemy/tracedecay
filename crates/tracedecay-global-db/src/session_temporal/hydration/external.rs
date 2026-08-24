@@ -18,7 +18,7 @@ pub(super) async fn resolve_external_manifest(
     message_id: &str,
     payload_ref: &str,
     content_hash: &str,
-) -> Result<HydrationResolution, ()> {
+) -> Result<HydrationResolution, HydrationError> {
     if validate_payload_ref(payload_ref).is_err() {
         return Ok(unverifiable());
     }
@@ -41,23 +41,34 @@ pub(super) async fn resolve_external_manifest(
             params![provider, session_id, message_id, payload_ref],
         )
         .await
-        .map_err(|_| ())?;
-    let Some(row) = rows.next().await.map_err(|_| ())? else {
+        .map_err(super::hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(super::hydration_failure)? else {
         return Ok(HydrationResolution::Unavailable(HydrationStateV1::Deleted));
     };
 
-    let stored_hash: String = row.get(0).map_err(|_| ())?;
-    let kind: String = row.get(1).map_err(|_| ())?;
-    let byte_count = nonnegative_usize(row.get::<Option<i64>>(2).map_err(|_| ())?)?;
-    let char_count = nonnegative_usize(row.get::<Option<i64>>(3).map_err(|_| ())?)?;
-    let metadata: Option<String> = row.get(4).map_err(|_| ())?;
-    let external_created_at: i64 = row.get(5).map_err(|_| ())?;
-    let manifest_session: Option<String> = row.get(6).map_err(|_| ())?;
-    let manifest_digest: Option<String> = row.get(7).map_err(|_| ())?;
-    let manifest_json: Option<String> = row.get(8).map_err(|_| ())?;
-    let receipt_id: Option<String> = row.get(9).map_err(|_| ())?;
-    let manifest_created_at: Option<i64> = row.get(10).map_err(|_| ())?;
-    if rows.next().await.map_err(|_| ())?.is_some() {
+    let stored_hash: String = row.get(0).map_err(super::hydration_failure)?;
+    let kind: String = row.get(1).map_err(super::hydration_failure)?;
+    let byte_count = nonnegative_usize(
+        row.get::<Option<i64>>(2)
+            .map_err(super::hydration_failure)?,
+    )?;
+    let char_count = nonnegative_usize(
+        row.get::<Option<i64>>(3)
+            .map_err(super::hydration_failure)?,
+    )?;
+    let metadata: Option<String> = row.get(4).map_err(super::hydration_failure)?;
+    let external_created_at: i64 = row.get(5).map_err(super::hydration_failure)?;
+    let manifest_session: Option<String> = row.get(6).map_err(super::hydration_failure)?;
+    let manifest_digest: Option<String> = row.get(7).map_err(super::hydration_failure)?;
+    let manifest_json: Option<String> = row.get(8).map_err(super::hydration_failure)?;
+    let receipt_id: Option<String> = row.get(9).map_err(super::hydration_failure)?;
+    let manifest_created_at: Option<i64> = row.get(10).map_err(super::hydration_failure)?;
+    if rows
+        .next()
+        .await
+        .map_err(super::hydration_failure)?
+        .is_some()
+    {
         return Ok(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
         ));
@@ -119,14 +130,23 @@ pub(super) async fn resolve_external_manifest(
             ],
         )
         .await
-        .map_err(|_| ())?;
-    let Some(publication_row) = publication_rows.next().await.map_err(|_| ())? else {
+        .map_err(super::hydration_failure)?;
+    let Some(publication_row) = publication_rows
+        .next()
+        .await
+        .map_err(super::hydration_failure)?
+    else {
         return Ok(unverifiable());
     };
-    let summary_id: String = publication_row.get(0).map_err(|_| ())?;
-    let publication_json: String = publication_row.get(1).map_err(|_| ())?;
-    let publication_created_at: i64 = publication_row.get(2).map_err(|_| ())?;
-    if publication_rows.next().await.map_err(|_| ())?.is_some() {
+    let summary_id: String = publication_row.get(0).map_err(super::hydration_failure)?;
+    let publication_json: String = publication_row.get(1).map_err(super::hydration_failure)?;
+    let publication_created_at: i64 = publication_row.get(2).map_err(super::hydration_failure)?;
+    if publication_rows
+        .next()
+        .await
+        .map_err(super::hydration_failure)?
+        .is_some()
+    {
         return Ok(unverifiable());
     }
     let publication: CanonicalPublicationManifest = match serde_json::from_str(&publication_json) {
@@ -175,10 +195,7 @@ pub(in crate::session_temporal) async fn resolve_external_target(
     session_id: &str,
     payload_ref: &str,
 ) -> Result<HydrationResolution, HydrationError> {
-    match resolve_current(conn, None, snapshot, anchor_id)
-        .await
-        .map_err(|_| HydrationError::Unavailable)?
-    {
+    match resolve_current(conn, None, snapshot, anchor_id).await? {
         HydrationResolution::Unavailable(state) => {
             return Ok(HydrationResolution::Unavailable(state));
         }
@@ -186,7 +203,7 @@ pub(in crate::session_temporal) async fn resolve_external_target(
     }
 
     let generation =
-        i64::try_from(snapshot.watermarks().generation).map_err(|_| HydrationError::Unavailable)?;
+        i64::try_from(snapshot.watermarks().generation).map_err(super::hydration_failure)?;
     let mut rows = conn
         .query(
             "SELECT raw.message_id, raw.content_hash, raw.storage_kind
@@ -211,17 +228,17 @@ pub(in crate::session_temporal) async fn resolve_external_target(
             ],
         )
         .await
-        .map_err(|_| HydrationError::Unavailable)?;
-    let Some(row) = rows.next().await.map_err(|_| HydrationError::Unavailable)? else {
+        .map_err(super::hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(super::hydration_failure)? else {
         return Ok(HydrationResolution::Unavailable(HydrationStateV1::Deleted));
     };
-    let message_id: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
-    let content_hash: String = row.get(1).map_err(|_| HydrationError::Unavailable)?;
-    let storage_kind: String = row.get(2).map_err(|_| HydrationError::Unavailable)?;
+    let message_id: String = row.get(0).map_err(super::hydration_failure)?;
+    let content_hash: String = row.get(1).map_err(super::hydration_failure)?;
+    let storage_kind: String = row.get(2).map_err(super::hydration_failure)?;
     if rows
         .next()
         .await
-        .map_err(|_| HydrationError::Unavailable)?
+        .map_err(super::hydration_failure)?
         .is_some()
         || storage_kind != "external"
     {
@@ -238,7 +255,6 @@ pub(in crate::session_temporal) async fn resolve_external_target(
         &content_hash,
     )
     .await
-    .map_err(|_| HydrationError::Unavailable)
 }
 
 fn unverifiable() -> HydrationResolution {

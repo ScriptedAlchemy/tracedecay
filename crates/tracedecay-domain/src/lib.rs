@@ -1,4 +1,4 @@
-//! Pure, versioned domain contracts for TraceDecay V2.
+//! Pure, versioned domain contracts.
 //!
 //! This crate contains values and validation only. It performs no I/O,
 //! persistence, query execution, policy evaluation, host integration, or async work.

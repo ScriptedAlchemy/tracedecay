@@ -54,7 +54,6 @@ impl ContentLengthCodec {
         Self
     }
 
-    /// Encodes an opaque JSON-RPC payload into the standard LSP envelope.
     pub fn encode(frame: &[u8]) -> Result<Vec<u8>, ContentLengthCodecError> {
         let mut encoded = BytesMut::new();
         encode_frame(frame, &mut encoded)?;
@@ -204,7 +203,6 @@ fn parse_content_length(header: &[u8]) -> Result<usize, ContentLengthCodecError>
     content_length.ok_or(ContentLengthCodecError::MissingContentLength)
 }
 
-/// Failure from the deadline-aware Tokio framing adapter.
 #[derive(Debug)]
 pub enum AsyncContentLengthError {
     Io(io::Error),
@@ -388,7 +386,6 @@ where
     }
 }
 
-/// Result of a non-blocking receive attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FramePoll {
     Frame(LspFrame),
@@ -396,7 +393,6 @@ pub enum FramePoll {
     Closed,
 }
 
-/// Result of a non-blocking send attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameSend {
     Sent,

@@ -30,6 +30,7 @@ use crate::{
 };
 
 impl GraphDbRegistry {
+    #[hotpath::measure(label = "graph_db.replay_pool.retire", impl_type = "GraphDbRegistry")]
     pub fn retire_one_code_generation_replay(
         &self,
         registration: GraphDbRegistration,
@@ -195,9 +196,7 @@ impl GraphDbRegistry {
             return Ok(GraphReplayCollectionOutcome::Absent);
         }
         let selected = {
-            let mut state = database.inner.verified_generations.write().map_err(|_| {
-                GraphDbError::unavailable("verified graph generation state lock is poisoned")
-            })?;
+            let mut state = database.wait_verified_generations_write()?;
             for head in state.heads.values() {
                 retain_lease_closure(head, &mut retained);
             }
@@ -274,6 +273,7 @@ impl GraphDbRegistry {
         }
     }
 
+    #[hotpath::measure(label = "graph_db.replay_pool.finalize", impl_type = "GraphDbRegistry")]
     pub fn finalize_one_code_generation_replay_cleanup(
         &self,
         registration: GraphDbRegistration,
@@ -442,6 +442,7 @@ impl GraphDbRegistry {
         self.publish_verified_inner(&operation, authority, context, publication_key, None, true)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.publish", impl_type = "GraphDbRegistry")]
     fn publish_verified_inner(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -485,6 +486,19 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
+        crate::hotpath_observe::record_counts(
+            manifest.entities.len(),
+            manifest.relations.len(),
+            1,
+            0,
+        );
+        crate::hotpath_observe::record_hydration_source(if has_supplied_manifest {
+            crate::hotpath_observe::HydrationSource::Supplied
+        } else if metadata_only {
+            crate::hotpath_observe::HydrationSource::Metadata
+        } else {
+            crate::hotpath_observe::HydrationSource::Replay
+        });
         let current = authority
             .verified_head(&publication_key.projection, context)
             .map_err(map_publication_error)?;
@@ -713,6 +727,7 @@ impl GraphDbRegistry {
         self.recover_verified_snapshot_with_operation(&operation, authority, context, projection)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.recover", impl_type = "GraphDbRegistry")]
     fn recover_verified_snapshot_with_operation(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -745,6 +760,10 @@ impl GraphDbRegistry {
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.recover.historical",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn verified_generation_snapshot(
         &self,
         registration: GraphDbRegistration,
@@ -866,6 +885,12 @@ impl GraphDbRegistry {
         visiting: &mut BTreeSet<GenerationLocator>,
     ) -> Result<Arc<VerifiedGenerationLease>, GraphDbError> {
         operation.check(self, context)?;
+        let locator = locator_from_key(&head.key)?;
+        if let Some(lease) = database.verified_generation(&locator)?
+            && lease.head == head
+        {
+            return Ok(lease);
+        }
         let replay = authority
             .replay(&head.key, context)
             .map_err(map_publication_error)?;

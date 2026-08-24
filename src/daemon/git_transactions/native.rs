@@ -4,6 +4,7 @@
 //! expiring durable preview input, so a daemon restart never invalidates an
 //! otherwise current immutable preview.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -275,23 +276,28 @@ impl NativeGitIndexPreviewAssembler {
             .read_authority()
             .hunk_refs(&scope, preview_id, snapshot_digest)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        // Digest every current ref once up front so the selected-hunk loop is
+        // a map lookup instead of re-digesting all refs per requested hunk.
+        let mut current_by_digest = BTreeMap::new();
+        for reference in &current_refs {
+            if let Ok(digest) = reference.compute_digest() {
+                current_by_digest.entry(digest).or_insert(reference);
+            }
+        }
+        let diff_text = read_scope_diff(&self.repository_root, &scope)?;
         let mut patches = Vec::with_capacity(selected_hunks.len());
         for requested in selected_hunks {
             let requested_digest = requested
                 .compute_digest()
                 .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-            let current = current_refs
-                .iter()
-                .find(|reference| {
-                    reference
-                        .compute_digest()
-                        .is_ok_and(|digest| digest == requested_digest)
-                })
+            let current = current_by_digest
+                .get(&requested_digest)
+                .copied()
                 .ok_or(GitIndexTransactionPortError::StalePreview)?;
             if current != requested {
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
-            let bytes = extract_patch(&self.repository_root, &scope, requested)?;
+            let bytes = extract_patch_from_diff(&diff_text, requested)?;
             patches.push(
                 ValidatedIndexPatch::new(requested.clone(), bytes).map_err(map_native_error)?,
             );
@@ -811,6 +817,8 @@ fn unsupported_hunk_selection(
     intelligence: &NativeGitIntelligence,
     operation: GitIndexTransactionOperationV1,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    let mut unique_paths = Vec::new();
+    let mut seen_paths = BTreeSet::new();
     for hunk in selected_hunks {
         if hunk.original_path.is_some() {
             return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
@@ -837,19 +845,33 @@ fn unsupported_hunk_selection(
         if modes.iter().flatten().any(|mode| mode.is_symlink()) {
             return Some(GitIndexUnsupportedStateV1::Symlink);
         }
-        if let Some(reason) = unsupported_path_state(runner, intelligence, operation, &hunk.path) {
-            return Some(reason);
+        if seen_paths.insert(hunk.path.clone()) {
+            unique_paths.push(hunk.path.clone());
         }
     }
-    None
+    unsupported_selected_paths(runner, intelligence, operation, &unique_paths)
 }
 
+// Only the transaction tests exercise this refusal shape.
+#[cfg(test)]
 fn unsupported_path_state(
     runner: &FixedGitIndexRunner,
     intelligence: &NativeGitIntelligence,
     operation: GitIndexTransactionOperationV1,
     path: &str,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    unsupported_selected_paths(runner, intelligence, operation, &[path.to_owned()])
+}
+
+fn unsupported_selected_paths(
+    runner: &FixedGitIndexRunner,
+    intelligence: &NativeGitIntelligence,
+    operation: GitIndexTransactionOperationV1,
+    paths: &[String],
+) -> Option<GitIndexUnsupportedStateV1> {
+    if paths.is_empty() {
+        return None;
+    }
     let unreadable = match operation {
         GitIndexTransactionOperationV1::StageHunks => {
             GitIndexUnsupportedStateV1::UnreadableWorkingTree
@@ -869,49 +891,64 @@ fn unsupported_path_state(
     let Ok(diff) = intelligence.diff(&scope) else {
         return Some(unreadable);
     };
-    let Some(file) = diff.files.iter().find(|file| file.path == path) else {
-        return Some(unreadable);
+    for path in paths {
+        let Some(file) = diff.files.iter().find(|file| file.path == *path) else {
+            return Some(unreadable);
+        };
+        if file.original_path.is_some() {
+            return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
+        }
+        if file.binary {
+            return Some(GitIndexUnsupportedStateV1::BinaryHunk);
+        }
+        if file.submodule {
+            return Some(GitIndexUnsupportedStateV1::Submodule);
+        }
+        if [file.old_mode.as_ref(), file.new_mode.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(tracedecay_domain::GitFileModeV1::is_symlink)
+        {
+            return Some(GitIndexUnsupportedStateV1::Symlink);
+        }
+        if file.old_mode != file.new_mode && file.hunks.is_empty() {
+            return Some(GitIndexUnsupportedStateV1::FileModeOnly);
+        }
+        if !diff.coverage.is_complete() {
+            return Some(unreadable);
+        }
+    }
+    let filtered_paths = match check_attr_filter_paths(runner.repository_root(), paths) {
+        Ok(filtered_paths) => filtered_paths,
+        Err(()) => return Some(unreadable),
     };
-    if file.original_path.is_some() {
-        return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
+    paths
+        .iter()
+        .any(|path| filtered_paths.contains(path))
+        .then_some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine)
+}
+
+fn check_attr_filter_paths(
+    repository_root: &Path,
+    paths: &[String],
+) -> Result<BTreeSet<String>, ()> {
+    if paths.is_empty() {
+        return Ok(BTreeSet::new());
     }
-    if file.binary {
-        return Some(GitIndexUnsupportedStateV1::BinaryHunk);
-    }
-    if file.submodule {
-        return Some(GitIndexUnsupportedStateV1::Submodule);
-    }
-    if [file.old_mode.as_ref(), file.new_mode.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(tracedecay_domain::GitFileModeV1::is_symlink)
-    {
-        return Some(GitIndexUnsupportedStateV1::Symlink);
-    }
-    if file.old_mode != file.new_mode && file.hunks.is_empty() {
-        return Some(GitIndexUnsupportedStateV1::FileModeOnly);
-    }
-    if !diff.coverage.is_complete() {
-        return Some(unreadable);
-    }
-    let mut command = read_git_command(runner.repository_root());
-    let Ok(output) = command
-        .args([
-            "check-attr",
-            "-z",
-            "filter",
-            "text",
-            "eol",
-            "working-tree-encoding",
-            "--",
-            path,
-        ])
-        .output()
-    else {
-        return Some(unreadable);
-    };
+    let mut command = read_git_command(repository_root);
+    command.args([
+        "check-attr",
+        "-z",
+        "filter",
+        "text",
+        "eol",
+        "working-tree-encoding",
+        "--",
+    ]);
+    command.args(paths);
+    let output = command.output().map_err(|_| ())?;
     if !output.status.success() {
-        return Some(unreadable);
+        return Err(());
     }
     let fields = output
         .stdout
@@ -919,17 +956,17 @@ fn unsupported_path_state(
         .filter(|field| !field.is_empty())
         .collect::<Vec<_>>();
     let mut records = fields.chunks_exact(3);
-    let has_filter = records.any(|record| {
+    let mut filtered = BTreeSet::new();
+    for record in records.by_ref() {
         let value = record[2];
-        value != b"unspecified" && value != b"unset" && value != b"false"
-    });
+        if value != b"unspecified" && value != b"unset" && value != b"false" {
+            filtered.insert(String::from_utf8_lossy(record[0]).into_owned());
+        }
+    }
     if !records.remainder().is_empty() {
-        return Some(unreadable);
+        return Err(());
     }
-    if has_filter {
-        return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
-    }
-    None
+    Ok(filtered)
 }
 
 #[derive(Serialize)]
@@ -938,11 +975,10 @@ struct PatchDigestMaterial<'a> {
     body: &'a [String],
 }
 
-fn extract_patch(
+fn read_scope_diff(
     repository_root: &Path,
     scope: &GitDiffScopeV1,
-    hunk: &tracedecay_domain::HunkRefV1,
-) -> Result<Vec<u8>, GitIndexTransactionPortError> {
+) -> Result<String, GitIndexTransactionPortError> {
     let mut command = read_git_command(repository_root);
     command
         .arg("diff")
@@ -954,7 +990,6 @@ fn extract_patch(
     if matches!(scope, GitDiffScopeV1::Staged) {
         command.arg("--cached");
     }
-    command.arg("--").arg(&hunk.path);
     let output = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -963,8 +998,13 @@ fn extract_patch(
     if !output.status.success() {
         return Err(GitIndexTransactionPortError::StalePreview);
     }
-    let text = std::str::from_utf8(&output.stdout)
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    String::from_utf8(output.stdout).map_err(|_| GitIndexTransactionPortError::StalePreview)
+}
+
+fn extract_patch_from_diff(
+    text: &str,
+    hunk: &tracedecay_domain::HunkRefV1,
+) -> Result<Vec<u8>, GitIndexTransactionPortError> {
     let lines = text.lines().collect::<Vec<_>>();
     let mut old_marker = None;
     let mut new_marker = None;
@@ -978,6 +1018,9 @@ fn extract_patch(
             continue;
         }
         if !line.starts_with("@@ ") {
+            continue;
+        }
+        if !diff_markers_match_path(old_marker, new_marker, &hunk.path) {
             continue;
         }
         let Some(normalized) = normalize_hunk_header(line) else {
@@ -1018,6 +1061,27 @@ fn extract_patch(
         return Ok(patch);
     }
     Err(GitIndexTransactionPortError::StalePreview)
+}
+
+fn diff_markers_match_path(old_marker: Option<&str>, new_marker: Option<&str>, path: &str) -> bool {
+    [old_marker, new_marker]
+        .into_iter()
+        .flatten()
+        .any(|marker| marker_path(marker).is_some_and(|candidate| candidate == path))
+}
+
+fn marker_path(line: &str) -> Option<&str> {
+    let rest = line
+        .strip_prefix("--- ")
+        .or_else(|| line.strip_prefix("+++ "))?;
+    if rest == "/dev/null" {
+        return None;
+    }
+    Some(
+        rest.strip_prefix("a/")
+            .or_else(|| rest.strip_prefix("b/"))
+            .unwrap_or(rest),
+    )
 }
 
 fn normalize_hunk_header(header: &str) -> Option<String> {
@@ -1900,8 +1964,9 @@ mod tests {
             Some(GitIndexUnsupportedStateV1::RenameOrCopy),
             "rename/copy hunks remain explicit read-only previews"
         );
-        let patch = extract_patch(directory.path(), &GitDiffScopeV1::WorkingTree, &hunk)
-            .expect("extract exact packet");
+        let diff = read_scope_diff(directory.path(), &GitDiffScopeV1::WorkingTree)
+            .expect("read working-tree diff");
+        let patch = extract_patch_from_diff(&diff, &hunk).expect("extract exact packet");
         let patch = ValidatedIndexPatch::new(hunk, patch).expect("validate exact packet");
         let old_tree = runner.write_tree().expect("old index tree");
         let candidate = runner

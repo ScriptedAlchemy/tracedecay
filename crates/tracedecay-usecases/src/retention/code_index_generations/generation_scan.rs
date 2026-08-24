@@ -3,12 +3,14 @@ use std::io::Read;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_lowercase_hex};
 
 use super::{
     CodeGenerationRetentionErrorV1, GenerationDigestVerificationV1,
     MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, storage,
 };
 
+#[hotpath::measure]
 pub(super) fn read_generation_metadata(
     path: &Path,
     verification: GenerationDigestVerificationV1,
@@ -25,12 +27,15 @@ pub(super) fn read_generation_metadata(
         if bytes_read == 0 {
             break;
         }
+        crate::hotpath_observe::retention_inspected(bytes_read as u64);
         if verification == GenerationDigestVerificationV1::Full {
             hasher.update(&buffer[..bytes_read]);
+            crate::hotpath_observe::retention_hashed(bytes_read as u64);
         }
         let remaining = MAX_GENERATION_METADATA_PREFIX_BYTES.saturating_sub(prefix.len());
         prefix.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
         if is_cancelled() {
+            crate::hotpath_observe::retention_cancelled();
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         if verification == GenerationDigestVerificationV1::MetadataOnly
@@ -59,7 +64,7 @@ pub(super) fn read_generation_metadata(
     })?;
     let state_digest = match verification {
         GenerationDigestVerificationV1::Full => {
-            format!("sha256:{}", hex::encode(hasher.finalize()))
+            encode_tagged_lowercase_hex("sha256:", &hasher.finalize())
         }
         GenerationDigestVerificationV1::MetadataOnly => named_state_digest(path)?,
     };
@@ -72,12 +77,7 @@ fn named_state_digest(path: &Path) -> Result<String, CodeGenerationRetentionErro
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("generation-"))
         .and_then(|name| name.strip_suffix(".json"))
-        .filter(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .filter(|digest| is_lowercase_hex(digest, 64))
         .ok_or_else(|| {
             CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation file '{}' does not name a SHA-256 content digest",

@@ -1270,28 +1270,27 @@ pub fn http_application_router_with_executor(
     let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
     let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor))?;
     let retained_router = retained::router_with_executor(Arc::clone(&executor))?;
-    Ok(
-        tracedecay_api::application_router(application_invoker_for_surface(
-            executor,
-            BindingSurface::Http,
-            &HttpApplicationOperation::ALL,
-        )?)
-        .merge(work_router)
-        .merge(workflow_router)
-        .merge(handoff_router)
-        .merge(multi_root_router)
-        .merge(retained_router)
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&cancellations),
-            application_http_context,
-        ))
-        .merge(http_operation_event_router(
-            operation_events,
-            active_project_id,
-            cancellations,
-            Some(event_executor),
-        )),
-    )
+    let router = tracedecay_api::application_router(application_invoker_for_surface(
+        executor,
+        BindingSurface::Http,
+        &HttpApplicationOperation::ALL,
+    )?)
+    .merge(work_router)
+    .merge(workflow_router)
+    .merge(handoff_router)
+    .merge(multi_root_router)
+    .merge(retained_router)
+    .layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&cancellations),
+        application_http_context,
+    ))
+    .merge(http_operation_event_router(
+        operation_events,
+        active_project_id,
+        cancellations,
+        Some(event_executor),
+    ));
+    Ok(with_hotpath_server_layer(router))
 }
 
 /// Build the dashboard's public Work mount.
@@ -1304,28 +1303,26 @@ pub fn dashboard_work_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
-    Ok(
-        work::dashboard_router_with_executor(executor)?.layer(
-            axum::middleware::from_fn_with_state(cancellations, application_http_context),
-        ),
-    )
+    let router = work::dashboard_router_with_executor(executor)?.layer(
+        axum::middleware::from_fn_with_state(cancellations, application_http_context),
+    );
+    Ok(with_hotpath_server_layer(router))
 }
 
 pub fn dashboard_configuration_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
-    Ok(
-        tracedecay_api::configuration_application_router(application_invoker_for_surface(
-            executor,
-            BindingSurface::Dashboard,
-            &CONFIGURATION_WIRE_OPERATIONS,
-        )?)
-        .layer(axum::middleware::from_fn_with_state(
-            cancellations,
-            application_http_context,
-        )),
-    )
+    let router = tracedecay_api::configuration_application_router(application_invoker_for_surface(
+        executor,
+        BindingSurface::Dashboard,
+        &CONFIGURATION_WIRE_OPERATIONS,
+    )?)
+    .layer(axum::middleware::from_fn_with_state(
+        cancellations,
+        application_http_context,
+    ));
+    Ok(with_hotpath_server_layer(router))
 }
 
 pub fn dashboard_feedback_application_router_with_executor(
@@ -1337,11 +1334,29 @@ pub fn dashboard_feedback_application_router_with_executor(
         BindingSurface::Dashboard,
         &DASHBOARD_FEEDBACK_OPERATIONS,
     )?;
-    Ok(tracedecay_api::feedback_application_router(invoker).layer(
+    let router = tracedecay_api::feedback_application_router(invoker).layer(
         axum::middleware::from_fn_with_state(cancellations, application_http_context),
-    ))
+    );
+    Ok(with_hotpath_server_layer(router))
 }
 
+/// Attach Hotpath only after a production HTTP router has its complete route
+/// and middleware assembly. Leaf routers remain unlayered so merged routes
+/// emit exactly one server event and enter exactly one route scope.
+#[cfg(feature = "hotpath")]
+pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(hotpath::AxumLayer::new())
+}
+
+#[cfg(not(feature = "hotpath"))]
+pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S> {
+    router
+}
+
+#[hotpath::measure]
 async fn application_http_context(
     State(cancellations): State<HttpCancellationRegistry>,
     mut request: Request<Body>,
@@ -1409,7 +1424,7 @@ async fn application_http_context(
         deadline,
         cancellation: cancellation.clone(),
     });
-    let response = next.run(request).await;
+    let response = hotpath::future!(next.run(request), label = "http.application_dispatch").await;
     active.finish();
     response
 }
@@ -3038,6 +3053,7 @@ pub fn parse_application_surface_request(
     }
 }
 
+#[hotpath::measure]
 pub async fn execute_application_surface(
     operation: ApplicationSurfaceOperation,
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
@@ -4073,14 +4089,10 @@ fn resolve_named_binding(
     )
 }
 
-/// Resolve any application-catalog transport binding by its public tool name.
-///
-/// Typed application surfaces continue through [`ApplicationSurfaceOperation`].
-/// Catalog bindings whose typed adapters are still being migrated use this
-/// gate before entering their retained compatibility owner.
 /// Resolves a public tool name through the application catalog for one host surface.
 ///
-/// Compatibility-owned tools use this boundary before entering their retained
+/// Typed application surfaces continue through [`ApplicationSurfaceOperation`];
+/// compatibility-owned tools use this boundary before entering their retained
 /// execution adapter, so catalog metadata remains the single binding authority.
 pub fn resolve_catalog_tool_binding(
     surface: BindingSurface,

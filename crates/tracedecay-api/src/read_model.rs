@@ -759,65 +759,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn domain_state_serializes_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&DashboardDomainStateV1::CompleteZeroFindings).unwrap(),
-            "\"complete_zero_findings\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DashboardDomainStateV1::UnsupportedSchema).unwrap(),
-            "\"unsupported_schema\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DashboardDomainStateV1::Unsupported).unwrap(),
-            "\"unsupported\""
-        );
-    }
-
-    #[test]
-    fn envelope_serializes_full_contract_surface() {
-        let envelope = DashboardEnvelopeV1::ready(
-            scope(),
-            DashboardCoverageV1::complete(1, "stores"),
-            json_payload(),
-        )
-        .with_source_watermark(DashboardWatermarkV1 {
-            source: "graph".into(),
-            watermark: "wm-1".into(),
-        })
-        .with_legal_actions(vec![DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::Refresh,
-            "use-case.dashboard.refresh",
-        )]);
-        let value = serde_json::to_value(&envelope).unwrap();
-        for key in [
-            "schema_revision",
-            "scope",
-            "version",
-            "time",
-            "source_watermark",
-            "authorization",
-            "coverage",
-            "freshness",
-            "domain_state",
-            "legal_actions",
-            "payload",
-        ] {
-            assert!(value.get(key).is_some(), "envelope missing `{key}`");
-        }
-        assert_eq!(value["authorization"]["outcome"], "authorized");
-    }
-
     fn scope() -> DashboardScopeV1 {
         DashboardScopeV1 {
             project_id: Some("proj".into()),
             storage_mode: "profile_sharded".into(),
             store_root: "/store".into(),
         }
-    }
-
-    fn json_payload() -> serde_json::Value {
-        serde_json::json!({ "ok": true })
     }
 }

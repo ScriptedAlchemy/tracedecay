@@ -9,7 +9,7 @@ import type { WorkResult } from '../work/workApi.ts';
 /**
  * The handoff frontier, derived from the work-product graph.
  *
- * Plan 11 asks the Agents surface for handoffs. The only handoff record any
+ * The only handoff record any
  * route in this build serves is `WorkHandoffV1`, which hangs off every
  * `WorkItemV1` on the work-product graph and is reachable through
  * `operation.work.views` (`POST /api/work/views`). It is exactly the record the

@@ -93,7 +93,6 @@ pub(in crate::tracedecay) fn bounded_region_diff(
     let old: Vec<&str> = original.lines().collect();
     let new: Vec<&str> = modified.lines().collect();
 
-    // Longest common line prefix.
     let mut prefix = 0;
     while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
         prefix += 1;

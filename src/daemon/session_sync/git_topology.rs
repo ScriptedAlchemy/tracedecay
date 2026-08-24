@@ -19,7 +19,7 @@ use tracedecay_store::FactReadControl;
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 use crate::global_db::RegisteredGlobalDbLeaseV1;
 
-use super::{SESSION_SYNC_POLL_INTERVAL, SessionSyncProjectContext, work::SessionSyncInterruption};
+use super::{DaemonSessionSyncService, SessionSyncProjectContext, work::SessionSyncInterruption};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GitTopologySyncFailure {
@@ -46,8 +46,8 @@ pub(super) enum GitTopologySyncOutcome {
 impl SessionSyncProjectContext {
     pub(super) async fn publish_git_topology(
         &self,
+        service: &DaemonSessionSyncService,
         request: &tracedecay_application::session_sync::SessionSyncRequestV1,
-        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> GitTopologySyncOutcome {
         let scope = match crate::daemon::project_open_owners::resolved_scope_for_project(
@@ -85,34 +85,18 @@ impl SessionSyncProjectContext {
             )
         });
         tokio::pin!(worker);
-        let mut interruption = None;
-        loop {
-            tokio::select! {
-                result = &mut worker => {
-                    return match interruption {
-                        Some(interruption) => GitTopologySyncOutcome::Interrupted(interruption),
-                        None => GitTopologySyncOutcome::Finished(match result {
-                            Ok(result) => result,
-                            Err(_) => Err(GitTopologySyncFailure::Unavailable),
-                        }),
-                    };
-                }
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if interruption.is_none() {
-                        if shutdown.is_cancelled() {
-                            interruption = Some(SessionSyncInterruption::Shutdown);
-                            cancelled.store(true, Ordering::Release);
-                        } else if request.cancellation().is_cancelled() {
-                            interruption = Some(SessionSyncInterruption::Cancelled);
-                            cancelled.store(true, Ordering::Release);
-                        } else if request.deadline().is_elapsed_at(
-                            tracedecay_application::now_micros(),
-                        ) {
-                            interruption = Some(SessionSyncInterruption::TimedOut);
-                            cancelled.store(true, Ordering::Release);
-                        }
-                    }
-                }
+        tokio::select! {
+            biased;
+            result = &mut worker => {
+                GitTopologySyncOutcome::Finished(match result {
+                    Ok(result) => result,
+                    Err(_) => Err(GitTopologySyncFailure::Unavailable),
+                })
+            }
+            interruption = service.wait_for_interruption(request) => {
+                cancelled.store(true, Ordering::Release);
+                let _ = worker.await;
+                GitTopologySyncOutcome::Interrupted(interruption)
             }
         }
     }

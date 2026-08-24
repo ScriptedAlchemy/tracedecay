@@ -689,6 +689,34 @@ fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
 }
 
 #[test]
+fn reader_admission_records_acquire_wait_saturation_and_release() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let before = pool.telemetry_snapshot();
+
+    let first = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("first snapshot admission");
+    let second = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("second snapshot admission");
+    assert!(
+        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+            .is_err(),
+        "the reserved health worker is not a general-lane overflow valve"
+    );
+
+    let held = pool.telemetry_snapshot();
+    assert_eq!(held.acquire_events, before.acquire_events + 2);
+    assert_eq!(held.release_events, before.release_events);
+    assert_eq!(held.saturated_events, before.saturated_events + 1);
+
+    drop((first, second));
+    let released = pool.telemetry_snapshot();
+    assert_eq!(released.release_events, before.release_events + 2);
+}
+
+#[test]
 fn saturated_general_lane_does_not_consume_reserved_health_reader() {
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();

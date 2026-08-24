@@ -6,6 +6,7 @@ use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use super::{
     AutomationRunLedgerRecord, run_ledger_path, sync_run_ledger_file_and_parent,
@@ -358,6 +359,7 @@ fn run_record_exact_identity(record: &AutomationRunLedgerRecord) -> Result<(Mani
 
 /// Verifies or publishes the exact staged row under the canonical ledger lock.
 /// A previously published digest succeeds even after its spool was retired.
+#[hotpath::measure(label = "automation_run_ledger_publish_exact")]
 pub async fn publish_staged_run_record_exact(
     dashboard_root: &Path,
     run_id: &str,
@@ -1703,13 +1705,7 @@ struct DigestWriter {
 
 impl DigestWriter {
     fn finish_with_len(self) -> Result<(ManifestDigest, u64)> {
-        let mut encoded = String::with_capacity(71);
-        encoded.push_str("sha256:");
-        for byte in self.hasher.finalize() {
-            use std::fmt::Write as _;
-            write!(&mut encoded, "{byte:02x}")
-                .map_err(|error| config_error(format!("failed to encode run digest: {error}")))?;
-        }
+        let encoded = encode_tagged_lowercase_hex("sha256:", &self.hasher.finalize());
         let digest = ManifestDigest::new(encoded)
             .map_err(|error| config_error(format!("invalid automation run digest: {error}")))?;
         Ok((digest, self.len))

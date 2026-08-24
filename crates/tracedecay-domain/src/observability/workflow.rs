@@ -1,4 +1,4 @@
-//! Canonical Plan 32 Workflow settlement observations for Plan 26.
+//! Canonical Workflow settlement observations.
 //!
 //! These payloads are projections of durable Workflow journal and fan-out
 //! census facts. They never treat a provider terminal as an independently

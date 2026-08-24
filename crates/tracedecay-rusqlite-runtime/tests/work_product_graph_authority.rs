@@ -2,10 +2,8 @@
 //!
 //! This suite drives the REAL composition — the application's
 //! `WorkProductMutationServiceV1` and `WorkProductReadServiceV1` over the
-//! registered exact-SQL storage, with no port doubles anywhere — because the
-//! defect this authority was built to close was precisely that every
-//! implementation of these ports was a test double. A suite that substituted
-//! its own port would reproduce the defect it is meant to prove is gone.
+//! registered exact-SQL storage, with no port doubles. A suite that
+//! substituted its own port would not prove the registered-store path.
 //!
 //! The assertions are about truthfulness as much as about persistence. The
 //! Work views draw effort, concurrency, churn, and a critical path, and every

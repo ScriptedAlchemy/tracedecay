@@ -1,5 +1,3 @@
-use super::*;
-
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
 };
@@ -10,6 +8,8 @@ use tracedecay_global_db::session_temporal::execution::{
     TaskSessionTemporalExecutionReportV1,
 };
 use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
+
+use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskSessionRetrievalOutcomeV1 {

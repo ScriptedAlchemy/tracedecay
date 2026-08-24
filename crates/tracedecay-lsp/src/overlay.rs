@@ -99,7 +99,6 @@ impl Default for OverlayLimits {
     }
 }
 
-/// Failure while admitting or applying an overlay update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OverlayError {
     InvalidLimits,
@@ -140,7 +139,6 @@ struct DocumentOverlay {
     retained_parse: RetainedOverlayParse,
 }
 
-/// In-memory overlays owned by exactly one LSP client session.
 #[derive(Default)]
 pub struct OverlayStore {
     documents: BTreeMap<String, DocumentOverlay>,
@@ -163,6 +161,7 @@ impl OverlayStore {
         })
     }
 
+    #[hotpath::measure(label = "lsp_overlay_open", impl_type = "OverlayStore")]
     pub fn open(
         &mut self,
         root: &AdmittedRoot,
@@ -222,6 +221,7 @@ impl OverlayStore {
 
     /// Applies an ordered `didChange` batch. A version must strictly advance;
     /// LSP does not require consecutive integer versions, only causal order.
+    #[hotpath::measure(label = "lsp_overlay_change", impl_type = "OverlayStore")]
     pub fn change(
         &mut self,
         uri: &str,
@@ -374,7 +374,6 @@ struct DiagnosticOperationKey {
     overlay_digest: Option<ContentDigest>,
 }
 
-/// Bounded non-blocking broker over canonical diagnostic refresh work.
 pub struct DiagnosticSnapshotAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
@@ -419,6 +418,10 @@ impl DiagnosticSnapshotAdapter {
 }
 
 impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
+    #[hotpath::measure(
+        label = "lsp_overlay_document_diagnostics",
+        impl_type = "DiagnosticSnapshotAdapter"
+    )]
     fn document_diagnostics(
         &self,
         root: &AdmittedRoot,
@@ -449,6 +452,10 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
         }
     }
 
+    #[hotpath::measure(
+        label = "lsp_overlay_request_refresh",
+        impl_type = "DiagnosticSnapshotAdapter"
+    )]
     fn request_document_refresh(
         &self,
         root: &AdmittedRoot,
@@ -462,8 +469,7 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             document_uri: document_uri.to_owned(),
             overlay: overlay.cloned(),
             source_generation,
-            expected_content_digest: overlay
-                .map(|overlay| ContentDigest::of_bytes(overlay.text.as_bytes())),
+            expected_content_digest: overlay.map(|overlay| overlay.content_digest.clone()),
             expected_code_generation_id: None,
             expected_snapshot_digest: None,
         };

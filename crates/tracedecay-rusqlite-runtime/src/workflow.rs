@@ -17,9 +17,8 @@ use tracedecay_domain::{
 };
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlError as MigrationSqlError, ExactSqlHandle, ExactSqlRows,
-    ExactSqlStatement, ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction,
-    ExactSqlValue, ExactSqlValue as MigrationSqlValue,
+    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
+    ExactSqlValue,
 };
 use crate::repository::RetainedExactSqlCapability;
 mod census;
@@ -228,6 +227,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         Ok(disposition)
     }
 
+    #[hotpath::measure]
     fn transition(
         &self,
         command: &WorkflowDefinitionLifecycleCommand,
@@ -408,18 +408,20 @@ fn require_columns(
     }
 }
 
-fn handoff_unavailable(_: ExactSqlError) -> TaskHandoffAuthorityError {
-    TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
+fn handoff_unavailable(error: ExactSqlError) -> TaskHandoffAuthorityError {
+    TaskHandoffAuthorityError::Unavailable(format!(
+        "workflow handoff authority unavailable: {error}"
+    ))
 }
 
 fn handoff_codec_unavailable() -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
 }
 
-fn workflow_effect_unavailable(_: ExactSqlError) -> WorkflowEffectAuthorityErrorV1 {
-    WorkflowEffectAuthorityErrorV1::Unavailable(
-        "registered workflow effect storage unavailable".to_owned(),
-    )
+fn workflow_effect_unavailable(error: ExactSqlError) -> WorkflowEffectAuthorityErrorV1 {
+    WorkflowEffectAuthorityErrorV1::Unavailable(format!(
+        "registered workflow effect storage unavailable: {error}"
+    ))
 }
 
 fn workflow_effect_codec_unavailable() -> WorkflowEffectAuthorityErrorV1 {
@@ -428,21 +430,18 @@ fn workflow_effect_codec_unavailable() -> WorkflowEffectAuthorityErrorV1 {
     )
 }
 
-fn statement(
-    sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlStatement, MigrationSqlError> {
-    MigrationSqlStatement::new(sql.to_owned(), params)
+fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
+    ExactSqlStatement::new(sql.to_owned(), params)
 }
 
-fn sql_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
+fn sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         ExactSqlValue::Text(value) => Some(value),
         _ => None,
     }
 }
 
-fn sql_integer(values: &[MigrationSqlValue], index: usize) -> Option<i64> {
+fn sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
     match values.get(index)? {
         ExactSqlValue::Integer(value) => Some(*value),
         _ => None,
@@ -496,6 +495,7 @@ fn execute_tx_changed(
 }
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
+    #[hotpath::measure]
     fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
         let frontier_payload =
@@ -507,7 +507,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         let existing = query_tx(
             &transaction,
             "SELECT 1 FROM workflow_handoffs WHERE token_digest = ?1",
-            vec![MigrationSqlValue::Text(
+            vec![ExactSqlValue::Text(
                 grant.token_digest().as_str().to_owned(),
             )],
         )
@@ -538,6 +538,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             .map_err(handoff_unavailable)
     }
 
+    #[hotpath::measure]
     fn consume(
         &self,
         token_digest: &ManifestDigest,
@@ -582,7 +583,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         execute_tx(
             &transaction,
             "UPDATE workflow_handoffs SET consumed = 1 WHERE token_digest = ?1 AND consumed = 0",
-            vec![MigrationSqlValue::Text(token_digest.as_str().to_owned())],
+            vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
         )
         .map_err(handoff_unavailable)?;
         transaction
@@ -602,6 +603,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         effect_holder::has_pending_effects(self.handle(), worktree_id)
     }
 
+    #[hotpath::measure]
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,

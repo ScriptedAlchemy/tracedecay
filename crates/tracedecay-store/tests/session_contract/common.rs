@@ -261,28 +261,6 @@ fn temporal_digests_are_bounded_and_canonical() {
     }
 }
 
-#[test]
-fn session_contract_dtos_are_public_for_schema_and_kernel_adapters() {
-    let _ = (
-        std::mem::size_of::<SessionTemporalProjectionBatchV1>(),
-        std::mem::size_of::<SessionTemporalProjectionBatchReceiptV1>(),
-        std::mem::size_of::<SessionGenerationRebuildRequestV1>(),
-        std::mem::size_of::<SessionGenerationRebuildReceiptV1>(),
-        std::mem::size_of::<SessionGenerationActivationRequestV1>(),
-        std::mem::size_of::<SessionGenerationActivationReceiptV1>(),
-        std::mem::size_of::<SessionRetrievalPageV1>(),
-        std::mem::size_of::<SessionSummaryPublicationRequestV1>(),
-        std::mem::size_of::<SessionRefreshBeginOrJoinRequestV1>(),
-        std::mem::size_of::<SessionRefreshBeginOrJoinReceiptV1>(),
-        std::mem::size_of::<SessionRefreshProgressRequestV1>(),
-        std::mem::size_of::<SessionRefreshProgressV1>(),
-        std::mem::size_of::<SessionRefreshCompletionRequestV1>(),
-        std::mem::size_of::<SessionRefreshFailureRequestV1>(),
-        std::mem::size_of::<SessionRefreshCancellationRequestV1>(),
-        std::mem::size_of::<SessionRefreshReceiptV1>(),
-    );
-}
-
 #[derive(Default)]
 pub(super) struct InMemorySessionState {
     pub(super) rebuild: Option<SessionGenerationRebuildReceiptV1>,

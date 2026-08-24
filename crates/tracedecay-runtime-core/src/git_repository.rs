@@ -67,7 +67,7 @@ pub struct GitRepositoryAuthority {
 }
 
 impl GitRepositoryAuthority {
-    /// Discover the repository containing `path`.
+    #[hotpath::measure]
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
         let repository = gix::discover_opts(
             path,
@@ -136,6 +136,7 @@ impl GitRepositoryAuthority {
     }
 
     /// All ordinary repository refs in stable name order.
+    #[hotpath::measure]
     pub fn references(&self) -> Result<Vec<GitReference>, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
         let platform = repository
@@ -192,6 +193,7 @@ impl GitRepositoryAuthority {
 
     /// Live staged, unstaged, untracked, ignored, conflict, and submodule
     /// status directly from the current index and working tree.
+    #[hotpath::measure]
     pub fn status(&self) -> Result<GitRepositoryStatus, GitRepositoryError> {
         use gix::diff::index::ChangeRef;
         use gix::dir::entry::Status as DirectoryStatus;

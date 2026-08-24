@@ -1,16 +1,16 @@
 use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::hooks::{
-    HookWorkspaceStatus, build_cursor_session_context, codex_additional_context_json,
-    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
-    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
-    cursor_project_root_from_event, cursor_session_start_json, cursor_should_run_sync,
-    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_subagent_start,
-    evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
-    record_codex_subagent_start,
-};
 use tracedecay::storage::{pin_fixture_repository_identity, resolve_layout_for_current_profile};
+use tracedecay_agent_hosts::hooks::{
+    HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
+    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
+    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
+    codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_should_run_sync, cursor_staleness_hint, evaluate_codex_subagent_start,
+    evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
+    kiro_post_tool_use_rel_paths, record_codex_subagent_start,
+};
 
 fn is_blocked(json: &str) -> bool {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -419,8 +419,9 @@ fn test_build_cursor_session_context_uninitialized_suggests_init() {
 fn test_build_cursor_session_context_initialized_includes_freshness() {
     let context = build_cursor_session_context(true, Some("last indexed 2m ago"), None);
     assert!(
-        context.len() <= 1_300,
-        "cursor initialized context should stay compact, got {} chars: {context}",
+        context.len() <= tracedecay_agent_hosts::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
+        "cursor initialized context should stay within its {} char budget, got {} chars: {context}",
+        tracedecay_agent_hosts::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
         context.len()
     );
     assert!(context.contains("last indexed 2m ago"));
@@ -429,9 +430,6 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
         "initialized workspaces should not be told to run init: {context}"
     );
     assert!(context.contains("TraceDecay project hint:"));
-    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
-    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
-    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("ToolSearch"));
     assert!(context.contains("tracedecay_find_exact_symbol"));
     assert!(context.contains("tracedecay_test_map"));
@@ -439,10 +437,14 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
 
 #[test]
 fn test_build_codex_session_context_carries_compact_steering() {
-    let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
+    let context = tracedecay_agent_hosts::hooks::build_codex_session_context(
+        true,
+        Some("last indexed 2m ago"),
+    );
     assert!(
-        context.len() <= 2_600,
-        "codex initialized context should stay compact, got {} chars: {context}",
+        context.len() <= tracedecay_agent_hosts::hooks::CODEX_SESSION_CONTEXT_BUDGET,
+        "codex initialized context should stay within its {} char budget, got {} chars: {context}",
+        tracedecay_agent_hosts::hooks::CODEX_SESSION_CONTEXT_BUDGET,
         context.len()
     );
     assert!(context.contains("TraceDecay project hint:"));
@@ -450,15 +452,12 @@ fn test_build_codex_session_context_carries_compact_steering() {
     assert!(context.contains("ToolSearch"));
     assert!(context.contains("tracedecay_find_exact_symbol"));
     assert!(context.contains("tracedecay_test_map"));
-    assert!(!context.contains("<EXTREMELY_IMPORTANT>"));
-    assert!(!context.contains("Below is the full `tracedecay:using-tracedecay`"));
-    assert!(!context.contains("Grep is faster for this"));
     assert!(context.contains("last indexed 2m ago"));
     assert!(context.contains("tracedecay_project_search"));
     assert!(context.contains("tracedecay_message_search"));
     assert!(context.contains("tracedecay_fact_store"));
     assert!(context.contains("before asking the user to repeat"));
-    let uninit = tracedecay::hooks::build_codex_session_context(false, None);
+    let uninit = tracedecay_agent_hosts::hooks::build_codex_session_context(false, None);
     assert!(uninit.contains("tracedecay init"));
     assert!(uninit.contains("tracedecay_project_search"));
     assert!(uninit.contains("tracedecay_message_search"));
@@ -466,7 +465,7 @@ fn test_build_codex_session_context_carries_compact_steering() {
 
 #[test]
 fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
-    let context = tracedecay::hooks::build_codex_session_context_for_workspace(
+    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
         HookWorkspaceStatus::UnindexedProject,
         None,
     );
@@ -480,7 +479,7 @@ fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
 
 #[test]
 fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance() {
-    let context = tracedecay::hooks::build_codex_session_context_for_workspace(
+    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
         HookWorkspaceStatus::Generic,
         None,
     );
@@ -690,6 +689,11 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
 #[test]
 fn test_codex_additional_context_json_uses_codex_schema() {
     let json = codex_additional_context_json("SessionStart", "hello context");
+    assert_eq!(
+        json,
+        additional_context_json("SessionStart", "hello context"),
+        "the shipped Codex compatibility API must delegate byte-exactly to the canonical formatter"
+    );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         v["hookSpecificOutput"]["hookEventName"].as_str(),

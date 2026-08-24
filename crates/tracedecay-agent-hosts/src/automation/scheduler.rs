@@ -16,7 +16,12 @@ use tracedecay_automation::evidence_budget::{
     SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
 };
 
-use super::backend::{AgentTaskKind, agent_task_failure_disposition, task_key};
+use super::backend::{
+    AgentTaskFailureClass, AgentTaskKind, agent_task_failure_disposition, task_key,
+};
+use super::backend_identity::{
+    BACKEND_IDENTITY_SUPPRESSED, backend_identity, is_deterministic_failure_class,
+};
 use super::config::{
     AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
 };
@@ -68,6 +73,7 @@ impl SessionActivity {
 /// This reads from the read-only store using bounded indexed timestamp lookups,
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
 /// ingest writers only ever move the value forward.
+#[hotpath::measure(label = "automation_load_session_activity")]
 pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> SessionActivity {
     SessionActivity {
         last_activity_secs: sessions_db.latest_session_activity_secs().await,
@@ -202,6 +208,10 @@ impl AutomationTaskLock {
     /// Acquires a lock under an arbitrary key. User-defined jobs lock per
     /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
     /// fixed-task lock name.
+    #[hotpath::measure(
+        label = "automation_task_lock_acquire",
+        impl_type = "AutomationTaskLock"
+    )]
     pub async fn try_acquire_keyed(
         dashboard_root: &Path,
         key: &str,
@@ -320,6 +330,7 @@ where
     }
 }
 
+#[hotpath::measure(label = "automation_schedule_decision")]
 pub fn schedule_decision(
     config: &AutomationConfig,
     task: AgentTaskKind,
@@ -471,7 +482,32 @@ fn schedule_decision_for_trigger(
                 record.error_retryable,
                 record.error.as_deref(),
             );
-            if failure.is_non_retryable() {
+            // Identity-stand first: Permanent is also non-retryable, so a
+            // forever skip here would swallow the suppress that re-admits
+            // after a backend/configuration change. Denied stays off that
+            // forever skip as well — credentials and policy can change, so
+            // it uses the ordinary cooldown.
+            match deterministic_backend_failure_stands(record, config) {
+                Ok(true) => {
+                    return Ok(AutomationScheduleDecision::skipped(
+                        BACKEND_IDENTITY_SUPPRESSED,
+                    ));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to derive automation backend identity for standing-failure admission"
+                    );
+                    return Err(error);
+                }
+            }
+            if failure.is_non_retryable()
+                && !matches!(
+                    failure.classification,
+                    Some(AgentTaskFailureClass::Permanent | AgentTaskFailureClass::Denied)
+                )
+            {
                 return Ok(AutomationScheduleDecision::skipped(
                     "scheduler_non_retryable_failure",
                 ));
@@ -527,6 +563,51 @@ fn schedule_decision_for_trigger(
     }
 
     Ok(AutomationScheduleDecision::due())
+}
+
+/// Whether `record` is a settled deterministic backend failure that still
+/// stands under the backend and configuration now in force.
+///
+/// Three facts must hold together, and each rules out a different kind of
+/// false positive:
+///
+/// 1. The failure class is deterministic under a fixed backend and
+///    configuration — typed Permanent only. Unavailable, Denied,
+///    Disconnected, MalformedOutput, Timeout, and Retryable keep the
+///    ordinary failure cooldown.
+/// 2. Every attempt the backend made failed that same way. A class that got
+///    its retries and reproduced them all is settled; one that recovered
+///    mid-ladder, or that never actually reached the backend, is not.
+/// 3. The identity stamped on the record equals the identity now configured.
+///    This is what makes the suppression self-clearing: change the backend,
+///    the executable, any effective setting, or the build that owns the
+///    protocol, and the task is re-admitted on the next tick.
+///
+/// A record with no stamped identity (written before the field existed) never
+/// suppresses: a failure that cannot be attributed to the current identity is
+/// not evidence about it. Hasher errors stay `Err` so callers cannot treat
+/// them as unstamped-legacy and silently re-admit.
+fn deterministic_backend_failure_stands(
+    record: &AutomationRunLedgerRecord,
+    config: &AutomationConfig,
+) -> Result<bool> {
+    let Some(classification) = record.error_classification else {
+        return Ok(false);
+    };
+    if !is_deterministic_failure_class(classification) {
+        return Ok(false);
+    }
+    let ladder_reproduced_the_class = !record.backend_attempts.is_empty()
+        && record.backend_attempts.iter().all(|attempt| {
+            !attempt.succeeded && attempt.failure_classification == Some(classification)
+        });
+    if !ladder_reproduced_the_class {
+        return Ok(false);
+    }
+    let Some(recorded_identity) = record.backend_identity.as_deref() else {
+        return Ok(false);
+    };
+    Ok(backend_identity(config)? == recorded_identity)
 }
 
 /// The standing session-evidence budget-exhausted state for `task`, if any.
@@ -1275,6 +1356,7 @@ fn windows_process_state(pid: u32) -> ProcessState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
     use super::super::config::AutomationTaskSet;
     use super::*;
     use tempfile::tempdir;
@@ -1315,6 +1397,7 @@ mod tests {
             task,
             task_key: None,
             backend: "codex_app_server".to_owned(),
+            backend_identity: None,
             host_mode: None,
             prompt_version: None,
             response_schema: None,
@@ -1344,6 +1427,358 @@ mod tests {
             completed_at: completed_at.to_string(),
             completed_at_micros: None,
         }
+    }
+
+    /// A `memory_curator` config on a plain interval schedule: the task that
+    /// burned the measured 26.9 runs/hour, and the one with no session-evidence
+    /// gate in front of it.
+    fn curator_config() -> AutomationConfig {
+        AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            tasks: AutomationTaskSet {
+                memory_curator: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("interval".to_owned()),
+                    interval_secs: Some(60),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
+            },
+            ..AutomationConfig::default()
+        }
+    }
+
+    /// One terminal failure whose retry ladder reproduced `classification` on
+    /// every attempt, stamped with `identity`.
+    fn settled_backend_failure(
+        config: &AutomationConfig,
+        error: &str,
+        classification: AgentTaskFailureClass,
+        attempts: u32,
+        completed_at: i64,
+        identity: Option<String>,
+    ) -> AutomationRunLedgerRecord {
+        let mut record = scheduler_ledger_record(
+            "run-settled",
+            AgentTaskKind::MemoryCurator,
+            AutomationRunStatus::Failed,
+            Some(error),
+            completed_at,
+        );
+        record.error_classification = Some(classification);
+        record.error_retryable = Some(classification.is_retryable());
+        record.backend_attempt_count = attempts as usize;
+        record.backend_attempts = (1..=attempts)
+            .map(|attempt| AgentTaskRetryAttempt {
+                attempt,
+                succeeded: false,
+                failure_classification: Some(classification),
+                backoff_millis: 0,
+            })
+            .collect();
+        record.backend_identity = identity.or_else(|| backend_identity(config).ok());
+        record
+    }
+
+    /// The exact transport failure the measured ledger recorded 18 times.
+    const DISCONNECT_ERROR: &str = "agent_task_backend port error: agent task backend \
+disconnected: config error: codex app-server closed stdout before completing";
+
+    #[test]
+    fn deterministic_backend_failure_settles_once_and_never_relaunches() {
+        let config = curator_config();
+        let records = vec![settled_backend_failure(
+            &config,
+            PERMANENT_PROTOCOL_ERROR,
+            AgentTaskFailureClass::Permanent,
+            3,
+            2_000,
+            None,
+        )];
+
+        // The failure cooldown is the only thing that used to gate this, and
+        // it elapses. Every tick after it — including a full day later — must
+        // still refuse to spawn the backend again.
+        for now_secs in [
+            2_001,
+            2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            2_000 + 10 * DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            2_000 + 86_400,
+        ] {
+            assert_eq!(
+                schedule_decision(
+                    &config,
+                    AgentTaskKind::MemoryCurator,
+                    &records,
+                    SessionActivity::none(),
+                    now_secs,
+                )
+                .skip_reason(),
+                Some(BACKEND_IDENTITY_SUPPRESSED),
+                "tick at {now_secs} must stay settled, not relaunch",
+            );
+        }
+    }
+
+    #[test]
+    fn changing_the_configuration_revision_readmits_a_settled_failure() {
+        let config = curator_config();
+        let records = vec![settled_backend_failure(
+            &config,
+            PERMANENT_PROTOCOL_ERROR,
+            AgentTaskFailureClass::Permanent,
+            3,
+            2_000,
+            None,
+        )];
+        let now_secs = 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64;
+
+        // Same identity: still settled.
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                now_secs,
+            )
+            .skip_reason(),
+            Some(BACKEND_IDENTITY_SUPPRESSED),
+        );
+
+        // Any effective configuration change is a new revision, and the task
+        // is re-admitted on the next tick with no operator reset step.
+        let mut changed = curator_config();
+        changed.timeout_secs = curator_config().timeout_secs.saturating_add(1);
+        assert_ne!(
+            backend_identity(&changed).unwrap(),
+            backend_identity(&config).unwrap(),
+        );
+        assert!(
+            schedule_decision(
+                &changed,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                now_secs,
+            )
+            .is_due(),
+            "a changed configuration revision must re-admit the task",
+        );
+    }
+
+    #[test]
+    fn a_settled_failure_from_another_backend_identity_does_not_suppress() {
+        let config = curator_config();
+        let records = vec![settled_backend_failure(
+            &config,
+            PERMANENT_PROTOCOL_ERROR,
+            AgentTaskFailureClass::Permanent,
+            3,
+            2_000,
+            Some("sha256:some-other-backend-identity".to_owned()),
+        )];
+
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            )
+            .is_due(),
+        );
+    }
+
+    #[test]
+    fn an_unstamped_legacy_failure_keeps_the_ordinary_cooldown() {
+        let config = curator_config();
+        let mut record = settled_backend_failure(
+            &config,
+            DISCONNECT_ERROR,
+            AgentTaskFailureClass::Disconnected,
+            3,
+            2_000,
+            None,
+        );
+        record.backend_identity = None;
+        let records = vec![record];
+
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            )
+            .is_due(),
+            "a failure that cannot be attributed to this identity is not \
+evidence about it",
+        );
+    }
+
+    const PERMANENT_PROTOCOL_ERROR: &str =
+        "typed protocol contract violation: handshake rejected the turn";
+
+    #[test]
+    fn typed_permanent_protocol_failure_stays_suppressed_under_the_same_identity() {
+        let config = curator_config();
+        let records = vec![settled_backend_failure(
+            &config,
+            PERMANENT_PROTOCOL_ERROR,
+            AgentTaskFailureClass::Permanent,
+            3,
+            2_000,
+            None,
+        )];
+        for now_secs in [
+            2_001,
+            2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            2_000 + 86_400,
+        ] {
+            assert_eq!(
+                schedule_decision(
+                    &config,
+                    AgentTaskKind::MemoryCurator,
+                    &records,
+                    SessionActivity::none(),
+                    now_secs,
+                )
+                .skip_reason(),
+                Some(BACKEND_IDENTITY_SUPPRESSED),
+                "tick at {now_secs} must stay identity-suppressed",
+            );
+        }
+    }
+
+    #[test]
+    fn same_path_executable_replacement_readmits_a_permanent_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex-backend");
+        std::fs::write(&path, b"backend-revision-one").unwrap();
+        let _env = super::super::backend_identity::CodexBinEnvGuard::set(&path);
+        let config = curator_config();
+        let records = vec![settled_backend_failure(
+            &config,
+            PERMANENT_PROTOCOL_ERROR,
+            AgentTaskFailureClass::Permanent,
+            3,
+            2_000,
+            None,
+        )];
+        let now_secs = 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64;
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                now_secs,
+            )
+            .skip_reason(),
+            Some(BACKEND_IDENTITY_SUPPRESSED),
+        );
+        std::fs::write(&path, b"backend-revision-two-replaced").unwrap();
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                now_secs,
+            )
+            .is_due(),
+            "replacing the same-path executable must re-admit the task",
+        );
+    }
+
+    #[test]
+    fn a_transient_backend_failure_still_retries_after_its_cooldown() {
+        let config = curator_config();
+        for (error, classification) in [
+            (
+                "agent task timed out: timed out waiting for codex app-server",
+                AgentTaskFailureClass::Timeout,
+            ),
+            (
+                "backend temporarily unavailable, try again later",
+                AgentTaskFailureClass::Retryable,
+            ),
+            (
+                "codex executable was not found on PATH",
+                AgentTaskFailureClass::Unavailable,
+            ),
+            (
+                "provider denied the automation request",
+                AgentTaskFailureClass::Denied,
+            ),
+        ] {
+            let records = vec![settled_backend_failure(
+                &config,
+                error,
+                classification,
+                3,
+                2_000,
+                None,
+            )];
+
+            // Inside the cooldown the transient failure still backs off …
+            assert_eq!(
+                schedule_decision(
+                    &config,
+                    AgentTaskKind::MemoryCurator,
+                    &records,
+                    SessionActivity::none(),
+                    2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64 - 1,
+                )
+                .skip_reason(),
+                Some("scheduler_cooldown_active"),
+                "transient {classification:?} must keep the ordinary cooldown",
+            );
+            // … and once it elapses the task retries, exactly as before.
+            assert!(
+                schedule_decision(
+                    &config,
+                    AgentTaskKind::MemoryCurator,
+                    &records,
+                    SessionActivity::none(),
+                    2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+                )
+                .is_due(),
+                "transient {classification:?} must still retry",
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_that_recovered_mid_ladder_is_not_settled() {
+        let config = curator_config();
+        let mut record = settled_backend_failure(
+            &config,
+            DISCONNECT_ERROR,
+            AgentTaskFailureClass::Disconnected,
+            3,
+            2_000,
+            None,
+        );
+        // The ladder did not reproduce one class: the run is not settled
+        // evidence about a deterministic fault.
+        record.backend_attempts[1].failure_classification = Some(AgentTaskFailureClass::Timeout);
+        let records = vec![record];
+
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            )
+            .is_due(),
+        );
     }
 
     fn budget_exhausted_skip(

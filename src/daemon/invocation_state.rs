@@ -1,9 +1,8 @@
 //! `DaemonInvocationState`: daemon-generation-local state for the closed
 //! invocation protocol, shared by the Unix and portable brokers.
 //!
-//! `use super::*` re-exposes the daemon authorities needed by this state (including
-//! the `multi_root_family_allows` kill-switch call target) while request
-//! cancellation remains threaded through the invocation boundary explicitly.
+//! Request cancellation stays threaded through the invocation boundary
+//! explicitly, including the `multi_root_family_allows` kill-switch.
 
 use std::sync::Arc;
 
@@ -27,7 +26,7 @@ mod project_invocation;
 /// session remains daemon-owned across client connections until it is detached
 /// or expires.
 #[derive(Clone)]
-pub(super) struct DaemonInvocationState {
+pub(crate) struct DaemonInvocationState {
     pub(super) lsp_session_registry: Arc<tokio::sync::Mutex<LspSessionRegistry>>,
     pub(super) service: DaemonInvocationService,
     pub(super) github_credential_lifecycle:
@@ -77,6 +76,32 @@ impl Default for DaemonInvocationState {
 impl DaemonInvocationState {
     pub(super) fn invocation_service(&self) -> DaemonInvocationService {
         self.service.clone()
+    }
+
+    /// Mount the profile-owned background-worker plan before any projectless
+    /// session or host-admission work can start. The exact ProfileSessions
+    /// shard is the persisted user-profile authority; project configuration
+    /// must never win this process-wide installation by opening first.
+    pub(crate) async fn install_profile_worker_plan(
+        &self,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        profile_id: &tracedecay_domain::configuration::UserProfileId,
+    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
+        let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
+            database, profile_id,
+        )
+        .await?;
+        let resident_memory = self.code_index_schedulers.process_resident_memory();
+        let resident_snapshot = resident_memory.snapshot();
+        tracedecay_code_index::parallelism::install_worker_plan(
+            configured,
+            resident_snapshot
+                .limit_bytes
+                .saturating_sub(resident_snapshot.used_bytes),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("code-index worker plan refused: {error}"),
+        })
     }
 
     pub(super) async fn retire_remote_deleted_project(
@@ -356,9 +381,9 @@ impl DaemonInvocationState {
                 message: "semantic vector graph provider could not be installed in the mounted code-index authority".to_owned(),
             });
         }
-        // Canonical Plan 26 observability lane. The deferred code-index mount
-        // runs after the project-open delivery mount that owns the producer;
-        // an absent producer leaves the lane uninstalled and nothing records.
+        // The deferred code-index mount runs after the project-open delivery
+        // mount that owns the producer; an absent producer leaves the
+        // observability lane uninstalled and nothing records.
         match self
             .service
             .observability_producer_with_database(Some(&canonical_project_root))
@@ -434,6 +459,11 @@ impl DaemonInvocationState {
                 );
             }
         };
+        // Parse and family-validate the operation once for the whole scope
+        // set; per-root execution reuses the typed value instead of
+        // re-deserializing the identical operation JSON for every root. A
+        // failure stays per-root below, exactly as when each root parsed it.
+        let parsed_operation = parse_multi_root_operation(&request.operation);
         let Ok(query_digest) = tracedecay_domain::canonical_sha256(&(
             "tracedecay.daemon.multi-root-query.v1",
             &operation_value,
@@ -499,8 +529,10 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
-            let Some(request_lease) = self.service.admit_project_request(&locator.canonical_root)
-            else {
+            let Some(request_lease) = self.service.admit_project_request_resolved(
+                &locator.canonical_root,
+                Some(&locator.canonical_root),
+            ) else {
                 let Ok(generation) = unavailable_root_generation(
                     scope,
                     tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
@@ -605,20 +637,24 @@ impl DaemonInvocationState {
                     service::invocation::DaemonInvocationProblem::InvalidRequest,
                 );
             };
-            let value = self
-                .execute_one_multi_root_operation(
-                    store_administration,
-                    &root,
-                    scope,
-                    ordinal,
-                    &request.operation,
-                    observed_at,
-                    deadline.clone(),
-                    cancellation.clone(),
-                    request_lease,
-                    request_cancellation.clone(),
-                )
-                .await;
+            let value = match parsed_operation.as_ref() {
+                Ok(parsed) => {
+                    self.execute_one_multi_root_operation(
+                        store_administration,
+                        &root,
+                        scope,
+                        ordinal,
+                        parsed,
+                        observed_at,
+                        deadline.clone(),
+                        cancellation.clone(),
+                        request_lease,
+                        request_cancellation.clone(),
+                    )
+                    .await
+                }
+                Err(problem) => Err(*problem),
+            };
             if request_cancellation
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
@@ -735,7 +771,7 @@ impl DaemonInvocationState {
         root: &Path,
         scope: &tracedecay_application::ResolvedScope,
         ordinal: usize,
-        operation: &tracedecay_application::MultiRootOperationV1,
+        operation: &ParsedMultiRootOperationV1,
         observed_at: tracedecay_domain::UtcMicros,
         deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationContext,
@@ -743,17 +779,7 @@ impl DaemonInvocationState {
         request_cancellation: Option<CancellationToken>,
     ) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
         match operation {
-            tracedecay_application::MultiRootOperationV1::Work { request } => {
-                let request = serde_json::from_value::<
-                    service::invocation::WorkApplicationInvocationV1,
-                >(request.clone())
-                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
-                if !matches!(
-                    request,
-                    service::invocation::WorkApplicationInvocationV1::Views(_)
-                ) {
-                    return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
-                }
+            ParsedMultiRootOperationV1::Work(request) => {
                 let control_cancellation = tracedecay_application::CancellationSignal::active(
                     cancellation.token_id.as_str(),
                 )
@@ -770,7 +796,7 @@ impl DaemonInvocationState {
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
-                        request,
+                        request.as_ref().clone(),
                         observed_at,
                         deadline.clone(),
                         cancellation,
@@ -795,15 +821,7 @@ impl DaemonInvocationState {
                 }
                 extract_work_application_payload(&outcome)
             }
-            tracedecay_application::MultiRootOperationV1::Git { request }
-            | tracedecay_application::MultiRootOperationV1::Feedback { request }
-            | tracedecay_application::MultiRootOperationV1::Impact { request }
-            | tracedecay_application::MultiRootOperationV1::Query { request } => {
-                let wire = serde_json::from_value::<FederatedSurfaceRequestV1>(request.clone())
-                    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
-                if !multi_root_family_allows(operation, wire.operation) {
-                    return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
-                }
+            ParsedMultiRootOperationV1::Surface { operation, request } => {
                 crate::application_surface::invoke_multi_root_surface_request(
                     Arc::new(InProcessDaemonInvocationExecutor::with_project_admission(
                         self.clone(),
@@ -813,7 +831,7 @@ impl DaemonInvocationState {
                         project_admission,
                         request_cancellation,
                     )),
-                    wire.operation,
+                    *operation,
                     tracedecay_application::RequestId::new(format!(
                         "request.multi-root.surface.{ordinal}"
                     ))
@@ -826,7 +844,7 @@ impl DaemonInvocationState {
                         cancellation.token_id.as_str(),
                     )
                     .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
-                    wire.request,
+                    request.clone(),
                 )
                 .await
                 .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)
@@ -840,6 +858,54 @@ impl DaemonInvocationState {
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await
+    }
+}
+
+/// One multi-root operation parsed and family-validated once per request.
+/// Per-root execution clones the typed value instead of re-deserializing the
+/// identical operation JSON for every admitted root.
+pub(super) enum ParsedMultiRootOperationV1 {
+    /// Boxed: the work invocation is ~1KiB against a ~33-byte sibling, and one
+    /// of these is cloned per admitted root.
+    Work(Box<service::invocation::WorkApplicationInvocationV1>),
+    Surface {
+        operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: Value,
+    },
+}
+
+fn parse_multi_root_operation(
+    operation: &tracedecay_application::MultiRootOperationV1,
+) -> std::result::Result<ParsedMultiRootOperationV1, service::invocation::DaemonInvocationProblem> {
+    match operation {
+        tracedecay_application::MultiRootOperationV1::Work { request } => {
+            let request =
+                serde_json::from_value::<service::invocation::WorkApplicationInvocationV1>(
+                    request.clone(),
+                )
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !matches!(
+                request,
+                service::invocation::WorkApplicationInvocationV1::Views(_)
+            ) {
+                return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+            }
+            Ok(ParsedMultiRootOperationV1::Work(Box::new(request)))
+        }
+        tracedecay_application::MultiRootOperationV1::Git { request }
+        | tracedecay_application::MultiRootOperationV1::Feedback { request }
+        | tracedecay_application::MultiRootOperationV1::Impact { request }
+        | tracedecay_application::MultiRootOperationV1::Query { request } => {
+            let wire = serde_json::from_value::<FederatedSurfaceRequestV1>(request.clone())
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !multi_root_family_allows(operation, wire.operation) {
+                return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+            }
+            Ok(ParsedMultiRootOperationV1::Surface {
+                operation: wire.operation,
+                request: wire.request,
+            })
+        }
     }
 }
 
@@ -873,17 +939,12 @@ mod resident_memory_tests {
     fn invocation_state_and_code_index_registry_share_one_process_resident_authority() {
         let state = DaemonInvocationState::default();
         let cloned = state.clone();
+        let state_memory = state.code_index_schedulers.process_resident_memory();
+        let cloned_memory = cloned.code_index_schedulers.process_resident_memory();
 
-        assert!(Arc::ptr_eq(
-            state.code_index_schedulers.resident_memory(),
-            cloned.code_index_schedulers.resident_memory(),
-        ));
+        assert!(Arc::ptr_eq(&state_memory, &cloned_memory));
         assert_eq!(
-            state
-                .code_index_schedulers
-                .resident_memory()
-                .snapshot()
-                .limit_bytes,
+            state_memory.snapshot().limit_bytes,
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
                 .get(),
         );

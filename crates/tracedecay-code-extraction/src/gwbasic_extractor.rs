@@ -52,12 +52,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -74,10 +79,7 @@ impl ExtractionState {
 }
 
 impl GwBasicExtractor {
-    /// Extract code graph nodes and edges from a GW-BASIC source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the BASIC source code to parse.
     pub fn extract_gwbasic(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -106,7 +108,6 @@ impl GwBasicExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -136,7 +137,6 @@ impl GwBasicExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Collect the selected program lines before synthesizing declarations.
         let mut selected_lines = Vec::new();
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             if child.kind() == "line" {
@@ -178,7 +178,6 @@ impl GwBasicExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Collect the program lines selected by the parsed extraction scope.
     fn collect_selected_lines<'tree>(
         state: &ExtractionState,
         tree: &'tree Tree,
@@ -440,12 +439,9 @@ impl GwBasicExtractor {
                         body_end += 1;
                         break;
                     }
-                    // Also check for inline RETURN in IF statements
-                    // (e.g. `1010 IF ... THEN PRINT "ERROR": RETURN`)
-                    if Self::line_has_return(lines[body_end].node) {
-                        // Keep going — the inline RETURN doesn't end the subroutine
-                        // unless it's the last statement before the next REM block.
-                    }
+                    // An inline RETURN in an IF statement (e.g. `1010 IF ...
+                    // THEN PRINT "ERROR": RETURN`) does not end the subroutine;
+                    // only a standalone return_statement line does.
                     // Stop at the next REM block (which would be the start of another subroutine).
                     if lines[body_end].statement_kind == "comment" {
                         break;
@@ -532,7 +528,6 @@ impl GwBasicExtractor {
                         });
                     }
 
-                    // Extract GOSUB/GOTO call sites from the body.
                     for line in &lines[body_start..body_end] {
                         Self::extract_calls_from_line(state, line, &fn_id);
                     }
@@ -575,26 +570,6 @@ impl GwBasicExtractor {
         }
     }
 
-    /// Check if a line node contains a `return_statement` anywhere in its AST.
-    fn line_has_return(node: TsNode<'_>) -> bool {
-        if node.kind() == "return_statement" {
-            return true;
-        }
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if Self::line_has_return(child) {
-                    return true;
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        false
-    }
-
     /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
     fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
         let file_node_id = state
@@ -621,7 +596,6 @@ impl GwBasicExtractor {
         let kind = node.kind();
         match kind {
             "gosub_statement" | "goto_statement" => {
-                // Extract the target line number.
                 if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {

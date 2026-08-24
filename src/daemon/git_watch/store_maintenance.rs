@@ -8,11 +8,11 @@
 //! maintenance owner.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
 
 use super::branch_admin::StoreAdministration;
@@ -127,16 +127,6 @@ pub(super) async fn run_gc(
     true
 }
 
-/// Current unix time in whole seconds, as the `i64` the retention engines
-/// compare row timestamps against.
-fn now_secs_i64() -> Result<i64, &'static str> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system_clock_before_unix_epoch")?
-        .as_secs();
-    i64::try_from(seconds).map_err(|_| "system_clock_out_of_range")
-}
-
 /// Advance one bounded project-wide semantic-vector retention page.
 ///
 /// The maintenance observation registry carries the stage cursor across ticks.
@@ -148,11 +138,11 @@ pub(super) async fn run_semantic_vector_generation_retention(
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_usecases::context::CancellationToken,
-) -> bool {
+) -> crate::daemon::maintenance::MaintenanceTickOutcome {
     if cancellation.is_cancelled() {
         observations.record_semantic_vector_retention_failure(graph.project_root());
         log_semantic_vector_retention_degraded("retention_cancelled");
-        return false;
+        return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
     }
     let root = graph.project_root();
     let Some(configuration) = graph
@@ -170,23 +160,23 @@ pub(super) async fn run_semantic_vector_generation_retention(
             Ok(runtime_configuration)
                 if semantic_retrieval_profiles_disabled(&runtime_configuration.config.semantic) =>
             {
-                // Plan 20 default off: no committed active or rollback
-                // retrieval profile, so no census will ever complete. Pin the
-                // typed unseated read for the code-generation pass and
-                // succeed quietly instead of resetting to Unknown and
-                // re-logging a degraded retry loop every tick.
+                // Default off: no committed active or rollback retrieval
+                // profile, so no census will ever complete. Pin the typed
+                // unseated read for the code-generation pass and succeed
+                // quietly instead of resetting to Unknown and re-logging a
+                // degraded retry loop every tick.
                 observations.record_semantic_vector_retention_unseated(root);
-                true
+                crate::daemon::maintenance::MaintenanceTickOutcome::Complete
             }
             Ok(_) => {
                 observations.record_semantic_vector_retention_failure(root);
                 log_semantic_vector_retention_degraded("configuration_inventory_unavailable");
-                false
+                crate::daemon::maintenance::MaintenanceTickOutcome::Retry
             }
             Err(_) => {
                 observations.record_semantic_vector_retention_failure(root);
                 log_semantic_vector_retention_degraded("runtime_configuration_unavailable");
-                false
+                crate::daemon::maintenance::MaintenanceTickOutcome::Retry
             }
         };
     };
@@ -211,7 +201,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
                 );
             if !observations.record_semantic_vector_retention_census(root, &census) {
                 log_semantic_vector_retention_degraded("census_count_overflow");
-                return false;
+                return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
             }
             if !matches!(
                 census.action,
@@ -225,46 +215,49 @@ pub(super) async fn run_semantic_vector_generation_retention(
                     ],
                 );
             }
-            // A bounded page/action deliberately requests the short retry
-            // cadence until a post-mutation census reaches its end.
-            !convergence_pending
+            if convergence_pending {
+                crate::daemon::maintenance::MaintenanceTickOutcome::Continue(
+                    crate::daemon::maintenance::MaintenanceContinuation::SemanticVectorRetention,
+                )
+            } else {
+                crate::daemon::maintenance::MaintenanceTickOutcome::Complete
+            }
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::ResetRequired(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("reset_required:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Corrupt(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("corrupt:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Unavailable(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("unavailable:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Denied(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("denied:{reason}"));
-            false
+            crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
     }
 }
 
-/// Plan 20 default-off: semantic retrieval is genuinely disabled only when
-/// the durable configuration commits neither an active nor a rollback
-/// retrieval profile. A committed profile with an unseated activation
-/// coordinator is a transient (or genuinely degraded) state that must stay
-/// retryable, not a quiet pin.
+/// Semantic retrieval is genuinely disabled only when the durable
+/// configuration commits neither an active nor a rollback retrieval profile.
+/// A committed profile with an unseated activation coordinator is a transient
+/// (or genuinely degraded) state that must stay retryable, not a quiet pin.
 fn semantic_retrieval_profiles_disabled(semantic: &crate::config::SemanticConfig) -> bool {
     semantic.active_profile.is_none() && semantic.rollback_profile.is_none()
 }
@@ -1788,7 +1781,7 @@ impl RetainedCompactionStore<'_> {
 
 /// Samples the store's free-page ratio and, when the owner-configured threshold
 /// is met, schedules a bounded incremental vacuum in the deferred background
-/// lane (Plan 38 §6). The placement is structurally forbidden from competing
+/// lane. The placement is structurally forbidden from competing
 /// with foreground writes; the page cap keeps the reclaim off the hot path.
 async fn run_compaction(
     store: RetainedCompactionStore<'_>,

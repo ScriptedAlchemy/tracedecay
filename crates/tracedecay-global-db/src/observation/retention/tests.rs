@@ -400,7 +400,7 @@ async fn superseded_and_deleted_dispositions_release_storage() -> Result<(), Str
 }
 
 // Active and unavailable dispositions retain their storage even when old: live
-// and source-unavailable evidence is never released (plan 38 non-goal).
+// and source-unavailable evidence is never released.
 #[tokio::test]
 async fn active_and_unavailable_dispositions_retain_storage() -> Result<(), String> {
     for state in ["active", "unavailable"] {

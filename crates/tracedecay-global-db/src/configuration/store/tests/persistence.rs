@@ -5,20 +5,24 @@ use super::super::mutation::{
 };
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
-    ConfigurationStoreError, CredentialWritePort, params,
+    ConfigurationRevisionStore, ConfigurationStoreError, CredentialWritePort, Executor,
+    QueryExecutor, params,
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
     GlobalDbConfigurationControlStore, HostAdmissionScope, TestConnection, TransactionBehavior,
-    UtcMicros, WriteOnlyCredentialMutation, control_authority, count, direct_project_layer,
-    global_setup, id, protected_commit, root_revision, seed_revision, setup,
+    UtcMicros, WriteOnlyCredentialMutation, control_authority,
+    control_authority_with_key_for_layer, count, direct_project_layer, global_setup, id,
+    protected_commit, root_revision, seed_revision, setup,
 };
 use crate::configuration::contracts::DirectConfigurationMutation;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::configuration::{
+    CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationOperationV1, CredentialKindV1, SettingKey,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -67,6 +71,107 @@ async fn canonical_initialization_publishes_one_final_revision_without_legacy_st
     assert_eq!(
         legacy.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile_root = directory.path().join("profile");
+    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let profile_id = db.binding().shard_id.profile_id.clone();
+    let store =
+        super::super::ProfileCodeIndexWorkerConfigurationStore::new_registered(db, &profile_id)
+            .unwrap();
+
+    let initialized = store.read_or_initialize(UtcMicros(1)).await.unwrap();
+    assert_eq!(initialized.selection, CodeIndexWorkerSelectionV1::Automatic);
+    let authority = control_authority_with_key_for_layer(
+        ConfigurationMutationOperationV1::DirectMutation,
+        &initialized.revision_id,
+        Some(
+            ConfigurationIdempotencyKey::new(
+                "configuration.idempotency.profile-worker-exact".to_owned(),
+            )
+            .unwrap(),
+        ),
+        ConfigurationLayerIdV1::UserProfile {
+            profile_id: profile_id.clone(),
+        },
+    );
+    let committed = store
+        .commit_selection(
+            &authority,
+            CodeIndexWorkerSelectionV1::Exact { workers: 8 },
+            &initialized.revision_id,
+        )
+        .await
+        .unwrap();
+    assert_ne!(committed.current.revision_id, initialized.revision_id);
+    assert_eq!(
+        committed.current.selection,
+        CodeIndexWorkerSelectionV1::Exact { workers: 8 }
+    );
+    let restarted = store.read_or_initialize(UtcMicros(2)).await.unwrap();
+    assert_eq!(restarted, committed.current);
+    assert!(matches!(
+        store
+            .commit_selection(
+                &authority,
+                CodeIndexWorkerSelectionV1::Automatic,
+                &initialized.revision_id,
+            )
+            .await,
+        Err(ConfigurationError::IdempotencyConflict | ConfigurationError::RevisionConflict)
+    ));
+
+    let worker_key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).unwrap();
+    assert!(
+        ConfigurationRegistry::core()
+            .unwrap()
+            .definition(&worker_key)
+            .is_err()
+    );
+    assert!(
+        ConfigurationRegistry::profile_code_index_workers()
+            .unwrap()
+            .definition(&worker_key)
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn project_revision_store_rejects_profile_worker_snapshot() {
+    let (_directory, runtime, root) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    let profile_registry = ConfigurationRegistry::profile_code_index_workers().unwrap();
+    let profile_snapshot = resolve_configuration(&profile_registry, &[])
+        .unwrap()
+        .snapshot;
+    let (plan, mut commit) = protected_commit(&root);
+    commit.next_revision.snapshot = profile_snapshot;
+
+    ConfigurationRevisionStore::save_change_plan(&store, &plan)
+        .await
+        .unwrap();
+    let result = ConfigurationRevisionStore::commit(&store, commit).await;
+    assert!(matches!(
+        result,
+        Err(ConfigurationStoreError::InvalidData(_))
+    ));
+    assert_eq!(
+        ConfigurationRevisionStore::current_revision(&store)
+            .await
+            .unwrap(),
+        root
     );
 }
 

@@ -245,8 +245,7 @@ pub(super) async fn handle_diagnose(
     }
 
     // Populate the durable managed-diagnostics store so the LSP Problems
-    // projection and every diagnostic read surface see these findings. Before
-    // this, nothing in production ever wrote a diagnostic record.
+    // projection and every diagnostic read surface see these findings.
     let publication =
         publish_parsed_compiler_diagnostics(cg, code_index_identity, &diagnostics).await;
 

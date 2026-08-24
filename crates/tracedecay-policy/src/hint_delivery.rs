@@ -36,6 +36,8 @@ pub const fn decide_hint_delivery(input: HintDeliveryInputV1) -> HintDeliveryDec
         || input.triggers_after_delivery.saturating_add(1) < input.escalation_threshold
     {
         HintDeliveryDecisionV1::SuppressDuplicate
+    } else if input.delivered_in_session >= input.session_limit {
+        HintDeliveryDecisionV1::SuppressBudget
     } else {
         HintDeliveryDecisionV1::DeliverEscalation
     }
@@ -68,6 +70,17 @@ mod tests {
                 escalation_threshold: 3,
             }),
             HintDeliveryDecisionV1::DeliverEscalation
+        );
+        assert_eq!(
+            decide_hint_delivery(HintDeliveryInputV1 {
+                category_was_delivered: true,
+                escalation_was_delivered: false,
+                triggers_after_delivery: 2,
+                delivered_in_session: 3,
+                session_limit: 3,
+                escalation_threshold: 3,
+            }),
+            HintDeliveryDecisionV1::SuppressBudget
         );
     }
 }

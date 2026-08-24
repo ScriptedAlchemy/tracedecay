@@ -10,6 +10,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [dependencies]
 axum = "0.8"
 clru = "0.6"
+hotpath.workspace = true
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,6 +37,55 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-agent-hosts/hotpath",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
 default = []
 # Mirrors the root crate's features; the root forwards its own selections here.
 token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting"]

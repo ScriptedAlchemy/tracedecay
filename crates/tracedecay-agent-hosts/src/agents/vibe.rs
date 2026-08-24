@@ -24,20 +24,12 @@ use crate::errors::Result;
 
 use super::{AgentIntegration, DoctorCounters, HealthcheckContext};
 
-/// Mistral Vibe agent.
 pub struct VibeIntegration;
 
-/// Returns the Vibe home directory.
 /// Respects `VIBE_HOME` only when it falls under `home` (so tests with
 /// temp-dir homes are not polluted by the real user's environment).
 fn vibe_home(home: &Path) -> std::path::PathBuf {
-    if let Ok(vibe) = std::env::var("VIBE_HOME") {
-        let vibe_path = std::path::PathBuf::from(&vibe);
-        if vibe_path.starts_with(home) {
-            return vibe_path;
-        }
-    }
-    home.join(".vibe")
+    super::host_home_override(home, "VIBE_HOME", ".vibe")
 }
 
 fn vibe_config_path(home: &Path) -> std::path::PathBuf {
@@ -179,17 +171,10 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
 }
 
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
-    let prompt_path = vibe_prompt_path(home);
-    if prompt_path.exists() {
-        let has_rules = std::fs::read_to_string(&prompt_path)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass("Vibe prompt contains tracedecay rules");
-        } else {
-            dc.fail("Vibe prompt missing tracedecay rules — run `tracedecay install --agent vibe`");
-        }
-    } else {
-        dc.warn("Vibe prompt does not exist");
-    }
+    super::doctor_check_prompt_contains_tracedecay(
+        dc,
+        &vibe_prompt_path(home),
+        "Vibe prompt",
+        "vibe",
+    );
 }

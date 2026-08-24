@@ -47,12 +47,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -69,10 +74,7 @@ impl ExtractionState {
 }
 
 impl GoExtractor {
-    /// Extract code graph nodes and edges from a Go source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Go source code to parse.
     pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -101,7 +103,6 @@ impl GoExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -156,7 +157,6 @@ impl GoExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package_clause" => Self::visit_package(state, node),
@@ -166,10 +166,8 @@ impl GoExtractor {
             "type_declaration" => Self::visit_type_declaration(state, node),
             "const_declaration" => Self::visit_const_declaration(state, node),
             "var_declaration" => Self::visit_var_declaration(state, node),
-            _ => {
-                // For other node types, recurse into children to find nested items.
-                // But skip comment nodes at top level (they are picked up as docstrings).
-            }
+            // Comments are picked up as docstrings by the definitions they precede.
+            _ => {}
         }
     }
 
@@ -370,10 +368,8 @@ impl GoExtractor {
             });
         }
 
-        // Extract generic type parameters.
         Self::extract_type_params(state, node, &id);
 
-        // Extract call sites from the function body.
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -432,10 +428,8 @@ impl GoExtractor {
             });
         }
 
-        // Extract receiver type and create a Receives edge.
         Self::extract_receiver(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -532,7 +526,6 @@ impl GoExtractor {
             });
         }
 
-        // Extract fields from the struct.
         state.node_stack.push((name.to_string(), id.clone()));
         Self::extract_struct_fields(state, struct_type);
         state.node_stack.pop();
@@ -1000,10 +993,6 @@ impl GoExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the receiver type from a `method_declaration` and create a Receives edge.
     fn extract_receiver(state: &mut ExtractionState, node: TsNode<'_>, method_id: &str) {

@@ -207,6 +207,7 @@ pub fn verified_embedded_host_component_set(
     )
 }
 
+#[hotpath::measure(label = "host_bundle_registry_component_set")]
 pub fn verified_embedded_host_component_set_with_tracedecay_bin(
     host: HostKindV1,
     requested_components: &[HostBundleComponentV1],
@@ -272,6 +273,7 @@ pub fn verified_embedded_host_bundle(
     verified_embedded_host_bundle_with_tracedecay_bin(host, component, now_unix, &tracedecay_bin)
 }
 
+#[hotpath::measure(label = "host_bundle_registry_verify")]
 fn verified_embedded_host_bundle_with_tracedecay_bin(
     host: HostKindV1,
     component: HostBundleComponentV1,
@@ -538,7 +540,7 @@ fn component_assets(
                 super::plugin_bundle::stamp_manifest_version(body)
                     .map_err(|_| HostBundleRegistryError::Incompatible)?
             } else {
-                render_compiled_asset(body, tracedecay_bin)
+                render_compiled_asset(body, tracedecay_bin)?
             };
             rendered.push((format!("{prefix}/{path}"), contents.into_bytes()));
         }
@@ -617,27 +619,39 @@ fn component_assets(
         ),
         _ => return Err(HostBundleRegistryError::Incompatible),
     };
-    Ok(files
+    files
         .into_iter()
         .map(|(path, body)| {
-            (
-                format!("{prefix}/{path}"),
-                render_compiled_asset(body, tracedecay_bin).into_bytes(),
-            )
+            render_compiled_asset(body, tracedecay_bin)
+                .map(|rendered| (format!("{prefix}/{path}"), rendered.into_bytes()))
         })
-        .collect())
+        .collect()
 }
 
-fn render_compiled_asset(body: &str, tracedecay_bin: &str) -> String {
+fn render_compiled_asset(
+    body: &str,
+    tracedecay_bin: &str,
+) -> Result<String, HostBundleRegistryError> {
     let encoded =
-        serde_json::to_string(tracedecay_bin).unwrap_or_else(|_| "\"tracedecay\"".to_string());
-    let sync = serde_json::to_string(&super::hook_command(tracedecay_bin, "hook-kimi-event"))
-        .unwrap_or_else(|_| encoded.clone());
-    let stop = serde_json::to_string(&super::hook_command(tracedecay_bin, "hook-kimi-event"))
-        .unwrap_or_else(|_| encoded.clone());
-    body.replace("\"__TRACEDECAY_BIN__\"", &encoded)
-        .replace("\"__TRACEDECAY_SYNC__\"", &sync)
-        .replace("\"__TRACEDECAY_STOP__\"", &stop)
+        serde_json::to_string(tracedecay_bin).map_err(|_| HostBundleRegistryError::Incompatible)?;
+    let hook = serde_json::to_string(&super::hook_command(tracedecay_bin, "hook-kimi-event"))
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
+    let rendered = body
+        .replace(
+            &format!("\"{}\"", super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER),
+            &encoded,
+        )
+        .replace(
+            &format!("\"{}\"", super::plugin_bundle::TRACEDECAY_SYNC_PLACEHOLDER),
+            &hook,
+        )
+        .replace(
+            &format!("\"{}\"", super::plugin_bundle::TRACEDECAY_STOP_PLACEHOLDER),
+            &hook,
+        );
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "compiled host-bundle asset")
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
+    Ok(rendered)
 }
 
 fn component_name(component: HostBundleComponentV1) -> &'static str {
@@ -768,9 +782,9 @@ mod tests {
         for content in bundle.contents {
             let body = String::from_utf8(content.bytes).unwrap();
             for placeholder in [
-                "__TRACEDECAY_BIN__",
-                "__TRACEDECAY_SYNC__",
-                "__TRACEDECAY_STOP__",
+                super::super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER,
+                super::super::plugin_bundle::TRACEDECAY_SYNC_PLACEHOLDER,
+                super::super::plugin_bundle::TRACEDECAY_STOP_PLACEHOLDER,
             ] {
                 assert!(
                     !body.contains(placeholder),
@@ -1313,7 +1327,6 @@ mod tests {
 
     #[test]
     fn every_host_with_a_default_set_is_reported_supported() {
-        assert_eq!(RECEIPT_BACKED_HOST_KINDS.len(), 12);
         for host in HostKindV1::ALL {
             assert_eq!(
                 default_components(host).is_empty(),

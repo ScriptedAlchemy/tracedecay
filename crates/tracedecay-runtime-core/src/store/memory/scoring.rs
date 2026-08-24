@@ -1,6 +1,7 @@
 //! Canonical project-memory scoring primitives.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError};
 
@@ -71,13 +72,28 @@ pub(super) fn project_memory_jaccard(left: &[String], right: &[String]) -> f64 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
-    let left = left.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let right = right.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let union = left.union(&right).count();
+    // Callers pass the sorted unique slices from `project_memory_tokens` /
+    // `project_memory_fact_tokens`, so a two-pointer walk is exact Jaccard
+    // without building sets.
+    let mut left_index = 0;
+    let mut right_index = 0;
+    let mut intersection = 0usize;
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].as_str().cmp(right[right_index].as_str()) {
+            Ordering::Less => left_index += 1,
+            Ordering::Greater => right_index += 1,
+            Ordering::Equal => {
+                intersection += 1;
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+    let union = left.len() + right.len() - intersection;
     if union == 0 {
         0.0
     } else {
-        left.intersection(&right).count() as f64 / union as f64
+        intersection as f64 / union as f64
     }
 }
 

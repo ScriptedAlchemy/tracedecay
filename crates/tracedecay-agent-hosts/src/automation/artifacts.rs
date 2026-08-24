@@ -88,7 +88,7 @@ pub(crate) async fn write_improvement_artifacts(
             "response": response,
             "record": record,
             "outcomes": outcomes,
-        })),
+        }))?,
     });
     if let Some(artifacts) =
         read_published_artifact_chain(dashboard_root, run_id, Some(&publication_identity)).await?
@@ -206,6 +206,7 @@ mod tests {
             task: AgentTaskKind::SkillWriter,
             task_key: Some("skill_writer".to_string()),
             backend: "test".to_string(),
+            backend_identity: None,
             host_mode: None,
             prompt_version: None,
             response_schema: None,

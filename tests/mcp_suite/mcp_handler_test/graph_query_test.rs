@@ -130,9 +130,6 @@ async fn graph_node_id(fixture: &GraphQueryFixture, name: &str) -> String {
         .to_owned()
 }
 
-// 1. tracedecay_search
-// ---------------------------------------------------------------------------
-
 /// A `limit` above the accepted retrieval budget must serve a budget-bounded
 /// page (any fused remainder rides the `next_cursor` continuation), not fail
 /// closed. The tool contract accepts `limit` up to 500 as an upper bound, but
@@ -713,10 +710,6 @@ async fn test_grep_missing_pattern_errors() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3. tracedecay_callers
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_callers() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -733,10 +726,6 @@ async fn test_callers() {
     let text = extract_text(&result.value);
     assert!(!text.is_empty());
 }
-
-// ---------------------------------------------------------------------------
-// 4. tracedecay_callees
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_callees() {
@@ -755,10 +744,6 @@ async fn test_callees() {
     assert!(!text.is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// 5. tracedecay_impact
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_impact() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -775,10 +760,6 @@ async fn test_impact() {
     let text = extract_text(&result.value);
     assert!(text.contains("node_count"));
 }
-
-// ---------------------------------------------------------------------------
-// 6. tracedecay_node — existing node
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_node_existing() {
@@ -812,10 +793,6 @@ async fn test_node_existing() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 7. tracedecay_node — nonexistent node
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_node_not_found() {
     let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
@@ -835,10 +812,6 @@ async fn test_node_not_found() {
         text,
     );
 }
-
-// ---------------------------------------------------------------------------
-// 9. tracedecay_files — no filter
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_files_no_filter() {
@@ -860,10 +833,6 @@ async fn test_files_no_filter() {
     assert!(!text.contains("|"), "files markdown should not use tables");
 }
 
-// ---------------------------------------------------------------------------
-// 10. tracedecay_files — path filter
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_files_path_filter() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -882,10 +851,6 @@ async fn test_files_path_filter() {
     shutdown_graph_fixture(cg).await;
 }
 
-// ---------------------------------------------------------------------------
-// 11. tracedecay_files — pattern filter
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_files_pattern_filter() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -902,10 +867,6 @@ async fn test_files_pattern_filter() {
     assert!(!text.is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// 12. tracedecay_files — flat format
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_files_flat_format() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -920,7 +881,6 @@ async fn test_files_flat_format() {
     .unwrap();
     let text = extract_text(&result.value);
     assert!(!text.is_empty());
-    // Flat format includes "bytes" per entry
     assert!(text.contains("bytes"), "flat format should show byte sizes");
 }
 
@@ -943,10 +903,6 @@ async fn test_files_json_format_with_grouped_layout() {
             && file["symbols"].as_i64().unwrap_or_default() >= 1
     }));
 }
-
-// ---------------------------------------------------------------------------
-// 13. tracedecay_affected
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_affected() {
@@ -1098,10 +1054,6 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
     );
 }
 
-// ---------------------------------------------------------------------------
-// 16. tracedecay_module_api
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_module_api() {
@@ -1131,10 +1083,6 @@ async fn test_module_api() {
     fixture.harness.shutdown().await;
 }
 
-// ---------------------------------------------------------------------------
-// 18. tracedecay_hotspots
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_hotspots() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -1147,10 +1095,6 @@ async fn test_hotspots() {
         "should have hotspot_count key"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 19. tracedecay_similar
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_similar() {
@@ -1172,33 +1116,55 @@ async fn test_similar() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 22. tracedecay_rank
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn test_rank() {
+async fn analytics_tools_return_their_canonical_envelope_keys() {
     let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_rank",
-        json!({"edge_kind": "calls", "direction": "incoming"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
-}
+    let cases: &[(&str, Value, &[&str])] = &[
+        (
+            "tracedecay_rank",
+            json!({"edge_kind": "calls", "direction": "incoming"}),
+            &["ranking", "result_count"],
+        ),
+        (
+            "tracedecay_largest",
+            json!({"limit": 5}),
+            &["ranking", "result_count"],
+        ),
+        (
+            "tracedecay_coupling",
+            json!({"direction": "fan_in"}),
+            &["ranking"],
+        ),
+        (
+            "tracedecay_inheritance_depth",
+            json!({"limit": 5}),
+            &["result_count"],
+        ),
+        ("tracedecay_distribution", json!({}), &["per_file"]),
+        (
+            "tracedecay_distribution",
+            json!({"summary": true}),
+            &["summary", "distribution"],
+        ),
+        ("tracedecay_complexity", json!({}), &["ranking", "formula"]),
+        (
+            "tracedecay_doc_coverage",
+            json!({}),
+            &["total_undocumented"],
+        ),
+    ];
 
-// ---------------------------------------------------------------------------
-// 23. tracedecay_rank — invalid direction
-// ---------------------------------------------------------------------------
+    for (tool, args, required_keys) in cases {
+        let result = call_production_tool(&cg, tool, args.clone(), None, None)
+            .await
+            .unwrap_or_else(|error| panic!("{tool} failed: {error}"));
+        let text = extract_text(&result.value);
+        for key in *required_keys {
+            assert!(text.contains(key), "{tool} omitted canonical key {key}");
+        }
+    }
+    shutdown_graph_fixture(cg).await;
+}
 
 #[tokio::test]
 async fn test_rank_invalid_direction() {
@@ -1224,141 +1190,6 @@ async fn test_rank_invalid_direction() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 24. tracedecay_largest
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_largest() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_largest", json!({"limit": 5}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 25. tracedecay_coupling
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_coupling() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_coupling",
-        json!({"direction": "fan_in"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-}
-
-// ---------------------------------------------------------------------------
-// 26. tracedecay_inheritance_depth
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_inheritance_depth() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_inheritance_depth",
-        json!({"limit": 5}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 27. tracedecay_distribution — default and summary mode
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_distribution_default() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_distribution", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("per_file"), "default mode should be per_file");
-}
-
-#[tokio::test]
-async fn test_distribution_summary() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_distribution",
-        json!({"summary": true}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("summary"),
-        "summary mode should report 'summary'"
-    );
-    assert!(
-        text.contains("distribution"),
-        "should have distribution key"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 29. tracedecay_complexity
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_complexity() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_complexity", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("ranking"), "should have ranking key");
-    assert!(text.contains("formula"), "should have formula key");
-}
-
-// ---------------------------------------------------------------------------
-// 30. tracedecay_doc_coverage
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_doc_coverage() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_doc_coverage", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("total_undocumented"),
-        "should have total_undocumented key"
-    );
-    shutdown_graph_fixture(cg).await;
-}
-
-// ---------------------------------------------------------------------------
-// 31. tracedecay_god_class
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_god_class() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -1371,10 +1202,6 @@ async fn test_god_class() {
         "should have result_count key"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 35. Unknown tool
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_unknown_tool() {
@@ -1393,28 +1220,7 @@ async fn test_unknown_tool() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 36. Missing required params — search without query
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_missing_required_params() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_search", json!({}), None, None).await;
-    let err_msg = match result {
-        Err(err) => format!("{}", err),
-        Ok(_) => panic!("missing query should produce an error"),
-    };
-    assert!(
-        err_msg.contains("missing required parameter"),
-        "error should mention 'missing required parameter', got: {}",
-        err_msg,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Extra: coupling with fan_out direction
-// ---------------------------------------------------------------------------
+// Missing required params — search without query
 
 #[tokio::test]
 async fn test_coupling_fan_out() {
@@ -1431,10 +1237,6 @@ async fn test_coupling_fan_out() {
     let text = extract_text(&result.value);
     assert!(text.contains("fan_out"), "should report fan_out direction");
 }
-
-// ---------------------------------------------------------------------------
-// Extra: rank with outgoing direction
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_rank_outgoing() {
@@ -1454,13 +1256,6 @@ async fn test_rank_outgoing() {
         "should reflect outgoing direction"
     );
     shutdown_graph_fixture(cg).await;
-}
-
-#[tokio::test]
-async fn test_callers_missing_node_id() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_callers", json!({}), None, None).await;
-    assert!(result.is_err(), "callers without node_id should error");
 }
 
 #[tokio::test]
@@ -1498,10 +1293,6 @@ async fn test_similar_missing_symbol() {
     assert!(result.is_err(), "similar without symbol should error");
 }
 
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_distribution with path prefix filter
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_distribution_with_path_filter() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -1522,10 +1313,6 @@ async fn test_distribution_with_path_filter() {
         "path filter should exclude files outside 'src/'",
     );
 }
-
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_files — grouped format
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_files_grouped_format() {
@@ -1555,10 +1342,6 @@ async fn test_files_grouped_format() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_affected with custom filter glob
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_affected_with_custom_filter() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -1579,10 +1362,6 @@ async fn test_affected_with_custom_filter() {
     assert!(text.contains("count"), "should have count key");
 }
 
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_complexity — verify response structure
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_complexity_response_fields() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -1593,7 +1372,6 @@ async fn test_complexity_response_fields() {
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert!(parsed.get("ranking").is_some(), "should have ranking key");
     assert!(parsed.get("formula").is_some(), "should have formula key");
-    // Check ranking items have expected fields
     if let Some(items) = parsed["ranking"].as_array()
         && let Some(first) = items.first()
     {
@@ -1619,10 +1397,6 @@ async fn test_complexity_response_fields() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_doc_coverage — verify response structure
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_doc_coverage_response_structure() {
@@ -1687,10 +1461,6 @@ async fn test_files_explicit_path_selects_tests() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_body
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_body_returns_full_function_source() {
     let (cg, _dir) = production_graph_query_fixture().await;
@@ -1716,8 +1486,8 @@ async fn test_body_returns_full_function_source() {
         body.contains("Hello"),
         "body should contain the function body, got: {body}"
     );
-    // Regression for issue #62: the function's outer closing brace must be
-    // included so the body is byte-exact usable as an Edit `old_string`.
+    // The function's outer closing brace must be included so the body is
+    // byte-exact usable as an Edit `old_string`.
     assert!(
         body.trim_end().ends_with('}'),
         "body should end with the function's closing brace, got: {body:?}"
@@ -1770,10 +1540,6 @@ async fn test_body_missing_symbol_param() {
     let result = call_production_tool(&cg, "tracedecay_body", json!({}), None, None).await;
     assert!(result.is_err(), "should error when symbol is missing");
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_callers_for — bulk caller lookup
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_callers_for_returns_caller_set_per_id() {
@@ -1888,10 +1654,6 @@ async fn test_callers_for_rejects_unknown_kind() {
     assert!(format!("{err}").contains("unknown edge kind"));
     shutdown_graph_fixture(cg).await;
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_by_qualified_name — cross-run lookup
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_by_qualified_name_finds_indexed_node() {

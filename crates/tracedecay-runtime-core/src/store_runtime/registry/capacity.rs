@@ -4,8 +4,8 @@ use tracedecay_store::RuntimeMaintenanceStateV1;
 
 use super::attachment::attachment_failure;
 use super::{
-    EvictingRuntime, RegistryEntry, RegistryState, StoreRuntimeClientLease, StoreRuntimeKey,
-    StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
+    EvictingRuntime, RegistryEntry, RegistryState, StoreRuntimeKey, StoreRuntimeRegistry,
+    StoreRuntimeRegistryFailure,
 };
 
 pub(crate) const MAX_PROJECT_CODE_OPEN_RUNTIMES: usize = 8;
@@ -213,6 +213,7 @@ impl StoreRuntimeRegistry {
         }
         drop(state);
         drop(evicting);
+        hotpath::gauge!("runtime_core.registry.runtimes_ready").dec(1.0);
         outcome
     }
 }

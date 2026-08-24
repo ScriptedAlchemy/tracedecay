@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use crate::runtime::shared::read_new_rows;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1026,6 +1027,150 @@ fn raw_strict_resume_checkpoint_preserves_append_only_progress() {
     assert_eq!(second.start_offset, first_end);
     assert_eq!(second.new_cursor.file_id, checkpoint.generation);
     assert_eq!(second.frames.len(), 1);
+}
+
+/// One resumed scan must walk the validated prefix exactly once.
+///
+/// Checkpoint validation and the scanner's resume digest both need the digest
+/// of `[0, cursor)`, and they used to derive it independently, so every resumed
+/// scan read that prefix twice. The charge is byte-exact, so this asserts the
+/// count rather than elapsed time: before the fix it was `2 * prefix`.
+#[test]
+fn raw_strict_resume_validates_the_prefix_once_per_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prefix-once.jsonl");
+    let record = b"{\"v\":0}\n";
+    let prefix_records = 512;
+    std::fs::write(&path, record.repeat(prefix_records)).unwrap();
+
+    let first = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+    let checkpoint = JsonlResumeState {
+        generation: first.new_cursor.file_id,
+        file_identity: first.file_identity,
+        fingerprint: first.frames.last().unwrap().resume_fingerprint,
+    };
+    let prefix_bytes = first.new_cursor.position;
+    assert_eq!(prefix_bytes, (record.len() * prefix_records) as u64);
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"v\":1}\n")
+        .unwrap();
+
+    let second = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint),
+    )
+    .unwrap();
+
+    // The append is still read, so the scan did real work and the byte charge
+    // below is not vacuously zero.
+    assert_eq!(second.frames.len(), 1, "the appended frame must be scanned");
+    assert_eq!(second.start_offset, prefix_bytes);
+    assert_eq!(
+        second.io.prefix_validation_bytes, prefix_bytes,
+        "the resumed prefix must be hashed once, not once per consumer"
+    );
+}
+
+/// A first-sight scan must not hash the whole file to police itself.
+///
+/// The snapshot fingerprint exists to catch a rewrite that lands *during* a
+/// scan, and catching that needs two independent full passes — one before the
+/// read and one after. On a cold catch-up every file takes both, which is why
+/// ingesting 109 MB of transcript cost 43.5 GB of hashing. Identity, size and
+/// mtime already fail closed on every observable change, so the pair is spent
+/// only where a rewrite has actually been observed, never on first sight.
+#[test]
+fn cold_full_file_scan_does_not_hash_the_whole_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cold.jsonl");
+    let record = b"{\"v\":0}\n";
+    let records = 512;
+    std::fs::write(&path, record.repeat(records)).unwrap();
+
+    let scan = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(scan.frames.len(), records);
+    assert_eq!(scan.io.content_bytes, (record.len() * records) as u64);
+    assert_eq!(scan.io.snapshot_hash_bytes, 0);
+    assert_eq!(scan.io.change, JsonlChangeKind::Cold);
+}
+
+/// A settled re-poll of an unchanged transcript performs zero content reads
+/// after a fully verified scan has populated the generation cache.
+///
+/// The canonical handle is still opened so native identity and high-resolution
+/// metadata can be checked. The production read meter proves that neither
+/// identity hashing nor prefix validation touched its contents.
+#[cfg(unix)]
+#[test]
+fn unchanged_settled_repoll_reads_zero_file_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warm.jsonl");
+    let record = b"{\"v\":0}\n";
+    std::fs::write(&path, record.repeat(8)).unwrap();
+
+    let first = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+    assert_eq!(first.frames.len(), 8, "the cold pass must read the file");
+    let checkpoint = JsonlResumeState {
+        generation: first.new_cursor.file_id,
+        file_identity: first.file_identity,
+        fingerprint: first.frames.last().unwrap().resume_fingerprint,
+    };
+
+    let second = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint),
+    )
+    .unwrap();
+
+    assert!(second.frames.is_empty(), "nothing was appended");
+    assert_eq!(
+        second.new_cursor, first.new_cursor,
+        "the cursor must not move"
+    );
+    assert_eq!(second.file_identity, first.file_identity);
+    assert_eq!(
+        second.io.identity_window_bytes, 0,
+        "identity must come from the checkpoint, not from re-hashing a head window"
+    );
+    assert_eq!(
+        second.io.prefix_validation_bytes, 0,
+        "an unchanged file must not re-walk its prefix"
+    );
+    assert_eq!(second.io.content_bytes, 0);
+    assert_eq!(second.io.scan_payload_read_bytes, 0);
+    assert_eq!(second.io.change, JsonlChangeKind::Unchanged);
 }
 
 #[cfg(any(unix, windows))]

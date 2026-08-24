@@ -782,6 +782,10 @@ where
         }
     }
 
+    #[hotpath::measure(
+        label = "context_scout_assemble_registered",
+        impl_type = "ContextScoutCanonicalInputAssemblerV1"
+    )]
     pub async fn assemble_registered(
         &self,
         hook: &AdmittedContextScoutHookV1,
@@ -800,6 +804,10 @@ where
         self.assemble(address, pin, context, observed_at).await
     }
 
+    #[hotpath::measure(
+        label = "context_scout_assemble_registered_exact",
+        impl_type = "ContextScoutCanonicalInputAssemblerV1"
+    )]
     pub async fn assemble_registered_exact(
         &self,
         hook: &AdmittedContextScoutHookV1,
@@ -818,6 +826,10 @@ where
         self.assemble(address, pin, context, observed_at).await
     }
 
+    #[hotpath::measure(
+        label = "context_scout_bind_and_assemble",
+        impl_type = "ContextScoutCanonicalInputAssemblerV1"
+    )]
     pub async fn bind_and_assemble(
         &self,
         hook: &AdmittedContextScoutHookV1,

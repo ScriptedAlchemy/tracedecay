@@ -36,12 +36,14 @@ function projectPatchResponse(current: unknown) {
  * doubling as a ledger of every route the page touches.
  */
 function isSettingsRoute(url: string): boolean {
-  return new URL(url, 'http://localhost').pathname.startsWith('/api/settings');
+  const pathname = new URL(url, 'http://localhost').pathname;
+  return pathname === '/api/settings' || pathname.startsWith('/api/settings/');
 }
 
 describe('SettingsPage authorized changes', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    useScope.getState().selectAllProjects();
   });
 
   it('reviews and applies a project patch with the held revision', async () => {
@@ -101,6 +103,126 @@ describe('SettingsPage authorized changes', () => {
       idempotency_key: expect.any(String),
       max_file_size: 2_097_152,
     });
+  });
+
+  it('round trips an exact code-index worker selection through review, PATCH, and refresh', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other project',
+        activation: 'selected',
+      },
+    });
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    let applied = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        if (url.includes('/settings')) calls.push({ url, method, body });
+        if (url === '/api/projects/proj_other/settings' && method === 'GET') {
+          return jsonResponse(applied ? updatedWorkerSettings('profile-worker-rev-8') : settings());
+        }
+        if (url === '/api/settings' && method === 'GET') {
+          return jsonResponse(applied ? updatedWorkerSettings('profile-worker-rev-8') : settings());
+        }
+        if (url === '/api/settings/user/code-index-workers' && method === 'PATCH') {
+          applied = true;
+          return jsonResponse(updatedWorkerSettings('profile-worker-rev-8'));
+        }
+        throw new Error(`unexpected request ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    expect(await screen.findByText('Running worker plan')).toBeTruthy();
+    for (const label of ['Configured', 'Requested', 'Effective', 'Memory-safe']) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    expect(screen.getByText('Automatic: all available cores')).toBeTruthy();
+    await user.click(screen.getByLabelText('Exact number of cores'));
+    const workers = screen.getByLabelText('Code-index worker count');
+    await user.clear(workers);
+    await user.type(workers, '4');
+    await user.click(screen.getByRole('button', { name: 'Review code-index worker change' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Review code-index worker selection change' });
+    expect(
+      within(dialog).getByText(
+        'Code-index worker changes are applied after the daemon restarts. The running worker plan remains in force until then; if current admission limits are unavailable, an exact selection is evaluated at restart.',
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).getByText(/code_index_workers/)).toBeTruthy();
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /I confirm this change against configuration revision profile-worker-rev-7/,
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply code-index worker selection' }));
+
+    expect(await screen.findByText('Code-index worker selection saved')).toBeTruthy();
+    expect(screen.getAllByText('Restart recommended').length).toBeGreaterThan(0);
+    expect(calls).toEqual([
+      { method: 'GET', url: '/api/projects/proj_other/settings', body: null },
+      { method: 'GET', url: '/api/settings', body: null },
+      {
+        method: 'PATCH',
+        url: '/api/settings/user/code-index-workers',
+        body: {
+          expected_revision_id: 'profile-worker-rev-7',
+          idempotency_key: expect.stringMatching(/^idempotency\.dashboard-settings\./),
+          code_index_workers: { mode: 'exact', workers: 4 },
+        },
+      },
+      { method: 'GET', url: '/api/projects/proj_other/settings', body: null },
+    ]);
+  });
+
+  it('states when TRACEDECAY_INDEX_WORKERS overrides the persisted worker selection', async () => {
+    const overridden = settings();
+    const user = settingsBody(overridden)['user'] as Record<string, unknown>;
+    user['code_index_worker_status'] = {
+      configured: { mode: 'exact', workers: 3 },
+      environment_override_workers: 7,
+      effective_workers: 7,
+      available_logical_cpus: 12,
+      memory_safe_workers: 10,
+      limiting_reason: 'environment_override',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(overridden)),
+    );
+    renderSettings();
+
+    expect(
+      await screen.findByText(
+        'TRACEDECAY_INDEX_WORKERS=7 overrides the persisted worker selection for this running daemon.',
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText('7 via TRACEDECAY_INDEX_WORKERS')).toBeTruthy();
+    expect(screen.getByText('TRACEDECAY_INDEX_WORKERS override')).toBeTruthy();
+  });
+
+  it('states that an exact selection is evaluated on restart when current admission limits are unavailable', async () => {
+    const unavailable = settings();
+    const user = settingsBody(unavailable)['user'] as Record<string, unknown>;
+    user['code_index_worker_status'] = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(unavailable)),
+    );
+    renderSettings();
+
+    expect(
+      await screen.findByText(
+        'Current CPU and memory admission limits are unavailable. An exact worker count will be evaluated when the daemon restarts.',
+      ),
+    ).toBeTruthy();
   });
 
   it('blocks a stale project change before sending the patch', async () => {
@@ -327,9 +449,9 @@ describe('SettingsPage authorized changes', () => {
 });
 
 /**
- * Both patch routes are addressed through the project gateway, so the scope the
- * dashboard is pointed at decides whether either editor can be written at all —
- * independently of whether the daemon advertises the apply action.
+ * Project and ordinary user writes route through the selected project's
+ * gateway. The ProfileSessions worker selection is profile-global and must
+ * remain governed by its own advertised operation.
  *
  * Conflating the two is what this covers. The read-only banner used to say "this
  * dashboard is not authorized to apply project settings" for every reason it
@@ -343,7 +465,7 @@ describe('Settings scope authority', () => {
 
   afterEach(() => useScope.getState().selectAllProjects());
 
-  it('takes both editors read-only in a selected non-active project, naming the scope', async () => {
+  it('keeps the profile worker editor writable in a selected non-active project', async () => {
     useScope.setState({
       scope: {
         kind: 'project',
@@ -363,8 +485,7 @@ describe('Settings scope authority', () => {
     );
     renderSettings();
 
-    // Both scopes, because the obstacle is the gateway rather than either
-    // scope's own authority — the envelope advertises both apply actions here.
+    // The project gateway blocks only project and ordinary user settings.
     const banners = await waitFor(() => {
       const found = document.querySelectorAll('[data-settings-gate="read_only"]');
       expect(found).toHaveLength(2);
@@ -378,8 +499,10 @@ describe('Settings scope authority', () => {
     }
     expect(fieldset('Maximum file size (bytes)').disabled).toBe(true);
     expect(fieldset('Watcher debounce').disabled).toBe(true);
+    expect(fieldset('Code-index worker count').disabled).toBe(false);
     expect(screen.queryByRole('button', { name: 'Review project changes' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Review user changes' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Review code-index worker change' })).toBeTruthy();
 
     // The read is legitimate in any scope; nothing else went out.
     expect(calls.filter((call) => !call.startsWith('GET '))).toEqual([]);
@@ -404,9 +527,11 @@ describe('Settings scope authority', () => {
         'Read-only · this dashboard is not authorized to apply project settings',
       ),
     ).toBeTruthy();
-    // Both editable scopes settle through the one cataloged configuration
-    // effect, so its withdrawal takes the user editor read-only too.
+    // The ordinary user editor uses the configuration effect, while the worker
+    // editor keeps its distinct ProfileSessions authority.
     expect(fieldset('Watcher debounce').disabled).toBe(true);
+    expect(fieldset('Code-index worker count').disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Review code-index worker change' })).toBeTruthy();
     expect(
       document.querySelector('[data-settings-gate="unauthorized"]')?.textContent,
     ).toContain('not authorized');
@@ -425,12 +550,13 @@ describe('Settings scope authority', () => {
     renderSettings();
 
     const banner = await waitFor(() => {
-      const found = document.querySelector('[data-settings-gate="unknown"]');
-      expect(found).toBeTruthy();
-      return found as Element;
+      const found = document.querySelectorAll('[data-settings-gate="unknown"]');
+      expect(found).toHaveLength(2);
+      return found[0] as Element;
     });
     expect(banner.textContent).toContain('not known yet');
     expect(banner.textContent).not.toMatch(/not authorized|read-only project/i);
+    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
   });
 
   it('names the write target in the active project', async () => {
@@ -447,15 +573,17 @@ describe('Settings scope authority', () => {
 
     await screen.findByRole('button', { name: 'Review project changes' });
     const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
-    expect(notes).toHaveLength(2);
-    for (const note of notes) expect(note.textContent).toBe('Applies to Active project.');
+    expect(notes).toHaveLength(3);
+    expect(screen.getAllByText('Applies to Active project.')).toHaveLength(2);
+    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
   });
 
   /**
-   * Both editors take their target from the reconciled scope, so a deep link
-   * cannot choose the name shown beside the settings it is about to change.
+   * Project and ordinary user settings take their target from the reconciled
+   * scope, so a deep link cannot choose their write target. The profile worker
+   * resource deliberately keeps its profile target throughout.
    */
-  it('names the registry label in both write targets, not a spoofed deep-link label', async () => {
+  it('names the registry label for project resources but keeps the profile worker target', async () => {
     useScope.getState().selectProject('proj_active', 'Scratch sandbox', 'unresolved');
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
     renderSettings();
@@ -467,6 +595,7 @@ describe('Settings scope authority', () => {
       return found;
     });
     for (const note of unknown) expect(note.textContent).toContain('not known yet');
+    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
 
     act(() =>
       useScope.getState().reconcileScope({
@@ -478,9 +607,28 @@ describe('Settings scope authority', () => {
 
     await screen.findByRole('button', { name: 'Review project changes' });
     const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
-    expect(notes).toHaveLength(2);
-    for (const note of notes) expect(note.textContent).toBe('Applies to Production.');
+    expect(notes).toHaveLength(3);
+    expect(screen.getAllByText('Applies to Production.')).toHaveLength(2);
+    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
     expect(document.body.textContent).not.toContain('Scratch sandbox');
+  });
+
+  it('withdraws the worker editor only when its ProfileSessions action is absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(settingsWithout('profile_code_index_worker_selection'))),
+    );
+    renderSettings();
+
+    expect(
+      await screen.findByText(
+        'Read-only · this dashboard is not authorized to apply code-index worker settings',
+      ),
+    ).toBeTruthy();
+    expect(fieldset('Code-index worker count').disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Review code-index worker change' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Review project changes' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review user changes' })).toBeTruthy();
   });
 });
 
@@ -833,6 +981,15 @@ function updatedSettings(revision: string): Record<string, unknown> {
   const config = project['config'] as Record<string, unknown>;
   project['configuration_revision_id'] = revision;
   config['max_file_size'] = 2_097_152;
+  return value;
+}
+
+function updatedWorkerSettings(revision: string): Record<string, unknown> {
+  const value = settings();
+  const user = settingsBody(value)['user'] as Record<string, unknown>;
+  user['code_index_worker_configuration_revision_id'] = revision;
+  user['code_index_workers'] = { mode: 'exact', workers: 4 };
+  settingsBody(value)['restart_recommended'] = true;
   return value;
 }
 

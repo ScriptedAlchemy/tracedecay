@@ -222,20 +222,19 @@ impl ClaudeSource {
         // or excluded: an `Unknown` (timed-out git identity) must defer the
         // whole scan so no cursor or skip range is persisted for it, and the
         // next sweep retries the identity lookup.
+        let mut memberships = Vec::with_capacity(scan.frames.len());
         for frame in &scan.frames {
-            let record = frame.scope_value();
-            let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            if scope_matcher.membership(line_cwd.as_deref()) == ProjectMembership::Unknown {
+            let line_cwd = record_cwd(frame.scope_value()).or_else(|| session_cwd.clone());
+            let membership = scope_matcher.membership(line_cwd.as_deref());
+            if membership == ProjectMembership::Unknown {
                 return None;
             }
+            memberships.push(membership);
         }
         let mut retained = Vec::with_capacity(scan.frames.len());
         let mut excluded = Vec::new();
-        for frame in scan.frames.drain(..) {
-            let record = frame.scope_value();
-            let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include = scope_matcher.membership(line_cwd.as_deref()) == ProjectMembership::Match;
-            if include {
+        for (frame, membership) in scan.frames.drain(..).zip(memberships) {
+            if membership == ProjectMembership::Match {
                 retained.push(frame);
             } else {
                 excluded.push(ClaudeSkippedFrame {
@@ -300,6 +299,7 @@ fn discover_claude_session_scoped_paths(
             truncated,
             skipped_oversized_entries,
             bytes_charged,
+            files_considered: 0,
         };
     };
     // Stream project slug entries; never collect the full read_dir into a Vec.
@@ -371,6 +371,7 @@ fn discover_claude_session_scoped_paths(
         .skipped_oversized_entries
         .saturating_add(skipped_oversized_entries);
     report.bytes_charged = report.bytes_charged.max(bytes_charged);
+    crate::runtime::pipeline_metrics::record_sweep_outcome(!report.is_truncated());
     report
 }
 

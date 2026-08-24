@@ -117,7 +117,7 @@ impl GitIndexCommitIntentV1 {
     ) -> Result<Self, DomainError> {
         let mut intent = Self {
             message,
-            message_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+            message_digest: ManifestDigest::zero()?,
             author,
             committer,
             signing_policy,
@@ -293,7 +293,7 @@ impl GitIndexPreviewInputV1 {
             commit_intent,
             created_at,
             expires_at,
-            input_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+            input_digest: ManifestDigest::zero()?,
         };
         input.validate_fields()?;
         input.input_digest = input.compute_input_digest()?;
@@ -566,7 +566,7 @@ impl GitIndexPreviewV1 {
             disposition,
             created_at,
             expires_at,
-            preview_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+            preview_digest: ManifestDigest::zero()?,
         };
         preview.preview_digest = preview.compute_preview_digest()?;
         preview.validate()?;

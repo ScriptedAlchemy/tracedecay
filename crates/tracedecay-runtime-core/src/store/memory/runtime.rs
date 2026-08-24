@@ -1,6 +1,8 @@
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tracedecay_domain::{FactEventId, FactOwnerV1, UtcMicros, canonical_sha256};
 use tracedecay_store::{
     CommandDigestV1, ConsistencyModeV1, DurabilityClassV1, FactCommitConflict, FactCommitOutcome,
@@ -296,8 +298,6 @@ fn build_read_request(
     validate_owner_binding(binding, owner, operation_name)?;
     let command = serde_json::to_value(&operation)
         .map_err(|error| runtime_error(operation_name, error.to_string()))?;
-    let command_bytes = serde_json::to_vec(&command)
-        .map_err(|error| runtime_error(operation_name, error.to_string()))?;
     let digest = canonical_sha256(&command)
         .map_err(|error| runtime_error(operation_name, error.to_string()))?;
     let suffix = digest_suffix(digest.as_str(), operation_name)?;
@@ -308,9 +308,7 @@ fn build_read_request(
             op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Fact(operation)),
         },
         OperationPriorityV1::Foreground,
-        u64::try_from(command_bytes.len())
-            .unwrap_or(u64::MAX)
-            .max(1),
+        serialized_admission_bytes(&command, operation_name)?,
         request_control(suffix, runtime_now(), operation_name)?,
     )
     .map_err(|error| runtime_error(operation_name, error.to_string()))
@@ -341,13 +339,7 @@ fn build_submit_request(
         },
         durability: DurabilityClassV1::Full,
         priority: OperationPriorityV1::Foreground,
-        admission_bytes: u64::try_from(
-            serde_json::to_vec(command)
-                .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))?
-                .len(),
-        )
-        .unwrap_or(u64::MAX)
-        .max(1),
+        admission_bytes: serialized_admission_bytes(command, COMMIT_OPERATION)?,
         admitted_at,
     };
     let batch_compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
@@ -402,6 +394,31 @@ fn request_control(
             generation: 1,
         },
     })
+}
+
+struct CountingSink {
+    written: u64,
+}
+
+impl Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_admission_bytes<T: Serialize>(
+    value: &T,
+    operation_name: &'static str,
+) -> FactStoreResult<u64> {
+    let mut output = CountingSink { written: 0 };
+    serde_json::to_writer(&mut output, value)
+        .map_err(|error| runtime_error(operation_name, error.to_string()))?;
+    Ok(output.written.max(1))
 }
 
 fn digest_suffix<'digest>(

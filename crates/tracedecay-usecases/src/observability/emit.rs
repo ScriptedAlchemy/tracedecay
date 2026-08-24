@@ -193,13 +193,37 @@ struct EnvelopeSpec<'a> {
     payload: ObservabilityPayloadV1,
 }
 
-fn build_envelope(spec: EnvelopeSpec<'_>) -> Result<ObservabilityEnvelopeV1, &'static str> {
-    let producer_sequence = next_sequence();
+/// Lane-neutral envelope assembly used by both the product-observability and
+/// retrieval-observability producers. Callers supply boot identity and
+/// sequence so the two streams stay independently ordered.
+pub(super) struct ObservabilityEnvelopeSpec<'a> {
+    pub scope_ref: &'a str,
+    pub boot_id: &'a str,
+    pub producer_sequence: u64,
+    pub event_prefix: &'a str,
+    pub capability: &'a str,
+    pub operation: &'a str,
+    pub quantity: Option<f64>,
+    pub unit: Option<&'a str>,
+    pub terminal_result: Option<ObservabilityTerminalResultV1>,
+    pub producer_revision: &'a str,
+    pub configuration_revision: &'a str,
+    pub policy_revision: &'a str,
+    pub coverage: CoverageStateV1,
+    pub retention_class: ObservabilityRetentionClassV1,
+    pub observed_at_micros: i64,
+    pub payload: ObservabilityPayloadV1,
+    pub schema_revision: u32,
+}
+
+pub(super) fn assemble_observability_envelope(
+    spec: ObservabilityEnvelopeSpec<'_>,
+) -> Result<ObservabilityEnvelopeV1, &'static str> {
     let digest = canonical_sha256(&(
         spec.payload.event_kind(),
-        boot_id(),
-        producer_sequence,
-        spec.project_id,
+        spec.boot_id,
+        spec.producer_sequence,
+        spec.scope_ref,
         spec.operation,
     ))
     .map_err(|_| "observability_event_identity")?;
@@ -211,10 +235,10 @@ fn build_envelope(spec: EnvelopeSpec<'_>) -> Result<ObservabilityEnvelopeV1, &'s
     let envelope = ObservabilityEnvelopeV1 {
         event_id: event_id.clone(),
         event_kind: spec.payload.event_kind().to_owned(),
-        schema_revision: SCHEMA_REVISION,
+        schema_revision: spec.schema_revision,
         idempotency_key: event_id.clone(),
         trace_id: event_id,
-        scope_ref: spec.project_id.to_owned(),
+        scope_ref: spec.scope_ref.to_owned(),
         capability: spec.capability.to_owned(),
         operation: spec.operation.to_owned(),
         event_time_micros: spec.observed_at_micros,
@@ -225,21 +249,47 @@ fn build_envelope(spec: EnvelopeSpec<'_>) -> Result<ObservabilityEnvelopeV1, &'s
         unit: spec.unit.map(str::to_owned),
         terminal_result: spec.terminal_result,
         producer_revision: spec.producer_revision.to_owned(),
-        configuration_revision: CONFIGURATION_REVISION.to_owned(),
+        configuration_revision: spec.configuration_revision.to_owned(),
         policy_revision: spec.policy_revision.to_owned(),
-        watermark: format!("{boot}:{producer_sequence}", boot = boot_id()),
+        watermark: format!(
+            "{boot}:{sequence}",
+            boot = spec.boot_id,
+            sequence = spec.producer_sequence
+        ),
         coverage: spec.coverage,
         sampling_probability: None,
         retention_class: spec.retention_class,
         emitted_count: 1,
         delayed_count: 0,
         dropped_count: 0,
-        process_boot_id: boot_id().to_owned(),
-        producer_sequence,
+        process_boot_id: spec.boot_id.to_owned(),
+        producer_sequence: spec.producer_sequence,
         payload: spec.payload,
     };
     envelope.validate()?;
     Ok(envelope)
+}
+
+fn build_envelope(spec: EnvelopeSpec<'_>) -> Result<ObservabilityEnvelopeV1, &'static str> {
+    assemble_observability_envelope(ObservabilityEnvelopeSpec {
+        scope_ref: spec.project_id,
+        boot_id: boot_id(),
+        producer_sequence: next_sequence(),
+        event_prefix: spec.event_prefix,
+        capability: spec.capability,
+        operation: spec.operation,
+        quantity: spec.quantity,
+        unit: spec.unit,
+        terminal_result: spec.terminal_result,
+        producer_revision: spec.producer_revision,
+        configuration_revision: CONFIGURATION_REVISION,
+        policy_revision: spec.policy_revision,
+        coverage: spec.coverage,
+        retention_class: spec.retention_class,
+        observed_at_micros: spec.observed_at_micros,
+        payload: spec.payload,
+        schema_revision: SCHEMA_REVISION,
+    })
 }
 
 fn contract_error(reason: &'static str) -> ApplicationContractError {

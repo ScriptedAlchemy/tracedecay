@@ -277,11 +277,21 @@ pub struct RetainedParseDocument {
     identity: ParseDocumentIdentity,
     language_id: String,
     source: String,
-    parsed_source: String,
+    /// Masked parse text handed to Tree-sitter when it differs from `source`;
+    /// `None` means the parse text is byte-identical to `source` (every plain
+    /// grammar). Retaining only the divergent case avoids storing two
+    /// identical full-source copies per document.
+    parsed_source: Option<String>,
     parser: Parser,
     tree: Tree,
     limits: ParseLimits,
     state_epoch: u64,
+}
+
+/// `Some` only when the parse text diverges from `source`, so one document
+/// never retains two identical full-source `String`s.
+fn normalize_parsed_source(source: &str, parsed_source: String) -> Option<String> {
+    (parsed_source != source).then_some(parsed_source)
 }
 
 impl RetainedParseDocument {
@@ -294,14 +304,7 @@ impl RetainedParseDocument {
         let language_id = language_id.into();
         let source = source.into();
         let grammar_key = grammar_key(&language_id, identity.logical_path()).to_owned();
-        Self::open_prepared(
-            identity,
-            language_id,
-            grammar_key,
-            source.clone(),
-            source,
-            limits,
-        )
+        Self::open_normalized(identity, language_id, grammar_key, source, None, limits)
     }
 
     pub fn open_prepared(
@@ -312,12 +315,30 @@ impl RetainedParseDocument {
         parsed_source: impl Into<String>,
         limits: ParseLimits,
     ) -> Result<(Self, ParseReport), ParseError> {
-        let language_id = language_id.into();
-        let grammar_key = grammar_key.into();
         let source = source.into();
-        let parsed_source = parsed_source.into();
+        let parsed_source = normalize_parsed_source(&source, parsed_source.into());
+        Self::open_normalized(
+            identity,
+            language_id.into(),
+            grammar_key.into(),
+            source,
+            parsed_source,
+            limits,
+        )
+    }
+
+    fn open_normalized(
+        identity: ParseDocumentIdentity,
+        language_id: String,
+        grammar_key: String,
+        source: String,
+        parsed_source: Option<String>,
+        limits: ParseLimits,
+    ) -> Result<(Self, ParseReport), ParseError> {
         ensure_source_bound(&source, limits)?;
-        validate_prepared_source(&source, &parsed_source)?;
+        if let Some(parsed) = parsed_source.as_deref() {
+            validate_prepared_source(&source, parsed)?;
+        }
         let language = ts_provider::try_language(&grammar_key).map_err(|_| {
             ParseError::UnsupportedLanguage {
                 language_id: language_id.clone(),
@@ -330,7 +351,9 @@ impl RetainedParseDocument {
                 language_id: language_id.clone(),
                 detail: error.to_string(),
             })?;
-        let (tree, elapsed) = parse_with_deadline(&mut parser, &parsed_source, None, limits)?;
+        let parse_text = parsed_source.as_deref().unwrap_or(&source);
+        let (tree, elapsed) =
+            parse_with_deadline(&language_id, &mut parser, parse_text, None, limits)?;
         let changed_ranges = if source.is_empty() {
             Vec::new()
         } else {
@@ -381,6 +404,12 @@ impl RetainedParseDocument {
         &self.source
     }
 
+    /// The exact text handed to Tree-sitter for the current state: the mask
+    /// for composite adapters, `source` itself for plain grammars.
+    fn parsed_source_text(&self) -> &str {
+        self.parsed_source.as_deref().unwrap_or(&self.source)
+    }
+
     pub fn retained_source_bytes(&self) -> usize {
         self.source.len()
     }
@@ -391,8 +420,7 @@ impl RetainedParseDocument {
         edits: &[ParseInputEdit],
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        let new_source = new_source.into();
-        self.apply_edits_prepared(next_identity, edits, new_source.clone(), new_source)
+        self.apply_edits_normalized(next_identity, edits, new_source.into(), None)
     }
 
     pub fn apply_edits_prepared(
@@ -402,13 +430,25 @@ impl RetainedParseDocument {
         new_source: impl Into<String>,
         new_parsed_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
+        let new_source = new_source.into();
+        let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
+        self.apply_edits_normalized(next_identity, edits, new_source, new_parsed_source)
+    }
+
+    fn apply_edits_normalized(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        edits: &[ParseInputEdit],
+        new_source: String,
+        new_parsed_source: Option<String>,
+    ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             return Err(ParseError::IdentityMismatch);
         }
-        let new_source = new_source.into();
-        let new_parsed_source = new_parsed_source.into();
         ensure_source_bound(&new_source, self.limits)?;
-        validate_prepared_source(&new_source, &new_parsed_source)?;
+        if let Some(parsed) = new_parsed_source.as_deref() {
+            validate_prepared_source(&new_source, parsed)?;
+        }
         validate_edits(self.source.len(), new_source.len(), edits)?;
         if edits.is_empty() {
             if self.source != new_source || self.parsed_source != new_parsed_source {
@@ -444,9 +484,11 @@ impl RetainedParseDocument {
         for edit in edits {
             edited_tree.edit(&(*edit).into());
         }
+        let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
+            &self.language_id,
             &mut self.parser,
-            &new_parsed_source,
+            parse_text,
             Some(&edited_tree),
             self.limits,
         )?;
@@ -489,8 +531,7 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        let new_source = new_source.into();
-        self.reparse_prepared(next_identity, new_source.clone(), new_source)
+        self.reparse_normalized(next_identity, new_source.into(), None)
     }
 
     pub fn reparse_prepared(
@@ -500,15 +541,24 @@ impl RetainedParseDocument {
         new_parsed_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
-        let new_parsed_source = new_parsed_source.into();
+        let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
+        self.reparse_normalized(next_identity, new_source, new_parsed_source)
+    }
+
+    fn reparse_normalized(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        new_source: String,
+        new_parsed_source: Option<String>,
+    ) -> Result<ParseReport, ParseError> {
         if self.source == new_source {
             if self.parsed_source != new_parsed_source {
-                return self.replace_prepared(next_identity, new_source, new_parsed_source);
+                return self.replace_normalized(next_identity, new_source, new_parsed_source);
             }
-            return self.apply_edits_prepared(next_identity, &[], new_source, new_parsed_source);
+            return self.apply_edits_normalized(next_identity, &[], new_source, new_parsed_source);
         }
         let edit = minimal_edit(&self.source, &new_source);
-        self.apply_edits_prepared(next_identity, &[edit], new_source, new_parsed_source)
+        self.apply_edits_normalized(next_identity, &[edit], new_source, new_parsed_source)
     }
 
     /// Parse a whole-document replacement without consulting the prior tree.
@@ -517,8 +567,7 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        let new_source = new_source.into();
-        self.replace_prepared(next_identity, new_source.clone(), new_source)
+        self.replace_normalized(next_identity, new_source.into(), None)
     }
 
     pub fn replace_prepared(
@@ -527,15 +576,32 @@ impl RetainedParseDocument {
         new_source: impl Into<String>,
         new_parsed_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
+        let new_source = new_source.into();
+        let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
+        self.replace_normalized(next_identity, new_source, new_parsed_source)
+    }
+
+    fn replace_normalized(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        new_source: String,
+        new_parsed_source: Option<String>,
+    ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             return Err(ParseError::IdentityMismatch);
         }
-        let new_source = new_source.into();
-        let new_parsed_source = new_parsed_source.into();
         ensure_source_bound(&new_source, self.limits)?;
-        validate_prepared_source(&new_source, &new_parsed_source)?;
-        let (new_tree, elapsed) =
-            parse_with_deadline(&mut self.parser, &new_parsed_source, None, self.limits)?;
+        if let Some(parsed) = new_parsed_source.as_deref() {
+            validate_prepared_source(&new_source, parsed)?;
+        }
+        let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
+        let (new_tree, elapsed) = parse_with_deadline(
+            &self.language_id,
+            &mut self.parser,
+            parse_text,
+            None,
+            self.limits,
+        )?;
         let ranges = if new_source.is_empty() {
             Vec::new()
         } else {
@@ -593,6 +659,24 @@ fn validate_prepared_source(source: &str, prepared: &str) -> Result<(), ParseErr
 }
 
 fn parse_with_deadline(
+    language_id: &str,
+    parser: &mut Parser,
+    source: &str,
+    old_tree: Option<&Tree>,
+    limits: ParseLimits,
+) -> Result<(Tree, Duration), ParseError> {
+    crate::hotpath_observe::measure_parse_file(
+        language_id,
+        source.len(),
+        || parse_with_deadline_unmeasured(parser, source, old_tree, limits),
+        |result| match result {
+            Ok((tree, _)) => tree.root_node().named_child_count(),
+            Err(_) => 0,
+        },
+    )
+}
+
+fn parse_with_deadline_unmeasured(
     parser: &mut Parser,
     source: &str,
     old_tree: Option<&Tree>,

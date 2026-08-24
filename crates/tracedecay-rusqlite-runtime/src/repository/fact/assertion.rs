@@ -230,7 +230,7 @@ fn assertion_children_match(
     fact_id: &FactId,
     persisted: &PersistedAssertion<'_>,
 ) -> rusqlite::Result<bool> {
-    let mut supersession = connection.prepare(
+    let mut supersession = connection.prepare_cached(
         "SELECT superseded_assertion_id FROM memory_v2_assertion_supersession
          WHERE assertion_id = ?1 AND fact_id = ?2
            AND owner_kind = ?3 AND project_id = ?4 ORDER BY ordinal",
@@ -257,7 +257,7 @@ fn assertion_children_match(
         Some(true) | None => {}
     }
 
-    let mut evidence = connection.prepare(
+    let mut evidence = connection.prepare_cached(
         "SELECT assertion_evidence.evidence_id, evidence.evidence_json,
                 evidence.owner_json, evidence.anchor_id
          FROM memory_v2_assertion_evidence AS assertion_evidence

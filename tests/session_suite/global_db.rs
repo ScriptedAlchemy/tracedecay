@@ -1284,10 +1284,6 @@ async fn search_session_messages_collapses_parent_prompt_copies_from_eight_subag
     assert_eq!(results[0].session.session_id, "parent");
 }
 
-// ---------------------------------------------------------------------------
-// Transcript ingest health
-// ---------------------------------------------------------------------------
-
 /// `session_ingest_health` must report the un-ingested tail per transcript:
 /// fully-ingested transcripts contribute nothing, partially-ingested ones
 /// contribute their pending bytes, and the per-transcript maximum drives the

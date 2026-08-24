@@ -201,8 +201,6 @@ async fn message_search_rejects_invalid_scope() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Regression: catch-up flag ordering — transcript_ingest_done must lag
 /// `project_scope` is a closed enum: any value other than `all_registered`
 /// must fail closed rather than silently degrade to a single-project search.
 #[tokio::test]

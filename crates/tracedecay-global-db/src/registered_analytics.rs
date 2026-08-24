@@ -391,7 +391,7 @@ impl RegisteredGlobalDb {
         Ok(pending)
     }
 
-    /// Expires only Plan 26 optional detail and rollup rows through the
+    /// Expires only optional observability detail and rollup rows through the
     /// registered writer. Product receipts retain their owning lifecycle.
     pub async fn prune_observability_events(
         &self,

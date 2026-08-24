@@ -188,10 +188,10 @@ if [[ -n "${TRACEDECAY_PERF_BIN:-}" ]]; then
   log "==> PHASE BUILD: using prebuilt binary $BIN"
 else
   command -v cargo >/dev/null 2>&1 || die "cargo is required unless TRACEDECAY_PERF_BIN is set"
-  log "==> PHASE BUILD: cargo build --profile $PERF_CARGO_PROFILE --bin tracedecay"
+  log "==> PHASE BUILD: cargo build -p tracedecay-cli --profile $PERF_CARGO_PROFILE --bin tracedecay"
   # No CARGO_TARGET_DIR override: .cargo/config.toml already pins a repo-local
   # target dir, which is exactly what the CI cache restores.
-  (cd "$REPO_ROOT" && cargo build --locked --profile "$PERF_CARGO_PROFILE" --bin tracedecay) >&2 ||
+  (cd "$REPO_ROOT" && cargo build --locked -p tracedecay-cli --profile "$PERF_CARGO_PROFILE" --bin tracedecay) >&2 ||
     die "the tracedecay binary failed to build"
   BUILD_DIR="$PERF_CARGO_PROFILE"
   [[ "$BUILD_DIR" == "dev" ]] && BUILD_DIR="debug"

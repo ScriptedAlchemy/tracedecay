@@ -22,7 +22,9 @@ use std::fmt::Write as _;
 use crate::runtime::git_correlation::MAX_SESSIONS_FOR_LIMIT;
 pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
+use tracedecay_runtime_core::db::engine::{
+    Executor, QueryExecutor, Row, Value, opt_i64, opt_text, params,
+};
 
 /// Schema version recorded in `session_schema_migrations` under
 /// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
@@ -34,18 +36,17 @@ const MIGRATION_NAME: &str = "workflow_indexing";
 /// git-correlation ceiling so the two surfaces page alike.
 pub const MAX_WORKFLOW_LIMIT: usize = MAX_SESSIONS_FOR_LIMIT;
 
-/// Errors from the workflow-index store.
-///
 /// Shaped like [`crate::runtime::git_correlation::GitCorrelationError`] so
 /// callers and `?`-conversions read the same across both stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowIndexError {
-    /// Underlying database failure.
     Db(String),
     /// Caller-supplied argument was invalid (empty run id, …).
     InvalidArgument(String),
     /// A required higher-level read authority was not supplied.
-    AuthorityUnavailable { authority: &'static str },
+    AuthorityUnavailable {
+        authority: &'static str,
+    },
 }
 
 impl std::fmt::Display for WorkflowIndexError {
@@ -220,14 +221,6 @@ pub async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 
     }
 }
 
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |text| Value::Text(text.to_string()))
-}
-
-fn opt_int(value: Option<i64>) -> Value {
-    value.map_or(Value::Null, Value::Integer)
-}
-
 /// Inserts or updates one run row (idempotent on `run_id`). Re-ingesting a run
 /// whose transcripts grew (e.g. a `running` run that later `completed`)
 /// overwrites the mutable columns and refreshes `updated_at`. `created_at` is
@@ -261,8 +254,8 @@ pub async fn upsert_run(conn: &impl Executor, run: &WorkflowRun) -> Result<(), W
             opt_text(run.description.as_deref()),
             opt_text(run.phase_json.as_deref()),
             run.status.as_str(),
-            opt_int(run.started_ts),
-            opt_int(run.ended_ts),
+            opt_i64(run.started_ts),
+            opt_i64(run.ended_ts),
             opt_text(run.result_summary.as_deref()),
             run.agent_count,
         ],
@@ -307,8 +300,8 @@ pub async fn upsert_agent(
             agent.status.as_str(),
             opt_text(agent.model.as_deref()),
             agent.tokens,
-            opt_int(agent.started_ts),
-            opt_int(agent.ended_ts),
+            opt_i64(agent.started_ts),
+            opt_i64(agent.ended_ts),
         ],
     )
     .await?;

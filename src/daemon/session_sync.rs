@@ -1,6 +1,7 @@
 //! One daemon-wide authority for bounded native transcript acquisition and session/Git sync.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use tracedecay_application::session_sync::{
     SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionSyncStatsV1,
 };
 use tracedecay_application::{
-    CancellationSignal, IdempotencyKey, OperationTermination, now_micros,
+    CancellationSignal, Deadline, IdempotencyKey, OperationTermination, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
@@ -20,7 +21,7 @@ use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
-const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const COALESCED_JOURNAL_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 const SESSION_SYNC_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
 
@@ -34,6 +35,8 @@ pub(crate) struct DaemonSessionSyncService {
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
     shutdown: tracedecay_usecases::observation::ObservationCancellation,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+    journal_changed: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -115,6 +118,8 @@ impl Default for DaemonSessionSyncService {
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
             completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
             shutdown: tracedecay_usecases::observation::ObservationCancellation::default(),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            journal_changed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -441,41 +446,27 @@ impl DaemonSessionSyncService {
         key: String,
         request: SessionSyncRequestV1,
     ) {
-        let permit = loop {
-            tokio::select! {
-                permit = Arc::clone(&self.scan_slots).acquire_owned() => {
-                    match permit {
-                        Ok(permit) => break permit,
-                        Err(_) => return,
-                    }
+        let acquire = Arc::clone(&self.scan_slots).acquire_owned();
+        tokio::pin!(acquire);
+        let permit = tokio::select! {
+            permit = &mut acquire => {
+                match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
                 }
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if self.shutdown.is_cancelled() {
-                        return;
-                    }
-                    if request.cancellation().is_cancelled() {
-                        let _ = self
-                            .persist_interruption_with_project_sessions(
-                                &context,
-                                &project_sessions,
-                                &key,
-                                OperationTermination::Cancelled,
-                            )
-                            .await;
-                        return;
-                    }
-                    if request.deadline().is_elapsed_at(now_micros()) {
-                        let _ = self
-                            .persist_interruption_with_project_sessions(
-                                &context,
-                                &project_sessions,
-                                &key,
-                                OperationTermination::TimedOut,
-                            )
-                            .await;
-                        return;
-                    }
+            }
+            interruption = self.wait_for_interruption(&request) => {
+                if let Some(termination) = interruption.termination() {
+                    let _ = self
+                        .persist_interruption_with_project_sessions(
+                            &context,
+                            &project_sessions,
+                            &key,
+                            termination,
+                        )
+                        .await;
                 }
+                return;
             }
         };
         if self.shutdown.is_cancelled() {
@@ -521,14 +512,13 @@ impl DaemonSessionSyncService {
                         &key,
                         running.admission.accepted_at,
                         &request,
-                        &self.shutdown,
                         project_sessions.clone(),
                     )
                     .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
                 context
-                    .synchronize_git(&request, options, &self.shutdown, project_sessions.clone())
+                    .synchronize_git(self, &request, options, project_sessions.clone())
                     .await
             }
         };
@@ -675,13 +665,16 @@ impl DaemonSessionSyncService {
                 serde_json::from_str(&current).map_err(journal_decode_error)?;
             update(&mut journal);
             let replacement = serde_json::to_string(&journal).map_err(journal_encode_error)?;
-            if replacement == current
-                || context
-                    .registry
-                    .compare_and_swap_session_sync_journal(key, &current, &replacement)
-                    .await
-                    .map_err(store_error)?
+            if replacement == current {
+                return Ok(journal);
+            }
+            if context
+                .registry
+                .compare_and_swap_session_sync_journal(key, &current, &replacement)
+                .await
+                .map_err(store_error)?
             {
+                self.journal_changed.notify_waiters();
                 return Ok(journal);
             }
         }
@@ -780,6 +773,7 @@ impl DaemonSessionSyncService {
         }
     }
 
+    #[hotpath::measure]
     async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
         let project_gate = self.project_gate(control.scope());
         let _project = project_gate.lock().await;
@@ -794,20 +788,27 @@ impl DaemonSessionSyncService {
 
 impl SessionSyncServicePort for DaemonSessionSyncService {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_> {
-        Box::pin(async move { self.execute_request(request).await })
+        Box::pin(async move {
+            hotpath::measure_block!("session_sync.execute", self.execute_request(request).await)
+        })
     }
 
     fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
-        Box::pin(async move { self.status_request(control).await })
+        Box::pin(async move {
+            hotpath::measure_block!("session_sync.status", self.status_request(control).await)
+        })
     }
 
     fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
-        Box::pin(async move { self.cancel_request(control).await })
+        Box::pin(async move {
+            hotpath::measure_block!("session_sync.cancel", self.cancel_request(control).await)
+        })
     }
 
     fn shutdown(&self) -> SessionSyncShutdownFuture<'_> {
         Box::pin(async move {
             self.shutdown.cancel();
+            self.shutdown_notify.notify_waiters();
             let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
             let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
@@ -847,6 +848,58 @@ mod project_lifecycle;
 mod work;
 
 use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
+
+impl DaemonSessionSyncService {
+    fn observed_interruption(
+        &self,
+        cancellation: &CancellationSignal,
+        deadline: &Deadline,
+    ) -> Option<work::SessionSyncInterruption> {
+        if self.shutdown.is_cancelled() {
+            Some(work::SessionSyncInterruption::Shutdown)
+        } else if cancellation.is_cancelled() {
+            Some(work::SessionSyncInterruption::Cancelled)
+        } else if deadline.is_elapsed_at(now_micros()) {
+            Some(work::SessionSyncInterruption::TimedOut)
+        } else {
+            None
+        }
+    }
+
+    async fn wait_for_interruption(
+        &self,
+        request: &SessionSyncRequestV1,
+    ) -> work::SessionSyncInterruption {
+        self.wait_for_interruption_parts(request.cancellation(), request.deadline())
+            .await
+    }
+
+    async fn wait_for_interruption_parts(
+        &self,
+        cancellation: &CancellationSignal,
+        deadline: &Deadline,
+    ) -> work::SessionSyncInterruption {
+        let shutdown = self.shutdown_notify.notified();
+        tokio::pin!(shutdown);
+        let _ = shutdown.as_mut().enable();
+        if let Some(interruption) = self.observed_interruption(cancellation, deadline) {
+            return interruption;
+        }
+        tokio::select! {
+            biased;
+            () = &mut shutdown => work::SessionSyncInterruption::Shutdown,
+            () = cancellation.cancelled() => work::SessionSyncInterruption::Cancelled,
+            () = sleep_until_deadline(deadline) => work::SessionSyncInterruption::TimedOut,
+        }
+    }
+}
+
+fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Future<Output = ()> {
+    let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
+    let remaining = u64::try_from(remaining_micros).unwrap_or(0);
+    tokio::time::sleep(Duration::from_micros(remaining))
+}
+
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();

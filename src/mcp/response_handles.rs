@@ -67,7 +67,6 @@ fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static 
             )
         }
         TraceDecayError::File { .. }
-        | TraceDecayError::Parse { .. }
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }
         | TraceDecayError::Config { .. }
@@ -102,7 +101,6 @@ pub(crate) fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
             }
         }
         TraceDecayError::File { .. }
-        | TraceDecayError::Parse { .. }
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }
         | TraceDecayError::Config { .. }
@@ -388,7 +386,6 @@ fn error_class(error: &TraceDecayError) -> &'static str {
     match error {
         TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::File { .. } => "file",
-        TraceDecayError::Parse { .. } => "parse",
         TraceDecayError::Database { .. } => "database",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",

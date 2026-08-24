@@ -7,12 +7,15 @@ use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
+use tracedecay_application::clock::now_micros;
+use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -20,12 +23,14 @@ use tracedecay_domain::configuration::{
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
-use tracedecay_domain::{ProjectId, UtcMicros};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::configuration::GlobalDbConfigurationControlStore;
+use crate::global_db::configuration::{
+    GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
+    ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
+};
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
@@ -518,11 +523,14 @@ impl Default for SyncConfig {
     }
 }
 
-/// Parses a boolean env value: `1`/`true` => true, `0`/`false` => false
-/// (case-insensitive). Any other value is ignored (returns `None`).
+/// Parses a boolean env value. Truthy spellings (`1`/`true`/`yes`/`on`) share
+/// [`tracedecay_global_db::env_value_truthy`]; `0`/`false` are false. Any
+/// other value is ignored (returns `None`) so an override is not applied.
 fn parse_env_bool(raw: &str) -> Option<bool> {
+    if tracedecay_global_db::env_value_truthy(raw) {
+        return Some(true);
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,
     }
@@ -621,11 +629,7 @@ impl Default for TraceDecayConfig {
 
 /// Typed project route for the configuration daemon boundary. The path is
 /// display/routing context only; [`ProjectId`] remains the authority key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeConfigurationTarget {
-    pub project_id: ProjectId,
-    pub project_root: PathBuf,
-}
+pub use tracedecay_usecases::config::RuntimeConfigurationTarget;
 
 /// A complete resolved configuration pinned to one revision before a runtime
 /// component starts. No caller may re-read mutable legacy input after holding
@@ -749,10 +753,7 @@ impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
     ) -> Result<tracedecay_dashboard_api::config::PinnedRuntimeConfiguration> {
         let configuration = self.for_root(project_root)?;
         tracedecay_dashboard_api::config::PinnedRuntimeConfiguration::new(
-            tracedecay_dashboard_api::config::RuntimeConfigurationTarget {
-                project_id: configuration.target.project_id,
-                project_root: configuration.target.project_root,
-            },
+            configuration.target,
             configuration.revision_id,
             configuration.snapshot,
         )
@@ -882,10 +883,7 @@ fn usecase_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,
 ) -> Result<tracedecay_usecases::config::PinnedRuntimeConfiguration> {
     tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
-        tracedecay_usecases::config::RuntimeConfigurationTarget {
-            project_id: configuration.target.project_id,
-            project_root: configuration.target.project_root,
-        },
+        configuration.target,
         configuration.revision_id,
         configuration.snapshot,
     )
@@ -906,10 +904,7 @@ pub(crate) fn root_runtime_configuration(
     configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
 ) -> Result<PinnedRuntimeConfiguration> {
     PinnedRuntimeConfiguration::new(
-        RuntimeConfigurationTarget {
-            project_id: configuration.target.project_id.clone(),
-            project_root: configuration.target.project_root.clone(),
-        },
+        configuration.target.clone(),
         configuration.revision_id.clone(),
         configuration.snapshot.clone(),
     )
@@ -1042,6 +1037,57 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
     })
 }
 
+/// Resolve the daemon-wide worker selection from the exact registered
+/// `ProfileSessions` authority, initializing only a genuinely fresh profile
+/// store from the canonical registry default.
+pub(crate) async fn read_or_initialize_profile_code_index_worker_selection(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+) -> Result<CodeIndexWorkerSelectionV1> {
+    read_or_initialize_profile_code_index_worker_configuration(database, profile_id)
+        .await
+        .map(|configuration| configuration.selection)
+}
+
+pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+) -> Result<ProfileCodeIndexWorkerConfigurationV1> {
+    let store =
+        ProfileCodeIndexWorkerConfigurationStore::new_registered(database.as_ref(), profile_id)
+            .map_err(map_configuration_error)?;
+    store
+        .read_or_initialize(now_micros())
+        .await
+        .map_err(map_configuration_error)
+}
+
+pub(crate) fn profile_code_index_worker_mutation(
+    database: &RegisteredGlobalDb,
+    profile_id: &UserProfileId,
+    selection: CodeIndexWorkerSelectionV1,
+) -> Result<tracedecay_usecases::configuration::DirectConfigurationMutation> {
+    ProfileCodeIndexWorkerConfigurationStore::new_registered(database, profile_id)
+        .and_then(|store| store.mutation(selection))
+        .map_err(map_configuration_error)
+}
+
+pub(crate) async fn commit_profile_code_index_worker_selection(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+    authority: &tracedecay_usecases::configuration::ConfigurationMutationAuthority,
+    selection: CodeIndexWorkerSelectionV1,
+    expected_revision: &ConfigurationRevisionId,
+) -> Result<ProfileCodeIndexWorkerCommitV1> {
+    let store =
+        ProfileCodeIndexWorkerConfigurationStore::new_registered(database.as_ref(), profile_id)
+            .map_err(map_configuration_error)?;
+    store
+        .commit_selection(authority, selection, expected_revision)
+        .await
+        .map_err(map_configuration_error)
+}
+
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
@@ -1094,7 +1140,7 @@ async fn open_runtime_configuration_from_store(
             ))
         })?;
         store
-            .initialize_canonical(&initial_revision_id, &resolution, current_utc_micros())
+            .initialize_canonical(&initial_revision_id, &resolution, now_micros())
             .await
             .map_err(map_configuration_error)?;
     }
@@ -1107,29 +1153,17 @@ async fn open_runtime_configuration_from_store(
             "daemon project source binding could not be derived: {error}"
         ))
     })?;
-    let mut current = store.current().await.map_err(map_configuration_error)?;
-    let native_graph_activation_key = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
-        .map_err(|error| {
-            config_error(format!(
-                "invalid native graph activation setting key: {error}"
-            ))
-        })?;
-    if !current
-        .snapshot
-        .effective_values
-        .contains_key(&native_graph_activation_key)
+    let current = store.current().await.map_err(map_configuration_error)?;
+    let mut current = match store
+        .converge_registered_additive_defaults(&current.revision_id, now_micros())
+        .await
     {
-        current = match store
-            .converge_native_graph_activation_default(&current.revision_id, current_utc_micros())
-            .await
-        {
-            Ok(state) => state,
-            Err(tracedecay_usecases::configuration::ConfigurationError::RevisionConflict) => {
-                store.current().await.map_err(map_configuration_error)?
-            }
-            Err(error) => return Err(map_configuration_error(error)),
-        };
-    }
+        Ok(state) => state,
+        Err(tracedecay_usecases::configuration::ConfigurationError::RevisionConflict) => {
+            store.current().await.map_err(map_configuration_error)?
+        }
+        Err(error) => return Err(map_configuration_error(error)),
+    };
     let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
         .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
     enum SourceBindingCheck {
@@ -1182,7 +1216,7 @@ async fn open_runtime_configuration_from_store(
                     .rebind_daemon_project_source_binding(
                         &current.revision_id,
                         &daemon_binding,
-                        current_utc_micros(),
+                        now_micros(),
                     )
                     .await
                 {
@@ -1324,16 +1358,6 @@ pub async fn load_runtime_configuration_for_layout_read_only(
 fn registered_configuration_database_required() -> TraceDecayError {
     config_error(
         "configuration authority unavailable: a registered project session runtime is required",
-    )
-}
-
-fn current_utc_micros() -> UtcMicros {
-    UtcMicros(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                duration.as_micros().min(i64::MAX as u128) as i64
-            }),
     )
 }
 

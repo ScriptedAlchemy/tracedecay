@@ -1,7 +1,6 @@
 /**
- * CORTEX — the macro sheet of the structure LENS (plan 11b `:134`, `:214`,
- * `:229` "Synthesis: ONE navigable space. Far = CORTEX. Touch a symbol = TRACE
- * floods. Enter a file = CORE SAMPLE").
+ * CORTEX — the macro sheet of the structure LENS. One navigable space:
+ * Far = CORTEX. Touch a symbol = TRACE floods. Enter a file = CORE SAMPLE.
  *
  * This is the far end of the same continuum the LENS ruler already carries, not
  * a page of its own: it renders inside the `cortex` position above the
@@ -34,6 +33,7 @@ import {
 } from '../../contracts/generated.ts';
 import { absenceReason, useStructure } from '../../data/query/structure.ts';
 import { CenteredState } from '../../ui/ReadSection.tsx';
+import { VirtualList } from '../../ui/VirtualList.tsx';
 import { Readout } from '../../ui/instrument.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { cn } from '../../ui/cn';
@@ -293,8 +293,13 @@ function SelectedRegion({ region }: { region: CortexRegion }) {
   );
 }
 
+const REGION_ROW =
+  'grid grid-cols-[minmax(8rem,2fr)_repeat(8,minmax(3.5rem,1fr))] items-center text-left text-2xs';
+
 /** The accessible equivalent of the relief: every region in the measurement,
- * drawn or folded, with the numbers the field encodes. */
+ * drawn or folded, with the numbers the field encodes. Windowed through
+ * `VirtualList` so a large monorepo does not mount thousands of rows; below
+ * the list threshold the DOM is the full population, same as a bare table. */
 function RegionTable({
   model,
   selected,
@@ -304,96 +309,131 @@ function RegionTable({
   selected: string | null;
   onSelect: (directory: string | null) => void;
 }) {
+  const caption = `Every module region the strata scan clustered — ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files — including the ${model.foldedRegions.toLocaleString()} the drawing cap folds out. Ordered by ${model.clusterOrdering}.`;
+  const windowed = model.regions.length > 200;
   return (
-    <div className="max-h-96 overflow-auto">
-      <table className="w-full text-left text-2xs">
-        <caption className="td-legend border-b border-edge-subtle px-3 py-2 text-left normal-case tracking-normal text-text-muted">
-          Every module region the strata scan clustered — {model.totalRegions.toLocaleString()}{' '}
-          directories over {model.totalFiles.toLocaleString()} files — including the{' '}
-          {model.foldedRegions.toLocaleString()} the drawing cap folds out. Ordered by{' '}
-          {model.clusterOrdering}.
-        </caption>
-        <thead className="sticky top-0 bg-surface-1">
-          <tr className="border-b border-edge-subtle">
-            <th className="td-legend px-3 py-2">region</th>
-            <th className="td-legend px-3 py-2">stratum</th>
-            <th className="td-legend px-3 py-2">files</th>
-            <th className="td-legend px-3 py-2">internal</th>
-            <th className="td-legend px-3 py-2">e / file</th>
-            <th className="td-legend px-3 py-2">contours</th>
-            <th className="td-legend px-3 py-2">in</th>
-            <th className="td-legend px-3 py-2">out</th>
-            <th className="td-legend px-3 py-2">on relief</th>
-          </tr>
-        </thead>
-        <tbody>
-          {model.regions.map((region) => (
-            <tr
-              key={region.directory}
-              className={cn(
-                'border-b border-edge-subtle',
-                selected === region.directory && 'bg-surface-2',
-              )}
-            >
-              <td className="max-w-72 px-3 py-1.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    onSelect(selected === region.directory ? null : region.directory)
-                  }
-                  aria-pressed={selected === region.directory}
-                  className="flex w-full min-w-0 items-center gap-1.5 text-left"
-                >
-                  <span
-                    aria-hidden
-                    className="size-1.5 shrink-0 rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
-                    style={kindColorVars(region.directory)}
-                  />
-                  <span className="min-w-0 truncate font-mono text-text-primary">
-                    {region.directory}
-                  </span>
-                </button>
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-secondary">
-                {region.depth === null ? (
-                  <span className="text-state-unknown">absent</span>
-                ) : region.depthMin !== null &&
-                  region.depthMax !== null &&
-                  region.depthMin !== region.depthMax ? (
-                  `${region.depth} (${region.depthMin}–${region.depthMax})`
-                ) : (
-                  region.depth
-                )}
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-secondary">
-                {region.fileCount.toLocaleString()}
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-secondary">
-                {region.internalEdges.toLocaleString()}
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-secondary">
-                {region.density.toFixed(2)}
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-secondary">
-                {region.contours === 0 ? (
-                  <span className="text-state-unknown">no relief</span>
-                ) : (
-                  region.contours
-                )}
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-muted">
-                {region.incomingEdges.toLocaleString()}
-              </td>
-              <td className="px-3 py-1.5 tabular-nums text-text-muted">
-                {region.outgoingEdges.toLocaleString()}
-              </td>
-              <td className="px-3 py-1.5 text-text-muted">
-                {region.drawn ? 'drawn' : 'folded'}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div
+      role="table"
+      aria-label={caption}
+      className={windowed ? 'h-96' : 'max-h-96 overflow-auto'}
+    >
+      <VirtualList
+        items={model.regions as CortexRegion[]}
+        getKey={(region) => region.directory}
+        estimateHeight={36}
+        className={windowed ? 'h-full' : undefined}
+        header={
+          <>
+            <p className="td-legend border-b border-edge-subtle px-3 py-2 text-left normal-case tracking-normal text-text-muted">
+              {caption}
+            </p>
+            <div role="row" className={cn(REGION_ROW, 'sticky top-0 border-b border-edge-subtle bg-surface-1')}>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                region
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                stratum
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                files
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                internal
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                e / file
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                contours
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                in
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                out
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                on relief
+              </span>
+            </div>
+          </>
+        }
+        renderItem={(region) => (
+          <RegionRow region={region} selected={selected} onSelect={onSelect} />
+        )}
+      />
+    </div>
+  );
+}
+
+function RegionRow({
+  region,
+  selected,
+  onSelect,
+}: {
+  region: CortexRegion;
+  selected: string | null;
+  onSelect: (directory: string | null) => void;
+}) {
+  const active = selected === region.directory;
+  return (
+    <div
+      role="row"
+      className={cn(REGION_ROW, 'border-b border-edge-subtle', active && 'bg-surface-2')}
+    >
+      <div role="cell" className="max-w-72 px-3 py-1.5">
+        <button
+          type="button"
+          onClick={() => onSelect(active ? null : region.directory)}
+          aria-pressed={active}
+          className="flex w-full min-w-0 items-center gap-1.5 text-left"
+        >
+          <span
+            aria-hidden
+            className="size-1.5 shrink-0 rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
+            style={kindColorVars(region.directory)}
+          />
+          <span className="min-w-0 truncate font-mono text-text-primary">
+            {region.directory}
+          </span>
+        </button>
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.depth === null ? (
+          <span className="text-state-unknown">absent</span>
+        ) : region.depthMin !== null &&
+          region.depthMax !== null &&
+          region.depthMin !== region.depthMax ? (
+          `${region.depth} (${region.depthMin}–${region.depthMax})`
+        ) : (
+          region.depth
+        )}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.fileCount.toLocaleString()}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.internalEdges.toLocaleString()}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.density.toFixed(2)}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.contours === 0 ? (
+          <span className="text-state-unknown">no relief</span>
+        ) : (
+          region.contours
+        )}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-muted">
+        {region.incomingEdges.toLocaleString()}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-muted">
+        {region.outgoingEdges.toLocaleString()}
+      </div>
+      <div role="cell" className="px-3 py-1.5 text-text-muted">
+        {region.drawn ? 'drawn' : 'folded'}
+      </div>
     </div>
   );
 }

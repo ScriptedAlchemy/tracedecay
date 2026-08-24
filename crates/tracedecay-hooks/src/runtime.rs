@@ -151,6 +151,7 @@ pub trait AsyncHookAdmissionPortV1 {
 /// Validate exact daemon-issued scope before yielding to asynchronous local
 /// admission. This function performs no search, model, command, store-open, or
 /// external-network work.
+#[hotpath::measure]
 pub async fn admit_async_exact_scope(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -198,6 +199,12 @@ pub struct HookSynchronousResultV1 {
 /// Finish one synchronous hook invocation without performing I/O. The caller
 /// supplies the already-completed admission and spool outcomes. Over-budget
 /// work still returns a receipt, but it can never render guidance.
+///
+/// Every synchronous hook call ends here, so this is the coarse boundary for
+/// hook dispatch cost as felt by the host. The completion mix is what tells
+/// apart a healthy hook path from one that is quietly missing its budget or
+/// falling back to replay.
+#[hotpath::measure]
 pub fn finish_synchronous_hook(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -243,6 +250,35 @@ pub fn finish_synchronous_hook(
         completed_at,
         deadline_exceeded,
     );
+
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!(match immediate_state {
+            HookImmediateAdmissionStateV1::Accepted => "hooks.admission.immediate.accepted",
+            HookImmediateAdmissionStateV1::CatchupRequired => {
+                "hooks.admission.immediate.catchup_required"
+            }
+            HookImmediateAdmissionStateV1::Unavailable => "hooks.admission.immediate.unavailable",
+            HookImmediateAdmissionStateV1::TimedOut => "hooks.admission.immediate.timed_out",
+            HookImmediateAdmissionStateV1::Backpressured => {
+                "hooks.admission.immediate.backpressured"
+            }
+        })
+        .inc(1);
+        hotpath::gauge!(match guidance {
+            HookGuidanceDispositionV1::Rendered => "hooks.guidance.rendered",
+            HookGuidanceDispositionV1::NotReady => "hooks.guidance.not_ready",
+            HookGuidanceDispositionV1::Paused => "hooks.guidance.paused",
+            HookGuidanceDispositionV1::Disabled => "hooks.guidance.disabled",
+            HookGuidanceDispositionV1::Expired => "hooks.guidance.expired",
+            HookGuidanceDispositionV1::Invalid => "hooks.guidance.invalid",
+            HookGuidanceDispositionV1::DeadlineExceeded => "hooks.guidance.deadline_exceeded",
+        })
+        .inc(1);
+        if deadline_exceeded {
+            hotpath::gauge!("hooks.synchronous.deadline_exceeded").inc(1);
+        }
+    }
 
     Ok(HookSynchronousResultV1 {
         receipt: HookAdmissionReceiptV1 {
@@ -336,6 +372,7 @@ const fn route_for_rollback(
     Ok(rollback.route)
 }
 
+#[hotpath::measure]
 pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
     feedback: &T,
@@ -430,6 +467,7 @@ const fn feedback_is_eligible(receipt: &HookAdmissionReceiptV1) -> bool {
 /// budget remains, so an over-budget or foreign-scope hook can never surface
 /// another scope's feedback. Acknowledgement failure withholds nothing already
 /// earned: the outcome is reported so callers can record it truthfully.
+#[hotpath::measure]
 pub async fn deliver_hook_feedback<T, P>(
     envelope: &HookEventEnvelopeV2,
     receipt: &HookAdmissionReceiptV1,

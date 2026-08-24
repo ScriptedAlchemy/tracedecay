@@ -47,6 +47,7 @@ pub enum GitRepositoryIdentityOutcome {
 }
 
 /// Resolve a repository identity without blocking the async executor.
+#[hotpath::measure]
 pub async fn discover_repository_identity(
     directory: &Path,
     deadline: MonotonicDeadline,
@@ -104,6 +105,7 @@ pub fn discover_repository_identity_bounded(directory: &Path) -> GitRepositoryId
 }
 
 /// Synchronous discovery with explicit cancellation and monotonic deadline.
+#[hotpath::measure]
 pub fn discover_repository_identity_with_control(
     directory: &Path,
     deadline: MonotonicDeadline,

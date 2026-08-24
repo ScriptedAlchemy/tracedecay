@@ -314,12 +314,13 @@ where
         })
     }
 
+    #[hotpath::measure(label = "query.stream.translate")]
     fn translate<E, T>(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<E>>,
         translate_batch: impl Fn(&RetrieverBatch<E>) -> Result<Vec<T>, QueryExecutionContractErrorV1>,
     ) -> Result<NativeLaneOutcomeV1<T>, QueryExecutionContractErrorV1> {
-        match outcome {
+        let translated = match outcome {
             RetrieverOutcome::Complete(batch) => {
                 batch
                     .validate()
@@ -345,7 +346,23 @@ where
             }
             RetrieverOutcome::TimedOut(usage) => Ok(NativeLaneOutcomeV1::TimedOut(usage)),
             RetrieverOutcome::Cancelled => Ok(NativeLaneOutcomeV1::Cancelled),
+        };
+        if let Ok(ref outcome) = translated {
+            match outcome {
+                NativeLaneOutcomeV1::Complete(page) | NativeLaneOutcomeV1::Partial { page, .. } => {
+                    hotpath::gauge!("query.stream.results").set(page.items.len());
+                    hotpath::gauge!("query.stream.rows").set(page.coverage.examined);
+                }
+                NativeLaneOutcomeV1::Cancelled => {
+                    hotpath::gauge!("query.cancel.count").inc(1u32);
+                }
+                NativeLaneOutcomeV1::Stale(_) => {
+                    crate::hotpath_metrics::Residency::Rebuilding.record("query.stream.residency");
+                }
+                _ => {}
+            }
         }
+        translated
     }
 
     fn validate_binding(

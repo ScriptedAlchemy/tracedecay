@@ -1,8 +1,10 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+use tokio::task::JoinSet;
 use tracedecay_application::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
@@ -13,12 +15,13 @@ use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvan
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationAdmissionPort, ObservationCaptureSink,
     ObservationCursorPort, ObservationPersistOutcome, ObservationProjectionStatus,
-    ObservationReplayRequest, ObservationStoreError, ObservationWrite,
+    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
@@ -306,12 +309,74 @@ pub enum ObservationApplicationError {
     Store(#[from] ObservationStoreError),
     #[error("observation operation was cancelled")]
     Cancelled,
+    #[error("observation batch contains a non-durable privacy outcome")]
+    BatchContainsNonDurable,
+    #[error("observation batch worker stopped before completing")]
+    BatchWorkerStopped,
+}
+
+enum PreparedObservationCapture {
+    Durable {
+        // Boxed: this field dominates the enum (the variant was ~2.5 KiB
+        // against ~112 bytes for the rejection variants), so every Rejected and
+        // Quarantined value paid for it.
+        write: Box<AnchoredObservationWrite>,
+        sanitized_record: SanitizedObservationRecordV1,
+        findings: Vec<SanitizationFindingV1>,
+        cancellation: ObservationCancellation,
+    },
+    Rejected {
+        receipt: SanitizationReceiptV1,
+        findings: Vec<SanitizationFindingV1>,
+    },
+    Quarantined {
+        receipt: SanitizationReceiptV1,
+        findings: Vec<SanitizationFindingV1>,
+    },
+}
+
+struct DurableObservationCapture {
+    sanitized_record: SanitizedObservationRecordV1,
+    findings: Vec<SanitizationFindingV1>,
+    cancellation: ObservationCancellation,
+}
+
+struct PersistedObservationCapture {
+    outcome: ObservationPersistOutcome,
+    stored: Option<StoredObservation>,
+    durable: DurableObservationCapture,
+}
+
+/// Bounds independent batch preparation.
+///
+/// The daemon owns the actual width selection. Keeping the bound here makes
+/// the application boundary deterministic while allowing composition to pass
+/// the shared, memory-aware daemon plan without creating another CPU pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObservationBatchConcurrency(NonZeroUsize);
+
+impl ObservationBatchConcurrency {
+    pub const fn new(max_in_flight: NonZeroUsize) -> Self {
+        Self(max_in_flight)
+    }
+
+    const fn max_in_flight(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Default for ObservationBatchConcurrency {
+    fn default() -> Self {
+        Self(NonZeroUsize::MIN)
+    }
 }
 
 /// Application-owned composition of sanitizer and an already-authoritative store.
 pub struct ObservationApplication<S> {
     store: S,
     sanitizer: RecordSanitizerV1,
+    batch_concurrency: ObservationBatchConcurrency,
+    background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
 }
 
 impl<S> ObservationApplication<S>
@@ -319,7 +384,32 @@ where
     S: ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
 {
     pub fn new(store: S, sanitizer: RecordSanitizerV1) -> Self {
-        Self { store, sanitizer }
+        Self {
+            store,
+            sanitizer,
+            batch_concurrency: ObservationBatchConcurrency::default(),
+            background_cpu: None,
+        }
+    }
+
+    /// Applies a narrow injected bound in projectless or test composition.
+    ///
+    /// Production composition must use [`Self::with_background_cpu`] so active
+    /// preparation participates in the process-wide CPU authority.
+    #[must_use]
+    pub fn with_batch_concurrency(mut self, batch_concurrency: NonZeroUsize) -> Self {
+        self.batch_concurrency = ObservationBatchConcurrency::new(batch_concurrency);
+        self
+    }
+
+    /// Mounts the daemon's canonical background-CPU authority for independent
+    /// preparation. Cursor-dependent persistence remains ordered in the one
+    /// store-owned batch transaction.
+    #[must_use]
+    pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+        self.batch_concurrency = ObservationBatchConcurrency::new(background_cpu.width());
+        self.background_cpu = Some(background_cpu);
+        self
     }
 
     /// Advances a validated non-durable frame cursor without exposing the store.
@@ -345,6 +435,160 @@ where
         Ok(outcome)
     }
 
+    fn prepare_capture(
+        &self,
+        request: CaptureObservationRequest,
+    ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
+        Self::prepare_capture_with_sanitizer(&self.sanitizer, request)
+    }
+
+    fn prepare_capture_with_sanitizer(
+        sanitizer: &RecordSanitizerV1,
+        request: CaptureObservationRequest,
+    ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
+        #[cfg(test)]
+        tests::observe_capture_preparation(&request);
+        let CaptureObservationRequest {
+            parsed_record,
+            identity,
+            expected_cursor,
+            resume_checkpoint,
+            retention_class,
+            cancellation,
+            repository_provenance,
+        } = request;
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        let sanitized = sanitizer.sanitize_parsed(parsed_record, identity, retention_class)?;
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        match sanitized {
+            ObservationSanitizationOutcomeV1::Durable {
+                observation,
+                sanitized_record,
+                findings,
+            } => {
+                let identity = observation.identity();
+                let mut next_cursor = ObservationSourceCursorV1::for_ordering(
+                    identity.source().clone(),
+                    identity.scope().clone(),
+                    identity.generation(),
+                    identity.ordering_domain(),
+                    identity.position().end(),
+                )?;
+                if let Some((file_identity, resume_fingerprint)) = resume_checkpoint {
+                    next_cursor =
+                        next_cursor.with_resume_checkpoint(file_identity, resume_fingerprint);
+                }
+                let projection_generation =
+                    ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION)
+                        .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+                let ingested_at = now_micros();
+                let authorization = build_observation_resolution_authorization_v1(
+                    &observation,
+                    tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
+                )?;
+                let repository_provenance = repository_provenance.map_or_else(
+                    crate::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,
+                    |context| {
+                        context.capture_after_sanitization(
+                            &observation,
+                            &projection_generation,
+                            ingested_at,
+                            authorization.clone(),
+                        )
+                    },
+                );
+                let retrieval_anchor = build_observation_retrieval_anchor_v2(
+                    &observation,
+                    projection_generation.clone(),
+                    ingested_at,
+                    authorization,
+                )?;
+                let write = AnchoredObservationWrite::new(
+                    ObservationWrite::new(*observation, expected_cursor, next_cursor)?,
+                    retrieval_anchor,
+                    projection_generation,
+                )?
+                .with_repository_provenance_attachment(
+                    repository_provenance.availability().clone(),
+                    repository_provenance.anchor().cloned(),
+                )?;
+                if cancellation.is_cancelled() {
+                    return Err(ObservationApplicationError::Cancelled);
+                }
+                Ok(PreparedObservationCapture::Durable {
+                    write: Box::new(write),
+                    sanitized_record,
+                    findings,
+                    cancellation,
+                })
+            }
+            ObservationSanitizationOutcomeV1::Rejected { receipt, findings } => {
+                Ok(PreparedObservationCapture::Rejected { receipt, findings })
+            }
+            ObservationSanitizationOutcomeV1::Quarantined { receipt, findings } => {
+                Ok(PreparedObservationCapture::Quarantined { receipt, findings })
+            }
+        }
+    }
+
+    async fn persisted_outcome(
+        &self,
+        outcome: ObservationPersistOutcome,
+        sanitized_record: SanitizedObservationRecordV1,
+        findings: Vec<SanitizationFindingV1>,
+        cancellation: &ObservationCancellation,
+    ) -> Result<CaptureObservationOutcome, ObservationApplicationError> {
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        let observation_id = outcome.receipt().observation().observation_id();
+        let stored = self.store.read_admitted_observation(observation_id).await?;
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        Ok(Self::persisted_outcome_from_readback(
+            outcome,
+            sanitized_record,
+            findings,
+            stored,
+        ))
+    }
+
+    fn persisted_outcome_from_readback(
+        outcome: ObservationPersistOutcome,
+        sanitized_record: SanitizedObservationRecordV1,
+        findings: Vec<SanitizationFindingV1>,
+        stored: Option<StoredObservation>,
+    ) -> CaptureObservationOutcome {
+        // Preserve authoritative projection state when visible. A
+        // new commit establishes queued state. Duplicate receipts
+        // prove durability but carry no projection status, so a
+        // trailing reader snapshot remains explicitly unavailable.
+        let projection_status = match (stored, &outcome) {
+            (Some(stored), _) => {
+                ObservationProjectionReadback::Authoritative(stored.projection_status())
+            }
+            (None, ObservationPersistOutcome::Committed(_)) => {
+                ObservationProjectionReadback::Authoritative(ObservationProjectionStatus::Queued)
+            }
+            (
+                None,
+                ObservationPersistOutcome::ExactDuplicate(_)
+                | ObservationPersistOutcome::CoveredDuplicate(_),
+            ) => ObservationProjectionReadback::Unavailable,
+        };
+        CaptureObservationOutcome::Persisted {
+            outcome: Box::new(outcome),
+            projection_status,
+            sanitized_record: Box::new(sanitized_record),
+            findings,
+        }
+    }
+
     /// Boxes the whole admission future at this shared chokepoint so every
     /// caller (the cursor JSONL per-frame loop, composer, Claude, Hermes,
     /// snapshot) inherits a bounded debug poll frame without pinning at the
@@ -361,118 +605,21 @@ where
         >,
     > {
         Box::pin(async move {
-            let CaptureObservationRequest {
-                parsed_record,
-                identity,
-                expected_cursor,
-                resume_checkpoint,
-                retention_class,
-                cancellation,
-                repository_provenance,
-            } = request;
-            if cancellation.is_cancelled() {
-                return Err(ObservationApplicationError::Cancelled);
-            }
-            let sanitized =
-                self.sanitizer
-                    .sanitize_parsed(parsed_record, identity, retention_class)?;
-            if cancellation.is_cancelled() {
-                return Err(ObservationApplicationError::Cancelled);
-            }
-            match sanitized {
-                ObservationSanitizationOutcomeV1::Durable {
-                    observation,
+            match self.prepare_capture(request)? {
+                PreparedObservationCapture::Durable {
+                    write,
                     sanitized_record,
                     findings,
+                    cancellation,
                 } => {
-                    let identity = observation.identity();
-                    let mut next_cursor = ObservationSourceCursorV1::for_ordering(
-                        identity.source().clone(),
-                        identity.scope().clone(),
-                        identity.generation(),
-                        identity.ordering_domain(),
-                        identity.position().end(),
-                    )?;
-                    if let Some((file_identity, resume_fingerprint)) = resume_checkpoint {
-                        next_cursor =
-                            next_cursor.with_resume_checkpoint(file_identity, resume_fingerprint);
-                    }
-                    let projection_generation =
-                        ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION)
-                            .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-                    let ingested_at = now_micros();
-                    let authorization = build_observation_resolution_authorization_v1(
-                        &observation,
-                        tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
-                    )?;
-                    let repository_provenance = repository_provenance.map_or_else(
-                        crate::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,
-                        |context| {
-                            context.capture_after_sanitization(
-                                &observation,
-                                &projection_generation,
-                                ingested_at,
-                                authorization.clone(),
-                            )
-                        },
-                    );
-                    let retrieval_anchor = build_observation_retrieval_anchor_v2(
-                        &observation,
-                        projection_generation.clone(),
-                        ingested_at,
-                        authorization,
-                    )?;
-                    let write = AnchoredObservationWrite::new(
-                        ObservationWrite::new(*observation, expected_cursor, next_cursor)?,
-                        retrieval_anchor,
-                        projection_generation,
-                    )?
-                    .with_repository_provenance_attachment(
-                        repository_provenance.availability().clone(),
-                        repository_provenance.anchor().cloned(),
-                    )?;
-                    if cancellation.is_cancelled() {
-                        return Err(ObservationApplicationError::Cancelled);
-                    }
-                    let outcome = self.store.persist_admitted_observation(write).await?;
-                    if cancellation.is_cancelled() {
-                        return Err(ObservationApplicationError::Cancelled);
-                    }
-                    let observation_id = outcome.receipt().observation().observation_id();
-                    let stored = self.store.read_admitted_observation(observation_id).await?;
-                    if cancellation.is_cancelled() {
-                        return Err(ObservationApplicationError::Cancelled);
-                    }
-                    // Preserve authoritative projection state when visible. A
-                    // new commit establishes queued state. Duplicate receipts
-                    // prove durability but carry no projection status, so a
-                    // trailing reader snapshot remains explicitly unavailable.
-                    let projection_status = match (stored, &outcome) {
-                        (Some(stored), _) => {
-                            ObservationProjectionReadback::Authoritative(stored.projection_status())
-                        }
-                        (None, ObservationPersistOutcome::Committed(_)) => {
-                            ObservationProjectionReadback::Authoritative(
-                                ObservationProjectionStatus::Queued,
-                            )
-                        }
-                        (
-                            None,
-                            ObservationPersistOutcome::ExactDuplicate(_)
-                            | ObservationPersistOutcome::CoveredDuplicate(_),
-                        ) => ObservationProjectionReadback::Unavailable,
-                    };
-                    Ok(CaptureObservationOutcome::Persisted {
-                        outcome: Box::new(outcome),
-                        projection_status,
-                        sanitized_record: Box::new(sanitized_record),
-                        findings,
-                    })
+                    let outcome = self.store.persist_admitted_observation(*write).await?;
+                    self.persisted_outcome(outcome, sanitized_record, findings, &cancellation)
+                        .await
                 }
-                ObservationSanitizationOutcomeV1::Rejected { receipt, findings } => {
+                PreparedObservationCapture::Rejected { receipt, findings } => {
                     Ok(CaptureObservationOutcome::Rejected { receipt, findings })
                 }
-                ObservationSanitizationOutcomeV1::Quarantined { receipt, findings } => {
+                PreparedObservationCapture::Quarantined { receipt, findings } => {
                     Ok(CaptureObservationOutcome::Quarantined { receipt, findings })
                 }
             }
@@ -568,6 +715,154 @@ where
             has_more,
             next_after_sequence,
         })
+    }
+}
+
+impl<S> ObservationApplication<S>
+where
+    S: ObservationStore + ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
+{
+    #[hotpath::measure(future = true)]
+    async fn prepare_batch_captures(
+        &self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> Result<Vec<PreparedObservationCapture>, ObservationApplicationError> {
+        let total = requests.len();
+        let mut pending = requests.into_iter().enumerate();
+        let limit = self.batch_concurrency.max_in_flight().min(total);
+        let mut tasks = JoinSet::new();
+        let mut prepared = (0..total).map(|_| None).collect::<Vec<_>>();
+
+        loop {
+            while tasks.len() < limit {
+                let Some((index, request)) = pending.next() else {
+                    break;
+                };
+                if request.cancellation.is_cancelled() {
+                    tasks.abort_all();
+                    return Err(ObservationApplicationError::Cancelled);
+                }
+                let sanitizer = self.sanitizer.clone();
+                let background_cpu = self.background_cpu.clone();
+                tasks.spawn_blocking(move || {
+                    let capture = match background_cpu {
+                        Some(authority) => authority.with_permit(|| {
+                            Self::prepare_capture_with_sanitizer(&sanitizer, request)
+                        }),
+                        None => Self::prepare_capture_with_sanitizer(&sanitizer, request),
+                    };
+                    (index, capture)
+                });
+            }
+
+            let Some(joined) = tasks.join_next().await else {
+                break;
+            };
+            let (index, capture) =
+                joined.map_err(|_| ObservationApplicationError::BatchWorkerStopped)?;
+            prepared[index] = Some(capture?);
+        }
+
+        prepared
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(ObservationApplicationError::BatchWorkerStopped)
+    }
+
+    fn persisted_batch_outcomes(
+        persisted: Vec<PersistedObservationCapture>,
+    ) -> Result<Vec<CaptureObservationOutcome>, ObservationApplicationError> {
+        let mut outcomes = Vec::with_capacity(persisted.len());
+        for persisted_capture in persisted {
+            if persisted_capture.durable.cancellation.is_cancelled() {
+                return Err(ObservationApplicationError::Cancelled);
+            }
+            outcomes.push(Self::persisted_outcome_from_readback(
+                persisted_capture.outcome,
+                persisted_capture.durable.sanitized_record,
+                persisted_capture.durable.findings,
+                persisted_capture.stored,
+            ));
+        }
+        Ok(outcomes)
+    }
+
+    /// Sanitizes every request, then persists durable writes through one
+    /// store-owned `persist_observations` call. Empty input returns empty
+    /// without touching persist authority. A sanitizer reject or quarantine
+    /// in the batch refuses before persistence so the stream owner can retry
+    /// one request at a time and advance typed coverage between records.
+    #[hotpath::measure]
+    pub async fn capture_observations(
+        &self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> Result<Vec<CaptureObservationOutcome>, ObservationApplicationError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prepared = self.prepare_batch_captures(requests).await?;
+        if prepared.iter().any(|capture| {
+            matches!(
+                capture,
+                PreparedObservationCapture::Durable { cancellation, .. }
+                    if cancellation.is_cancelled()
+            )
+        }) {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        let all_durable = prepared
+            .iter()
+            .all(|prepared| matches!(prepared, PreparedObservationCapture::Durable { .. }));
+        if !all_durable {
+            return Err(ObservationApplicationError::BatchContainsNonDurable);
+        }
+        let mut writes = Vec::with_capacity(prepared.len());
+        let mut durable = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            match prepared {
+                PreparedObservationCapture::Durable {
+                    write,
+                    sanitized_record,
+                    findings,
+                    cancellation,
+                } => {
+                    writes.push(*write);
+                    durable.push(DurableObservationCapture {
+                        sanitized_record,
+                        findings,
+                        cancellation,
+                    });
+                }
+                PreparedObservationCapture::Rejected { .. }
+                | PreparedObservationCapture::Quarantined { .. } => {
+                    return Err(ObservationApplicationError::BatchContainsNonDurable);
+                }
+            }
+        }
+        let persist_outcomes = self.store.persist_observations(writes).await?;
+        if persist_outcomes.len() != durable.len() {
+            return Err(ObservationApplicationError::Store(
+                ObservationStoreError::Storage {
+                    operation: "persist_observations",
+                    source: Box::new(std::io::Error::other(
+                        "persist_observations returned a different outcome count",
+                    )),
+                },
+            ));
+        }
+        let persisted = durable
+            .into_iter()
+            .zip(persist_outcomes)
+            .map(|(durable, persisted)| {
+                let (outcome, stored) = persisted.into_parts();
+                PersistedObservationCapture {
+                    outcome,
+                    stored,
+                    durable,
+                }
+            })
+            .collect();
+        Self::persisted_batch_outcomes(persisted)
     }
 }
 

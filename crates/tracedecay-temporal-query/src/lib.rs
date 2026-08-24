@@ -273,6 +273,7 @@ pub enum TemporalKernelError {
     Context(#[from] ContextError),
 }
 
+#[hotpath::measure]
 pub async fn execute_temporal_kernel(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -286,6 +287,10 @@ pub async fn execute_temporal_kernel(
 
 /// Execute the canonical Plan-23 candidate, temporal-resolution, fusion,
 /// dedupe, diversity, and pagination phases without reading payload bytes.
+///
+/// Hotpath names are static crate stages. Candidate-page and record-page
+/// ports are left unmeasured so storage/query crates own those spans.
+#[hotpath::measure]
 pub async fn execute_temporal_candidate_export(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -310,13 +315,15 @@ pub async fn execute_temporal_candidate_export(
     // An empty query is a scope browse — the authorized scope's records in
     // temporal order — never a zero-clause (structurally empty) plan. Text
     // queries rank through the lexical/phrase/entity channels instead.
-    let plan = if let Some(anchor_id) = request.direct_anchor.as_ref() {
-        candidates::plan_anchor(anchor_id)
-    } else if snapshot.request().semantic_filter().goals || request.query.trim().is_empty() {
-        candidates::plan_scope_candidates()
-    } else {
-        candidates::plan_candidates(&request.query)
-    };
+    let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
+        if let Some(anchor_id) = request.direct_anchor.as_ref() {
+            candidates::plan_anchor(anchor_id)
+        } else if snapshot.request().semantic_filter().goals || request.query.trim().is_empty() {
+            candidates::plan_scope_candidates()
+        } else {
+            candidates::plan_candidates(&request.query)
+        }
+    });
     let candidate_page_items = limits.candidate_limit.min(64);
     let candidate_limits = PageLimits::new(
         limits.candidate_limit,
@@ -327,16 +334,19 @@ pub async fn execute_temporal_candidate_export(
     .map_err(map_port_error)?;
     let mut candidate_state = CandidateReadState::new(candidate_limits);
     let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
-    loop {
-        let page = pull_candidate_page(read_port, snapshot, &plan, &mut candidate_state)
-            .await
-            .map_err(map_port_error)?;
-        let status = page.status();
-        candidates.extend(page.into_items());
-        if status == PageStatus::Complete {
-            break;
+    hotpath::measure_block!("temporal_query.candidates.generate", {
+        loop {
+            let page = pull_candidate_page(read_port, snapshot, &plan, &mut candidate_state)
+                .await
+                .map_err(map_port_error)?;
+            let status = page.status();
+            candidates.extend(page.into_items());
+            if status == PageStatus::Complete {
+                break;
+            }
         }
-    }
+    });
+    hotpath::gauge!("temporal_query.candidates.generated").set(candidates.len());
 
     let record_page_items = limits.record_limit.min(64);
     let record_limits = PageLimits::new(
@@ -457,22 +467,27 @@ pub async fn execute_temporal_candidate_export(
                 && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
+    hotpath::gauge!("temporal_query.candidates.visible").set(visible_candidates.len());
     let eligible =
         u64::try_from(visible_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
     let excluded = examined
         .checked_sub(eligible)
         .ok_or(TemporalKernelError::BudgetExceeded)?;
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
+    hotpath::gauge!("temporal_query.candidates.ranked").set(ranked.len());
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
+    hotpath::gauge!("temporal_query.candidates.after_cursor").set(ranked.len());
     let mut deduplicated_anchors = BTreeSet::new();
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
+    hotpath::gauge!("temporal_query.candidates.deduped").set(ranked.len());
 
     let has_more = ranked.len() > request.limit;
     let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
+    hotpath::gauge!("temporal_query.candidates.paged").set(ranked.len());
     let next_cursor = if has_more {
         ranked
             .last()

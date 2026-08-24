@@ -558,6 +558,28 @@ fn temporal_request_mode(
     })
 }
 
+struct CountingSink {
+    written: u64,
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn count_serialized_bytes<T: Serialize>(value: &T) -> Result<u64, RetainedSurfaceExecutionErrorV1> {
+    let mut output = CountingSink { written: 0 };
+    serde_json::to_writer(&mut output, value)
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    Ok(output.written)
+}
+
 pub(super) fn measured_budget<T: Serialize>(
     started_at: tracedecay_domain::UtcMicros,
     finished_at: tracedecay_domain::UtcMicros,
@@ -568,11 +590,7 @@ pub(super) fn measured_budget<T: Serialize>(
         .checked_sub(started_at.0)
         .and_then(|elapsed| u64::try_from(elapsed).ok())
         .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let bytes_consumed = serde_json::to_vec(result)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
-        .and_then(|payload| {
-            u64::try_from(payload.len()).map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
-        })?;
+    let bytes_consumed = count_serialized_bytes(result)?;
     Ok(OperationBudgetUsage {
         units_consumed: 1,
         bytes_consumed,

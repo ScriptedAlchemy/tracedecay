@@ -463,9 +463,9 @@ mod tests {
             .unwrap();
         assert_eq!(sessions.rows, 0, "session retention is disabled by default");
         assert_eq!(sessions.window_days, None);
-        // Review-fix guard: lcm_raw_messages participates in every global
-        // pass — an operator-set lcm_raw_messages_days must never be
-        // silently ignored. Disabled by default (lossless).
+        // lcm_raw_messages participates in every global pass — an
+        // operator-set lcm_raw_messages_days must never be silently
+        // ignored. Disabled by default (lossless).
         let lcm = reports
             .iter()
             .find(|r| r.table == "lcm_raw_messages")

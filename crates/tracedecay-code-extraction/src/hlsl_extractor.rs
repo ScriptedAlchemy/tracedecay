@@ -45,12 +45,18 @@ impl ExtractionState {
         }
     }
 
+    /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     fn parent_node_id(&self) -> Option<&str> {
@@ -169,10 +175,6 @@ impl HlslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // function_definition
-    // -------------------------------------------------------
-
     fn visit_function_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         let name =
             Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -252,10 +254,6 @@ impl HlslExtractor {
             text.trim().trim_end_matches(';').trim().to_string()
         }
     }
-
-    // -------------------------------------------------------
-    // struct_specifier  (struct / class)
-    // -------------------------------------------------------
 
     fn visit_struct_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
@@ -377,10 +375,6 @@ impl HlslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // cbuffer_specifier  (constant buffer)
-    // -------------------------------------------------------
-
     fn visit_cbuffer_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
@@ -429,7 +423,6 @@ impl HlslExtractor {
             });
         }
 
-        // Visit cbuffer members as fields.
         if let Some(body) = node.child_by_field_name("body") {
             state.node_stack.push((name, id));
             Self::visit_cbuffer_members(state, body);
@@ -451,10 +444,6 @@ impl HlslExtractor {
             }
         }
     }
-
-    // -------------------------------------------------------
-    // declaration  (global variables / prototypes)
-    // -------------------------------------------------------
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Skip function prototypes — handled by function_definition.
@@ -545,10 +534,6 @@ impl HlslExtractor {
         find_direct_child_by_kind(node, "identifier").map(|n| state.node_text(n))
     }
 
-    // -------------------------------------------------------
-    // Preprocessor
-    // -------------------------------------------------------
-
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
@@ -618,10 +603,6 @@ impl HlslExtractor {
         }
     }
 
-    // -------------------------------------------------------
-    // Call site extraction
-    // -------------------------------------------------------
-
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
             &state.source,
@@ -631,10 +612,6 @@ impl HlslExtractor {
             fn_node_id,
         );
     }
-
-    // -------------------------------------------------------
-    // Utility helpers
-    // -------------------------------------------------------
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {

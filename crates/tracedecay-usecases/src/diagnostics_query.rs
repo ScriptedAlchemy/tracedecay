@@ -1,11 +1,9 @@
-//! Typed diagnostic query core over [`DiagnosticsStore`] (Plan 35, "Universal
-//! managed diagnostics"; query/22-diagnostic-query-core packet).
+//! Typed diagnostic query core over [`DiagnosticsStore`].
 //!
 //! This module is a pure read path: no writes, no repair, no schema changes.
 //! Every lane returns domain records with explicit coverage — `Complete`,
 //! `Truncated`, or `StoreUnavailable` — so a partial or failed read is never
-//! presented as a clean result (Plan 35: "Partial coverage is never
-//! represented as a clean result"). All list lanes are bounded by a limit
+//! presented as a clean result. All list lanes are bounded by a limit
 //! plus an opaque cursor and are deterministic: records page in ascending
 //! anchor order, chains page in chain order.
 //!
@@ -43,9 +41,8 @@ const CURSOR_PREFIX: &str = "dq1:";
 
 /// Explicit coverage for every diagnostic query lane. A read is either
 /// complete, deterministically truncated with a resumption cursor, or
-/// unavailable because the store could not answer — never silently partial
-/// (Plan 35: engine status and dropped updates "remain visible through typed
-/// status").
+/// unavailable because the store could not answer — never silently partial.
+/// Engine status and dropped updates remain visible through typed status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagnosticQueryCoverage {
     /// The lane returned every matching record.
@@ -128,7 +125,7 @@ impl DiagnosticPage {
     }
 }
 
-/// Point lookup of one record by its Plan 13 anchor.
+/// Point lookup of one record by its retrieval anchor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticAnchorLookup {
     pub record: Option<GenerationDiagnosticV1>,
@@ -175,8 +172,8 @@ pub struct GenerationDiagnosticDiff {
 
 /// Where one entry of the merged current view came from. The durable lane
 /// and the session-only overlay lane stay typed and separate even after
-/// merging (Plan 35: overlay findings "are never published as durable LSP
-/// diagnostics").
+/// merging; overlay findings are never published as durable LSP
+/// diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergedDiagnosticProvenance {
     /// A durable record persisted in the store for the clean generation.
@@ -315,6 +312,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// Reads the clean-generation publication pointer. A completed empty
     /// publication returns `Some(generation)` even when it contains no
     /// findings; no pointer is distinct from a clean result.
+    #[hotpath::measure]
     pub async fn current_generation(&self) -> CurrentDiagnosticGeneration {
         let operation = "diagnostics query current_generation";
         match self.store.current_generation().await {
@@ -334,6 +332,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records bound to `generation`, paged in ascending anchor
     /// order.
+    #[hotpath::measure]
     pub async fn current_by_generation(
         &self,
         generation: &CodeGenerationId,
@@ -359,6 +358,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records for one file occurrence inside `generation`, paged in
     /// ascending anchor order.
+    #[hotpath::measure]
     pub async fn current_by_file(
         &self,
         generation: &CodeGenerationId,
@@ -384,8 +384,8 @@ impl<'a> DiagnosticsQuery<'a> {
     }
 
     /// Stale (superseded or cleared) records bound to `generation`. Stale
-    /// findings remain queryable but never re-enter active publication
-    /// (Plan 35).
+    /// findings remain queryable but never re-enter active publication.
+    #[hotpath::measure]
     pub async fn stale_by_generation(
         &self,
         generation: &CodeGenerationId,
@@ -400,6 +400,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Stale (superseded or cleared) records for one file occurrence inside
     /// `generation`, paged in ascending anchor order.
+    #[hotpath::measure]
     pub async fn stale_by_file(
         &self,
         generation: &CodeGenerationId,
@@ -419,18 +420,22 @@ impl<'a> DiagnosticsQuery<'a> {
         }
     }
 
-    /// Fetches one record by its Plan 13 anchor. A miss is `Complete` with
+    /// Fetches one record by its retrieval anchor. A miss is `Complete` with
     /// no record; a store failure is typed `StoreUnavailable`.
+    #[hotpath::measure]
     pub async fn by_anchor(
         &self,
         anchor: &RetrievalAnchorId,
     ) -> Result<DiagnosticAnchorLookup, DiagnosticQueryError> {
         let operation = "diagnostics query by_anchor";
         match self.store.record_by_anchor(anchor).await {
-            Ok(record) => Ok(DiagnosticAnchorLookup {
-                record,
-                coverage: DiagnosticQueryCoverage::Complete,
-            }),
+            Ok(record) => {
+                crate::hotpath_observe::diagnostics_query(usize::from(record.is_some()), 1);
+                Ok(DiagnosticAnchorLookup {
+                    record,
+                    coverage: DiagnosticQueryCoverage::Complete,
+                })
+            }
             Err(error) => Ok(DiagnosticAnchorLookup {
                 record: None,
                 coverage: DiagnosticQueryCoverage::StoreUnavailable {
@@ -445,6 +450,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// `Superseded { successor_generation }` edges toward newer records and
     /// is returned oldest-first including the starting record. The chain
     /// ends at a current, cleared, or missing successor.
+    #[hotpath::measure]
     pub async fn supersession_forward(
         &self,
         anchor: &RetrievalAnchorId,
@@ -463,6 +469,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// same-key record whose `Superseded { successor_generation }` names the
     /// current record's generation. The walk stops deterministically when
     /// there is no unique predecessor.
+    #[hotpath::measure]
     pub async fn supersession_backward(
         &self,
         anchor: &RetrievalAnchorId,
@@ -557,6 +564,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// `superseded` lane, a finding with no `from_generation` counterpart
     /// lands in `introduced`, and a finding with no `to_generation`
     /// counterpart lands in `cleared`. Each lane is capped at `limit`.
+    #[hotpath::measure]
     pub async fn generation_file_diff(
         &self,
         from_generation: &CodeGenerationId,
@@ -645,7 +653,8 @@ impl<'a> DiagnosticsQuery<'a> {
     /// overlay into one deterministic merged view. On the same logical
     /// finding key the overlay entry wins; every entry carries typed
     /// provenance (persisted vs overlay). The overlay lane is session-only
-    /// and is never written back (Plan 35).
+    /// and is never written back.
+    #[hotpath::measure]
     pub async fn merged_current_with_overlay(
         &self,
         generation: &CodeGenerationId,
@@ -804,6 +813,7 @@ fn paginate_sorted(
     let total = records.len();
     let (records, coverage, next_cursor) =
         paginate_items(records, |record| record.diagnostic_anchor.as_str(), request);
+    crate::hotpath_observe::diagnostics_query(records.len(), total);
     DiagnosticPage {
         records,
         total,
@@ -824,6 +834,7 @@ fn page_from_bounded_records(
                 .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor))
         })
         .flatten();
+    crate::hotpath_observe::diagnostics_query(records.len(), total);
     DiagnosticPage {
         records,
         total,

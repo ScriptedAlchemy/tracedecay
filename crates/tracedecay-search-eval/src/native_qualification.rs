@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
     EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
@@ -850,9 +851,7 @@ fn validate_report_runtime_bindings(
 }
 
 fn canonical_sha256(bytes: &[u8]) -> String {
-    let mut digest = String::from("sha256:");
-    digest.push_str(&hex::encode(Sha256::digest(bytes)));
-    digest
+    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -19,8 +19,35 @@ pub(crate) enum RepositoryMutationQueueError {
     Saturated,
 }
 
+struct RepositoryGate {
+    occupied: Mutex<bool>,
+    available: Condvar,
+}
+
+impl RepositoryGate {
+    fn new() -> Self {
+        Self {
+            occupied: Mutex::new(false),
+            available: Condvar::new(),
+        }
+    }
+}
+
+struct OccupiedGate<'a> {
+    gate: &'a RepositoryGate,
+}
+
+impl Drop for OccupiedGate<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut occupied) = self.gate.occupied.lock() {
+            *occupied = false;
+            self.gate.available.notify_one();
+        }
+    }
+}
+
 pub(crate) struct RepositoryMutationQueue {
-    gates: Mutex<BTreeMap<RepositoryId, Arc<Mutex<()>>>>,
+    gates: Mutex<BTreeMap<RepositoryId, Arc<RepositoryGate>>>,
     pending: AtomicUsize,
     capacity: usize,
 }
@@ -93,35 +120,42 @@ impl RepositoryMutationQueue {
             Arc::clone(
                 gates
                     .entry(repository_id.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+                    .or_insert_with(|| Arc::new(RepositoryGate::new())),
             )
         };
         if let Some(cancelled_at) = cancellation_requested() {
             self.release_idle_gate(repository_id, &gate)?;
             return Ok(operation(Some(cancelled_at)));
         }
-        let _guard = loop {
-            match gate.try_lock() {
-                Ok(guard) => break guard,
-                Err(TryLockError::Poisoned(_)) => {
-                    return Err(RepositoryMutationQueueError::Unavailable);
-                }
-                Err(TryLockError::WouldBlock) => {
-                    if let Some(cancelled_at) = cancellation_requested() {
-                        self.release_idle_gate(repository_id, &gate)?;
-                        return Ok(operation(Some(cancelled_at)));
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
+        let mut occupied = gate
+            .occupied
+            .lock()
+            .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
+        loop {
+            if !*occupied {
+                *occupied = true;
+                break;
             }
-        };
+            if let Some(cancelled_at) = cancellation_requested() {
+                drop(occupied);
+                self.release_idle_gate(repository_id, &gate)?;
+                return Ok(operation(Some(cancelled_at)));
+            }
+            let (guard, _) = gate
+                .available
+                .wait_timeout(occupied, Duration::from_millis(50))
+                .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
+            occupied = guard;
+        }
+        drop(occupied);
+        let _held = OccupiedGate { gate: &gate };
         if let Some(cancelled_at) = cancellation_requested() {
-            drop(_guard);
+            drop(_held);
             self.release_idle_gate(repository_id, &gate)?;
             return Ok(operation(Some(cancelled_at)));
         }
         let result = operation(None);
-        drop(_guard);
+        drop(_held);
         self.release_idle_gate(repository_id, &gate)?;
         Ok(result)
     }
@@ -129,7 +163,7 @@ impl RepositoryMutationQueue {
     fn release_idle_gate(
         &self,
         repository_id: &RepositoryId,
-        gate: &Arc<Mutex<()>>,
+        gate: &Arc<RepositoryGate>,
     ) -> Result<(), RepositoryMutationQueueError> {
         let mut gates = self
             .gates

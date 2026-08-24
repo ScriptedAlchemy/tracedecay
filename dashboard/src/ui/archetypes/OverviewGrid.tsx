@@ -2,8 +2,8 @@ import type { ReactNode } from 'react';
 import { cn } from '../cn';
 import { Panel } from '../instrument.tsx';
 
-/** Archetype 1 (plan 11a): responsive panel grid. Each panel is one read model
- * with its truth strip; no panel renders a computed grade.
+/** Responsive panel grid. Each panel is one read model with its truth
+ * strip; no panel renders a computed grade.
  *
  * The gutter is one grid cell so panels land on the same rhythm the graticule
  * and the readout bars use — the whole console is ruled to a single module. */

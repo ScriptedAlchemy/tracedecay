@@ -2,7 +2,7 @@
 //!
 //! This module owns only lifetime and delegation. Resolution, validation,
 //! authorization, mutation, audit, and credential semantics remain in the
-//! existing application operations and Plan20 store.
+//! existing application operations and transactional store.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,7 +42,7 @@ type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send 
 pub(crate) const RUNTIME_CONFIGURATION_COMPONENT: &str = "configuration.runtime-cache";
 
 /// Retained project-level control-plane runtime. It owns the one opened
-/// Plan20 store handle and the one application operation facade used by every
+/// transactional store handle and the one application operation facade used by every
 /// local transport.
 pub struct ProjectConfigurationRuntime {
     target: RuntimeConfigurationTarget,
@@ -823,7 +823,6 @@ impl ConfigurationClock for SystemConfigurationClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
     use tracedecay_domain::configuration::ConfigurationValueKindV1;
 
     use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig};
@@ -906,12 +905,6 @@ mod tests {
             .install(scopes, authorization)
             .expect_err("second authority installation must fail");
         assert!(matches!(error, TraceDecayError::Config { .. }));
-    }
-
-    #[test]
-    fn production_client_is_the_semantic_configuration_source() {
-        fn assert_source<T: SemanticConfigurationSnapshotSourceV1>() {}
-        assert_source::<ProductionConfigurationDaemonClient>();
     }
 
     #[test]

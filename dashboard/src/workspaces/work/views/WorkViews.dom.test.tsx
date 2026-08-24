@@ -3,12 +3,12 @@
  *
  * Two invariants carry this file.
  *
- * The first is plan 11's mandate: one canonical selection, many synchronized
+ * The first is the product mandate: one canonical selection, many synchronized
  * projections. The switcher moves the camera and must never move the
  * selection, so a task selected on the board is still selected after three
  * projection changes and a reload of the same address.
  *
- * The second is 11c's honesty rule. Each of these projections is asked to
+ * The second is the honesty rule. Each of these projections is asked to
  * encode a measurement this build cannot take, and the failure mode is not a
  * broken drawing — it is a gap that quietly acquires a value. Every projection
  * is therefore asserted to render its absent channels as stated absences, and
@@ -312,8 +312,8 @@ describe('the projection switcher', () => {
     );
   });
 
-  /** The plan 11 mandate. A projection is a camera position; it does not own
-   * the selection and must not clear one. */
+  /** A projection is a camera position; it does not own the selection and
+   * must not clear one. */
   it('keeps the selected task across every projection change', async () => {
     const user = userEvent.setup();
     const { container } = renderPage();
@@ -395,8 +395,8 @@ describe('the DAG projection', () => {
     expect(container.querySelectorAll('[data-work-widest="true"]').length).toBeGreaterThan(0);
   });
 
-  /** The effort-weighted critical path is the measurement 11c asks for, and
-   * `operation.work.views` now carries it: the authority's chain and its
+  /** The effort-weighted critical path is the measurement the graph read
+   * carries: the authority's chain and its
    * weight render from the wire, beside — never in place of — the unweighted
    * chain over this page's own edges. */
   it('weights the critical path with the authority chain from the graph read', async () => {

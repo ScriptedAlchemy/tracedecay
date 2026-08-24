@@ -97,6 +97,27 @@ export function createFieldRenderer({
 }: FieldRendererOptions): FieldRenderer {
   const roomyDenseField = denseField && roominess >= 0.8;
 
+  /** Neighbourhood of the current hover, rebuilt only when focus changes.
+   * The node reducer used to walk each body's adjacency array with
+   * `includes` on every frame. */
+  let focusedNeighborhood: Set<string> | null = null;
+  let focusedNeighborhoodOf: string | null = null;
+  const neighborhoodOf = (hovered: string | null): Set<string> | null => {
+    if (hovered == null) {
+      focusedNeighborhood = null;
+      focusedNeighborhoodOf = null;
+      return null;
+    }
+    if (hovered === focusedNeighborhoodOf && focusedNeighborhood != null) {
+      return focusedNeighborhood;
+    }
+    const next = new Set(neighborsOf.get(hovered) ?? []);
+    next.add(hovered);
+    focusedNeighborhood = next;
+    focusedNeighborhoodOf = hovered;
+    return next;
+  };
+
   const sigma = new Sigma(graph, container, {
     // Sigma's default hover pass paints an opaque white shadowed disc over
     // the hovered body; ours stays in the field's palette. See nodeHover.ts.
@@ -134,8 +155,7 @@ export function createFieldRenderer({
       const hovered = focus.node;
       const isSelected = node === selectedId();
       const isHovered = node === hovered;
-      const isNeighbor =
-        hovered != null && (neighborsOf.get(node)?.includes(hovered) === true || isHovered);
+      const isNeighbor = neighborhoodOf(hovered)?.has(node) === true;
       const dim = hovered != null && !isNeighbor ? focus.t : 0;
       const heat = field.heatOf(node);
       const vitality = (data['vitality'] as number | undefined) ?? 0.6;

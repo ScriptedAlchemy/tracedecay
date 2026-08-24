@@ -31,7 +31,7 @@ the current checkout, only `retrieval.rs::temporal_decay_factor` remains.
 | Storage | `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md` | per-fact byte cost, capacity math, unbounded-growth paths |
 | Retrieval/entity | `docs/RETRIEVAL-QUALITY-EVAL.md` | recall pipeline + 7 empirically-measured quality risks (binary-driven evidence) |
 | Trust-decay | `docs/TRUST-DECAY-SEMANTICS.md` | persisted vs. ranking decay, dead code, explainability gaps |
-| Visibility | `docs/MEMORY-HEALTH-VISIBILITY-GAPS.md` | dashboard/CLI/doctor/MCP surfacing gaps (G1–G11) |
+| Visibility | `docs/archive/MEMORY-HEALTH-VISIBILITY-GAPS.md` | dashboard/CLI/doctor/MCP surfacing gaps (G1–G11) |
 
 All four audited the same live checkout (`.tracedecay/tracedecay.db`, 129 facts,
 memory subsystem 2.43 MiB of a 78.5 MiB DB) and agree on the headline numbers.
@@ -91,7 +91,7 @@ operation, so operators can see what a retention sweep would delete before an
 authorized owner applies it.
 
 ### X3 — Retrieval tuning is gated by an eval harness that does not exist
-`tests/memory_suite/memory_eval_test.rs` + `eval/scenarios/*` cover **hygiene contracts only**
+`tests/memory_suite/memory_eval_test.rs` + `evals/memory/scenarios/*` cover **hygiene contracts only**
 (secrets, transient, supersession, dedup). There are **no ranking-quality
 scenarios**. Fusing re-balance (F2) and holographic-weight changes (F4) both
 re-rank every existing query; without a regression guard they are tuning blind.
@@ -202,7 +202,7 @@ subsystem).
 ### Tier 1 — Medium follow-ups (after the relevant Tier-0 prerequisites)
 
 #### M1 — Ranking-quality eval scenario family (F1)
-- **What:** Extend `tests/memory_suite/memory_eval_test.rs` + `eval/scenarios/*` with ranking
+- **What:** Extend `tests/memory_suite/memory_eval_test.rs` + `evals/memory/scenarios/*` with ranking
   assertions (`SearchRank { query, top_fact_source, min_rank_gap }`) using the
   same subprocess path the harness already drives. Pin the trust-bias case
   (retrieval Risk C), the supersession case (Risk F), and the morphology case

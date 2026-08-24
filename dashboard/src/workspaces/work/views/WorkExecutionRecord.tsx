@@ -11,6 +11,7 @@ import type {
   WorkExecutorReading,
 } from '../workAttemptModel.ts';
 import type { WorkWeaveReading } from '../workViewsModel.ts';
+import { TaskChip } from './TaskChip.tsx';
 import { ChannelAbsence, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -394,26 +395,21 @@ function Lineage({
       ? 'first attempt only'
       : `${lineage.restarts} ${lineage.restarts === 1 ? 'restart' : 'restarts'}${lineage.truncated ? ' or more' : ''}`;
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(lineage.taskId)}
-      aria-pressed={selected}
+    <TaskChip
+      taskId={lineage.taskId}
+      selected={selected}
+      onSelect={onSelect}
+      variant="hollow"
+      lamp
       aria-label={`Task ${lineage.taskId} on run ${lineage.runId}: ${chain}, ${restarts}, ${lineage.open ? 'still open' : 'terminated'}${lineage.truncated ? ', chain begins before this page' : ''}`}
-      // 44px explicitly: this app's root font size is 14px, so `min-h-11`
-      // computes under the target size the accessibility gate measures.
       className={cn(
-        'relative flex min-h-[44px] w-full min-w-0 flex-col justify-center gap-1',
-        'border bg-transparent px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected ? 'border-accent' : 'border-edge-subtle',
-        'hover:border-edge-strong',
+        'w-full gap-1 hover:border-edge-strong',
+        selected ? undefined : 'border-edge-subtle',
       )}
-      data-work-task={lineage.taskId}
       data-work-lineage={`${lineage.taskId}/${lineage.runId}`}
       data-work-restarts={lineage.restarts}
       data-work-lineage-truncated={lineage.truncated ? 'true' : undefined}
     >
-      {selected ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" /> : null}
       <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <span className="min-w-0 flex-1 truncate font-mono text-2xs text-text-secondary">
           {lineage.taskId} · {lineage.runId}
@@ -432,7 +428,7 @@ function Lineage({
           chain begins before this page
         </span>
       ) : null}
-    </button>
+    </TaskChip>
   );
 }
 

@@ -202,7 +202,6 @@ impl ErlangExtractor {
             line: Some(start_line),
         });
 
-        // Collect call sites from all clauses.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -307,7 +306,6 @@ impl ErlangExtractor {
         // -spec name(Type) -> Type.  Track as an unresolved ref to the function.
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
-        // Extract just the function name from spec.
         if let Some(name) = Self::extract_attr_value(state, node) {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: state.file_node_id.clone(),

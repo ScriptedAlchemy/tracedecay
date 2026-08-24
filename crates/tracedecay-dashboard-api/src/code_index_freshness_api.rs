@@ -1,5 +1,5 @@
 //! `GET /api/code-index/freshness` — per-mounted-worktree code-index generation
-//! and freshness state (plan 11 §"Typed presentation contracts").
+//! and freshness state.
 //!
 //! The authoritative source is the daemon-owned
 //! `crate::daemon::code_index_scheduler` registry, which holds the map of live
@@ -30,7 +30,7 @@ use super::read_model::{
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
 /// exactly this type back out of the daemon's `tracedecay_status` response,
 /// keeping one authority for the freshness shape.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CodeIndexWorktreeFreshnessV1 {
     /// Display path of the mounted worktree root.
     pub worktree_root: String,
@@ -79,6 +79,16 @@ const UNAVAILABLE_NOTE: &str =
 pub async fn freshness(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1>> {
+    let envelope = hotpath::measure_block!("dashboard.freshness.projection", {
+        project_code_index_freshness(&state).await
+    });
+    crate::observe::record_freshness_state(envelope.freshness.state);
+    Json(envelope)
+}
+
+async fn project_code_index_freshness(
+    state: &DashboardState,
+) -> DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1> {
     let authority_attached = state.code_index_freshness_reader.is_some();
     let read = match &state.code_index_freshness_reader {
         Some(reader) => reader(state.project_root.clone()).await,
@@ -96,20 +106,20 @@ pub async fn freshness(
         }
         .to_string(),
     };
-    let envelope = match live {
+    match live {
         Some(worktree)
             if worktree.latest_generation_id.is_some()
                 && worktree.coverage == "complete"
                 && worktree.staleness_state.as_deref() == Some("fresh") =>
         {
             DashboardEnvelopeV1::ready(
-                scope_from_state(&state),
+                scope_from_state(state),
                 DashboardCoverageV1::complete(1, "mounted_worktree"),
                 payload,
             )
         }
         Some(worktree) if worktree.latest_generation_id.is_none() => DashboardEnvelopeV1::new(
-            scope_from_state(&state),
+            scope_from_state(state),
             if worktree.staleness_state.as_deref() == Some("indexing") {
                 DashboardDomainStateV1::Loading
             } else {
@@ -120,7 +130,7 @@ pub async fn freshness(
             payload,
         ),
         Some(_) => DashboardEnvelopeV1::new(
-            scope_from_state(&state),
+            scope_from_state(state),
             DashboardDomainStateV1::Partial,
             DashboardCoverageV1::partial(
                 1,
@@ -132,7 +142,7 @@ pub async fn freshness(
             payload,
         ),
         None if authority_attached => DashboardEnvelopeV1::new(
-            scope_from_state(&state),
+            scope_from_state(state),
             DashboardDomainStateV1::Unknown,
             DashboardCoverageV1::unknown(),
             DashboardFreshnessV1 {
@@ -142,13 +152,12 @@ pub async fn freshness(
             },
             payload,
         ),
-        None => DashboardEnvelopeV1::unsupported(scope_from_state(&state), payload),
+        None => DashboardEnvelopeV1::unsupported(scope_from_state(state), payload),
     }
     .with_legal_actions(vec![DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::Refresh,
         "use-case.dashboard.code-index.freshness.refresh",
-    )]);
-    Json(envelope)
+    )])
 }
 
 #[cfg(test)]
@@ -163,7 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_is_typed_unsupported_without_daemon_authority() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
         let Json(envelope) = freshness(State(state)).await;
 
@@ -175,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_projects_exact_live_scheduler_identity() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -212,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -241,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { None })));
 

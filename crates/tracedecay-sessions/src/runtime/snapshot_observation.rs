@@ -40,7 +40,6 @@ pub const MAX_SNAPSHOT_METADATA_BYTES: u64 = 256 * 1024;
 pub const MAX_SNAPSHOT_CAPTURE_UNIT_BYTES: u64 =
     (2 * MAX_SNAPSHOT_FILE_BYTES) + (3 * MAX_SNAPSHOT_METADATA_BYTES);
 
-/// Provider-specific domain separators for [`stable_snapshot_message_id`].
 #[derive(Clone, Copy)]
 pub struct StableMessageIdDomains {
     pub delimited_domain: &'static [u8],
@@ -159,8 +158,6 @@ pub fn host_admission_error(
     }
 }
 
-/// Human-readable host-admission failure message shared by the SQLite-backed
-/// snapshot providers, prefixed with the caller's provider label.
 pub fn host_admission_status_message(provider_label: &str, status: HostAdmissionStatus) -> String {
     match status {
         HostAdmissionStatus::Backpressured => {

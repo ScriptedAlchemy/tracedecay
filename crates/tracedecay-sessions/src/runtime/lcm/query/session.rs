@@ -1,3 +1,4 @@
+use super::super::util;
 use super::*;
 
 pub async fn load_session(
@@ -15,9 +16,7 @@ pub async fn load_session(
     let mut role_clause = String::new();
     let roles = normalized_strings(&request.roles);
     if !roles.is_empty() {
-        let placeholders = std::iter::repeat_n("?", roles.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let placeholders = util::sql_in_placeholders(roles.len());
         role_clause = format!(" AND role IN ({placeholders})");
         values.extend(roles.into_iter().map(Value::Text));
     }
@@ -260,10 +259,9 @@ async fn replay_slice_summary_nodes(
 
 fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
     let text = text.trim();
-    if text.chars().nth(max_chars).is_none() {
-        (text.to_string(), false)
-    } else {
-        (text.chars().take(max_chars).collect(), true)
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => (text[..end].to_string(), true),
+        None => (text.to_string(), false),
     }
 }
 

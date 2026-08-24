@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -9,6 +10,7 @@ import {
   type WorkDagReading,
   workDagReading,
 } from '../workViewsModel.ts';
+import { TaskChip } from './TaskChip.tsx';
 import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -17,12 +19,12 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * Strata are the longest path over the Tarjan condensation, the same discipline
  * the Code workspace layers imports with: a task sits one stratum below the
  * deepest thing it declares a dependency on, and a dependency cycle is
- * condensed into one mark rather than broken. Plan 11c calls a backward jump
- * the climb hue and requires the caption to state it is an observation; a
- * declared cycle is a real reading of the plan, not a rendering fault.
+ * condensed into one mark rather than broken. A backward jump uses the climb
+ * hue and the caption must state it is an observation; a declared cycle is a
+ * real reading of the plan, not a rendering fault.
  *
  * The widest channel is the deepest chain of components, and it is UNWEIGHTED.
- * 11c's critical path is weighted by effort, and the effort lives in the
+ * The product critical path is weighted by effort, and the effort lives in the
  * work-product graph rather than in `WorkProjection`, so the two chains are
  * drawn side by side and neither is rescaled by the other: this one is the
  * longest path over the edges THIS PAGE returned, and the authority's is the
@@ -48,9 +50,15 @@ export function WorkDagView({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workDagReading(snapshot.projections, graph);
+  const reading = useMemo(
+    () => workDagReading(snapshot.projections, graph),
+    [snapshot.projections, graph],
+  );
   const coverage = coverageReading(snapshot.coverage);
-  const onLongestChain = new Set(reading.longestChain.map((component) => component.index));
+  const onLongestChain = useMemo(
+    () => new Set(reading.longestChain.map((component) => component.index)),
+    [reading],
+  );
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-work-view="dag">
@@ -344,22 +352,12 @@ function TaskMark({
   const cycleNote = node.cyclic ? ', in a dependency cycle' : '';
   const chainNote = widest ? ', on the deepest chain' : '';
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(taskId)}
-      aria-pressed={selected}
-      // 44px explicitly rather than a spacing utility: this app's root font
-      // size is 14px, so `min-h-11` computes to 38.5px and lands under the
-      // target size the accessibility gate measures.
-      className={cn(
-        'flex min-h-[44px] min-w-0 max-w-[16rem] flex-col justify-center gap-0.5 border px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected
-          ? 'border-accent bg-surface-3'
-          : 'border-edge-subtle bg-surface-1 hover:bg-surface-2',
-        widest && !selected && 'border-edge-strong',
-      )}
-      data-work-task={taskId}
+    <TaskChip
+      taskId={taskId}
+      selected={selected}
+      onSelect={onSelect}
+      variant="filled"
+      className={cn('max-w-[16rem]', widest && !selected && 'border-edge-strong')}
       data-work-depth={node.depth}
       data-work-widest={widest ? 'true' : undefined}
     >
@@ -381,7 +379,7 @@ function TaskMark({
         {cycleNote}
         {chainNote}
       </span>
-    </button>
+    </TaskChip>
   );
 }
 

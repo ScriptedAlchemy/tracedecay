@@ -4,6 +4,7 @@
 //! message occurrences. They are not source authority, summaries, or carriers of
 //! external GitHub/CI/diagnostic/Git/receipt/task payloads.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -194,26 +195,24 @@ impl SessionDerivedEvidenceRecordV1 {
             return Err(SessionContractError::DerivedEvidenceMembersRequired);
         }
         source_horizon.validate()?;
-        let mut seen = BTreeSetLite::default();
+        let mut seen = BTreeSet::new();
         for (index, member) in members.iter().enumerate() {
             member.validate()?;
             if member.ordinal as usize != index {
                 return Err(SessionContractError::NoncontiguousDerivedEvidenceOrdinals);
             }
-            if !seen.insert(member.occurrence_id.as_str().to_owned()) {
+            if !seen.insert(member.occurrence_id.as_str()) {
                 return Err(SessionContractError::DuplicateDerivedEvidenceMember);
             }
         }
-        let first = members
+        let first_member = members
             .first()
-            .expect("non-empty members")
-            .occurrence_id
-            .clone();
-        let last = members
+            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
+        let last_member = members
             .last()
-            .expect("non-empty members")
-            .occurrence_id
-            .clone();
+            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
+        let first = first_member.occurrence_id.clone();
+        let last = last_member.occurrence_id.clone();
         let member_digest = member_digest(
             evidence_kind,
             &algorithm_version,
@@ -279,9 +278,17 @@ impl SessionDerivedEvidenceRecordV1 {
                 field: "DerivedEvidenceIdV1",
             });
         }
-        let first = &self.members.first().expect("non-empty").occurrence_id;
-        let last = &self.members.last().expect("non-empty").occurrence_id;
-        if first != &self.first_occurrence_id || last != &self.last_occurrence_id {
+        let first_member = self
+            .members
+            .first()
+            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
+        let last_member = self
+            .members
+            .last()
+            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
+        if first_member.occurrence_id != self.first_occurrence_id
+            || last_member.occurrence_id != self.last_occurrence_id
+        {
             return Err(SessionContractError::DerivedEvidenceEndpointMismatch);
         }
         for (index, member) in self.members.iter().enumerate() {
@@ -560,6 +567,11 @@ fn horizon_for_run(
     })
 }
 
+/// Frozen derived-identity layout: these three digests concatenate hasher
+/// updates with **no length framing**. That is weaker than
+/// [`crate::canonical_text::canonical_framed_sha256`], but the persisted ids
+/// are already written. Do not change these bytes; any new derived identity
+/// must use the framed helper.
 fn derive_evidence_id(
     kind: DerivedEvidenceKindV1,
     algorithm_version: &str,
@@ -634,19 +646,52 @@ fn is_sha256_identity(value: &str) -> bool {
     crate::canonical_text::is_tagged_lowercase_hex(value, "sha256:", 64)
 }
 
-#[derive(Default)]
-struct BTreeSetLite {
-    values: Vec<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl BTreeSetLite {
-    fn insert(&mut self, value: String) -> bool {
-        match self.values.binary_search(&value) {
-            Ok(_) => false,
-            Err(index) => {
-                self.values.insert(index, value);
-                true
-            }
+    fn sha_id(label: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        encode_sha256(hasher)
+    }
+
+    #[test]
+    fn singleton_occurrence_derives_valid_burst_and_span_evidence() {
+        let session_id = SessionId::new("session.derived.singleton").unwrap();
+        let occurrence_id = MessageOccurrenceIdV1::new(sha_id("singleton-occurrence")).unwrap();
+        let occurrences = [DerivedEvidenceOccurrenceRefV1 {
+            occurrence_id: occurrence_id.clone(),
+            retrieval_anchor_id: RetrievalAnchorId::new(sha_id("singleton-anchor")).unwrap(),
+            thread_id: Some(ThreadId::new("thread.derived.singleton").unwrap()),
+            message_id: Some(MessageId::new("message.derived.singleton").unwrap()),
+            knowledge_at: UtcMicros(1),
+            observation_sequence: 1,
+            projection_output_ordinal: 0,
+        }];
+
+        let derived = derive_session_evidence_from_occurrences(
+            &session_id,
+            &occurrences,
+            &SessionDerivedEvidencePolicyV1::default(),
+        )
+        .unwrap();
+
+        assert_eq!(derived.len(), 2);
+        for record in derived {
+            assert_eq!(record.member_count(), 1);
+            assert_eq!(record.first_occurrence_id(), &occurrence_id);
+            assert_eq!(record.last_occurrence_id(), &occurrence_id);
+            assert_eq!(
+                record.members()[0].member_role,
+                DerivedEvidenceMemberRoleV1::First
+            );
+            record.validate().unwrap();
+            let encoded = serde_json::to_value(&record).unwrap();
+            assert_eq!(
+                serde_json::from_value::<SessionDerivedEvidenceRecordV1>(encoded).unwrap(),
+                record
+            );
         }
     }
 }

@@ -1,6 +1,17 @@
-use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Value, params};
+use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, params};
+pub use tracedecay_runtime_core::db::engine::{opt_i64, opt_text};
 
 use super::LcmError;
+
+/// SQLite bind-list chunk size shared by LCM `IN (...)` batch reads/writes.
+pub const SQLITE_IN_BATCH_SIZE: usize = 500;
+
+pub fn sql_in_placeholders(len: usize) -> String {
+    if len == 0 {
+        return String::new();
+    }
+    tracedecay_runtime_core::db::build_qmark_placeholders(len)
+}
 
 #[cfg(unix)]
 pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
@@ -16,14 +27,6 @@ pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
-}
-
-pub fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
-}
-
-pub fn opt_i64(value: Option<i64>) -> Value {
-    value.map_or(Value::Null, Value::Integer)
 }
 
 pub fn sha256_hex(content: &[u8]) -> String {

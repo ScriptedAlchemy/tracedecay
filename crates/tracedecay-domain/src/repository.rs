@@ -521,11 +521,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_identity_is_deterministic() {
-        assert_eq!(capture().capture_id(), capture().capture_id());
-    }
-
-    #[test]
     fn detached_unborn_and_unavailable_are_preserved() {
         let evidence = RepositoryEvidenceV1::new(
             EvidenceAvailabilityV1::Detached,

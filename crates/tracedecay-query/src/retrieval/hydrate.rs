@@ -15,8 +15,8 @@ use tracedecay_domain::{
     SourceOccurrenceId,
 };
 
-/// Failures of the hydration stage. Hydration denial removes the anchor and
-/// is indistinguishable from absence in public results (Plan 15).
+/// Hydration denial removes the anchor and is indistinguishable from absence
+/// in public results (Plan 15).
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum HydrationStageError {
     #[error("hydration exceeded its byte or deadline budget")]
@@ -183,6 +183,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
         self.hydrate_with_control(request, selected, budget, &control)
     }
 
+    #[hotpath::measure(label = "query.hydrate")]
     pub fn hydrate_with_control<P>(
         &mut self,
         request: &RetrievalRequest,
@@ -225,6 +226,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                                 )
                             }
                             HydrationPreflightOutcomeV1::Cancelled => {
+                                hotpath::gauge!("query.cancel.count").inc(1u32);
                                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
                             }
                             HydrationPreflightOutcomeV1::Ready { estimated_bytes } => {
@@ -261,6 +263,8 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 outcome,
             });
         }
+        hotpath::gauge!("query.hydrate.results").set(results.len());
+        hotpath::gauge!("query.hydrate.bytes").set(bytes_hydrated);
         Ok(HydrationPageV1 { results, receipts })
     }
 
@@ -320,6 +324,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
             }
             HydrationReadOutcomeV1::Cancelled => {
+                hotpath::gauge!("query.cancel.count").inc(1u32);
                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
             }
         })
@@ -332,6 +337,7 @@ fn prework_unavailable(
     bytes_hydrated: u64,
 ) -> Option<HydrationUnavailableV1> {
     if control.is_cancelled() {
+        hotpath::gauge!("query.cancel.count").inc(1u32);
         return Some(HydrationUnavailableV1::Cancelled);
     }
     if bytes_hydrated >= budget.max_hydration_bytes {

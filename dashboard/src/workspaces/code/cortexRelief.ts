@@ -1,8 +1,7 @@
 /**
- * CORTEX — the macro end of the structure LENS (plan 11b: `:134` "modules as
- * relief terrain — depth-strata placement, area = symbol mass, contour lines =
- * measured connectivity density", `:214` "the right macro underlay: real
- * contour interval", `:229` "Far = CORTEX").
+ * CORTEX — the macro end of the structure LENS: modules as relief terrain
+ * (depth-strata placement, area = symbol mass, contour lines = measured
+ * connectivity density). Far = CORTEX.
  *
  * This module is the honesty boundary the plan's "Rendering strategy" (`:196`)
  * demands: it turns ONE wire reading — `GET /api/plugins/graph/strata`,

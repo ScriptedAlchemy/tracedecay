@@ -1436,7 +1436,9 @@ async fn unregistered_collection_refuses_same_second_directory_replacement() {
     let data_root = profile_root.join("projects/proj_replaced_unregistered");
     std::fs::create_dir_all(&data_root).unwrap();
 
-    let now = newest_mtime_secs(&data_root).saturating_add(100 * DAY);
+    let now = walk_store_stats(&data_root)
+        .newest_mtime_secs
+        .saturating_add(100 * DAY);
     let findings = census_unregistered_project_dirs(&db, &profile_root, now)
         .await
         .unwrap();
@@ -1482,7 +1484,9 @@ async fn unregistered_collection_rejects_profile_contained_data_root_symlink() {
     let data_root = profile_root.join("projects/proj_symlinked_unregistered");
     std::fs::create_dir_all(&data_root).unwrap();
 
-    let now = newest_mtime_secs(&data_root).saturating_add(100 * DAY);
+    let now = walk_store_stats(&data_root)
+        .newest_mtime_secs
+        .saturating_add(100 * DAY);
     let findings = census_unregistered_project_dirs(&db, &profile_root, now)
         .await
         .unwrap();
@@ -1776,7 +1780,7 @@ fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> Or
         expected_store_relpath: expected_store_relpath.to_owned(),
         expected_created_at: 1,
         expected_last_write_at: None,
-        expected_payload_mtime_secs: newest_mtime_secs(&data_root),
+        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
         expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
         // The mtime fence is the boundary under test; no later phase should be
         // reached when this control is interrupted.

@@ -217,7 +217,7 @@ impl HistoricalGitReadUnavailableReasonV1 {
     }
 }
 
-/// Code-index join over one already-mounted Plan 36 Git authority.
+/// Code-index join over one already-mounted Git authority.
 pub struct HistoricalGitQueryAdapter<'a, P: GitHistoricalBlobReadPort> {
     port: &'a P,
     scope: ResolvedScope,
@@ -228,6 +228,7 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
         Self { port, scope }
     }
 
+    #[hotpath::measure]
     pub fn query(
         &self,
         authorization: Option<&HistoricalSourceAuthorizationV1>,
@@ -467,6 +468,7 @@ fn validate_path(path: &str) -> Result<(), HistoricalQueryError> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn term_anchors(bytes: &[u8], terms: &[String]) -> Vec<HistoricalTermAnchorV1> {
     terms
         .iter()

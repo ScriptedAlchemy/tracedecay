@@ -10,16 +10,7 @@ use tracedecay_domain::{
     RetrievalAnchorId, UtcMicros,
 };
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FactCategoryV1 {
-    General,
-    UserPref,
-    Project,
-    Tool,
-    Decision,
-    CodeArea,
-}
+pub use tracedecay_domain::FactCategoryV1;
 
 /// JSON metadata is open only within the fact payload's bounded metadata
 /// field; it is never an operation envelope.

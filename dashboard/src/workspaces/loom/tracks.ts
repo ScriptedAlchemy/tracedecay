@@ -1,9 +1,10 @@
-/** Loom track model: pure data + layout, no DOM. The canvas renderer consumes
- * this; tests and future virtualization reason about it directly.
+/** Loom track model: pure time-window math, interval packing and axis
+ * generation, no DOM. The weave renderer consumes this; tests reason about it
+ * directly.
  *
  * Everything here is derived from real spans. Nothing in this module invents a
- * span, a track, or a magnitude — the density profile and the lane packing are
- * projections of the same session rows the canvas draws.
+ * span or a magnitude — the lane packing is a projection of the same session
+ * rows the canvas draws.
  */
 
 export interface LoomSpan {
@@ -17,64 +18,14 @@ export interface LoomSpan {
   weight: number;
 }
 
-export interface LoomTrack {
-  id: string;
-  label: string;
-  spans: LoomSpan[];
-}
-
 export interface LoomWindow {
   start: number;
   end: number;
 }
 
 /* -------------------------------------------------------------------------
- * Rhythm. Lanes are thin because the interesting axis is horizontal; a track
- * grows by stacking sub-lanes only when its spans genuinely overlap.
- * ---------------------------------------------------------------------- */
-
-/** One packed sub-lane inside a track. */
-export const LANE_HEIGHT = 16;
-/** Lanes stretch to fill a tall pane, but never become slabs. */
-export const MAX_LANE_HEIGHT = 46;
-export const LANE_GAP = 3;
-/** Breathing room above/below a track's stack of lanes. */
-export const TRACK_PAD = 7;
-/** Two-tier axis: a day-band row over a fine tick row. */
-export const AXIS_HEIGHT = 34;
-
-/** Minimum on-screen width of a mark, in CSS pixels. */
-export const MIN_MARK_PX = 3;
-
-export interface TrackLayout {
-  track: LoomTrack;
-  /** Spans packed into non-overlapping sub-lanes, earliest first. */
-  lanes: LoomSpan[][];
-  /** Top edge of the track band, relative to the top of the axis. */
-  top: number;
-  height: number;
-  /** Resolved lane height — lanes stretch to fill a tall viewport. */
-  laneHeight: number;
-}
-
-/* -------------------------------------------------------------------------
  * Windows
  * ---------------------------------------------------------------------- */
-
-/** Full data extent across every track, or null when nothing is timestamped. */
-export function windowOf(tracks: LoomTrack[]): LoomWindow | null {
-  let start = Infinity;
-  let end = -Infinity;
-  for (const track of tracks) {
-    for (const span of track.spans) {
-      if (span.start < start) start = span.start;
-      if (span.end > end) end = span.end;
-    }
-  }
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  if (end - start < 3600) end = start + 3600;
-  return { start, end };
-}
 
 /** The extent with a small margin, so the first and last mark are not welded
  * to the frame. This is the default viewport and the "fit" target. */
@@ -127,7 +78,7 @@ export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
   );
 }
 
-export function xFor(time: number, window: LoomWindow, width: number): number {
+function xFor(time: number, window: LoomWindow, width: number): number {
   return ((time - window.start) / (window.end - window.start)) * width;
 }
 
@@ -159,71 +110,6 @@ export function packTrack(spans: LoomSpan[], minGapSeconds = 0): LoomSpan[][] {
     }
   }
   return lanes;
-}
-
-/** Lane height that spends whatever vertical room the viewport can spare,
- * within a legible band. A three-track weave in a tall pane should breathe;
- * a thirty-lane weave should stay thin and scroll. */
-export function laneHeightFor(totalLanes: number, availableHeight: number): number {
-  if (totalLanes <= 0 || availableHeight <= 0) return LANE_HEIGHT;
-  const free = availableHeight - AXIS_HEIGHT - totalLanes * LANE_GAP;
-  return Math.min(Math.max(free / totalLanes, LANE_HEIGHT), MAX_LANE_HEIGHT);
-}
-
-/** Lay every track out vertically, packing each one against the current
- * viewport so lane count reflects what actually collides on screen. */
-export function layoutTracks(
-  tracks: LoomTrack[],
-  view: LoomWindow,
-  width: number,
-  availableHeight = 0,
-): TrackLayout[] {
-  const minGap = width > 0 ? ((view.end - view.start) / width) * MIN_MARK_PX : 0;
-  const packed = tracks.map((track) => packTrack(track.spans, minGap));
-  const totalLanes = packed.reduce((sum, lanes) => sum + Math.max(lanes.length, 1), 0);
-  const laneHeight = laneHeightFor(totalLanes, availableHeight);
-  const layouts: TrackLayout[] = [];
-  let top = 0;
-  tracks.forEach((track, index) => {
-    const lanes = packed[index] ?? [];
-    const laneCount = Math.max(lanes.length, 1);
-    const height = TRACK_PAD * 2 + laneCount * laneHeight + (laneCount - 1) * LANE_GAP;
-    layouts.push({ track, lanes, top, height, laneHeight });
-    top += height;
-  });
-  return layouts;
-}
-
-export function layoutHeight(layouts: TrackLayout[]): number {
-  const last = layouts[layouts.length - 1];
-  return last ? last.top + last.height : 0;
-}
-
-/** Pick the span under a canvas-space point, if any. `y` is measured from the
- * top of the canvas (axis included). */
-export function pick(
-  layouts: TrackLayout[],
-  view: LoomWindow,
-  width: number,
-  x: number,
-  y: number,
-): { track: LoomTrack; span: LoomSpan } | null {
-  const localY = y - AXIS_HEIGHT;
-  const layout = layouts.find(
-    (candidate) => localY >= candidate.top && localY < candidate.top + candidate.height,
-  );
-  if (!layout) return null;
-  const laneY = localY - layout.top - TRACK_PAD;
-  const lane = Math.floor(laneY / (layout.laneHeight + LANE_GAP));
-  const spans = layout.lanes[lane];
-  if (!spans) return null;
-  let best: LoomSpan | null = null;
-  for (const span of spans) {
-    const x0 = xFor(span.start, view, width);
-    const x1 = Math.max(xFor(span.end, view, width), x0 + MIN_MARK_PX);
-    if (x >= x0 - 2 && x <= x1 + 2) best = span;
-  }
-  return best ? { track: layout.track, span: best } : null;
 }
 
 /* -------------------------------------------------------------------------
@@ -374,51 +260,6 @@ function bandLabel(epochSeconds: number, scale: 'hour' | 'day' | 'month'): strin
     });
   }
   return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-}
-
-/* -------------------------------------------------------------------------
- * Density
- * ---------------------------------------------------------------------- */
-
-/** Weight-per-bucket across the full extent: the overview profile drawn in the
- * minimap. Each span contributes its weight spread evenly over the buckets it
- * covers, so a long quiet session does not out-shout a short dense one. */
-export function densityProfile(
-  tracks: LoomTrack[],
-  extent: LoomWindow,
-  buckets: number,
-): number[] {
-  const out = new Array<number>(Math.max(buckets, 1)).fill(0);
-  const span = extent.end - extent.start;
-  if (span <= 0) return out;
-  const width = span / out.length;
-  for (const track of tracks) {
-    for (const mark of track.spans) {
-      const from = Math.max(0, Math.floor((mark.start - extent.start) / width));
-      const to = Math.min(out.length - 1, Math.floor((mark.end - extent.start) / width));
-      const covered = Math.max(1, to - from + 1);
-      const share = mark.weight / covered;
-      for (let i = from; i <= to; i += 1) out[i] = (out[i] ?? 0) + share;
-    }
-  }
-  return out;
-}
-
-/** Highest number of marks alive at once in a track — the honest headline for
- * "how tangled is this lane". */
-export function peakConcurrency(track: LoomTrack): number {
-  const edges: Array<[number, number]> = [];
-  for (const span of track.spans) {
-    edges.push([span.start, 1], [Math.max(span.end, span.start), -1]);
-  }
-  edges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  let live = 0;
-  let peak = 0;
-  for (const [, delta] of edges) {
-    live += delta;
-    if (live > peak) peak = live;
-  }
-  return peak;
 }
 
 /* -------------------------------------------------------------------------

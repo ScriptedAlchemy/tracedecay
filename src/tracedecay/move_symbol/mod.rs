@@ -183,7 +183,6 @@ impl TraceDecay {
             ));
         }
 
-        // Build the source with the span removed (with blank-line cleanup).
         let residual = remove_span_with_cleanup(&src_lines, start, end_inclusive);
         let source_modified = splice_lines(&residual, source.ends_with('\n'));
 
@@ -219,7 +218,6 @@ impl TraceDecay {
         let source_modified =
             strip_orphaned_imports(&source_modified, &analysis.orphaned_source_imports);
 
-        // Assemble the destination content.
         let applied_imports = dedup_preserve(
             &analysis.auto_imports,
             &dest_original,
@@ -227,7 +225,6 @@ impl TraceDecay {
         );
         let dest_modified = build_dest_content(&dest_original, &applied_imports, &moved_text);
 
-        // Impact report.
         let mut impact = analysis.hints;
         impact.extend(
             self.caller_hints(

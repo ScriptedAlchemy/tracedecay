@@ -2,7 +2,20 @@
 //!
 //! Re-exports below preserve every `crud::*` path used outside this module.
 
+use sha2::{Digest, Sha256};
+use tracedecay_domain::LocatorDigest;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_store::{FactStoreError, FactStoreResult};
+
 pub(super) const DEFAULT_TRUST: f64 = 0.5;
+
+pub(super) fn content_digest(content: &str) -> FactStoreResult<LocatorDigest> {
+    LocatorDigest::new(encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(content.as_bytes()),
+    ))
+    .map_err(FactStoreError::from)
+}
 
 mod add;
 mod commands;

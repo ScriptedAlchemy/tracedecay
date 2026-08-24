@@ -50,12 +50,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -72,10 +77,7 @@ impl ExtractionState {
 }
 
 impl RubyExtractor {
-    /// Extract code graph nodes and edges from a Ruby source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Ruby source code to parse.
     pub fn extract_ruby(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -104,7 +106,6 @@ impl RubyExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -159,7 +160,6 @@ impl RubyExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -173,7 +173,6 @@ impl RubyExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "method" => Self::visit_method(state, node, false),
@@ -239,7 +238,6 @@ impl RubyExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -249,7 +247,6 @@ impl RubyExtractor {
             });
         }
 
-        // Extract call sites from the method body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -299,7 +296,6 @@ impl RubyExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -309,7 +305,6 @@ impl RubyExtractor {
             });
         }
 
-        // Extract call sites from the method body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -356,7 +351,6 @@ impl RubyExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -366,10 +360,8 @@ impl RubyExtractor {
             });
         }
 
-        // Extract superclass (inheritance): `class Foo < Bar`
         Self::extract_superclass(state, node, &id);
 
-        // Visit class body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "body_statement") {
@@ -393,7 +385,6 @@ impl RubyExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
 
-        // Build "module ModuleName" signature
         let text = state.node_text(node);
         let signature = text
             .lines()
@@ -428,7 +419,6 @@ impl RubyExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -438,7 +428,6 @@ impl RubyExtractor {
             });
         }
 
-        // Visit module body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "body_statement") {
@@ -494,7 +483,6 @@ impl RubyExtractor {
             };
             state.nodes.push(graph_node);
 
-            // Contains edge from parent.
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
                     source: parent_id.to_string(),
@@ -505,10 +493,6 @@ impl RubyExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the superclass from a class definition (`class Foo < Bar`).
     ///
@@ -671,7 +655,6 @@ impl RubyExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into the call for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested method/singleton_method/class/module definitions to avoid

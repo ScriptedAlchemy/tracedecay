@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use futures_util::stream::{self, StreamExt};
+
 use tracedecay_application::retained_surfaces::{
     LcmDescribeRequestV1, LcmDescribeResultV1, LcmDescribeTargetV1, LcmExpandQueryRequestV1,
     LcmExpandRequestV1, LcmExpandResultV1, LcmExpandTargetV1, LcmGrepRequestV1, LcmGrepResultV1,
@@ -41,6 +43,7 @@ use crate::daemon::session_retrieval::{
 use crate::timeutil::SearchTimeBound;
 
 const MAX_RESULTS: usize = 100;
+const EXPAND_QUERY_CONCURRENCY: usize = 8;
 // The admitted retrieval ceiling. Default ExecutionLimits are multi-MiB and
 // fail within_request_budgets as a persistent BudgetExhausted / Saturated, so
 // every query built here is sized against the one shared constant.
@@ -54,6 +57,7 @@ const MAX_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_QUERY_PROMPT_CHARS: usize = 2_048;
 const MAX_QUERY_QUERY_CHARS: usize = 1_024;
 
+#[hotpath::measure]
 pub(super) async fn execute_load_session(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -142,6 +146,7 @@ pub(super) async fn execute_load_session(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_grep(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -240,6 +245,7 @@ pub(super) async fn execute_grep(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_describe(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -350,6 +356,7 @@ pub(super) async fn execute_describe(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_expand(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -420,6 +427,7 @@ pub(super) async fn execute_expand(
     )
 }
 
+#[hotpath::measure]
 pub(super) async fn execute_expand_query(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -546,8 +554,7 @@ fn retrieval_query(
         },
         false,
     )
-    .query()
-    .clone())
+    .into_query())
 }
 
 fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
@@ -830,32 +837,48 @@ async fn expand_query_from_nodes(
     ),
     RetainedSurfaceExecutionErrorV1,
 > {
+    let mut omitted = node_ids.len().saturating_sub(max_results);
+    let selected: Vec<String> = node_ids.into_iter().take(max_results).collect();
+    // Own each id rather than borrowing out of `selected`: an async block that
+    // captures `&String` leaves the closure's return type tied to the input
+    // lifetime, so it is not higher-ranked and `buffer_unordered` rejects it.
+    // `selected` is not read after this, so moving is also one clone cheaper.
+    let mut expansions = stream::iter(selected.into_iter().enumerate())
+        .map(|(index, node_id)| {
+            let cursor = cursor.clone();
+            async move {
+                let outcome = service
+                    .expand_lcm_admitted(
+                        context.request_context,
+                        context.cancellation_signal,
+                        LcmExpandServiceCommand::new(
+                            provider,
+                            session_id.clone(),
+                            LcmExpandTarget::SummaryNode {
+                                node_id: node_id.clone(),
+                            },
+                            RetrievalGrainV1::Summary,
+                            LcmContentSlice {
+                                offset: 0,
+                                limit: context_max_tokens.min(MAX_CONTENT_LIMIT),
+                            },
+                            Some(max_results),
+                            cursor,
+                            SessionRetrievalStoreScope::Profile,
+                        ),
+                    )
+                    .await;
+                (index, node_id, outcome)
+            }
+        })
+        .buffer_unordered(EXPAND_QUERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    expansions.sort_unstable_by_key(|(index, _, _)| *index);
     let mut sources = Vec::new();
     let mut pagination = Vec::new();
     let mut temporal = SessionTemporalMetadataView::default();
-    let mut omitted = node_ids.len().saturating_sub(max_results);
-    for node_id in node_ids.iter().take(max_results) {
-        let outcome = service
-            .expand_lcm_admitted(
-                context.request_context,
-                context.cancellation_signal,
-                LcmExpandServiceCommand::new(
-                    provider,
-                    session_id.clone(),
-                    LcmExpandTarget::SummaryNode {
-                        node_id: node_id.clone(),
-                    },
-                    RetrievalGrainV1::Summary,
-                    LcmContentSlice {
-                        offset: 0,
-                        limit: context_max_tokens.min(MAX_CONTENT_LIMIT),
-                    },
-                    Some(max_results),
-                    cursor.clone(),
-                    SessionRetrievalStoreScope::Profile,
-                ),
-            )
-            .await;
+    for (_, node_id, outcome) in expansions {
         let (expansion, incoming, retrieval) = match outcome {
             LcmExpandServiceOutcome::Complete {
                 expansion,

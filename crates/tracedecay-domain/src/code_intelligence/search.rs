@@ -1,5 +1,4 @@
-//! Storage-neutral code-search chunk and projection contracts (Plan 25,
-//! "Code-search chunk and projection contract").
+//! Storage-neutral code-search chunk and projection contracts.
 //!
 //! These values are immutable logical records, not rows coupled to a lexical
 //! table, vector table, or vendor index. Chunks are the replayable source for
@@ -7,8 +6,8 @@
 //! become source or symbol authority.
 //!
 //! Code search does not define parallel ranking, fusion-profile,
-//! contribution, candidate, cursor, or hydration types here; Plan 15 owns
-//! those in `crate::retrieval`.
+//! contribution, candidate, cursor, or hydration types here; those live in
+//! `crate::retrieval`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -167,7 +166,7 @@ impl EphemeralSanitizedQueryViewV1 {
     }
 }
 
-/// The five deterministic chunk grains (Plan 25). Symbol signatures and
+/// The five deterministic chunk grains. Symbol signatures and
 /// bodies are separate grains; members become child chunks only when the
 /// language descriptor identifies stable member spans; file preambles cover
 /// imports/module documentation; file windows cover otherwise unowned
@@ -201,7 +200,7 @@ pub enum CodeSearchEligibilityV1 {
 }
 
 /// One generation-bound file manifest — the scheduling/checkpoint unit.
-/// Chunks are the projection and receipt unit (Plan 25).
+/// Chunks are the projection and receipt unit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSearchDocumentV1 {
@@ -248,9 +247,8 @@ impl CodeSearchChunkAnchorV1 {
     }
 }
 
-/// The classification of one whole exact technical term (Plan 25/Plan 15
-/// exact tier). Whole exact terms and language-profiled subtokens are
-/// distinct fields.
+/// The classification of one whole exact technical term. Whole exact terms
+/// and language-profiled subtokens are distinct fields.
 #[derive(
     Clone,
     Copy,
@@ -279,8 +277,8 @@ pub enum ExactTechnicalTermKindV1 {
     CommitIdentifier,
 }
 
-/// One whole exact technical term extracted as evidence (Plan 25: extraction
-/// evidence only; Plan 05 applies Plan 15's protected lexical policy).
+/// One whole exact technical term extracted as evidence. Extraction
+/// evidence only; protected lexical policy is applied separately.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactTechnicalTermV1 {
@@ -618,7 +616,6 @@ impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
     }
 }
 
-/// The sensitivity decision applied to one chunk by the privacy boundary.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SensitivityDecision {
@@ -627,7 +624,7 @@ pub struct SensitivityDecision {
 }
 
 /// Sensitivity levels; privacy-domain or key-epoch changes rebuild canonical
-/// eligibility when policy output changes (Plan 25).
+/// eligibility when policy output changes.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SensitivityLevelV1 {
@@ -801,9 +798,9 @@ pub struct ChangedCodeChunkV1 {
     pub current_digest: Option<ContentDigest>,
 }
 
-/// Ordered changed/reused/deleted chunk manifest between two generations
-/// (Plan 25: lets downstream projectors prove exactly which generation-bound
-/// chunks they consumed, skipped, replaced, or removed). A no-op generation
+/// Ordered changed/reused/deleted chunk manifest between two generations.
+/// Downstream projectors prove exactly which generation-bound chunks they
+/// consumed, skipped, replaced, or removed. A no-op generation
 /// emits empty `added_or_changed` and `deleted` sets plus explicit `reused`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -911,11 +908,6 @@ fn validate_changed_partition(
     Ok(())
 }
 
-/// Identity of one projection profile (Plan 25: projection kind, projection
-/// schema revision, and a canonical profile digest). Plan 31's
-/// `EmbeddingProjectionKeyV1` is the typed semantic profile whose canonical
-/// digest occupies `profile_digest`; adapters cannot define a second
-/// projection-key identity.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingPoolingV1 {
@@ -986,7 +978,7 @@ impl VectorGenerationIdV1 {
 
 /// Complete identity of one embedding projection. Every vector-affecting
 /// input is pinned here; its canonical digest becomes the profile digest in
-/// Plan 25's generic [`ProjectionKeyV1`].
+/// [`ProjectionKeyV1`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingProjectionKeyV1 {
@@ -1227,6 +1219,10 @@ impl SemanticSearchIndexKeyV1 {
     }
 }
 
+/// Identity of one projection profile: kind, schema revision, and a
+/// canonical profile digest. `EmbeddingProjectionKeyV1` is the typed
+/// semantic profile whose digest occupies `profile_digest`; adapters cannot
+/// define a second projection-key identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionKeyV1 {
@@ -1256,7 +1252,6 @@ pub enum ProjectionReplayReasonV1 {
     VerificationReplay,
 }
 
-/// One projector batch request (Plan 25).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionBatchRequestV1 {
@@ -1277,7 +1272,6 @@ pub enum ProjectionOperationV1 {
     Reused,
 }
 
-/// Outcome of one projection operation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(tag = "outcome", content = "reason", rename_all = "snake_case")]
 pub enum ProjectionOutcomeV1 {
@@ -1287,7 +1281,7 @@ pub enum ProjectionOutcomeV1 {
     Failed { reason: String },
 }
 
-/// One per-chunk projection receipt (Plan 25). Receipts are deterministic
+/// One per-chunk projection receipt. Receipts are deterministic
 /// apart from store-owned operational timestamps, which are excluded from
 /// receipt identity and digest. Publication rejects duplicate, missing,
 /// extra, cross-generation, wrong-digest, or wrong-projection-key receipts.
@@ -1307,7 +1301,7 @@ pub struct CodeChunkProjectionReceiptV1 {
     pub output_digest: Option<ContentDigest>,
 }
 
-/// The complete receipt for one projection batch (Plan 25). Failed or
+/// The complete receipt for one projection batch. Failed or
 /// partial receipt sets remain inspectable but cannot activate a projection
 /// generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1322,10 +1316,10 @@ pub struct ProjectionBatchReceiptV1 {
     pub publication_digest: ManifestDigest,
 }
 
-/// The mandatory base capability manifest (Plan 25). Consumers must reject a
-/// missing, incompatible, mixed-generation, or unauthorized base manifest
-/// before candidate production. Plan 31's optional semantic manifest augments
-/// this base; its absence cannot block authorized lexical/graph retrieval.
+/// The mandatory base capability manifest. Consumers must reject a missing,
+/// incompatible, mixed-generation, or unauthorized base manifest before
+/// candidate production. The optional semantic manifest augments this base;
+/// its absence cannot block authorized lexical/graph retrieval.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexCapabilityManifestV1 {
@@ -1427,7 +1421,6 @@ impl CodeIndexCapabilityManifestV1 {
     }
 }
 
-/// Source coverage and exclusion summary carried by the capability manifest.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageSummaryV1 {

@@ -17,8 +17,8 @@ use crate::recovery::{
     validate_or_initialize_format,
 };
 use crate::state::{
-    FormatState, latest_projection, load_entity, projection_entities, projection_relations,
-    publication, relations_for_entity,
+    FormatState, latest_projection, load_entity_locator, outgoing_relation_projections,
+    projection_entities, projection_relations, publication,
 };
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
@@ -110,6 +110,7 @@ impl GraphDb {
         Self::open_with_store_state(options, None)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.open", impl_type = "GraphDb")]
     pub(crate) fn open_with_store_state(
         options: GraphDbOpenOptions,
         persistent_store_state: Option<PersistentGraphStoreState>,
@@ -150,11 +151,18 @@ impl GraphDb {
         }
     }
 
+    #[hotpath::measure(label = "graph_db.snapshot.acquire", impl_type = "GraphDb")]
     pub fn snapshot(self: &Arc<Self>) -> Result<GraphSnapshot, GraphDbError> {
-        let lease = self.inner.snapshot_gate.read_arc();
+        let lease = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_READ,
+            || self.inner.snapshot_gate.read_arc(),
+        );
         let guard = self.read_guard()?;
         guard.as_ref().ok_or(GraphDbError::Closed)?;
         drop(guard);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
         Ok(GraphSnapshot {
             database: Arc::clone(self),
             _lease: lease,
@@ -166,12 +174,13 @@ impl GraphDb {
     ///
     /// The result identifies this handle's native state only; callers keep
     /// canonical projection inputs independently and can rebuild the index.
+    #[hotpath::measure(label = "graph_db.write.apply", impl_type = "GraphDb")]
     pub fn apply_unverified(
         &self,
         mut batch: GraphWriteBatch,
     ) -> Result<GraphCommit, GraphDbError> {
         let digest = batch.validate_and_digest()?;
-        let _snapshot_gate = self.inner.snapshot_gate.write();
+        let _snapshot_gate = self.wait_snapshot_gate_write();
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         if batch.cancellation.is_cancelled() {
@@ -213,6 +222,7 @@ impl GraphDb {
         )
     }
 
+    #[hotpath::measure(label = "graph_db.write.replace", impl_type = "GraphDb")]
     fn replace_projection_unverified_inner(
         &self,
         replacement: ProjectionReplacement,
@@ -298,13 +308,13 @@ impl GraphDb {
     ///
     /// This is local replay metadata for a rebuildable graph projection, not
     /// publication to a durable source-of-truth authority.
+    #[hotpath::measure(label = "graph_db.write.publish", impl_type = "GraphDb")]
     pub fn publish_unverified(
         &self,
         mut publication_request: GraphPublication,
     ) -> Result<GraphCommit, GraphDbError> {
-        let publication_digest = publication_request.validate_and_digest()?;
-        let batch_digest = publication_request.batch.validate_and_digest()?;
-        let _snapshot_gate = self.inner.snapshot_gate.write();
+        let digests = publication_request.validate_and_digest()?;
+        let _snapshot_gate = self.wait_snapshot_gate_write();
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         if publication_request.cancellation.is_cancelled()
@@ -317,7 +327,7 @@ impl GraphDb {
             &publication_request.namespace,
             &publication_request.idempotency_key,
         )? {
-            return if existing.digest == publication_digest {
+            return if existing.digest == digests.publication {
                 Ok(existing.commit)
             } else {
                 Err(GraphDbError::Conflict)
@@ -334,7 +344,7 @@ impl GraphDb {
         }
         let publication_record = (
             publication_request.idempotency_key,
-            publication_digest,
+            digests.publication,
             publication_request.input_digest.as_str().to_owned(),
         );
         let mut state = self.state_write_guard()?;
@@ -343,7 +353,7 @@ impl GraphDb {
             &mut state,
             publication_request.batch,
             mutation::CommitMetadata {
-                digest: batch_digest,
+                digest: digests.batch,
                 generation_dependency_digest: None,
                 publication_record: Some(publication_record),
             },
@@ -377,6 +387,7 @@ impl GraphDb {
             .transpose()
     }
 
+    #[hotpath::measure(label = "graph_db.traversal", impl_type = "GraphDb")]
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -385,11 +396,25 @@ impl GraphDb {
             &request.namespace,
             std::slice::from_ref(&request.start),
         )?;
-        traversal::traverse(database, request, &|namespace, projection| {
+        let result = traversal::traverse(database, request, &|namespace, projection| {
             self.ensure_projection_readable(namespace, projection)
-        })
+        })?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = result
+                .visits
+                .iter()
+                .filter(|visit| visit.via_relation.is_some())
+                .count();
+            crate::hotpath_observe::record_counts(result.visits.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(result)
     }
 
+    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids", impl_type = "GraphDb")]
     pub fn outgoing_relation_ids(
         &self,
         namespace: &GraphNamespace,
@@ -401,7 +426,7 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
-        traversal::outgoing_relation_ids(
+        let batches = traversal::outgoing_relation_ids(
             database,
             namespace,
             starts,
@@ -409,12 +434,22 @@ impl GraphDb {
             max_relations,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
     }
 
     /// Bulk kind-filtered incoming fan-out: the counterpart of
     /// [`Self::outgoing_relation_ids`], with identical budget and
     /// cancellation semantics.
+    #[hotpath::measure(label = "graph_db.traversal.incoming_ids", impl_type = "GraphDb")]
     pub fn incoming_relation_ids(
         &self,
         namespace: &GraphNamespace,
@@ -426,7 +461,7 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
-        traversal::incoming_relation_ids(
+        let batches = traversal::incoming_relation_ids(
             database,
             namespace,
             starts,
@@ -434,9 +469,19 @@ impl GraphDb {
             max_relations,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
     }
 
+    #[hotpath::measure(label = "graph_db.traversal.outgoing", impl_type = "GraphDb")]
     pub fn outgoing_relations(
         &self,
         namespace: &GraphNamespace,
@@ -448,7 +493,7 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
-        traversal::outgoing_relations(
+        let batches = traversal::outgoing_relations(
             database,
             namespace,
             starts,
@@ -456,10 +501,20 @@ impl GraphDb {
             max_relations,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "graph_db.traversal.reachable", impl_type = "GraphDb")]
     pub fn reachable_entities(
         &self,
         namespace: &GraphNamespace,
@@ -474,7 +529,7 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(namespace, projection)?;
         self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
-        traversal::reachable_entities(
+        let results = traversal::reachable_entities(
             database,
             namespace,
             projection,
@@ -484,9 +539,19 @@ impl GraphDb {
             max_visits,
             cancellation.as_ref(),
             &|namespace, projection| self.ensure_projection_readable(namespace, projection),
-        )
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let entities: usize = results.iter().map(BTreeSet::len).sum();
+            crate::hotpath_observe::record_counts(entities, 0, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(results)
     }
 
+    #[hotpath::measure(label = "graph_db.search.vector", impl_type = "GraphDb")]
     pub fn vector_search(
         &self,
         request: VectorSearchRequest,
@@ -522,7 +587,7 @@ impl GraphDb {
         request: GraphVectorIndexRequest,
     ) -> Result<GraphVectorIndexStatus, GraphDbError> {
         request.validate()?;
-        let _snapshot_gate = self.inner.snapshot_gate.write();
+        let _snapshot_gate = self.wait_snapshot_gate_write();
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
@@ -551,8 +616,11 @@ impl GraphDb {
     }
 
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
-        let _snapshot_gate = self.inner.snapshot_gate.write();
-        let mut guard = match self.inner.database.write() {
+        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let mut guard = match crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+            || self.inner.database.write(),
+        ) {
             Ok(guard) => guard,
             Err(_) => {
                 self.inner.closed.store(true, Ordering::Release);
@@ -610,7 +678,7 @@ impl GraphDb {
         derive: impl FnOnce(&GrafeoDB) -> Result<GraphBatchPlan<P>, GraphDbError>,
         settle: impl FnOnce(&GrafeoDB, GraphCommit, P) -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
-        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
+        let snapshot_gate = self.wait_snapshot_gate_upgradable();
         let plan = {
             let guard = self.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -619,7 +687,10 @@ impl GraphDb {
         let (commit, payload, _snapshot_gate) = match plan {
             GraphBatchPlan::Settled(commit, payload) => (commit, payload, snapshot_gate),
             GraphBatchPlan::Apply(prepared, payload) => {
-                let write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
+                let write_gate = crate::hotpath_observe::wait_lock(
+                    crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
+                    || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
+                );
                 let commit = {
                     let guard = self.write_guard()?;
                     let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -764,7 +835,16 @@ impl GraphDb {
             .quarantined_projections
             .read()
             .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
-        if quarantined.contains(&(namespace.clone(), projection.clone())) {
+        if quarantined.is_empty() {
+            return Ok(());
+        }
+        let is_quarantined =
+            quarantined
+                .iter()
+                .any(|(quarantined_namespace, quarantined_projection)| {
+                    quarantined_namespace == namespace && quarantined_projection == projection
+                });
+        if is_quarantined {
             Err(projection_mismatch(
                 namespace,
                 projection,
@@ -782,7 +862,7 @@ impl GraphDb {
         starts: &[GraphEntityId],
     ) -> Result<(), GraphDbError> {
         for start in starts {
-            if let Some(stored) = load_entity(database, namespace, start)? {
+            if let Some(stored) = load_entity_locator(database, namespace, start)? {
                 self.ensure_projection_readable(&stored.namespace, &stored.projection)?;
             }
         }
@@ -796,13 +876,11 @@ impl GraphDb {
         starts: &[GraphEntityId],
     ) -> Result<(), GraphDbError> {
         for start in starts {
-            let Some(stored) = load_entity(database, namespace, start)? else {
+            let Some(stored) = load_entity_locator(database, namespace, start)? else {
                 continue;
             };
-            for relation in relations_for_entity(database, stored.node)? {
-                if relation.relation.from == *start {
-                    self.ensure_projection_readable(namespace, &relation.projection)?;
-                }
+            for projection in outgoing_relation_projections(database, stored.node)? {
+                self.ensure_projection_readable(namespace, &projection)?;
             }
         }
         Ok(())
@@ -810,11 +888,11 @@ impl GraphDb {
 
     pub(crate) fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
-        let guard = self
-            .inner
-            .database
-            .read()
-            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
+        let guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_READ,
+            || self.inner.database.read(),
+        )
+        .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
         self.ensure_available()?;
         Ok(guard)
     }
@@ -823,11 +901,11 @@ impl GraphDb {
         &self,
     ) -> Result<RwLockWriteGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
-        let guard = self
-            .inner
-            .database
-            .write()
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        let guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+            || self.inner.database.write(),
+        )
+        .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         self.ensure_available()?;
         Ok(guard)
     }
@@ -835,10 +913,34 @@ impl GraphDb {
     pub(crate) fn state_write_guard(
         &self,
     ) -> Result<RwLockWriteGuard<'_, FormatState>, GraphDbError> {
-        self.inner
-            .state
-            .write()
-            .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
+        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_STATE_WRITE, || {
+            self.inner.state.write()
+        })
+        .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
+    }
+
+    pub(crate) fn wait_snapshot_gate_write(&self) -> ParkingRwLockWriteGuard<'_, ()> {
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_WRITE,
+            || self.inner.snapshot_gate.write(),
+        )
+    }
+
+    pub(crate) fn wait_snapshot_gate_upgradable(&self) -> RwLockUpgradableReadGuard<'_, ()> {
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADABLE,
+            || self.inner.snapshot_gate.upgradable_read(),
+        )
+    }
+
+    pub(crate) fn wait_verified_generations_write(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, crate::lease::VerifiedGenerationState>, GraphDbError> {
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_VERIFIED_GENERATIONS,
+            || self.inner.verified_generations.write(),
+        )
+        .map_err(|_| GraphDbError::unavailable("verified graph generation state lock is poisoned"))
     }
 
     pub(crate) fn ensure_available(&self) -> Result<(), GraphDbError> {

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     FactAssertionId, FactCurationActionV1, FactId, FactLineageEventKindV1, FactLineageEventV1,
     FactOwnerV1, FactPayloadV1, FactRelationKindV1, ProjectMemoryGraphRelationKindV1,
@@ -1007,11 +1007,8 @@ pub(in crate::store::memory) async fn hydrate_roots_from_canonical_source_for_te
 
 fn namespace(owner: &FactOwnerV1) -> FactStoreResult<GraphNamespace> {
     let encoded = serde_json::to_vec(owner).map_err(|error| storage_error(OPERATION, error))?;
-    GraphNamespace::new(format!(
-        "project-memory:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
-    .map_err(|error| graph_error(owner, error))
+    GraphNamespace::new(format!("project-memory:{}", sha256_hex(&encoded)))
+        .map_err(|error| graph_error(owner, error))
 }
 
 fn relation_kinds() -> Result<BTreeSet<GraphRelationKind>, tracedecay_graph_db::GraphDbError> {

@@ -82,7 +82,6 @@ impl CompactionTriggerPolicyV1 {
     }
 }
 
-/// The typed outcome of a compaction decision.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "decision")]
 pub enum CompactionDecisionV1 {

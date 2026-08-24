@@ -10,6 +10,7 @@ impl McpServer {
     /// Process a single raw JSON-RPC line and write the response. The
     /// in-process test-transport harness drives single requests through this
     /// without running the full connection loop (the module mount is gated).
+    #[hotpath::measure(label = "mcp.handle_and_write")]
     pub async fn handle_and_write(
         &self,
         line: &str,

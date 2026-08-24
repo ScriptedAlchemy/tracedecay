@@ -46,6 +46,14 @@ impl TemporalCandidateExport {
                 .to_owned(),
         )
         .map_err(candidate_export_contract)?;
+        let source_namespace =
+            SourceNamespace::try_from("session".to_owned()).map_err(candidate_export_contract)?;
+        let mut participants_by_session_source = BTreeMap::new();
+        for entry in self.snapshot.participant_manifest().entries() {
+            participants_by_session_source
+                .entry((entry.session_id(), entry.source_id()))
+                .or_insert(entry);
+        }
         let mut candidates = Vec::new();
         let mut evidence_by_occurrence = BTreeMap::new();
         for ranked in &self.ranked {
@@ -69,6 +77,17 @@ impl TemporalCandidateExport {
             };
             let logical_evidence_id =
                 LogicalEvidenceId::try_from(logical_identity).map_err(candidate_export_contract)?;
+            let session_id = ranked
+                .session
+                .as_deref()
+                .ok_or_else(|| {
+                    TemporalKernelError::CandidateExportContract(
+                        "temporal candidate omitted its owning session".to_owned(),
+                    )
+                })
+                .and_then(|value| {
+                    SessionId::new(value.to_owned()).map_err(candidate_export_contract)
+                })?;
             for (occurrence_index, source_occurrence) in occurrence_order.into_iter().enumerate() {
                 let occurrence_contributions = contributions_by_occurrence
                     .remove(&source_occurrence)
@@ -76,17 +95,6 @@ impl TemporalCandidateExport {
                         TemporalKernelError::CandidateExportContract(
                             "temporal occurrence lost its contribution evidence".to_owned(),
                         )
-                    })?;
-                let session_id = ranked
-                    .session
-                    .as_deref()
-                    .ok_or_else(|| {
-                        TemporalKernelError::CandidateExportContract(
-                            "temporal candidate omitted its owning session".to_owned(),
-                        )
-                    })
-                    .and_then(|value| {
-                        SessionId::new(value.to_owned()).map_err(candidate_export_contract)
                     })?;
                 let source_ids = occurrence_contributions
                     .iter()
@@ -106,14 +114,9 @@ impl TemporalCandidateExport {
                             "temporal candidate omitted its owning source".to_owned(),
                         )
                     })?;
-                let participant = self
-                    .snapshot
-                    .participant_manifest()
-                    .entries()
-                    .iter()
-                    .find(|entry| {
-                        entry.session_id() == &session_id && entry.source_id() == source_id
-                    })
+                let participant = participants_by_session_source
+                    .get(&(&session_id, source_id.as_str()))
+                    .copied()
                     .ok_or_else(|| {
                         TemporalKernelError::CandidateExportContract(
                             "temporal candidate is outside the frozen participant manifest"
@@ -125,8 +128,6 @@ impl TemporalCandidateExport {
                         "temporal candidate participant is not authorized".to_owned(),
                     ));
                 }
-                let source_namespace = SourceNamespace::try_from("session".to_owned())
-                    .map_err(candidate_export_contract)?;
                 let source_instance =
                     SourceInstanceKey::try_from(format!("{}:{source_id}", session_id))
                         .map_err(candidate_export_contract)?;
@@ -149,7 +150,7 @@ impl TemporalCandidateExport {
                     logical_evidence_id: logical_evidence_id.clone(),
                     source_occurrence_id: source_occurrence.clone(),
                     file_occurrence_id: None,
-                    source_namespace,
+                    source_namespace: source_namespace.clone(),
                     repository_id: Some(request.scope.root.repository.clone()),
                     session_or_thread_id: Some(
                         SessionOrThreadId::try_from(session_id.to_string())
@@ -299,6 +300,7 @@ fn participant_freshness(
 
 /// Hydrate only the globally selected temporal anchors, in the supplied
 /// selected order, through the canonical temporal content authority.
+#[hotpath::measure]
 pub async fn hydrate_temporal_candidate_selection(
     request: &TemporalKernelRequest,
     mut export: TemporalCandidateExport,
@@ -340,6 +342,7 @@ pub async fn hydrate_temporal_candidate_selection(
 }
 
 /// Hydrate the entire temporal page without changing its lane-local selection.
+#[hotpath::measure]
 pub async fn hydrate_temporal_candidate_export(
     request: &TemporalKernelRequest,
     export: TemporalCandidateExport,
@@ -399,6 +402,8 @@ pub async fn hydrate_temporal_candidate_export(
     check_control(&snapshot)?;
     let summary_omissions = public_summary_omissions(&summary_eligibility);
     let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
+    hotpath::gauge!("temporal_query.candidates.hydrated").set(hydrated.len());
+    hotpath::gauge!("temporal_query.context.assembled").set(context.bundle.records.len());
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),

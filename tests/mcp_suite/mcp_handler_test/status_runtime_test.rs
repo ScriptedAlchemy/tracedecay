@@ -15,10 +15,6 @@ use tracedecay_sessions::runtime::SessionRecord;
 #[cfg(feature = "test-transport")]
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
-// ---------------------------------------------------------------------------
-// 8. tracedecay_status
-// ---------------------------------------------------------------------------
-
 fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
     let status: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(
@@ -222,10 +218,6 @@ async fn status_without_retained_session_authority_fails_closed() {
     assert!(payload.get("cursor_session_ingest").is_none());
 }
 
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_status without server_stats
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_status_without_server_stats() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -273,9 +265,9 @@ async fn test_status_no_scope_prefix() {
     );
 }
 
-/// Issue #80: `tracedecay_runtime` must surface process + DB telemetry so
-/// users hitting unexpected CPU/RAM can capture a structured snapshot
-/// without leaving the chat session.
+/// `tracedecay_runtime` must surface process + DB telemetry so users hitting
+/// unexpected CPU/RAM can capture a structured snapshot without leaving the
+/// chat session.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -285,12 +277,10 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
 
-    // Top-level envelope.
     assert!(parsed.get("captured_at").is_some());
     assert!(parsed["tracedecay_version"].is_string());
     assert!(parsed["host_os"].is_string());
 
-    // Process block — PID must match our own.
     let proc = &parsed["process"];
     assert_eq!(
         proc["pid"].as_u64().unwrap_or(0),
@@ -304,7 +294,6 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     assert!(proc["system_cpu_count"].as_u64().unwrap_or(0) >= 1);
     assert!(proc["system_total_memory_bytes"].as_u64().unwrap_or(0) > 0);
 
-    // Database block — the DB file we just opened must be present and sized.
     let db = &parsed["database"];
     assert!(db["db_path"].is_string());
     assert!(

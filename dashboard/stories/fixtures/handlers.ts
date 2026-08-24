@@ -1,6 +1,6 @@
 /**
  * MSW request handlers for the dashboard `/api` surfaces. These are the
- * canonical fixture mocks (plan 11a): they answer every workspace's GET calls
+ * canonical fixture mocks: they answer every workspace's GET calls
  * from `data.ts` without a running daemon. They are used directly by MSW in
  * node/jsdom test contexts (`setupServer(...handlers)`), and the same fixture
  * data backs the Playwright route interceptor used by the visual audit
@@ -44,7 +44,7 @@ export const handlers = [
 ];
 
 /* ==========================================================================
- * HTTP fault injection (plan 11, "MSW covers HTTP/SSE faults")
+ * HTTP fault injection
  *
  * The transport failures a workspace read can actually suffer, named after
  * what went wrong on the wire rather than after the state they happen to

@@ -1,6 +1,3 @@
-//! `git` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
-
 use super::*;
 
 #[test]

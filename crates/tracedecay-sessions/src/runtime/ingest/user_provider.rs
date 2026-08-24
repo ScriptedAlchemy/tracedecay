@@ -6,7 +6,9 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::source::{HostProviderCoverage, persist_host_provider_coverage};
+use crate::runtime::source::{
+    HostProviderCoverage, persist_host_provider_coverage, read_host_provider_coverage,
+};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{
     SessionProvider, claude_observation, cline_like, hermes, kimi, kiro, opencode, vibe,
@@ -17,9 +19,7 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     warn_transcript_catch_up_failure,
 };
-use super::scheduler::{
-    USER_INGEST_CODEX_HISTORY_FRONTIER_KEY, read_ingest_frontier, write_ingest_frontier,
-};
+use super::scheduler::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 use super::user::{
     BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_rotated,
     try_ingest_user_cursor_sessions_with_db_bounded,
@@ -104,6 +104,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
     candidate: SessionProvider,
     max_new_bytes: u64,
     cancellation: &ObservationCancellation,
+    codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
 ) -> UserProviderRunResult {
     UserProviderUnit {
         store,
@@ -113,6 +114,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
         candidate,
         max_new_bytes,
         cancellation,
+        codex_discovery,
     }
     .run()
     .await
@@ -126,6 +128,7 @@ struct UserProviderUnit<'a, S> {
     candidate: SessionProvider,
     max_new_bytes: u64,
     cancellation: &'a ObservationCancellation,
+    codex_discovery: Option<(&'a crate::runtime::codex::CodexDiscoveryHub, &'a str)>,
 }
 
 impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
@@ -148,13 +151,43 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         }
     }
 
+    #[hotpath::measure]
     async fn run_codex(self) -> ProviderRunOutcome {
-        // Recent-first with a durable historical rotation: the frontier picks
-        // which older discovery buckets this pass covers. A missing frontier
-        // (fresh store) truthfully starts the rotation at zero.
-        let rotation = read_ingest_frontier(self.store, USER_INGEST_CODEX_HISTORY_FRONTIER_KEY)
-            .await
-            .unwrap_or(0);
+        let stored = match read_codex_discovery_frontier(self.store).await {
+            Ok(frontier) => frontier,
+            Err(error) => {
+                return ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "codex",
+                        "frontier",
+                        &error,
+                        "user Codex discovery frontier read failed",
+                    ),
+                    0,
+                );
+            }
+        };
+        let stored_coverage =
+            match read_host_provider_coverage(self.facade, &ObservationScopeV1::Profile, "codex")
+                .await
+            {
+                Ok(coverage) => coverage,
+                Err(error) => {
+                    return ProviderRunOutcome::failed(
+                        warn_transcript_catch_up_failure(
+                            "codex",
+                            "coverage",
+                            &error,
+                            "user Codex coverage read failed",
+                        ),
+                        0,
+                    );
+                }
+            };
+        let frontier = stored.for_coverage(matches!(
+            stored_coverage,
+            Some(HostProviderCoverage::Complete)
+        ));
         match try_ingest_user_codex_sessions_rotated(
             self.profile_root,
             None,
@@ -162,26 +195,66 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             self.facade,
             Some(self.max_new_bytes),
             self.cancellation,
-            rotation,
+            frontier,
+            self.codex_discovery,
         )
         .await
         {
-            Ok((outcome, next_rotation)) => {
-                // A failed advance repeats the same historical window next
-                // pass — at-least-once coverage, never a skipped range.
-                let advance = next_rotation.saturating_sub(rotation);
-                let _ = write_ingest_frontier(
-                    self.store,
-                    USER_INGEST_CODEX_HISTORY_FRONTIER_KEY,
-                    rotation,
-                    usize::try_from(advance).unwrap_or(usize::MAX),
-                )
-                .await;
-                ProviderRunOutcome::bounded(
+            Ok(result) => {
+                let outcome = result.outcome;
+                let mut run = ProviderRunOutcome::bounded(
                     outcome.stats,
                     outcome.bytes_consumed,
                     outcome.deferred_by_byte_cap,
-                )
+                );
+                let mut frontier_persisted = result.committable_frontier.is_some();
+                if let Some(next_frontier) = result
+                    .committable_frontier
+                    .filter(|next_frontier| *next_frontier != stored)
+                {
+                    if let Err(error) =
+                        write_codex_discovery_frontier(self.store, stored, next_frontier).await
+                    {
+                        frontier_persisted = false;
+                        run.add_deferred_units(1);
+                        run.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "frontier",
+                            &error,
+                            "user Codex discovery frontier persistence failed",
+                        ));
+                    }
+                }
+                let coverage = if outcome.deferred_by_byte_cap || !frontier_persisted {
+                    HostProviderCoverage::Partial
+                } else {
+                    HostProviderCoverage::Complete
+                };
+                if stored_coverage != Some(coverage) {
+                    if let Err(coverage_error) = persist_host_provider_coverage(
+                        self.facade,
+                        &ObservationScopeV1::Profile,
+                        "codex",
+                        coverage,
+                        u64::from(coverage != HostProviderCoverage::Complete),
+                    )
+                    .await
+                    {
+                        run.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "coverage",
+                            &coverage_error,
+                            "user Codex coverage persistence failed",
+                        ));
+                    }
+                }
+                if frontier_persisted && let Some((hub, consumer)) = self.codex_discovery {
+                    hub.acknowledge(consumer);
+                }
+                crate::runtime::pipeline_metrics::record_historical_ingest(
+                    coverage == HostProviderCoverage::Complete,
+                );
+                run
             }
             Err(error) => {
                 if let Some(cancelled) = cancelled_provider_outcome(&error) {

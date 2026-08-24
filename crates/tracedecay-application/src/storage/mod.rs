@@ -1,8 +1,8 @@
 //! Storage retention, size, and efficiency read models (Plan 38 §5–§7).
 //!
 //! This module owns the read models and policies *behind* the landed Doctor
-//! `Storage` finding contract (`crate::doctor::DoctorStorageFindingKindV1`,
-//! commit be3a113f). It never redefines that contract; it produces its findings.
+//! `Storage` finding contract (`crate::doctor::DoctorStorageFindingKindV1`).
+//! It never redefines that contract; it produces its findings.
 //!
 //! Layout:
 //! - [`identity`]: bounded store/table/path identifiers plus byte-size

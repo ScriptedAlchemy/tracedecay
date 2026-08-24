@@ -7,8 +7,8 @@ import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { CodePage } from './CodePage.tsx';
 
 /**
- * Renderer parity/fallback acceptance (Plan 11, "Renderer-neutral interaction
- * and fallback contract").
+ * Renderer parity/fallback: renderer-neutral interaction and fallback
+ * contract.
  *
  * The sibling suites mock GraphCanvas because the canvas is not their
  * subject. Here it IS the subject, and jsdom's missing WebGL context is not

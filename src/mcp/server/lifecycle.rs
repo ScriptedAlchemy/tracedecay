@@ -615,7 +615,7 @@ impl McpServer {
         // Reserve the single-flight slot shared with the read-refresh lane so a
         // lazy sync and a read refresh never stack on the same store. If a
         // refresh is already running, the cooldown claim above has done its job
-        // and this call simply serves the current snapshot.
+        // and this call serves the current snapshot.
         if self
             .background_refresh_running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

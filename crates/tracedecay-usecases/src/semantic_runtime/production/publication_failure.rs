@@ -348,13 +348,15 @@ impl SemanticPublicationFailureRecorderV1 {
 mod tests {
     use std::collections::BTreeSet;
 
+    use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
+
+    use crate::semantic_runtime::SemanticVectorGraphErrorV1;
     use crate::store::vector_generations::VectorGenerationStoreErrorV1;
 
     use super::{
         SemanticPublicationFailureCategoryV1, SemanticPublicationFailureRecorderV1,
         SemanticPublicationStageV1,
     };
-    use crate::semantic_runtime::SemanticVectorGraphErrorV1;
 
     #[test]
     fn publication_failure_receipts_keep_bounded_stage_and_category_truth() {
@@ -445,8 +447,6 @@ mod tests {
 
     #[test]
     fn live_publication_failures_keep_stage_and_category_without_private_detail() {
-        use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
-
         let resume = SemanticPublicationFailureRecorderV1::default();
         let failure = resume.retain_for_resume(&SemanticVectorGraphErrorV1::Rejected(
             "backend path is private".to_owned(),
@@ -484,8 +484,6 @@ mod tests {
 
     #[test]
     fn shared_recorder_keeps_first_live_pair_across_resume_and_commit() {
-        use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
-
         let publication_failure = SemanticPublicationFailureRecorderV1::default();
         let resume_failure = publication_failure.clone();
         let commit_failure = publication_failure.clone();
@@ -514,8 +512,6 @@ mod tests {
 
     #[test]
     fn shared_recorder_keeps_commit_batch_when_it_is_the_first_live_pair() {
-        use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
-
         let publication_failure = SemanticPublicationFailureRecorderV1::default();
         let resume_failure = publication_failure.clone();
         let commit_failure = publication_failure.clone();

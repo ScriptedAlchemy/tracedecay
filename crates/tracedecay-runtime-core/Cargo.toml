@@ -8,6 +8,40 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+]
 default = []
 # Forwarded from the root package. Gates daemonless fixture runtimes and the
 # in-process transport doubles used by storage-runtime tests.
@@ -20,6 +54,7 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = []
 
 [dependencies]
+hotpath.workspace = true
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }

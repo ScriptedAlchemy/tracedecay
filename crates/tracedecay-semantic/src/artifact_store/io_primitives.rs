@@ -1,6 +1,6 @@
 //! I/O and validation primitives for the model artifact store.
-//! Split out of artifact_store.rs to keep the facade under the 1000-line
-//! hygiene ceiling; pure structural move, no behavior change.
+
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 use super::*;
 
@@ -157,7 +157,7 @@ pub(super) fn sha256_open_file(
         }
         hasher.update(&buffer[..read]);
     }
-    Sha256DigestHex::new(hex::encode(hasher.finalize()))
+    Sha256DigestHex::new(encode_lowercase_hex(&hasher.finalize()))
         .map_err(|_| ArtifactImportErrorV1::StorageFailure)
 }
 

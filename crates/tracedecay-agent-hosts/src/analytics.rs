@@ -1,12 +1,9 @@
 //! Provider-neutral assistant usage taxonomy.
 //!
-//! A **downward move** from the root crate's `src/analytics.rs`, carried out
-//! with `automation/`, its heaviest consumer: `skill_usage` classifies stored
-//! analytics rows through [`infer_usage_events`], `runner::evidence` scores
-//! tool families through [`underused_tool_family_signals`], and `skill_writer`
-//! reports [`ToolFamilySignal`]. The module names no other subsystem — it is
-//! pure classification over `serde_json` values — so it moves cleanly rather
-//! than needing a port.
+//! `skill_usage` classifies stored analytics rows through [`infer_usage_events`],
+//! `runner::evidence` scores tool families through [`underused_tool_family_signals`],
+//! and `skill_writer` reports [`ToolFamilySignal`]. The module names no other
+//! subsystem — it is pure classification over `serde_json` values.
 //!
 //! Root wiring: `src/analytics.rs` is
 //! `pub use tracedecay_agent_hosts::analytics::*;`, keeping every

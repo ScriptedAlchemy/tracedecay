@@ -1,9 +1,8 @@
-// Rust guideline compliant 2026-08-14
 //! Codex's own non-interactive plugin registry, driven for Core activation.
 //!
 //! # What shipped, and what this module adopts
 //!
-//! Plan 27's 2026-08-08 Codex verdict treated plugin activation as
+//! Codex previously treated plugin activation as
 //! interactive-only (reason code `(a)`): `/plugin marketplace add` and
 //! `/plugin install` ran inside a session, so TraceDecay staged the source
 //! and stopped. Codex CLI 0.147.0 now publishes a non-interactive counterpart:
@@ -108,6 +107,7 @@ fn plugin_selector(marketplace_name: &str) -> String {
 /// MCP servers, or hook-trust records. The exact post-command bytes are
 /// recorded through the active host transaction so rollback can restore the
 /// pre-command document when the command fails or a later step rejects it.
+#[hotpath::measure(label = "codex_plugin_registry_step")]
 fn run_codex_plugin_step(
     codex_cli: &Path,
     args: &[&str],

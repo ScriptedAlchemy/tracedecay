@@ -5,7 +5,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// How a directory fsync failure is surfaced to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectorySyncPolicy {
     /// Surface every fsync failure.
@@ -15,10 +14,11 @@ pub enum DirectorySyncPolicy {
 }
 
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
+#[hotpath::measure]
 pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
     #[cfg(unix)]
     {
-        match File::open(dir).and_then(|directory| directory.sync_all()) {
+        match File::open(dir).and_then(|directory| sync_owned_file(&directory)) {
             Ok(()) => Ok(()),
             Err(error)
                 if matches!(policy, DirectorySyncPolicy::TolerateUnsupported)
@@ -36,7 +36,6 @@ pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()>
     }
 }
 
-/// Flush the parent directory of `path`, if any.
 pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
     match path.parent() {
         Some(parent) => sync_directory(parent, policy),
@@ -64,14 +63,18 @@ pub fn validate_regular_or_missing(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Restrict an existing file to owner read/write (`0o600` on unix).
+///
+/// Call this on a path you just created. Prefer [`tighten_existing_file`]
+/// when the file may be missing (that helper no-ops on `NotFound`).
 #[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> io::Result<()> {
+pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> io::Result<()> {
+pub fn set_owner_private_file_mode(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -87,9 +90,10 @@ pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
             "path is not a regular file",
         ));
     }
-    set_private_file_permissions(path)
+    set_owner_private_file_mode(path)
 }
 
+#[hotpath::measure]
 pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {
     if !validate_regular_or_missing(path)? {
         return Ok(None);
@@ -101,6 +105,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length is invalid",
         ));
     }
+    hotpath::gauge!("private_fs.framed_log.read_bytes").set(length);
     let mut bytes = Vec::with_capacity(length as usize);
     File::open(path)?
         .take(maximum as u64 + 1)
@@ -133,6 +138,10 @@ fn remove_owned_temp(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+fn sync_owned_file(file: &File) -> io::Result<()> {
+    hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
+}
+
 fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, File)> {
     for _ in 0..64 {
         let path = temporary_path(destination, kind);
@@ -157,6 +166,7 @@ fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, Fil
 
 /// Publish `destination` by staging into an owned temp file, syncing, then
 /// replacing through `publish`.
+#[hotpath::measure]
 pub fn with_owned_temp_publish<T>(
     destination: &Path,
     kind: &str,
@@ -168,7 +178,7 @@ pub fn with_owned_temp_publish<T>(
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
         let value = write(&mut output)?;
-        output.sync_all()?;
+        sync_owned_file(&output)?;
         drop(output);
         publish(&temporary, destination)?;
         tighten_existing_file(destination)?;
@@ -200,6 +210,7 @@ pub fn atomic_write(
     )
 }
 
+#[hotpath::measure]
 pub fn atomic_write_prepared(
     destination: &Path,
     kind: &str,
@@ -207,16 +218,17 @@ pub fn atomic_write_prepared(
     prepare: impl FnOnce(&Path) -> io::Result<()>,
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<()> {
+    hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
         output.write_all(bytes)?;
-        output.sync_all()?;
+        sync_owned_file(&output)?;
         prepare(&temporary)?;
         // Keep flushing through the original writable handle. Windows rejects
         // FlushFileBuffers on a read-only reopen, and `prepare` may also have
         // applied destination permissions that prevent a writable reopen.
-        output.sync_all()?;
+        sync_owned_file(&output)?;
         drop(output);
         replace_via_rename(&temporary, destination)?;
         sync_parent_directory(destination, directory_policy)
@@ -227,11 +239,13 @@ pub fn atomic_write_prepared(
     result
 }
 
+#[hotpath::measure]
 pub fn append_durable(
     path: &Path,
     frame: &[u8],
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<u64> {
+    hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
     tighten_existing_file(path)?;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -243,11 +257,12 @@ pub fn append_durable(
     let mut output = options.open(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;
-    output.sync_all()?;
+    sync_owned_file(&output)?;
     sync_parent_directory(path, directory_policy)?;
     Ok(offset)
 }
 
+#[hotpath::measure]
 pub fn truncate_file(
     path: &Path,
     len: u64,
@@ -256,7 +271,7 @@ pub fn truncate_file(
     tighten_existing_file(path)?;
     let output = OpenOptions::new().write(true).open(path)?;
     output.set_len(len)?;
-    output.sync_all()?;
+    sync_owned_file(&output)?;
     tighten_existing_file(path)?;
     sync_parent_directory(path, directory_policy)
 }

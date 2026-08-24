@@ -38,6 +38,7 @@ pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<Path
     tracedecay_sessions::runtime::home_dir()
 }
 
+#[hotpath::measure]
 pub(super) async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
@@ -51,6 +52,9 @@ pub(super) async fn production_project_server(
 ) -> Result<ProductionProjectComposition> {
     let project_open_started = Instant::now();
     project_open_cancellation_checkpoint(cancellation)?;
+    invocation
+        .configuration_runtime_registrar()
+        .ensure_worker_plan()?;
     ensure_registered_project_route(
         store_administration,
         canonical_project_path,
@@ -387,14 +391,23 @@ pub(super) async fn production_project_server(
         return Err(project_server_capacity_error());
     };
     for (retired_key, retired_server) in retired {
+        let owner = retired_key.owner;
+        store_administration
+            .session_temporal_refresh_schedulers()
+            .retire_project(&owner)
+            .await;
         retirement_admission.spawn_and_track(
-            retired_key.owner,
+            owner,
             super::project_server_lifecycle::retire_project_servers(vec![retired_server], None),
         );
+        hotpath::gauge!("project_servers").inc(-1.0);
     }
     // The owner registry guard was dropped before the synchronous retirement
     // handoff. Release admission before the remaining project-open awaits.
     drop(retirement_admission);
+    if inserted {
+        hotpath::gauge!("project_servers").inc(1.0);
+    }
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {
@@ -553,6 +566,9 @@ pub(super) async fn production_project_server(
                             canonical_project_path.to_path_buf(),
                             code_search_project_id.clone(),
                             transcript_source_home.clone(),
+                            store_administration
+                                .session_temporal_refresh_schedulers()
+                                .codex_discovery(),
                         ),
                     ),
                 )
@@ -568,6 +584,9 @@ pub(super) async fn production_project_server(
                             registry_db.clone(),
                             profile_identity.clone(),
                             transcript_source_home.clone(),
+                            store_administration
+                                .session_temporal_refresh_schedulers()
+                                .codex_discovery(),
                         ),
                     ),
                 )
@@ -1253,7 +1272,7 @@ async fn retire_failed_project_open_owner(
     // Request execution may itself need the owner writer held by this open
     // attempt. The tracked retirement starts draining after the caller returns
     // and releases that writer.
-    schedule_project_server_retirement(
+    super::project_server_lifecycle::retire_evicted_project_owner(
         store_administration,
         failed_key.owner.clone(),
         removed,

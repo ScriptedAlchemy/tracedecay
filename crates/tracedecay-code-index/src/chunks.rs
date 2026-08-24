@@ -9,7 +9,7 @@
 //! and mutable line numbers cannot affect `CodeSearchChunkId`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -135,6 +135,7 @@ const PARALLEL_CHUNK_THRESHOLD: usize = 16;
 /// is large enough. Results are returned in chunk order and the reported
 /// failure is always the lowest-index one, so the outcome is identical to the
 /// sequential sweep this replaces.
+#[hotpath::measure]
 fn map_chunks_ordered<T, F>(
     chunks: &[CodeSearchChunkV1],
     operation: F,
@@ -146,8 +147,10 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().map(operation).collect();
     }
-    let results: Vec<Result<T, ChunkingFailureV1>> =
-        chunks.par_iter().map(operation).collect::<Vec<_>>();
+    let results: Vec<Result<T, ChunkingFailureV1>> = chunks
+        .par_iter()
+        .map(|chunk| crate::parallelism::with_background_cpu_permit(|| operation(chunk)))
+        .collect::<Vec<_>>();
     results.into_iter().collect()
 }
 
@@ -167,7 +170,11 @@ where
     let failure = chunks
         .par_iter()
         .enumerate()
-        .filter_map(|(index, chunk)| operation(chunk).err().map(|error| (index, error)))
+        .filter_map(|(index, chunk)| {
+            crate::parallelism::with_background_cpu_permit(|| operation(chunk))
+                .err()
+                .map(|error| (index, error))
+        })
         .min_by_key(|(index, _)| *index);
     match failure {
         Some((_, error)) => Err(error),
@@ -260,7 +267,7 @@ impl ExactExtractionAuthorityV1 {
         }
         let admitted = chunks
             .into_par_iter()
-            .map(|chunk| self.admit(chunk))
+            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
             .collect::<Vec<_>>();
         admitted.into_iter().collect()
     }
@@ -388,15 +395,13 @@ impl CodeFileChunksV1 {
     }
 }
 
-/// Compatibility re-export for callers that previously obtained raw source
-/// digests from the chunking module.
 pub use super::intake::content_digest;
 
 /// Pinned fallback window size for oversized regions with no usable
-/// structural boundary (Plan 25).
+/// structural boundary.
 pub const FALLBACK_WINDOW_BYTES: u64 = 16 * 1024;
 
-/// Pinned fallback window overlap (Plan 25).
+/// Pinned fallback window overlap.
 pub const FALLBACK_WINDOW_OVERLAP_BYTES: u64 = 1024;
 
 /// Domain separator for chunk logical identity digests.
@@ -523,6 +528,7 @@ impl DeterministicCodeChunker {
     /// Index one file from the parser rows that produced its extraction batch.
     /// The opaque output type prevents callers from pairing a batch with rows
     /// from a different parse.
+    #[hotpath::measure]
     pub fn index_file_with_authority_from_extraction(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -803,7 +809,8 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             end_byte: base_offset + cursor as u64,
         };
         for subtoken in split_subtokens(token) {
-            if seen_subtokens.insert(subtoken.clone()) {
+            if !seen_subtokens.contains(subtoken.as_str()) {
+                seen_subtokens.insert(subtoken.clone());
                 subtokens.push(subtoken);
             }
         }
@@ -814,6 +821,10 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
     let mut line_start = 0usize;
     for line in text.split_inclusive('\n') {
         let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        if !line_has_ascii_error_marker(line_without_newline) {
+            line_start += line.len();
+            continue;
+        }
         let lowercase = line_without_newline.to_ascii_lowercase();
         let marker = [
             (
@@ -876,6 +887,16 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
             ))
     });
     (terms, subtokens)
+}
+
+fn line_has_ascii_error_marker(line: &str) -> bool {
+    const MARKERS: [&[u8]; 3] = [b"compiler error:", b"runtime error:", b"panic:"];
+    let bytes = line.as_bytes();
+    MARKERS.iter().any(|marker| {
+        bytes
+            .windows(marker.len())
+            .any(|window| window.eq_ignore_ascii_case(marker))
+    })
 }
 
 /// Mint a whole technical term only after a type-specific recognizer has
@@ -1061,6 +1082,7 @@ struct PendingChunk {
 }
 
 impl CodeChunker for DeterministicCodeChunker {
+    #[hotpath::measure]
     fn chunk_file(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -1373,24 +1395,30 @@ impl DeterministicCodeChunker {
         });
 
         let mut rows = Vec::with_capacity(raw.len());
+        // Parent = the smallest enclosing span among earlier (outer-or-equal)
+        // rows; equal spans resolve to the earliest row. Rows are sorted
+        // start-ascending/end-descending, so a containment stack of earlier
+        // row indices yields that encloser after popping non-enclosing tops.
+        // A row whose span equals its parent's is not pushed, keeping every
+        // later equal span resolved to the earliest row.
+        let mut enclosing: Vec<usize> = Vec::new();
+        let mut occurrence_counts: HashMap<(&str, &str), u32> = HashMap::with_capacity(raw.len());
         for (index, node) in raw.iter().enumerate() {
-            // Parent = the smallest strictly enclosing span among earlier
-            // (outer-or-equal) rows; equal spans resolve to the earlier row.
-            let parent = raw[..index]
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| {
-                    candidate.span.start_byte <= node.span.start_byte
-                        && candidate.span.end_byte >= node.span.end_byte
-                })
-                .min_by_key(|(_, candidate)| candidate.span.len())
-                .map(|(parent_index, _)| parent_index);
-            let occurrence_index = raw[..index]
-                .iter()
-                .filter(|candidate| {
-                    candidate.qualified_name == node.qualified_name && candidate.kind == node.kind
-                })
-                .count() as u32;
+            while enclosing
+                .last()
+                .is_some_and(|&candidate| raw[candidate].span.end_byte < node.span.end_byte)
+            {
+                enclosing.pop();
+            }
+            let parent = enclosing.last().copied();
+            if parent.is_none_or(|parent_index| raw[parent_index].span != node.span) {
+                enclosing.push(index);
+            }
+            let occurrences = occurrence_counts
+                .entry((node.qualified_name.as_str(), node.kind.as_str()))
+                .or_insert(0);
+            let occurrence_index = *occurrences;
+            *occurrences += 1;
             let identity = canonical_digest(
                 SYMBOL_IDENTITY_SEPARATOR,
                 &(
@@ -1494,6 +1522,14 @@ impl DeterministicCodeChunker {
             signature: Option<SourceSpan>,
         }
 
+        // Child start-bytes grouped by parent index in one pass; every
+        // symbol's members are consumed exactly once in the loop below.
+        let mut member_starts_by_parent: Vec<Vec<u64>> = vec![Vec::new(); symbols.len()];
+        for symbol in symbols {
+            if let Some(parent_index) = symbol.parent {
+                member_starts_by_parent[parent_index].push(symbol.span.start_byte);
+            }
+        }
         let mut emissions = Vec::with_capacity(symbols.len());
         for (index, symbol) in symbols.iter().enumerate() {
             if index % 64 == 0 && cancellation.is_cancelled() {
@@ -1505,11 +1541,7 @@ impl DeterministicCodeChunker {
             } else {
                 CodeSearchChunkGrainV1::SymbolBody
             };
-            let member_starts: Vec<u64> = symbols
-                .iter()
-                .filter(|candidate| candidate.parent == Some(index))
-                .map(|candidate| candidate.span.start_byte)
-                .collect();
+            let member_starts = std::mem::take(&mut member_starts_by_parent[index]);
             let mut pieces = Vec::new();
             if symbol.span.len() > MAX_CHUNK_TEXT_BYTES as u64 {
                 // Oversized bodies split on deterministic structural
@@ -1937,10 +1969,12 @@ fn emit_windows(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
 
     use super::*;
     use tracedecay_domain::{
@@ -1959,8 +1993,70 @@ mod tests {
     };
     use crate::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
+    use tracedecay_runtime_core::background_cpu::{
+        install_process_background_cpu, process_background_cpu,
+    };
 
     struct AlwaysCancelled;
+
+    #[test]
+    fn nested_chunk_fanout_admits_stolen_workers_without_exceeding_width() {
+        assert!(
+            process_background_cpu().is_none(),
+            "no test may install a shadow background CPU authority"
+        );
+        let _preview = crate::parallelism::preview_worker_plan(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+            20 * crate::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
+        );
+        assert!(
+            process_background_cpu().is_none(),
+            "worker-plan preview must not install background CPU authority"
+        );
+        let authority =
+            install_process_background_cpu(NonZeroUsize::new(2).expect("nonzero background width"))
+                .expect("background CPU authority");
+        let fixture = chunk_source("pub fn shared_cpu_fixture() {}\n")
+            .chunks
+            .into_iter()
+            .next()
+            .expect("fixture chunk");
+        let chunks = vec![fixture; PARALLEL_CHUNK_THRESHOLD * 2];
+        let active = AtomicUsize::new(0);
+        let maximum = AtomicUsize::new(0);
+        let parent_completed = AtomicUsize::new(0);
+        let stolen_completed = AtomicUsize::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("nested Rayon pool");
+
+        let mapped = pool
+            .install(|| {
+                crate::parallelism::with_background_cpu_permit(|| {
+                    let parent = rayon::current_thread_index().expect("parent Rayon worker");
+                    map_chunks_ordered(&chunks, |_| {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(current, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(5));
+                        if rayon::current_thread_index() == Some(parent) {
+                            parent_completed.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            stolen_completed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                })
+            })
+            .expect("nested chunk fan-out");
+
+        assert_eq!(mapped.len(), chunks.len());
+        assert_eq!(maximum.load(Ordering::SeqCst), authority.width().get());
+        assert!(parent_completed.load(Ordering::SeqCst) > 0);
+        assert!(stolen_completed.load(Ordering::SeqCst) > 0);
+        assert_eq!(authority.active_units(), 0);
+    }
 
     impl ExtractionCancellation for AlwaysCancelled {
         fn is_cancelled(&self) -> bool {

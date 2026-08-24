@@ -31,9 +31,13 @@
  * A value of `0` is a fourth thing again, and it is `measured`: zero observed
  * events is a reading. Only a *missing* value renders as unavailable.
  */
-import type { MetricValueV1, ObservabilityHorizonV1 } from '../../contracts/generated.ts';
+import type {
+  MetricValueV1,
+  ObservabilityHorizonV1,
+  ObservatoryReadModelV1,
+} from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
-import { coverageSentence, denominatorSentence, metricFigure } from '../../ui/metricModel.ts';
+import { denominatorSentence, metricFigure } from '../../ui/metricModel.ts';
 import { formatMicrosUtc } from '../../ui/format.ts';
 
 /** What is said in place of a figure that does not exist. Never `0`, never an
@@ -67,6 +71,13 @@ export interface PlanDimension {
   /** What Plan 26 requires this dimension to expose, in the plan's terms. */
   requirement: string;
   reading: DimensionReading;
+}
+
+/** One titled group of required dimensions. */
+export interface PlanDimensionBand {
+  marker: string;
+  label: string;
+  dimensions: PlanDimension[];
 }
 
 /** One dimension reduced to the strings a card renders. Every field of the
@@ -234,6 +245,23 @@ export function measuredCount(dimensions: readonly PlanDimension[]): number {
   return dimensions.filter((dimension) => dimension.reading.kind === 'measured').length;
 }
 
-/** Re-exported so views state coverage in the same words the canonical metric
- * plates do. */
-export { coverageSentence };
+export function readAnchors(model: ObservatoryReadModelV1): ReadAnchors {
+  return {
+    authorizedScopeRef: model.authorized_scope_ref,
+    watermark: model.watermark,
+    horizon: model.horizon,
+  };
+}
+
+export function dimensionCoverage(bands: readonly PlanDimensionBand[]): {
+  measured: number;
+  required: number;
+  unprojected: number;
+} {
+  const dimensions = bands.flatMap((band) => band.dimensions);
+  return {
+    measured: measuredCount(dimensions),
+    required: dimensions.length,
+    unprojected: dimensions.filter((dimension) => dimension.reading.kind === 'unpublished').length,
+  };
+}

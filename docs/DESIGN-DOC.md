@@ -1,8 +1,10 @@
 # TraceDecay Design Document
 
 TraceDecay is a code intelligence tool that builds semantic knowledge graphs from source code.
-It parses source files with tree-sitter, extracts symbols and relationships into a SQLite
-database, and exposes the graph through a CLI and an MCP (Model Context Protocol) server.
+It parses source files with tree-sitter, extracts symbols and relationships into
+`tracedecay-graph-db` (Grafeo), and exposes the graph through a CLI, MCP, LSP, and an
+embedded dashboard. Relational SQLite remains for session, memory, and registry
+state — not the code graph.
 The core insight is that AI coding agents waste tokens reading raw files when a pre-built
 graph can answer most questions instantly.
 
@@ -18,7 +20,7 @@ graph LR
         B --> C[Language Extractors]
         C --> D[Nodes + Edges + Unresolved Refs]
         D --> E[Reference Resolver]
-        E --> F[SQLite Database]
+        E --> F[Graph store]
     end
 
     subgraph Querying
@@ -42,6 +44,10 @@ The library (`src/lib.rs`) exposes all internals so the CLI and server share the
 paths without duplication.
 
 ## Module Map
+
+This map is a historical snapshot of the pre-crate-split tree. Current layout
+is in `AGENTS.md` and `CONTRIBUTING.md` (`src/` daemon/MCP, `crates/` members,
+`dashboard/`, `plugin/`).
 
 ```
 src/
@@ -100,7 +106,7 @@ src/
 
 ## Core Data Model
 
-The graph has three primary entities stored in SQLite tables.
+The graph has three primary entities stored in `tracedecay-graph-db`.
 
 **Nodes** represent code symbols. Each node has:
 
@@ -168,10 +174,9 @@ etc.) that create cross-file connections in the graph.
 
 ### 4. Storage
 
-Nodes, edges, and file records are bulk-inserted into SQLite via `Database::insert_nodes`
-and `Database::insert_edges`, which use batched prepared statements for performance.
-The database runs in WAL mode with `busy_timeout = 5000ms` to handle concurrent access
-from the MCP server and git post-commit hooks.
+The code graph persists through `tracedecay-graph-db` (Grafeo). Relational
+SQLite (`tracedecay-rusqlite-runtime`) holds session, memory, and registry
+state, not graph nodes.
 
 ### 5. Incremental Sync
 
@@ -187,9 +192,9 @@ again on the full graph to pick up any new cross-file edges.
 
 ## Database Layer
 
-The database uses SQLite through the bundled `tracedecay-rusqlite-runtime` and
-the `src/db/engine` abstraction. The schema is managed by sequential migrations
-tracked via `PRAGMA user_version`.
+The code graph is Grafeo. Relational catalogs use SQLite through the bundled
+`tracedecay-rusqlite-runtime`. Sequential migrations still track relational
+schema via `PRAGMA user_version`.
 
 Key schema features:
 

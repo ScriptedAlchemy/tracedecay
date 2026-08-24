@@ -7,7 +7,7 @@ import { ObservatoryPage } from './ObservatoryPage.tsx';
 const NOW_MICROS = 1_753_003_600_000_000;
 
 /**
- * The V2 accounting views share two source reads. This fixture deliberately
+ * The accounting views share two source reads. This fixture deliberately
  * gives the record-count source a partial window: a missing family is
  * censored by that cap, while a reported four-record family is withheld by the
  * local suppression floor. Those are distinct states and neither is zero.
@@ -32,8 +32,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('the mounted Observatory V2 accounting surface', () => {
-  it('mounts all three V2 views and keeps capped and suppressed family states distinct', async () => {
+describe('the mounted Observatory accounting surface', () => {
+  it('mounts all three accounting views and keeps capped and suppressed family states distinct', async () => {
     renderObservatory();
 
     for (const heading of ['Adoption coverage', 'Adoption outcomes', 'Retrieval quality']) {

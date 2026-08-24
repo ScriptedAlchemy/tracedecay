@@ -129,7 +129,6 @@ fn test_svelte_fixture() {
         "expected prerender const in {:?}",
         names
     );
-    // Props interface
     assert!(
         names.contains(&"Props"),
         "expected Props interface in {:?}",

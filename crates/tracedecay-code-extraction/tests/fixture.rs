@@ -1,7 +1,4 @@
 //! Integration tests that run each language extractor against realistic sample files.
-//!
-//! These tests verify that extractors handle real-world code patterns correctly,
-//! producing the expected nodes, edges, and relationships.
 
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
@@ -101,9 +98,6 @@ fn test_fixture_typescript() {
             .iter()
             .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "createUser")
     );
-
-    // Namespace (Auth module — may or may not be detected depending on TS grammar version)
-    // assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Namespace && n.name == "Auth"));
 
     // Call sites
     assert!(

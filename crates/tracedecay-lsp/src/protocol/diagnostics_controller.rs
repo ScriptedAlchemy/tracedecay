@@ -616,6 +616,10 @@ where
         true
     }
 
+    #[hotpath::measure(
+        label = "lsp_diagnostics_merge_document",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub(super) fn merge_document_diagnostics(
         &self,
         uri: &str,
@@ -650,6 +654,10 @@ where
             .collect()
     }
 
+    #[hotpath::measure(
+        label = "lsp_diagnostics_publish",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub(super) fn publish_diagnostics(
         &mut self,
         uri: &str,

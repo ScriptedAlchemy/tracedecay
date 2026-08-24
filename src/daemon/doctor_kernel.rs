@@ -652,8 +652,8 @@ impl ObservabilityDoctorPort for ObservabilityDoctorAdapterV1 {
 
 // === Storage retention/size (Storage family) =================================
 
-/// Wrap a set of typed storage findings the daemon's Plan 38 producers emitted
-/// into a kernel read.
+/// Wrap a set of typed storage findings the daemon's retention producers
+/// emitted into a kernel read.
 ///
 /// An empty finding set is a typed [`DoctorStorageFamilyReadV1::Absent`] — the
 /// runtime was consulted but produced nothing — never a fabricated healthy

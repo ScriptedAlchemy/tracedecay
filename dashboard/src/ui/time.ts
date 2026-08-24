@@ -57,3 +57,20 @@ export function relativeAge(
   if (delta < MONTH) return `${Math.floor(delta / DAY)}d ago`;
   return `${Math.floor(delta / MONTH)}mo ago`;
 }
+
+/** "now" / "15m" / "6d" / "1mo" — the compact unit-only variant for dense
+ * rows; a call site that needs prose appends "ago" itself. A future
+ * observation reads "now" rather than a negative age. Returns null for an
+ * absent timestamp so callers must render the absence explicitly. */
+export function compactRelativeAge(
+  epochSecs: number | null | undefined,
+  nowSecs: number,
+): string | null {
+  if (epochSecs == null || !Number.isFinite(epochSecs)) return null;
+  const delta = Math.max(0, nowSecs - epochSecs);
+  if (delta < 90) return 'now';
+  if (delta < HOUR) return `${Math.round(delta / MINUTE)}m`;
+  if (delta < DAY) return `${Math.round(delta / HOUR)}h`;
+  if (delta < MONTH) return `${Math.round(delta / DAY)}d`;
+  return `${Math.round(delta / MONTH)}mo`;
+}

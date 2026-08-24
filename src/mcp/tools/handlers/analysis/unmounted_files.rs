@@ -266,7 +266,6 @@ pub(super) fn normalized(path: &Path) -> PathBuf {
     out
 }
 
-/// Handles `tracedecay_unmounted_files` tool calls.
 pub(crate) async fn handle_unmounted_files(
     cg: &TraceDecay,
     args: Value,

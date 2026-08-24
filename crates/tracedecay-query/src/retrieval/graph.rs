@@ -57,9 +57,6 @@ const GRAPH_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
     unaddressed_binding: "graph lane binding does not address its candidate",
 };
 
-/// Typed graph-lane request for bounded traversal from generation-matched
-/// anchors.
-///
 /// Relation and path requests preserve edge authority and weakest coverage
 /// state.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -359,6 +356,7 @@ impl<P> GraphLaneRetriever for GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
+    #[hotpath::measure(label = "query.lane.graph")]
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
@@ -375,19 +373,30 @@ where
                     RetrievalFailure::AuthorityUnavailable { detail },
                 ));
             }
-            Err(RetrievalPortError::Cancelled) => return Ok(RetrieverOutcome::Cancelled),
+            Err(RetrievalPortError::Cancelled) => {
+                hotpath::gauge!("query.cancel.count").inc(1u32);
+                return Ok(RetrieverOutcome::Cancelled);
+            }
             Err(error) => return Err(error),
         };
-        match outcome {
-            RetrieverOutcome::Complete(batch) => Ok(RetrieverOutcome::Complete(
-                self.enforce_batch(request, &batch, control.as_ref())?,
-            )),
-            RetrieverOutcome::Partial { value, reason } => Ok(RetrieverOutcome::Partial {
+        let outcome = match outcome {
+            RetrieverOutcome::Complete(batch) => {
+                RetrieverOutcome::Complete(self.enforce_batch(request, &batch, control.as_ref())?)
+            }
+            RetrieverOutcome::Partial { value, reason } => RetrieverOutcome::Partial {
                 value: self.enforce_batch(request, &value, control.as_ref())?,
                 reason,
-            }),
-            outcome => Ok(outcome),
-        }
+            },
+            outcome => outcome,
+        };
+        crate::hotpath_metrics::record_lane(
+            "query.lane.graph.candidates",
+            "query.lane.graph.examined",
+            "query.lane.graph.results",
+            "query.lane.graph.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 
@@ -444,11 +453,7 @@ fn graph_checkpoint_digest(
                     "graph checkpoint evidence is missing for a returned occurrence".to_owned(),
                 )
             })?;
-        let path_ids: Vec<String> = evidence
-            .ordered_path_ids()?
-            .into_iter()
-            .map(|path_id| path_id.as_str().to_owned())
-            .collect();
+        let path_ids = evidence.ordered_path_ids()?;
         let edge_kinds: Vec<RelationEdgeKindV1> = evidence
             .path
             .iter()
@@ -460,10 +465,13 @@ fn graph_checkpoint_digest(
             .map(|segment| segment.authority)
             .collect();
         prefix.push((
-            candidate.source_occurrence_id.as_str().to_owned(),
-            candidate.retriever_evidence_anchor.as_str().to_owned(),
+            candidate.source_occurrence_id.as_str(),
+            candidate.retriever_evidence_anchor.as_str(),
             candidate.raw_score.micros(),
-            path_ids,
+            path_ids
+                .iter()
+                .map(|path_id| path_id.as_str())
+                .collect::<Vec<_>>(),
             edge_kinds,
             authorities,
             evidence.weakest_authority,

@@ -653,6 +653,7 @@ impl DaemonEngine {
         })
     }
 
+    #[hotpath::measure]
     pub(super) async fn start_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -720,7 +721,7 @@ impl DaemonEngine {
         #[cfg(test)]
         let exit_barrier = self.automation_scheduler_exit_barrier.lock().await.clone();
         let (published, start) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
+        let scheduler_loop = async move {
             let _ = start.await;
             Box::pin(run_automation_scheduler_loop(
                 project_path,
@@ -744,7 +745,11 @@ impl DaemonEngine {
                     !Arc::ptr_eq(&handle.completion, &completed)
                         || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
                 });
-        });
+        };
+        let task = tokio::spawn(hotpath::future!(
+            scheduler_loop,
+            label = "daemon.automation.scheduler_loop"
+        ));
         schedulers.insert(
             key,
             AutomationSchedulerHandle {
@@ -971,6 +976,39 @@ const SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
 /// Longest gap between project-open retries.
 const SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING: Duration = Duration::from_mins(5);
 
+struct BackgroundJobGaugeGuard {
+    #[cfg(test)]
+    test_counter: Option<Arc<std::sync::atomic::AtomicI64>>,
+}
+
+impl BackgroundJobGaugeGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("background_jobs").inc(1.0);
+        Self {
+            #[cfg(test)]
+            test_counter: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn enter_for_test(counter: Arc<std::sync::atomic::AtomicI64>) -> Self {
+        let mut guard = Self::enter();
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        guard.test_counter = Some(counter);
+        guard
+    }
+}
+
+impl Drop for BackgroundJobGaugeGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("background_jobs").inc(-1.0);
+        #[cfg(test)]
+        if let Some(counter) = self.test_counter.as_ref() {
+            counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// Exponential backoff for repeated project-open failures, from one tick.
 fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
     let base = Duration::from_secs(
@@ -982,6 +1020,7 @@ fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
@@ -1033,6 +1072,15 @@ async fn run_automation_scheduler_loop(
                         ],
                     );
                     break;
+                }
+                // Still configured or the generation advanced, so stay in the
+                // loop — but yield until the next tick or an explicit wake
+                // instead of spinning through the gate locks.
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(
+                        tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+                    )) => {}
+                    () = wake.notified() => {}
                 }
                 continue;
             }
@@ -1096,15 +1144,18 @@ async fn run_automation_scheduler_loop(
                 ("outcome", "start".to_string()),
             ],
         );
-        if let Err(e) = Box::pin(run_automation_scheduler_tick(
-            &project_path,
-            &cg,
-            &handshake,
-            &engine,
-            &run_control,
-        ))
-        .await
-        {
+        let tick_result = {
+            let _background_job = BackgroundJobGaugeGuard::enter();
+            Box::pin(run_automation_scheduler_tick(
+                &project_path,
+                &cg,
+                &handshake,
+                &engine,
+                &run_control,
+            ))
+            .await
+        };
+        if let Err(e) = tick_result {
             log_daemon_event(
                 "scheduler_tick",
                 &[
@@ -2067,9 +2118,11 @@ async fn scheduled_user_job_run_id(
 #[cfg(test)]
 mod scheduler_project_open_backoff_tests {
     use super::{
-        SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING, SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION,
-        scheduler_project_open_backoff,
+        BackgroundJobGaugeGuard, SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
+        SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION, scheduler_project_open_backoff,
     };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::time::Duration;
 
     #[test]
@@ -2115,6 +2168,29 @@ mod scheduler_project_open_backoff_tests {
         assert!(
             total <= Duration::from_hours(1),
             "a futile streak must not run for hours before escalating"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_job_gauge_is_released_when_the_tick_is_aborted() {
+        let active = Arc::new(AtomicI64::new(0));
+        let observed = Arc::clone(&active);
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _gauge = BackgroundJobGaugeGuard::enter_for_test(observed);
+            entered.send(()).expect("report gauge entry");
+            std::future::pending::<()>().await;
+        });
+
+        entered_rx.await.expect("tick reached gauge scope");
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        task.abort();
+        assert!(task.await.expect_err("tick was aborted").is_cancelled());
+
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            0,
+            "aborting a scheduler tick must not strand the background-job gauge"
         );
     }
 }

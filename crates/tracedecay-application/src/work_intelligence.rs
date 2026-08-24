@@ -5,15 +5,15 @@
 //! graph revision the caller names. Proposal comparison reads two exact
 //! verified revisions and returns both sides plus their structural delta.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProposalId, ProviderId,
-    TaskEvidenceLinkV1, TaskId, UtcMicros, WorkGraphVersionV1, WorkItemV1, WorkProductRelationV1,
-    WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1,
-    WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
+    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkGraphVersionV1, WorkItemV1,
+    WorkProductRelationV1, WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRouteDecisionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
     WorkShapeAssessmentV1, WorkSizingV1, canonical_sha256,
     configuration::{
         ConfigurationSnapshotV1, ConfigurationValueV1, PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
@@ -584,7 +584,20 @@ where
             });
         }
 
-        let mut candidates = Vec::new();
+        // The in-window evidence links are grouped by task once so the item
+        // loop below does not rescan the full link set for every item.
+        let mut evidence_by_task: BTreeMap<&TaskId, Vec<&TaskEvidenceLinkV1>> = BTreeMap::new();
+        for link in graph.evidence() {
+            if link.observed_at() >= request.evidence_not_before
+                && link.observed_at() <= request.observed_at
+            {
+                evidence_by_task
+                    .entry(link.task_id())
+                    .or_default()
+                    .push(link);
+            }
+        }
+        let mut picks = Vec::new();
         let mut stale_excluded = 0u32;
         for item in graph.items() {
             if item.task_id() == target.task_id() || !item.is_accepted() || item.is_archived() {
@@ -605,34 +618,33 @@ where
             if applicability.is_empty() {
                 continue;
             }
-            let evidence = graph
-                .evidence()
-                .iter()
-                .filter(|link| {
-                    link.task_id() == item.task_id()
-                        && link.observed_at() >= request.evidence_not_before
-                        && link.observed_at() <= request.observed_at
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if evidence.is_empty() {
+            let Some(evidence) = evidence_by_task
+                .get(item.task_id())
+                .filter(|links| !links.is_empty())
+            else {
                 stale_excluded = stale_excluded.saturating_add(1);
                 continue;
-            }
-            candidates.push(WorkExperienceCandidateV1 {
-                item: item.clone(),
-                evidence,
-                applicability,
-            });
+            };
+            picks.push((item, evidence.as_slice(), applicability));
         }
-        candidates.sort_by(|left, right| left.item.task_id().cmp(right.item.task_id()));
-        let applicable = bounded(candidates.len())?
+        picks.sort_by(|left, right| left.0.task_id().cmp(right.0.task_id()));
+        let applicable = bounded(picks.len())?
             .checked_add(stale_excluded)
             .ok_or(WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
         let limit = usize::try_from(request.limit)
             .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
-        let omitted = candidates.len().saturating_sub(limit);
-        candidates.truncate(limit);
+        let omitted = picks.len().saturating_sub(limit);
+        let candidates = picks
+            .into_iter()
+            .take(limit)
+            .map(
+                |(item, evidence, applicability)| WorkExperienceCandidateV1 {
+                    item: item.clone(),
+                    evidence: evidence.iter().copied().cloned().collect(),
+                    applicability,
+                },
+            )
+            .collect::<Vec<_>>();
         let returned = bounded(candidates.len())?;
         let coverage = if omitted == 0 {
             WorkExperienceCoverageV1::Complete {
@@ -815,8 +827,23 @@ fn evidence_difference(
     left: &[TaskEvidenceLinkV1],
     right: &[TaskEvidenceLinkV1],
 ) -> Vec<TaskEvidenceLinkV1> {
+    // `TaskEvidenceLinkV1` derives no `Ord`, so instead of a `BTreeSet`
+    // difference the membership probe is keyed by link id and confirmed with
+    // full equality inside each (near-singleton) bucket.
+    let mut right_by_link: BTreeMap<&TaskEvidenceLinkId, Vec<&TaskEvidenceLinkV1>> =
+        BTreeMap::new();
+    for existing in right {
+        right_by_link
+            .entry(existing.link_id())
+            .or_default()
+            .push(existing);
+    }
     left.iter()
-        .filter(|candidate| !right.iter().any(|existing| existing == *candidate))
+        .filter(|candidate| {
+            right_by_link
+                .get(candidate.link_id())
+                .is_none_or(|bucket| !bucket.contains(candidate))
+        })
         .cloned()
         .collect()
 }
@@ -827,19 +854,20 @@ fn proposal_runtime_coverage(
 ) -> Result<WorkProposalRuntimeCoverageV1, WorkProductApplicationErrorV1> {
     match runtime.coverage() {
         WorkRuntimeProjectionCoverageV1::Complete => {
-            let attempts = runtime
-                .attempts()
-                .iter()
-                .filter(|attempt| attempt.identity.task_id() == task_id)
-                .collect::<Vec<_>>();
+            let mut attempt_count = 0usize;
+            let mut terminal_attempt_count = 0usize;
+            for attempt in runtime.attempts() {
+                if attempt.identity.task_id() != task_id {
+                    continue;
+                }
+                attempt_count = attempt_count.saturating_add(1);
+                if attempt.state.is_terminal() {
+                    terminal_attempt_count = terminal_attempt_count.saturating_add(1);
+                }
+            }
             Ok(WorkProposalRuntimeCoverageV1::Complete {
-                attempt_count: bounded(attempts.len())?,
-                terminal_attempt_count: bounded(
-                    attempts
-                        .iter()
-                        .filter(|attempt| attempt.state.is_terminal())
-                        .count(),
-                )?,
+                attempt_count: bounded(attempt_count)?,
+                terminal_attempt_count: bounded(terminal_attempt_count)?,
             })
         }
         WorkRuntimeProjectionCoverageV1::Partial { .. } => {

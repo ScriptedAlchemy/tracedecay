@@ -308,27 +308,31 @@ async fn operation<O>(
 where
     O: WorkflowApplicationOwner,
 {
-    let Some(operation) = WorkflowOperation::from_route_segment(&segment) else {
-        return adapter_problem_response(
-            request_id,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        );
+    let request = match hotpath::measure_block!("api.http.admission", {
+        match WorkflowOperation::from_route_segment(&segment) {
+            None => Err(adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            )),
+            Some(operation) => match body {
+                Ok(Json(body)) => Ok(WorkflowHttpRequest {
+                    operation,
+                    request_id,
+                    controls,
+                    body,
+                }),
+                Err(_) => Err(invalid_request_response(
+                    request_id,
+                    "workflow.invalid_body",
+                    "The Workflow request body is invalid or exceeds the configured limit",
+                )),
+            },
+        }
+    }) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
-    let Ok(Json(body)) = body else {
-        return invalid_request_response(
-            request_id,
-            "workflow.invalid_body",
-            "The Workflow request body is invalid or exceeds the configured limit",
-        );
-    };
-    owner
-        .invoke_workflow(WorkflowHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        })
-        .await
+    hotpath::measure_block!("api.http.handler", owner.invoke_workflow(request).await)
 }
 
 pub fn workflow_invalid_request_response(request_id: RequestId) -> Response {

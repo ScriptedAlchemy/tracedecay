@@ -4,10 +4,11 @@
 //! supplies the canonical Work and automation authorities through the ports
 //! defined here; this module does not create a second scheduler or Work store.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display};
 
 use crate::RequestContext;
+use crate::bearer_token::BearerTokenSecret;
 use crate::work_handoff_frontier::WorkHandoffFrontierV1;
 use crate::workflow_admission::{
     WorkflowCatalogAdmissionError, admit_workflow_definition_operations,
@@ -16,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId, canonical_sha256,
+    WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId,
 };
 
 /// Fixed task-handoff grant lifetime (60 seconds), as `UtcMicros` duration micros.
@@ -605,19 +606,24 @@ where
     ) -> Result<WorkflowDefinitionDiff, WorkflowCoordinationError> {
         let from = self.get(definition_id, from_version)?;
         let to = self.get(definition_id, to_version)?;
-        let step_ids = from
+        let from_by_id = from
             .steps()
             .iter()
-            .chain(to.steps())
-            .map(|step| step.step_id.clone())
-            .collect::<BTreeSet<_>>();
-        let changed_steps = step_ids
+            .map(|step| (&step.step_id, step))
+            .collect::<BTreeMap<_, _>>();
+        let to_by_id = to
+            .steps()
+            .iter()
+            .map(|step| (&step.step_id, step))
+            .collect::<BTreeMap<_, _>>();
+        let changed_steps = from_by_id
+            .keys()
+            .copied()
+            .chain(to_by_id.keys().copied())
+            .collect::<BTreeSet<_>>()
             .into_iter()
-            .filter(|step_id| {
-                let from_step = from.steps().iter().find(|step| &step.step_id == step_id);
-                let to_step = to.steps().iter().find(|step| &step.step_id == step_id);
-                from_step != to_step
-            })
+            .filter(|step_id| from_by_id.get(step_id) != to_by_id.get(step_id))
+            .cloned()
             .collect();
         Ok(WorkflowDefinitionDiff {
             definition_id: definition_id.clone(),
@@ -662,23 +668,19 @@ fn coordination_authority_error(
 }
 
 pub struct TaskHandoffToken {
-    secret: String,
+    secret: BearerTokenSecret,
 }
 
 impl TaskHandoffToken {
     pub fn new(secret: String) -> Result<Self, TaskHandoffError> {
-        let byte_len = secret.len();
-        if !(32..=512).contains(&byte_len)
-            || secret.trim() != secret
-            || secret.chars().any(char::is_control)
-        {
-            return Err(TaskHandoffError::InvalidToken);
-        }
-        Ok(Self { secret })
+        Ok(Self {
+            secret: BearerTokenSecret::new(secret).map_err(|_| TaskHandoffError::InvalidToken)?,
+        })
     }
 
     fn digest(&self) -> Result<ManifestDigest, TaskHandoffError> {
-        canonical_sha256(&("tracedecay.application.task-handoff.v1", &self.secret))
+        self.secret
+            .digest("tracedecay.application.task-handoff.v1")
             .map_err(|_| TaskHandoffError::InvalidToken)
     }
 }

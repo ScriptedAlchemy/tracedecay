@@ -403,12 +403,8 @@ fn blocked_problem(
 ) -> ApplicationProblem {
     let named = blockers
         .iter()
-        .map(|blocker| {
-            serde_json::to_value(blocker)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned())
-        })
+        .copied()
+        .map(placement_blocker_name)
         .collect::<Vec<_>>()
         .join(", ");
     ApplicationProblem::Conflict {
@@ -440,5 +436,25 @@ fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
         },
         retry: RetryDirective::AfterRevalidate,
         legal_actions: vec![LegalAction::Refresh],
+    }
+}
+
+/// Wire names for the closed blocker vocabulary. Kept as a match so a new
+/// variant cannot silently become `"unknown"` through a JSON round-trip.
+const fn placement_blocker_name(blocker: WorkPlacementBlockerV1) -> &'static str {
+    match blocker {
+        WorkPlacementBlockerV1::DirtyTrackedFiles => "dirty_tracked_files",
+        WorkPlacementBlockerV1::UntrackedData => "untracked_data",
+        WorkPlacementBlockerV1::UniqueCommits => "unique_commits",
+        WorkPlacementBlockerV1::ActiveHolder => "active_holder",
+        WorkPlacementBlockerV1::UnresolvedEffect => "unresolved_effect",
+        WorkPlacementBlockerV1::UnacknowledgedReceipt => "unacknowledged_receipt",
+        WorkPlacementBlockerV1::UncertainPullRequest => "uncertain_pull_request",
+        WorkPlacementBlockerV1::SharedRef => "shared_ref",
+        WorkPlacementBlockerV1::MissingAnchor => "missing_anchor",
+        WorkPlacementBlockerV1::StaleScope => "stale_scope",
+        WorkPlacementBlockerV1::AuthorizationLost => "authorization_lost",
+        WorkPlacementBlockerV1::TargetUnreadable => "target_unreadable",
+        WorkPlacementBlockerV1::NetworkRequired => "network_required",
     }
 }

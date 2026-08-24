@@ -6,7 +6,7 @@ use crate::candidate_output::{CandidateWorkloadV1, ProfileSpecV1};
 
 use super::SemanticNativeEvaluationErrorV1;
 
-/// Optional stages requested by one checked-in Plan 15 profile.
+/// Optional stages requested by one checked-in workload profile.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticNativeProfileRequirementsV1 {

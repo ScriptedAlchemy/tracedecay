@@ -15,6 +15,7 @@ pub mod retrieval_anchor_schema;
 mod semantic_vector_staging;
 mod sql;
 
+pub use crate::store_runtime::registry::RepositoryRuntimePhysicalSnapshot;
 pub use access::OwnedMaintenanceDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;

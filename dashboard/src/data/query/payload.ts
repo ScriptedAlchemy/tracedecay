@@ -184,17 +184,3 @@ export function fetchPayloadWrite<T>(
 
 /** Loose object schema for payloads we render generically. */
 export const AnyObject = z.record(z.string(), z.unknown());
-
-// `ProjectSchema`/`ProjectsSchema` — every field optional, the collection
-// optional — had no callers; `/api/projects` is the generated
-// `ProjectsPayloadV1Schema`, where `status` discriminates the reading and
-// `projects`/`active_project_id` are required and nullable rather than absent.
-// Deleted rather than kept as a spare, because a schema whose every field is
-// optional accepts a body that says nothing, and the one field it would have
-// been reached for — `active_project_id`, the authority behind `scopeWritable`
-// — it could not express at all.
-//
-// The seven per-surface aliases that followed (`LcmOverviewSchema`,
-// `GraphOverviewSchema`, and the rest) went for the adjacent reason: each was
-// `AnyObject` under another name, so they promised a per-route contract none of
-// them held, and every caller had already moved to a generated schema.

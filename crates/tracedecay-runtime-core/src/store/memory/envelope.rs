@@ -6,8 +6,7 @@ use std::pin::Pin;
 use crate::db::engine::params;
 use crate::db::{Database, DatabaseMemoryTransaction as Transaction};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_store::{FactStoreError, FactStoreResult, FactWriteControl};
 
@@ -50,7 +49,7 @@ pub(super) struct ProjectMemoryOperationReceiptV1 {
 
 pub(super) fn project_memory_digest(material: Value) -> FactStoreResult<String> {
     let encoded = to_json(&material, "serialize project-memory request digest")?;
-    Ok(hex::encode(Sha256::digest(encoded.as_bytes())))
+    Ok(sha256_hex(encoded.as_bytes()))
 }
 
 pub(super) async fn project_memory_lookup_operation_receipt_tx(

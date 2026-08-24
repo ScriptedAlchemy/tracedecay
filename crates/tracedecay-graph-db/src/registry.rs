@@ -584,6 +584,7 @@ impl GraphDbRegistry {
     /// via the publication surface; the native runtime lease is for graphs
     /// whose state is itself the authority (for example daemon-owned session
     /// relation graphs) and for direct storage tests.
+    #[hotpath::measure(label = "graph_db.registry.resolve", impl_type = "GraphDbRegistry")]
     pub fn resolve(
         &self,
         registration: GraphDbRegistration,
@@ -1794,10 +1795,10 @@ impl GraphDbRegistry {
     }
 
     fn state_lock(&self) -> Result<MutexGuard<'_, RegistryState>, GraphDbError> {
-        self.inner
-            .state
-            .lock()
-            .map_err(|_| GraphDbError::unavailable("graph registry state lock is poisoned"))
+        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_REGISTRY, || {
+            self.inner.state.lock()
+        })
+        .map_err(|_| GraphDbError::unavailable("graph registry state lock is poisoned"))
     }
 
     /// Recovers a poisoned registry mutex only after native close has crossed

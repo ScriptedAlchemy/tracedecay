@@ -301,7 +301,7 @@ export function EnvelopeSection<T>({
   );
 }
 
-/** Crafted truthful states (plan 11a): one sentence of what this state means
+/** Crafted truthful states: one sentence of what this state means
  * here plus the next action, not a bare chip. Workspace-specific sentences
  * come from the caller; these are the designed defaults per state.
  *

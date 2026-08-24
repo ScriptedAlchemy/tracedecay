@@ -1,18 +1,20 @@
+import type { DashboardCoverageV1 } from '../contracts/generated.ts';
 import { cn } from './cn';
 import { EvidencePattern, type EvidenceQuality } from './EvidencePattern.tsx';
 
-export interface EvidenceCoverage {
-  completeness?: string;
-  eligible?: number | null;
-  examined?: number | null;
-}
+/** The subset of the generated `DashboardCoverageV1` contract the strip
+ * renders. Doctor coverage statements are assignable too: their completeness
+ * variants are a subset of the dashboard completeness enum. */
+export type EvidenceStripCoverage = Partial<
+  Pick<DashboardCoverageV1, 'completeness' | 'eligible' | 'examined'>
+>;
 
 export interface EvidenceFreshness {
   state?: string;
   observed_at?: string;
 }
 
-/** Always-visible truth strip (plan 11): coverage with denominator, freshness
+/** Always-visible truth strip: coverage with denominator, freshness
  * age, counts. Unknown denominators NEVER render a percent or a meter. */
 export function EvidenceTruthStrip({
   coverage,
@@ -22,7 +24,7 @@ export function EvidenceTruthStrip({
   scoreKind,
   className,
 }: {
-  coverage?: EvidenceCoverage | undefined;
+  coverage?: EvidenceStripCoverage | undefined;
   freshness?: EvidenceFreshness | undefined;
   citations?: number | undefined;
   omissions?: number | undefined;
@@ -59,7 +61,7 @@ export function EvidenceTruthStrip({
   );
 }
 
-function coverageLabel(coverage?: EvidenceCoverage): string {
+function coverageLabel(coverage?: EvidenceStripCoverage): string {
   if (!coverage) return 'coverage unknown';
   const { completeness, examined, eligible } = coverage;
   const qualifier = completeness && completeness !== 'complete' ? ` · ${completeness}` : '';

@@ -15,6 +15,9 @@ use std::{
     },
 };
 
+#[cfg(feature = "hotpath")]
+use std::time::Instant;
+
 use thiserror::Error;
 use tracedecay_domain::{CodeGenerationId, WorktreeId};
 
@@ -180,6 +183,8 @@ struct QueuedProjectionBatchV1 {
     ticket: u64,
     batch: SemanticProjectionBatchV1,
     dispatch: Option<SemanticProjectionDispatchV1>,
+    #[cfg(feature = "hotpath")]
+    enqueued_at: Instant,
 }
 
 struct ActiveProjectionBatchV1 {
@@ -203,6 +208,17 @@ struct SemanticProjectionSchedulerStateV1 {
     active_publications: usize,
     draining_work: bool,
     work_drain_requested: bool,
+}
+
+impl SemanticProjectionSchedulerStateV1 {
+    fn observe_hotpath(&self) {
+        crate::hotpath_observe::semantic_queue(
+            self.queued_batches,
+            self.queued_bytes,
+            self.reserved_session_memory_bytes,
+            self.active_publications,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -235,6 +251,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         self.limits
     }
 
+    #[hotpath::measure]
     pub fn enqueue(
         &self,
         batch: SemanticProjectionBatchV1,
@@ -242,6 +259,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         self.enqueue_inner(batch, None)
     }
 
+    #[hotpath::measure]
     pub fn enqueue_work(
         &self,
         batch: SemanticProjectionBatchV1,
@@ -349,6 +367,8 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
                 ticket,
                 batch: batch.clone(),
                 dispatch,
+                #[cfg(feature = "hotpath")]
+                enqueued_at: Instant::now(),
             });
         if queue_was_empty
             && !state
@@ -363,6 +383,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
             .insert(batch.worktree_id.clone(), batch.source_generation.clone());
         state.queued_batches += 1;
         state.queued_bytes = projected_bytes;
+        state.observe_hotpath();
 
         Ok(SemanticProjectionEnqueueOutcomeV1 {
             ticket,
@@ -372,6 +393,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         })
     }
 
+    #[hotpath::measure]
     pub fn try_dispatch(&self) -> Option<SemanticProjectionLeaseV1> {
         self.try_dispatch_matching(false).map(|(lease, _)| lease)
     }
@@ -450,6 +472,13 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
                     publication_claimed: false,
                 },
             );
+            #[cfg(feature = "hotpath")]
+            {
+                let wait_ns =
+                    u64::try_from(queued.enqueued_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                crate::hotpath_observe::semantic_queue_wait_ns(wait_ns);
+            }
+            state.observe_hotpath();
             let lease = SemanticProjectionLeaseV1 {
                 ticket: queued.ticket,
                 batch: queued.batch,
@@ -461,6 +490,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         None
     }
 
+    #[hotpath::measure]
     pub fn cancel_generation(
         &self,
         worktree_id: &WorktreeId,
@@ -510,6 +540,10 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         {
             state.latest_generations.remove(worktree_id);
         }
+        crate::hotpath_observe::semantic_cancelled(
+            removed_queued_batches.saturating_add(cancelled_running_batches),
+        );
+        state.observe_hotpath();
         SemanticProjectionCancellationOutcomeV1 {
             removed_queued_batches,
             removed_queued_bytes,
@@ -517,8 +551,10 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         }
     }
 
+    #[hotpath::measure]
     pub fn stats(&self) -> SemanticProjectionSchedulerStatsV1 {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.observe_hotpath();
         SemanticProjectionSchedulerStatsV1 {
             queued_batches: state.queued_batches,
             queued_bytes: state.queued_bytes,
@@ -546,6 +582,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
                 }
             }
             state.work_drain_requested = true;
+            state.observe_hotpath();
         }
         self.drain_ready_work();
     }
@@ -553,6 +590,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
     fn release_publication(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.active_publications = state.active_publications.saturating_sub(1);
+        state.observe_hotpath();
     }
 
     fn drain_ready_work(&self) {
@@ -635,10 +673,12 @@ impl SemanticProjectionLeaseV1 {
         self.cancellation.load(Ordering::Acquire)
     }
 
+    #[hotpath::measure]
     pub fn try_begin_publication(
         &self,
     ) -> Result<SemanticProjectionPublicationLeaseV1, SemanticProjectionScheduleErrorV1> {
         if self.is_cancelled() {
+            crate::hotpath_observe::semantic_cancelled(1);
             return Err(SemanticProjectionScheduleErrorV1::Cancelled);
         }
         let mut state = self
@@ -652,6 +692,7 @@ impl SemanticProjectionLeaseV1 {
             .get_mut(&self.ticket)
             .ok_or(SemanticProjectionScheduleErrorV1::Cancelled)?;
         if active.cancellation.load(Ordering::Acquire) {
+            crate::hotpath_observe::semantic_cancelled(1);
             return Err(SemanticProjectionScheduleErrorV1::Cancelled);
         }
         if active.publication_claimed {
@@ -665,6 +706,7 @@ impl SemanticProjectionLeaseV1 {
         }
         active.publication_claimed = true;
         state.active_publications += 1;
+        state.observe_hotpath();
         Ok(SemanticProjectionPublicationLeaseV1 {
             cancellation: Arc::clone(&self.cancellation),
             scheduler: self.scheduler.clone(),

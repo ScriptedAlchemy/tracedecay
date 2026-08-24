@@ -7,8 +7,6 @@
 > below as independently open work — consult NEXT.md for what actually
 > remains.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Convert the interrupted Claude checkout into a fully wired, truthfully typed V2 release-candidate branch with direct production-journey and aggregate test evidence.
 
 **Architecture:** Preserve the canonical Rust domain/application authorities, finish one production vertical at a time, and derive MCP, HTTP, SDK, host, and dashboard surfaces from those authorities. Stabilize replay, identity, security, and typed-state boundaries first; mount runtime producers and consumers next; regenerate wire artifacts only after Rust contracts stop moving.

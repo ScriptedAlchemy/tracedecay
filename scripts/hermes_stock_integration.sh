@@ -5,7 +5,7 @@
 #
 #   git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-upstream
 #   git -C /tmp/hermes-upstream checkout <pinned ref>
-#   cargo build --bin tracedecay
+#   cargo build -p tracedecay-cli --bin tracedecay
 #   scripts/hermes_stock_integration.sh
 #
 # Environment:
@@ -20,6 +20,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/stock-host.sh"
 SCRIPT_PATH="$REPO_ROOT/scripts/hermes_stock_integration.sh"
 DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
 STAGE=""
@@ -70,14 +71,9 @@ main() {
     local tracedecay_bin hermes_upstream_dir hermes_venv
     local fake_home hermes_home profile socket project status
 
-    tracedecay_bin="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
-    tracedecay_bin="$(cd "$(dirname "$tracedecay_bin")" && pwd)/$(basename "$tracedecay_bin")"
+    tracedecay_bin="$(resolve_tracedecay_bin)"
     hermes_upstream_dir="${HERMES_UPSTREAM_DIR:-/tmp/hermes-upstream}"
 
-    if [[ ! -x "$tracedecay_bin" ]]; then
-        echo "error: tracedecay binary not found at $tracedecay_bin (build with: cargo build --bin tracedecay)" >&2
-        return 1
-    fi
     if [[ ! -f "$hermes_upstream_dir/pyproject.toml" ]]; then
         echo "error: stock hermes-agent checkout not found at $hermes_upstream_dir" >&2
         return 1
@@ -109,9 +105,7 @@ main() {
     # Throwaway project so tool dispatch has a real .tracedecay graph to hit.
     printf 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n\npub fn double(x: i32) -> i32 { add(x, x) }\n' > "$project/src/lib.rs"
     printf '[package]\nname = "throwaway"\nversion = "0.1.0"\nedition = "2021"\n' > "$project/Cargo.toml"
-    git -C "$project" init -q
-    git -C "$project" add -A
-    git -C "$project" -c user.email=ci@tracedecay -c user.name=ci commit -qm init
+    seed_throwaway_project "$project"
 
     # Installation must precede the sole-owner daemon. Keep every user/profile
     # path inside the throwaway HOME. `which_tracedecay()` prefers a PATH

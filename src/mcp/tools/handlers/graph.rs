@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
+use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_application::retrieval::{
@@ -202,7 +203,6 @@ fn rendered_context_tool_result(
     }
 }
 
-/// Handles `tracedecay_search` tool calls.
 pub(super) async fn handle_search<F>(
     cg: &TraceDecay,
     graph: F,
@@ -654,7 +654,6 @@ fn append_context_semantic_pending(output: &mut String, value: &Value) {
     }
 }
 
-/// Handles `tracedecay_context` tool calls.
 pub(super) async fn handle_context<F>(
     cg: &TraceDecay,
     graph: F,
@@ -867,7 +866,6 @@ where
     }
 }
 
-/// Handles `tracedecay_callers` tool calls.
 pub(super) async fn handle_callers(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -902,8 +900,6 @@ pub(super) async fn handle_callers(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_callees` tool calls.
-///
 /// Beyond the direct `Calls` edges, this handler also surfaces *trait
 /// dispatch targets*: when a callee is a method whose enclosing scope is a
 /// trait, the concrete impl methods reachable through that trait are added
@@ -982,11 +978,11 @@ pub(super) async fn handle_callees(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
-/// `idx_nodes_name` — no BM25 scoring, no fuzzy match, no qualified-name
-/// suffix walk. Returns every node whose `name` column equals the query
-/// exactly. Useful when you already know the symbol and want the apples-to-
-/// apples cost of an index hit instead of `tracedecay_search`'s ranked query.
+/// Bare-name lookup against `idx_nodes_name` — no BM25 scoring, no fuzzy
+/// match, no qualified-name suffix walk. Returns every node whose `name`
+/// column equals the query exactly. Useful when you already know the symbol
+/// and want the apples-to-apples cost of an index hit instead of
+/// `tracedecay_search`'s ranked query.
 pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1052,7 +1048,6 @@ pub(super) async fn handle_find_exact_symbol(
     Ok(generic_tool_result(cg, &args, &body, touched_files))
 }
 
-/// Handles `tracedecay_impact` tool calls.
 pub(super) async fn handle_impact(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1101,7 +1096,6 @@ pub(super) async fn handle_impact(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_node` tool calls.
 pub(super) async fn handle_node(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1163,7 +1157,6 @@ pub(super) async fn handle_node(
     }
 }
 
-/// Handles `tracedecay_similar` tool calls.
 pub(super) async fn handle_similar(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1251,12 +1244,12 @@ pub(super) async fn handle_similar(
 /// a file with many references is read once. `None` when the file cannot be
 /// read (e.g. deleted since indexing).
 fn cached_file_lines<'a>(
-    cg: &TraceDecay,
+    project_root: &Path,
     cache: &'a mut HashMap<String, Option<Vec<String>>>,
     file_path: &str,
 ) -> Option<&'a [String]> {
     if !cache.contains_key(file_path) {
-        let abs = cg.project_root().join(file_path);
+        let abs = project_root.join(file_path);
         let lines = std::fs::read_to_string(&abs)
             .ok()
             .map(|source| source.lines().map(str::to_string).collect::<Vec<_>>());
@@ -1320,12 +1313,23 @@ fn count_identifier_occurrences(haystack: &str, name: &str) -> usize {
     count
 }
 
-/// Handles `tracedecay_rename_preview` tool calls. READ-ONLY: reports what a
-/// rename of the given symbol WOULD touch — the declaration site and every graph
-/// reference site (incoming edges; outgoing edges reference other symbols and so
-/// are excluded), each with a current-text snippet, plus a per-file count of
-/// literal name occurrences that are NOT backed by a graph edge ("text-only
-/// matches — review manually"). Nothing is rewritten.
+/// Graph-derived inputs for one rename-preview reference site, extracted
+/// before the blocking file walk so the worker needs no graph access.
+struct RenameReferenceSiteInput {
+    from_node_id: String,
+    from_name: String,
+    from_kind: String,
+    edge_kind: String,
+    file: String,
+    evidence_start_byte: u64,
+}
+
+/// READ-ONLY: reports what a rename of the given symbol WOULD touch — the
+/// declaration site and every graph reference site (incoming edges; outgoing
+/// edges reference other symbols and so are excluded), each with a
+/// current-text snippet, plus a per-file count of literal name occurrences
+/// that are NOT backed by a graph edge ("text-only matches — review
+/// manually"). Nothing is rewritten.
 pub(super) async fn handle_rename_preview(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1335,90 +1339,141 @@ pub(super) async fn handle_rename_preview(
         decode_primitive_request(&args, "tracedecay_rename_preview")?;
 
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    let Some(node) = graph.symbol_summary(&occurrence)? else {
-        return node_not_found_result(&request.node_id);
-    };
-    let node_metadata = required_graph_metadata(&node)?;
-    let node_file = required_graph_file_path(&node)?;
-    let symbol_name = node_metadata.simple_name.clone();
-
-    let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
     // Graph occurrences per file (declaration + reference sites) — subtracted
     // from the literal textual count to isolate the text-only matches.
     let mut graph_counts: HashMap<String, usize> = HashMap::new();
-    let mut touched: Vec<String> = vec![node_file.to_owned()];
+    let mut touched: Vec<String> = Vec::new();
+    // Graph phase: extract owned declaration fields and per-reference-site
+    // inputs so the blocking file walk below needs no graph value at all.
+    let (mut declaration, declaration_line, symbol_name, reference_inputs) = {
+        let Some(node) = graph.symbol_summary(&occurrence)? else {
+            return node_not_found_result(&request.node_id);
+        };
+        let node_metadata = required_graph_metadata(&node)?;
+        let node_file = required_graph_file_path(&node)?;
+        let symbol_name = node_metadata.simple_name.clone();
 
-    *graph_counts.entry(node_file.to_owned()).or_default() += 1;
-    let decl_snippet = cached_file_lines(cg, &mut lines_cache, node_file).and_then(|lines| {
-        lines
-            .get(node_metadata.start_line as usize)
-            .map(|line| snippet_text(line))
-    });
-    let declaration = RenamePreviewNodeV1 {
-        id: node.occurrence.as_str().to_owned(),
-        name: node_metadata.simple_name.clone(),
-        qualified_name: node_metadata.qualified_name.clone(),
-        kind: node_metadata.kind.clone(),
-        file: node_file.to_owned(),
-        line: user_line(node_metadata.start_line),
-        snippet: decl_snippet,
+        touched.push(node_file.to_owned());
+        *graph_counts.entry(node_file.to_owned()).or_default() += 1;
+        let declaration = RenamePreviewNodeV1 {
+            id: node.occurrence.as_str().to_owned(),
+            name: node_metadata.simple_name.clone(),
+            qualified_name: node_metadata.qualified_name.clone(),
+            kind: node_metadata.kind.clone(),
+            file: node_file.to_owned(),
+            line: user_line(node_metadata.start_line),
+            snippet: None,
+        };
+
+        // Reference sites: incoming edges are the callers/users that name this
+        // symbol. NOTE: call-edge coverage improves as the resolver improves;
+        // the text-only counts below catch what the graph currently misses.
+        let incoming = single_graph_adjacency_batch(graph.callers(
+            std::slice::from_ref(&node.occurrence),
+            &[],
+            2_000_000,
+        )?)?;
+        let mut reference_inputs = Vec::<RenameReferenceSiteInput>::with_capacity(incoming.len());
+        for edge in incoming {
+            let source_node = edge.neighbor;
+            let source_metadata = required_graph_metadata(&source_node)?;
+            let source_file = required_graph_file_path(&source_node)?;
+            touched.push(source_file.to_owned());
+            *graph_counts.entry(source_file.to_owned()).or_default() += 1;
+            reference_inputs.push(RenameReferenceSiteInput {
+                from_node_id: source_node.occurrence.as_str().to_owned(),
+                from_name: source_metadata.simple_name.clone(),
+                from_kind: source_metadata.kind.clone(),
+                edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
+                file: source_file.to_owned(),
+                evidence_start_byte: edge.edge.evidence_span.start_byte,
+            });
+        }
+        (
+            declaration,
+            node_metadata.start_line,
+            symbol_name,
+            reference_inputs,
+        )
     };
-
-    // Reference sites: incoming edges are the callers/users that name this
-    // symbol. NOTE: call-edge coverage improves as the resolver improves; the
-    // text-only counts below catch what the graph currently misses.
-    let incoming = single_graph_adjacency_batch(graph.callers(
-        std::slice::from_ref(&node.occurrence),
-        &[],
-        2_000_000,
-    )?)?;
-    let mut references = Vec::<RenamePreviewReferenceV1>::new();
-    for edge in incoming {
-        let source_node = edge.neighbor;
-        let source_metadata = required_graph_metadata(&source_node)?;
-        let source_file = required_graph_file_path(&source_node)?;
-        touched.push(source_file.to_owned());
-        *graph_counts.entry(source_file.to_owned()).or_default() += 1;
-        let source = crate::sync::read_source_file(&cg.project_root().join(source_file))?;
-        let line = line_for_byte_offset(&source, edge.edge.evidence_span.start_byte)?;
-        let snippet = cached_file_lines(cg, &mut lines_cache, source_file)
-            .and_then(|lines| reference_line_snippet(lines, Some(line), &symbol_name));
-        references.push(RenamePreviewReferenceV1 {
-            from_node_id: source_node.occurrence.as_str().to_owned(),
-            from_name: source_metadata.simple_name.clone(),
-            from_kind: source_metadata.kind.clone(),
-            edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
-            file: source_file.to_owned(),
-            line: user_line(line),
-            snippet,
-        });
-    }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
-    // Text-only matches per touched file: literal identifier occurrences of the
-    // name minus the graph occurrences already accounted for. These are the
-    // comments/strings/dynamic-dispatch/unresolved sites a graph-only rename
-    // would miss — the scan is bounded to files that already appear in the
-    // preview, so occurrences in wholly unrelated files are not counted.
-    let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
-    for file in &touched_files {
-        let total = cached_file_lines(cg, &mut lines_cache, file).map_or(0, |lines| {
-            lines
-                .iter()
-                .map(|line| count_identifier_occurrences(line, &symbol_name))
-                .sum::<usize>()
-        });
-        let graph = graph_counts.get(file).copied().unwrap_or(0);
-        let text_only = total.saturating_sub(graph);
-        if text_only > 0 {
-            text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
-                file: file.clone(),
-                text_only_count: text_only,
-                note: "text-only matches — review manually".to_owned(),
-            });
-        }
-    }
+    // File-walk phase: every referenced source file is read from disk, so it
+    // runs on a blocking worker like the sibling analysis scans instead of
+    // holding the async dispatch thread through the reads.
+    let project_root = cg.project_root().to_path_buf();
+    let declaration_file = declaration.file.clone();
+    let walk_symbol_name = symbol_name.clone();
+    let walk_graph_counts = graph_counts;
+    let walk_touched_files = touched_files.clone();
+    let (decl_snippet, references, text_only_matches) = tokio::task::spawn_blocking(
+        move || -> Result<(
+            Option<String>,
+            Vec<RenamePreviewReferenceV1>,
+            Vec<RenamePreviewTextOnlyMatchV1>,
+        )> {
+            let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+            let decl_snippet =
+                cached_file_lines(&project_root, &mut lines_cache, &declaration_file).and_then(
+                    |lines| {
+                        lines
+                            .get(declaration_line as usize)
+                            .map(|line| snippet_text(line))
+                    },
+                );
+
+            let mut references =
+                Vec::<RenamePreviewReferenceV1>::with_capacity(reference_inputs.len());
+            for input in reference_inputs {
+                let source = crate::sync::read_source_file(&project_root.join(&input.file))?;
+                let line = line_for_byte_offset(&source, input.evidence_start_byte)?;
+                let snippet = cached_file_lines(&project_root, &mut lines_cache, &input.file)
+                    .and_then(|lines| reference_line_snippet(lines, Some(line), &walk_symbol_name));
+                references.push(RenamePreviewReferenceV1 {
+                    from_node_id: input.from_node_id,
+                    from_name: input.from_name,
+                    from_kind: input.from_kind,
+                    edge_kind: input.edge_kind,
+                    file: input.file,
+                    line: user_line(line),
+                    snippet,
+                });
+            }
+
+            // Text-only matches per touched file: literal identifier occurrences
+            // of the name minus the graph occurrences already accounted for.
+            // These are the comments/strings/dynamic-dispatch/unresolved sites a
+            // graph-only rename would miss — the scan is bounded to files that
+            // already appear in the preview, so occurrences in wholly unrelated
+            // files are not counted.
+            let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
+            for file in &walk_touched_files {
+                let total =
+                    cached_file_lines(&project_root, &mut lines_cache, file).map_or(0, |lines| {
+                        lines
+                            .iter()
+                            .map(|line| count_identifier_occurrences(line, &walk_symbol_name))
+                            .sum::<usize>()
+                    });
+                let graph = walk_graph_counts.get(file).copied().unwrap_or(0);
+                let text_only = total.saturating_sub(graph);
+                if text_only > 0 {
+                    text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
+                        file: file.clone(),
+                        text_only_count: text_only,
+                        note: "text-only matches — review manually".to_owned(),
+                    });
+                }
+            }
+            Ok((decl_snippet, references, text_only_matches))
+        },
+    )
+    .await
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("rename preview file scan task failed: {join_error}"),
+    })??;
+    declaration.snippet = decl_snippet;
 
     let output = serde_json::to_value(RenamePreviewPrimitiveResultV1 {
         read_only: true,
@@ -1439,7 +1494,7 @@ pub(super) async fn handle_rename_preview(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
+/// Bulk caller lookup over many IDs.
 pub(super) async fn handle_callers_for(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1524,7 +1579,7 @@ pub(super) async fn handle_callers_for(
     Ok(generic_tool_result(cg, &args, &output, vec![]))
 }
 
-/// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
+/// Cross-run node lookup by name.
 pub(super) async fn handle_by_qualified_name(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1548,9 +1603,9 @@ pub(super) async fn handle_by_qualified_name(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_signature` — signature-only lookup (no body) by
-/// qualified name or node ID. Returns the public-API surface of a symbol so
-/// callers can avoid reading the source file just to inspect the signature.
+/// Signature-only lookup (no body) by qualified name or node ID. Returns
+/// the public-API surface of a symbol so callers can avoid reading the
+/// source file just to inspect the signature.
 pub(super) async fn handle_signature(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1584,7 +1639,7 @@ pub(super) async fn handle_signature(
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
+/// Index of `impl Trait for Type` blocks.
 ///
 /// Both `trait` and `type` arguments are optional. With neither, every impl
 /// in the graph is returned (capped by `limit`). Surfaces trait-dispatch
@@ -1688,7 +1743,7 @@ pub(super) async fn handle_impls(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_derives`. Derive annotations are not published in the
+/// Derive annotations are not published in the
 /// verified code graph generation, so a matched symbol reports a typed
 /// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
 pub(super) async fn handle_derives(
@@ -1708,7 +1763,7 @@ pub(super) async fn handle_derives(
     })
 }
 
-/// Handles `tracedecay_implementations` — trait / method implementor lookup.
+/// Trait / method implementor lookup.
 pub(super) async fn handle_implementations(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

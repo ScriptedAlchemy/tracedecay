@@ -36,5 +36,4 @@ impl From<serde_json::Error> for AnalyzerRuntimeError {
 
 pub type AnalyzerResult<T> = Result<T, AnalyzerRuntimeError>;
 
-/// Cloneable cancellation signal for one analyzer operation.
 pub type AnalyzerCancellation = tokio_util::sync::CancellationToken;

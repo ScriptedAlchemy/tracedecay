@@ -1,5 +1,6 @@
-//! Production-shaped regression tests for the two durable Stage0a collision
-//! failures observed on 5ddd16271 (ancestral on 2be2b9478 / 0.1.0-beta.34):
+//! Production-shaped regression tests for the two durable observation
+//! collision failures observed on 5ddd16271 (ancestral on 2be2b9478 /
+//! 0.1.0-beta.34):
 //!
 //! 1. `observation_identity_collision` — a rewritten native record presents
 //!    the same canonical observation id with a different payload digest. The
@@ -16,7 +17,7 @@
 //!    observation plus exactly one disposition — never a skip that
 //!    contradicts a retained provenance binding.
 //!
-//! Review-driven contracts pinned alongside:
+//! Pinned contracts:
 //! * the refusal terminal survives cursor-advance retention and is bound to
 //!   the exact refused candidate digest, so a later canonical payload
 //!   revision replay still converges as `CoveredDuplicate`;
@@ -666,11 +667,10 @@ async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<Provenance
     collected
 }
 
-/// Stage0a symptom 1, first RED requirement: the first non-retryable identity
-/// collision must keep the retained row byte-identical and record durable
-/// terminal coverage — the typed source cursor converges past the colliding
-/// record and the refusal lands in the `source_cursor_advances` ledger with
-/// the typed `admission_refused` reason.
+/// The first non-retryable identity collision must keep the retained row
+/// byte-identical and record durable terminal coverage — the typed source
+/// cursor converges past the colliding record and the refusal lands in the
+/// `source_cursor_advances` ledger with the typed `admission_refused` reason.
 #[tokio::test]
 async fn identity_collision_records_durable_admission_refused_coverage() {
     let tmp = TempDir::new().unwrap();
@@ -761,11 +761,11 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
     );
 }
 
-/// Stage0a symptom 1, second RED requirement: once the collision is durably
-/// terminal, a re-admitted candidate (late catch-up pass or temporal trigger
-/// holding a stale cursor) must fail with the same typed error without
-/// accessing the retained observation row and with only the one source-cursor
-/// runtime dispatch needed to converge coverage.
+/// Once the collision is durably terminal, a re-admitted candidate (late
+/// catch-up pass or temporal trigger holding a stale cursor) must fail with
+/// the same typed error without accessing the retained observation row and
+/// without any point-read runtime dispatches: the bounded preflight snapshot
+/// supplies the refusal, retained identity, and source-cursor authorities.
 #[tokio::test]
 async fn re_admitted_identity_collision_uses_marker_without_retained_row_access() {
     let tmp = TempDir::new().unwrap();
@@ -823,9 +823,9 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     assert_eq!(
         first_dispatch_trace.snapshot(),
         ObservationDispatchSnapshot {
-            runtime_commands: 2,
+            runtime_commands: 0,
         },
-        "the full collision path must dispatch the stored-observation and source-cursor reads"
+        "the full collision path must use the bounded preflight snapshot"
     );
 
     // The terminal marker now exists. Arm the corruption tripwire: overwrite
@@ -863,9 +863,9 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     assert_eq!(
         dispatch_trace.snapshot(),
         ObservationDispatchSnapshot {
-            runtime_commands: 1,
+            runtime_commands: 0,
         },
-        "the terminal marker path may dispatch only the canonical source-cursor read"
+        "the terminal marker path must use the bounded preflight snapshot"
     );
     // Any access to the retained row — including an ignored bare-column read
     // that would evade a byte-corruption tripwire — would have failed because
@@ -990,12 +990,12 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
     );
 }
 
-/// Stage0a symptom 2: a projection drain that collides with an existing
-/// provenance row for the same observation (an earlier projection era left a
-/// divergent output binding behind) must converge to a durable
-/// `output_collision` skip — checkpoint advances, the queue drains, replay is
-/// an exact duplicate — while the real pre-existing output stays durable and
-/// no partial replacement output rows leak.
+/// A projection drain that collides with an existing provenance row for the
+/// same observation (an earlier projection era left a divergent output
+/// binding behind) must converge to a durable `output_collision` skip —
+/// checkpoint advances, the queue drains, replay is an exact duplicate —
+/// while the real pre-existing output stays durable and no partial
+/// replacement output rows leak.
 #[tokio::test]
 async fn drain_provenance_collision_with_existing_output_converges_to_durable_skip() {
     let tmp = TempDir::new().unwrap();
@@ -2592,6 +2592,16 @@ impl ProductionJsonlAdmission {
             ObservationApplicationError::Privacy(_) => {
                 tracedecay_sessions::admission::HostAdmissionOutcome::degraded(
                     "privacy_boundary_failed",
+                )
+            }
+            ObservationApplicationError::BatchContainsNonDurable => {
+                tracedecay_sessions::admission::HostAdmissionOutcome::degraded(
+                    "observation_batch_non_durable",
+                )
+            }
+            ObservationApplicationError::BatchWorkerStopped => {
+                tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                    "observation_batch_worker_stopped",
                 )
             }
             ObservationApplicationError::Store(_) => {

@@ -1,6 +1,5 @@
-use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
@@ -8,53 +7,23 @@ use tracedecay::serve;
 use tracedecay::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+use crate::common::{EnvVarGuard, canonical_existing_path};
 use crate::home_env_lock::HOME_ENV_LOCK;
 
 struct HomeEnvGuard {
-    previous_home: Option<OsString>,
-    previous_userprofile: Option<OsString>,
-    previous_data_dir: Option<OsString>,
+    _home: EnvVarGuard,
+    _userprofile: EnvVarGuard,
+    _data_dir: EnvVarGuard,
 }
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
-        }
         Self {
-            previous_home,
-            previous_userprofile,
-            previous_data_dir,
+            _home: EnvVarGuard::set("HOME", home),
+            _userprofile: EnvVarGuard::set("USERPROFILE", home),
+            _data_dir: EnvVarGuard::set(USER_DATA_DIR_ENV, home.join(".tracedecay")),
         }
     }
-}
-
-impl Drop for HomeEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(USER_DATA_DIR_ENV),
-            }
-        }
-    }
-}
-
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn normalize_test_path(path: &Path) -> String {
@@ -175,7 +144,7 @@ fn schema_version(db_path: &Path) -> u32 {
 async fn fresh_profile_initialization_creates_the_final_v2_store() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
     let project = root.join("repo");
@@ -210,7 +179,7 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
 async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
     let project = root.join("repo");
@@ -261,7 +230,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
 async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");
@@ -305,7 +274,7 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
 async fn trace_decay_options_global_db_path_implies_profile_root() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");
@@ -344,7 +313,7 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
 async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let home = root.join("home");
     let project = root.join("repo-before-rename");
     let renamed = root.join("repo-after-rename");
@@ -399,7 +368,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
 async fn persisted_repository_identity_survives_rename_while_serve_open_fails_closed() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo-before-rename");
@@ -499,7 +468,7 @@ async fn branch_open_rejects_a_mismatched_maintenance_profile() {
 async fn trace_decay_open_branch_uses_shared_profile_store() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
     let project = root.join("repo");
@@ -546,7 +515,7 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
 async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = canonical_temp_path(dir.path());
+    let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");

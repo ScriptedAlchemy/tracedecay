@@ -37,7 +37,7 @@ impl CppExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Typedef, &name, start_line);
         state.nodes.push(Node {
@@ -86,8 +86,15 @@ impl CppExtractor {
         Self::emit_typedef(state, typedef_node, name.clone(), docstring.clone());
         if find_direct_child_by_kind(spec, "field_declaration_list").is_some() {
             let struct_name = find_direct_child_by_kind(spec, "type_identifier")
-                .map_or_else(|| name, |node| state.node_text(node));
-            Self::create_struct_node(state, &struct_name, spec, docstring);
+                .map_or_else(|| name, |node| state.node_str(node).to_string());
+            Self::create_record_node(
+                state,
+                &struct_name,
+                spec,
+                docstring,
+                NodeKind::Struct,
+                Visibility::Pub,
+            );
         }
     }
 
@@ -102,7 +109,7 @@ impl CppExtractor {
         Self::emit_typedef(state, typedef_node, name.clone(), docstring.clone());
         if find_direct_child_by_kind(spec, "field_declaration_list").is_some() {
             let union_name = find_direct_child_by_kind(spec, "type_identifier")
-                .map_or_else(|| name, |node| state.node_text(node));
+                .map_or_else(|| name, |node| state.node_str(node).to_string());
             Self::create_union_node(state, &union_name, spec, docstring);
         }
     }
@@ -114,7 +121,7 @@ impl CppExtractor {
         Self::emit_typedef(state, typedef_node, name.clone(), docstring.clone());
         if find_direct_child_by_kind(spec, "enumerator_list").is_some() {
             let enum_name = find_direct_child_by_kind(spec, "type_identifier")
-                .map_or_else(|| name, |node| state.node_text(node));
+                .map_or_else(|| name, |node| state.node_str(node).to_string());
             Self::create_enum_node(state, &enum_name, spec, docstring);
         }
     }
@@ -136,10 +143,10 @@ impl CppExtractor {
                 find_direct_child_by_kind(function, "parenthesized_declarator")
         {
             if let Some(identifier) = find_descendant_by_kind(parenthesized, "identifier") {
-                return Some(state.node_text(identifier));
+                return Some(state.node_str(identifier).to_string());
             }
             if let Some(identifier) = find_descendant_by_kind(parenthesized, "type_identifier") {
-                return Some(state.node_text(identifier));
+                return Some(state.node_str(identifier).to_string());
             }
         }
         None
@@ -159,7 +166,7 @@ impl CppExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "type_identifier" {
-                    last_type_id = Some(state.node_text(child));
+                    last_type_id = Some(state.node_str(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -173,8 +180,10 @@ impl CppExtractor {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_text(child));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |child| state.node_str(child).to_string(),
+        );
         if name == "<anonymous>" {
             return;
         }
@@ -186,8 +195,10 @@ impl CppExtractor {
         if find_direct_child_by_kind(node, "enumerator_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |child| state.node_text(child));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |child| state.node_str(child).to_string(),
+        );
         if name == "<anonymous>" {
             return;
         }
@@ -196,7 +207,7 @@ impl CppExtractor {
     }
 
     pub(super) fn visit_using_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
-        let text = state.node_text(node);
+        let text = state.node_str(node);
         let name = text
             .trim()
             .trim_start_matches("using")
@@ -259,10 +270,8 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Union, name, start_line);
-        let text = state.node_text(node);
-        let signature = text
-            .find('{')
-            .map(|position| text[..position].trim().to_string());
+        let signature = find_direct_child_by_kind(node, "field_declaration_list")
+            .map(|body| state.signature_before_child(node, body));
         state.nodes.push(Node {
             id: id.clone(),
             kind: NodeKind::Union,
@@ -310,10 +319,8 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Enum, name, start_line);
-        let text = state.node_text(node);
-        let signature = text
-            .find('{')
-            .map(|position| text[..position].trim().to_string());
+        let signature = find_direct_child_by_kind(node, "enumerator_list")
+            .map(|body| state.signature_before_child(node, body));
         state.nodes.push(Node {
             id: id.clone(),
             kind: NodeKind::Enum,

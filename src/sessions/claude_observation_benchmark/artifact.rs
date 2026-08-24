@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+pub(super) use tracedecay_domain::canonical_text::sha256_hex;
+
 use super::metrics::{
     aggregate_samples, ticks_to_ms, validate_no_op_invariants, validate_no_op_samples,
 };
@@ -49,10 +51,9 @@ struct ArtifactEnvelope {
 }
 
 pub(super) fn assert_repository_evidence() {
-    let strict = std::env::var_os("TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE")
-        .is_some_and(|value| value == "1");
+    let strict = tracedecay_global_db::env_flag("TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE");
     let directory = std::env::var_os("TRACEDECAY_BENCHMARK_EVIDENCE_DIR").map_or_else(
-        || repository_root().join("benchmarks/claude-observation"),
+        || repository_root().join("benchmark_data/claude-observation"),
         PathBuf::from,
     );
     validate_evidence_directory(&directory, strict).expect("benchmark evidence directory contract");
@@ -661,10 +662,6 @@ fn boolean(fields: &Map<String, Value>, name: &str) -> Result<bool, String> {
 
 fn float_close(left: f64, right: f64) -> bool {
     (left - right).abs() <= left.abs().max(right.abs()).max(1.0) * 1e-12
-}
-
-pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 pub(super) fn is_lower_hex(value: &str, length: usize) -> bool {

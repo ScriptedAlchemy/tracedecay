@@ -12,6 +12,49 @@ build = "build.rs"
 doctest = false
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-temporal-query/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
 default = []
 # Exact token counting for automation artifact budgeting (tiktoken BPE).
 # Mirrors the root crate's `token-counting` feature; forwarded by the root.
@@ -27,6 +70,7 @@ cap-std = "4.0.2"
 fs2 = "0.4"
 getrandom = "0.2"
 hex = "0.4"
+hotpath.workspace = true
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "std",
@@ -35,6 +79,7 @@ rustls = { version = "0.23", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+shell-words = "1.1"
 tempfile = "3"
 thiserror = "2"
 tiktoken-rs = { version = "0.12", optional = true }

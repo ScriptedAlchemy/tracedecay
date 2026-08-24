@@ -12,18 +12,17 @@ use super::super::primitives::{
 use super::super::projection::load_project_memory_projection_tx;
 use super::add::{ProjectMemoryAddClassification, classify_project_memory_add_tx};
 use super::{
-    active_fact_count_tx, commit_batch_tx, find_project_memory_fact_by_content_digest_tx,
-    initial_batch, load_current_fact_tx, load_current_projection, payload_metadata,
-    sanitize_payload, verified_payload,
+    active_fact_count_tx, commit_batch_tx, content_digest,
+    find_project_memory_fact_by_content_digest_tx, initial_batch, load_current_fact_tx,
+    load_current_projection, payload_metadata, sanitize_payload, verified_payload,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::db::tombstone_fact_derivatives_tx;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
-    FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LocatorDigest,
+    FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
     PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
@@ -303,14 +302,6 @@ pub(in crate::store::memory) async fn load_mutable_project_memory_fact_tx(
                 .ok_or(FactStoreError::FactUnavailable { fact_id })
         }
     }
-}
-
-fn content_digest(content: &str) -> FactStoreResult<LocatorDigest> {
-    LocatorDigest::new(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(content.as_bytes()))
-    ))
-    .map_err(FactStoreError::from)
 }
 
 async fn project_memory_replay_add_tx(

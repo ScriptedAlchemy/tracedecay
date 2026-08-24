@@ -1,6 +1,6 @@
 //! Daemon git-metadata watcher (design D3) and scheduler backstop (D5).
 //!
-//! # Why this is safe (unlike the removed #80 working-tree watcher)
+//! # Why this is safe (unlike a working-tree watcher)
 //!
 //! The v6.x `notify-debouncer-full` watcher recursively watched the **working
 //! tree** and drowned on monorepo `node_modules`/`target` churn. This watcher
@@ -325,9 +325,12 @@ impl GitWatcher {
         #[cfg(test)]
         self.inner.spawn_publication_probe.block_if_armed();
         let watcher = self.clone();
-        let handle = tokio::spawn(async move {
-            backstop::run(watcher).await;
-        });
+        let handle = tokio::spawn(hotpath::future!(
+            async move {
+                backstop::run(watcher).await;
+            },
+            label = "daemon.git_watch.backstop"
+        ));
         *retained = Some(handle);
         #[cfg(test)]
         self.inner.lifecycle_receipts.record_spawn();

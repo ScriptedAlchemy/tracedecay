@@ -94,7 +94,7 @@ fn run_hook(home: &Path, hook: &str, input: Option<&[u8]>) -> Output {
 }
 
 fn run_hook_at(home: &Path, cwd: &Path, hook: &str, input: Option<&[u8]>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(crate::common::tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);
     command
         .arg(hook)

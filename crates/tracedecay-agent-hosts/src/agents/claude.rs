@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Claude Code agent integration.
 //!
 //! tracedecay installs into Claude Code as a first-class **plugin bundle**
@@ -20,13 +19,13 @@ use serde_json::json;
 
 use crate::errors::{Result, TraceDecayError};
 
+pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
     NonInteractiveInstallOutcome, UpdatePluginOutcome, backup_config_file, expected_tool_perms,
     load_json_file, load_json_file_strict, safe_write_json_file, safe_write_text_file,
 };
 
-/// Claude Code agent.
 pub struct ClaudeIntegration;
 
 impl AgentIntegration for ClaudeIntegration {
@@ -229,8 +228,11 @@ impl AgentIntegration for ClaudeIntegration {
         // tracedecay. An unrelated project `.claude/CLAUDE.md` with neither
         // signal must not become an export destination.
         if !claude_md_path.exists()
-            || !(local_mcp_has_tracedecay(project_root)
-                || claude_md_references_tracedecay(&claude_md_path))
+            || !(super::mcp_config_has_tracedecay(
+                &project_root.join(".mcp.json"),
+                "mcpServers",
+                load_json_file,
+            ) || claude_md_references_tracedecay(&claude_md_path))
         {
             return Ok(Vec::new());
         }
@@ -426,6 +428,7 @@ fn require_claude_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
+#[hotpath::measure(label = "claude_plugin_activate")]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
     let deploy_dir = plugin_deploy_dir(home);
     let deploy_arg = deploy_dir.to_string_lossy().into_owned();
@@ -458,19 +461,10 @@ fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
 
 /// Run one `claude plugin ...` step, converting a failed invocation into the
 /// host's own diagnosis.
+#[hotpath::measure(label = "claude_plugin_registry_step")]
 fn run_claude_plugin_step(claude: &Path, args: &[&str], home: &Path) -> Result<()> {
-    let outcome = super::host_cli::run_host_cli(claude, args, home)?;
-    if outcome.succeeded() {
-        return Ok(());
-    }
-    Err(TraceDecayError::Config {
-        message: outcome.failure_message(),
-    })
+    super::host_cli::require_host_cli_success(super::host_cli::run_host_cli(claude, args, home)?)
 }
-
-// `claude_native_remove_action` and `deferred_user_action_error` were removed
-// with the deferral they served: removal is no longer handed back to the
-// operator as prose, it is performed through `claude plugin uninstall`.
 
 fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Value>, ()> {
     match std::fs::read(path) {
@@ -478,20 +472,6 @@ fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Val
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
     }
-}
-
-/// True when a project's local `.mcp.json` declares the tracedecay MCP server,
-/// marking the project as a tracedecay-managed Claude workspace (the signal
-/// `tracedecay init` writes, independent of CLAUDE.md content).
-fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let mcp_path = project_root.join(".mcp.json");
-    if !mcp_path.exists() {
-        return false;
-    }
-    let json = load_json_file(&mcp_path);
-    json.get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -502,10 +482,6 @@ fn local_mcp_has_tracedecay(project_root: &Path) -> bool {
 /// `tracedecay@tracedecay` plugin identifier Claude Code enables by.
 const MARKETPLACE_NAME: &str = "tracedecay";
 const PLUGIN_IDENTIFIER: &str = "tracedecay@tracedecay";
-
-/// Placeholder in `hooks/hooks.json` replaced with the resolved absolute
-/// tracedecay binary path at deploy time.
-const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
 
 /// Compose the MCP-free core and optional MCP companion for native staging and
 /// catalog rendering. Signed lifecycle callers can consume either inventory
@@ -535,6 +511,7 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 
 /// Deploy every embedded bundle file into the stable marketplace dir,
 /// stamping the plugin version and substituting the binary path.
+#[hotpath::measure(label = "claude_plugin_deploy")]
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     if std::fs::symlink_metadata(home.join(".claude"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -654,7 +631,9 @@ fn set_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> {
             }
         }
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&hooks)?);
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "Claude hooks")?;
+    Ok(rendered)
 }
 
 /// Set `value["command"]` to `tracedecay_bin` when it is exactly the
@@ -988,7 +967,6 @@ fn uninstall_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         eprintln!("  CLAUDE.md does not contain tracedecay rules, skipping");
         return Ok(());
     }
-    // Try steady marker first, then display-case marker.
     let Some(range) = claude_md_rules_block_range(&contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
         return Ok(());
     };

@@ -25,9 +25,9 @@
 //! which matches user expectations.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tree_sitter::{Node, Parser, Tree};
 
 /// Length of an n-gram shingle, in tokens.
@@ -581,11 +581,7 @@ fn is_generic_helper_name(name: &str) -> bool {
 fn short_hex(bytes: &[u8]) -> String {
     // 16 hex chars = 64 bits of entropy — enough to make a collision
     // between two functions in the same repo astronomically unlikely.
-    let mut s = String::with_capacity(16);
-    for b in bytes.iter().take(8) {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
+    encode_lowercase_hex(&bytes[..bytes.len().min(8)])
 }
 
 /// Round a score to 4 decimal places for stable JSON/markdown output.

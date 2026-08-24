@@ -113,7 +113,6 @@ pub(crate) async fn graph_statistics_value(
     Ok(serde_json::to_value(&census)?)
 }
 
-/// Handles `tracedecay_status` tool calls.
 pub(crate) async fn handle_status(
     cg: &TraceDecay,
     args: Value,
@@ -459,7 +458,6 @@ fn store_kind_name(kind: &StoreKind) -> &'static str {
     }
 }
 
-/// Handles `tracedecay_active_project` tool calls.
 pub(crate) fn handle_active_project(
     cg: &TraceDecay,
     args: &Value,

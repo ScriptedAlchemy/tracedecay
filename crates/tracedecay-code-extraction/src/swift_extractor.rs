@@ -49,12 +49,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -71,10 +76,7 @@ impl ExtractionState {
 }
 
 impl SwiftExtractor {
-    /// Extract code graph nodes and edges from a Swift source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Swift source code to parse.
     pub fn extract_swift(file_path: &str, source: &str) -> ExtractionResult {
         let start = Instant::now();
         let tree = match Self::parse_source(source) {
@@ -105,7 +107,6 @@ impl SwiftExtractor {
     ) -> crate::parsed_extraction::ParsedExtraction {
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -160,7 +161,6 @@ impl SwiftExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -174,7 +174,6 @@ impl SwiftExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "import_declaration" => Self::visit_import(state, node),
@@ -187,10 +186,6 @@ impl SwiftExtractor {
             _ => {}
         }
     }
-
-    // ----------------------------------
-    // Import
-    // ----------------------------------
 
     /// Extract an import declaration (e.g. `import Foundation`).
     fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -240,7 +235,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -250,10 +244,6 @@ impl SwiftExtractor {
             });
         }
     }
-
-    // ----------------------------------
-    // class_declaration (class, struct, enum, extension)
-    // ----------------------------------
 
     /// Dispatch `class_declaration` based on the `declaration_kind` field.
     ///
@@ -330,7 +320,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -340,13 +329,10 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract inheritance (class Foo: Bar).
         Self::extract_inheritance(state, node, &id);
 
-        // Extract attribute annotations (e.g. @objc, @available).
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit class body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -395,7 +381,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -405,10 +390,8 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit struct body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -457,7 +440,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -467,7 +449,6 @@ impl SwiftExtractor {
             });
         }
 
-        // Visit enum body (enum_class_body with enum_entry children).
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -548,7 +529,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -607,7 +587,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -617,7 +596,6 @@ impl SwiftExtractor {
             });
         }
 
-        // Visit extension body.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -626,10 +604,6 @@ impl SwiftExtractor {
         state.class_depth -= 1;
         state.node_stack.pop();
     }
-
-    // ----------------------------------
-    // Protocol
-    // ----------------------------------
 
     /// Extract a protocol declaration (maps to Interface).
     fn visit_protocol(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -673,7 +647,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -683,10 +656,9 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Visit protocol body. Protocol functions are protocol_function_declaration.
+        // Protocol functions are `protocol_function_declaration`.
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -761,7 +733,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -771,10 +742,6 @@ impl SwiftExtractor {
             });
         }
     }
-
-    // ----------------------------------
-    // Function / Method
-    // ----------------------------------
 
     /// Extract a function or method declaration.
     ///
@@ -833,7 +800,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -843,16 +809,10 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
 
-        // Extract attribute annotations (e.g. @discardableResult, @objc).
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
-
-    // ----------------------------------
-    // Init (Constructor)
-    // ----------------------------------
 
     /// Extract an init declaration as a Constructor node.
     fn visit_init(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -895,7 +855,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -905,16 +864,10 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract call sites from the init body.
         Self::extract_call_sites(state, node, &id);
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
-
-    // ----------------------------------
-    // Property
-    // ----------------------------------
 
     /// Extract a property declaration (let/var).
     ///
@@ -963,7 +916,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -973,13 +925,8 @@ impl SwiftExtractor {
             });
         }
 
-        // Extract attribute annotations.
         Self::extract_annotations_from_modifiers(state, node, &id);
     }
-
-    // ----------------------------------
-    // Typealias
-    // ----------------------------------
 
     /// Extract a typealias declaration.
     fn visit_typealias(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -1025,7 +972,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1035,10 +981,6 @@ impl SwiftExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the type name from a `class_declaration` node.
     ///
@@ -1226,7 +1168,6 @@ impl SwiftExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into the call for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested definitions to avoid polluting call sites.
@@ -1370,7 +1311,6 @@ impl SwiftExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Annotates unresolved ref.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id.clone(),
             reference_name: annot_name,
@@ -1380,7 +1320,6 @@ impl SwiftExtractor {
             file_path: state.file_path.clone(),
         });
 
-        // Direct Annotates edge from the annotation to the target.
         state.edges.push(Edge {
             source: id,
             target: target_id.to_string(),

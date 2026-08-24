@@ -9,8 +9,8 @@
 //! attempt rows live in `work_attempts_v1` under a `WorkAuthority`
 //! (project/repository/worktree/actor/policy), and the product journal is keyed
 //! by the registered profile owner. There is no recorded correspondence between
-//! the two, so joining them would invent the very measurement Plan 11c forbids
-//! estimating.
+//! the two, so joining them would invent a coverage measurement this authority
+//! cannot prove.
 //!
 //! So the coverage is reported, not guessed:
 //!

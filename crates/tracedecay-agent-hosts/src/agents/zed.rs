@@ -18,10 +18,8 @@ use super::{
     doctor_check_mcp_registration, load_jsonc_file,
 };
 
-/// Zed agent.
 pub struct ZedIntegration;
 
-/// Returns the Zed config directory, platform-specific.
 fn zed_config_dir(home: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -56,27 +54,28 @@ impl AgentIntegration for ZedIntegration {
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(zed_config_dir(home).join("settings.json"))
+        Some(zed_settings_path(home))
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let settings_path = zed_config_dir(home).join("settings.json");
-        if !settings_path.exists() {
-            return false;
-        }
-        let json = load_jsonc_file(&settings_path);
-        let servers = json.get("context_servers");
-        servers.and_then(|v| v.get("tracedecay")).is_some()
+        super::mcp_config_has_tracedecay(
+            &zed_settings_path(home),
+            "context_servers",
+            load_jsonc_file,
+        )
     }
+}
+
+fn zed_settings_path(home: &Path) -> PathBuf {
+    zed_config_dir(home).join("settings.json")
 }
 
 // ---------------------------------------------------------------------------
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Zed settings.json has tracedecay context server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let settings_path = zed_config_dir(home).join("settings.json");
+    let settings_path = zed_settings_path(home);
     doctor_check_mcp_registration(
         dc,
         &settings_path,

@@ -1,4 +1,4 @@
-//! Durable Plan 26 observations projected from Work retry/leak receipts.
+//! Durable observations projected from Work retry/leak receipts.
 
 use tracedecay_application::{WorkLeakAdjudicationReceiptV1, WorkRetryReceiptV1};
 use tracedecay_domain::{

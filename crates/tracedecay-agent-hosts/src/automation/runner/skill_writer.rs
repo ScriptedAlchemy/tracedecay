@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::automation::artifacts::sha256_json;
 use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
@@ -40,6 +41,7 @@ pub struct SkillWriterAutomationOptions {
     pub profile_root: Option<PathBuf>,
 }
 
+#[hotpath::measure(label = "automation_run_skill_writer")]
 pub async fn run_skill_writer_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -539,11 +541,11 @@ pub(super) struct ProposedSkillOutput<'a> {
     pub(super) validation_repairs: &'a [Value],
 }
 
-fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Value {
-    json!({
+fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Result<Value> {
+    Ok(json!({
         "count": validation_repairs.len(),
-        "sha256": sha256_json(&json!(validation_repairs)),
-    })
+        "sha256": sha256_json(&json!(validation_repairs))?,
+    }))
 }
 
 pub(super) async fn finalize_skill_writer_success(
@@ -565,6 +567,9 @@ pub(super) async fn finalize_skill_writer_success(
         validation_repairs,
     } = output;
     let run_id = finalizer.run_id();
+    // Hash the repair transcript before any lifecycle effects are applied so a
+    // serialization failure cannot surface after skill mutations committed.
+    let validation_repairs_summary = skill_validation_repairs_summary(validation_repairs)?;
     let curation_decision =
         evaluate_skill_curation(config, authority, evidence_hash.as_deref(), proposals)?;
     let proposal_outcome = validate_and_apply_skill_proposals(
@@ -579,7 +584,7 @@ pub(super) async fn finalize_skill_writer_success(
         + proposal_outcome.updated.len()
         + proposal_outcome.consolidations.len();
     let rejected_count = proposal_outcome.rejected.len();
-    let committed_receipt = (accepted_count > 0).then(|| {
+    let committed_receipt = if accepted_count > 0 {
         let deployment = match proposal_outcome
             .deployment
             .as_ref()
@@ -596,20 +601,24 @@ pub(super) async fn finalize_skill_writer_success(
                 ExternalSkillDeploymentDisposition::Unavailable
             }
         };
-        crate::automation::jobs::effect_receipt::skill_writing_receipt(
-            run_id,
-            proposal_outcome.created.len(),
-            proposal_outcome.updated.len(),
-            proposal_outcome.consolidations.len(),
-            deployment,
-            sha256_json(&json!({
-                "created": &proposal_outcome.created,
-                "updated": &proposal_outcome.updated,
-                "consolidations": &proposal_outcome.consolidations,
-                "deployment": &proposal_outcome.deployment,
-            })),
+        Some(
+            crate::automation::jobs::effect_receipt::skill_writing_receipt(
+                run_id,
+                proposal_outcome.created.len(),
+                proposal_outcome.updated.len(),
+                proposal_outcome.consolidations.len(),
+                deployment,
+                sha256_json(&json!({
+                    "created": &proposal_outcome.created,
+                    "updated": &proposal_outcome.updated,
+                    "consolidations": &proposal_outcome.consolidations,
+                    "deployment": &proposal_outcome.deployment,
+                }))?,
+            ),
         )
-    });
+    } else {
+        None
+    };
     let completed_at_micros = finalizer
         .completion_timestamp_micros()
         .map_err(|error| match committed_receipt.clone() {
@@ -695,7 +704,7 @@ pub(super) async fn finalize_skill_writer_success(
         record.rejected_ops = report.get("rejected_skills").cloned();
         record.validation_report = Some(json!({
             "status": "failed_after_partial_effects",
-            "validation_repairs": skill_validation_repairs_summary(validation_repairs),
+            "validation_repairs": validation_repairs_summary,
             "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
             "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
         }));
@@ -754,7 +763,7 @@ pub(super) async fn finalize_skill_writer_success(
         "activation_policy": activation_policy,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
-        "validation_repairs": skill_validation_repairs_summary(validation_repairs),
+        "validation_repairs": validation_repairs_summary,
         "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     }));
     Ok(SkillWriterFinalization::Completed {

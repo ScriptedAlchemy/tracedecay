@@ -67,9 +67,11 @@ impl Executor for GitMutationWriteTransaction<'_> {
 }
 
 impl GitMutationDatabase<'_> {
+    #[hotpath::measure]
     pub(crate) async fn begin_write(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<GitMutationWriteTransaction<'_>> {
+        crate::hotpath_observe::record_transaction_rows(1);
         match self {
             Self::Registered(db) => db
                 .begin_write_transaction()

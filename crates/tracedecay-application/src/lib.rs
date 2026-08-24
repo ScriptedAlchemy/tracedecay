@@ -23,6 +23,7 @@
 
 pub mod advisory;
 pub mod authorization;
+mod bearer_token;
 pub mod clock;
 pub mod configuration;
 mod configuration_wire;
@@ -98,7 +99,7 @@ pub use authorization::{
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
     SourceAuthorizationSnapshot,
 };
-pub use clock::now_micros;
+pub use clock::{ClockError, now_micros, try_now_micros};
 pub use configuration::{
     ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
     ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,

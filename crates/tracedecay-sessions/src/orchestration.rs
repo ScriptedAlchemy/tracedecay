@@ -5,7 +5,6 @@ pub trait ProviderRunFailure {
     fn retryable(&self) -> bool;
 }
 
-/// One provider driver's bounded contribution to an orchestration pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRunOutcome<F> {
     pub stats: TranscriptIngestStats,
@@ -74,7 +73,6 @@ impl<F: ProviderRunFailure> ProviderRunOutcome<F> {
     }
 }
 
-/// Pass-level aggregation of provider-run outcomes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRunFold<F> {
     pub stats: TranscriptIngestStats,

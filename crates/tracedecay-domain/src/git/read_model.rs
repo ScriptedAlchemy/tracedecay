@@ -1,4 +1,4 @@
-//! Read-only native Git intelligence contracts (Plan 36, QUERY).
+//! Read-only native Git intelligence contracts.
 //!
 //! These are pure typed values for repository status, working/staged/range
 //! diff, bounded history, blame/line provenance, and `HunkRef` identity.
@@ -49,8 +49,7 @@ impl<'de> Deserialize<'de> for BranchGraphPublicationEpochV1 {
     }
 }
 
-/// Schema/domain separator for the independently hashed `HunkRefV1` identity
-/// (Plan 36, "`HunkRef` compare-and-swap contract").
+/// Schema/domain separator for the independently hashed `HunkRefV1` identity.
 pub const HUNK_REF_DIGEST_DOMAIN: &str = "tracedecay.git.hunkref.v1";
 
 /// Schema version pinned into every minted `HunkRefV1`.
@@ -209,7 +208,7 @@ impl std::fmt::Display for GitFileModeV1 {
 }
 
 /// Native HEAD state. Missing, unborn, and detached states are explicit,
-/// never guessed (Plan 36, provenance rule carried into query reads).
+/// never guessed.
 #[derive(
     Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -558,7 +557,7 @@ pub enum GitDiffScopeV1 {
 
 /// One structured diff hunk. The hunk body is not retained; `patch_digest`
 /// is the canonical digest of the normalized header plus body lines, which
-/// is the stable hunk identity evidence (Plan 36 bounded-result rule).
+/// is the stable hunk identity evidence.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitHunkV1 {

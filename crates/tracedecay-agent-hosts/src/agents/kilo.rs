@@ -19,7 +19,6 @@ use super::{
     install_mcp_server_entry, load_jsonc_file, load_jsonc_file_strict, uninstall_mcp_server_entry,
 };
 
-/// Kilo CLI agent.
 pub struct KiloIntegration;
 
 fn kilo_config_dir(home: &Path) -> std::path::PathBuf {
@@ -96,6 +95,7 @@ impl AgentIntegration for KiloIntegration {
         }
     }
 
+    #[hotpath::measure(label = "kilo_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -128,19 +128,13 @@ impl AgentIntegration for KiloIntegration {
                 "mcp",
                 load_jsonc_file,
                 McpUninstallPolicy::default(),
-            );
+            )?;
         }
         Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let config_path = kilo_config_path(home);
-        if !config_path.exists() {
-            return false;
-        }
-        let json = load_jsonc_file(&config_path);
-        let servers = json.get("mcp");
-        servers.and_then(|v| v.get("tracedecay")).is_some()
+        super::mcp_config_has_tracedecay(&kilo_config_path(home), "mcp", load_jsonc_file)
     }
 }
 

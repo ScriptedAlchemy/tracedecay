@@ -609,7 +609,7 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
     }
 }
 
-/// Retained daemon state for the typed LSP invocation operations.
+/// Retained daemon state for the typed Work application operations.
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) database: crate::global_db::RegisteredGlobalDbLeaseV1,
@@ -624,7 +624,8 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     /// Project-open-pinned proposal routing authority over the exact admitted
     /// configuration snapshot and executable bindings.
     pub(super) proposal_routing: super::work_routing::DaemonWorkProposalRoutingAuthorityV1,
-    /// Canonical Plan-23 adapter with per-request evaluated-profile resolution.
+    /// Canonical Work evidence retrieval adapter with per-request
+    /// evaluated-profile resolution.
     pub(super) evidence_retrieval:
         crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1,
     /// Project-owned bounded replay for receipts that closed outside a request
@@ -721,6 +722,10 @@ impl InvocationProjectRuntimeIdentityV1 {
         &self.profile_id == profile_id
             && &self.project_id == project_id
             && project_roots.contains(&self.project_root)
+    }
+
+    pub(super) fn profile_id(&self) -> &UserProfileId {
+        &self.profile_id
     }
 
     pub(super) fn matches_locator(&self, locator: &RegisteredRootLocatorV1) -> bool {

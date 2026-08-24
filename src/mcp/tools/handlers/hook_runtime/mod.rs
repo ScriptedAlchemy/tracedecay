@@ -51,6 +51,7 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| config_error(format!("missing required parameter `{key}`")))
 }
 
+#[hotpath::measure(label = "mcp.hook_runtime")]
 pub async fn handle_hook_runtime(
     cg: &TraceDecay,
     args: Value,
@@ -142,6 +143,7 @@ async fn opencode_lsp_updated(
     }))
 }
 
+#[hotpath::measure(label = "mcp.hook_runtime.projectless")]
 pub(crate) async fn handle_projectless_hook_runtime(
     args: Value,
     profile_root: &Path,

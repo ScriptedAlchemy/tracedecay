@@ -8,10 +8,27 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+]
 test-transport = []
 
 [dependencies]
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "hooks", "limits", "trace"] }
+hotpath.workspace = true
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "cache", "hooks", "limits", "trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ring = "0.17.14"

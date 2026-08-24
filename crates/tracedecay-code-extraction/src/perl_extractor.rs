@@ -49,12 +49,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -71,10 +76,7 @@ impl ExtractionState {
 }
 
 impl PerlExtractor {
-    /// Extract code graph nodes and edges from a Perl source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Perl source code to parse.
     pub fn extract_perl(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -104,7 +106,6 @@ impl PerlExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -159,7 +160,6 @@ impl PerlExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_definition" => Self::visit_function(state, node),
@@ -231,7 +231,6 @@ impl PerlExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -270,7 +269,7 @@ impl PerlExtractor {
         let start_column = node.start_position().column as u32;
 
         // Determine the end line by looking at siblings until next package or EOF.
-        let end_line = Self::find_package_end_line(node, state);
+        let end_line = Self::find_package_end_line(node);
         let end_column = 0u32;
 
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
@@ -331,7 +330,7 @@ impl PerlExtractor {
 
     /// Find the end line of a package scope by looking at the next sibling
     /// that is a `package_statement`, or the last sibling in the `source_file`.
-    fn find_package_end_line(node: TsNode<'_>, _state: &ExtractionState) -> u32 {
+    fn find_package_end_line(node: TsNode<'_>) -> u32 {
         let mut sibling = node.next_named_sibling();
         let mut last_end = node.end_position().row as u32;
         while let Some(sib) = sibling {
@@ -411,7 +410,6 @@ impl PerlExtractor {
             let is_our = scope_node.is_some_and(|s| state.node_text(s) == "our");
 
             if is_our {
-                // Get the variable name from scalar_variable child.
                 let var_name = left_node
                     .child_by_field_name("variable_name")
                     .map(|n| state.node_text(n))
@@ -475,10 +473,6 @@ impl PerlExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the function signature (first line of the sub definition).
     fn extract_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {

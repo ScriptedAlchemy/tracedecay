@@ -1,11 +1,12 @@
 use grafeo_engine::GrafeoDB;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
 
 use crate::GraphDbError;
 use crate::state::{
-    load_entity_by_node, load_relation_by_locator, projection_entity_nodes_sorted_checked,
-    projection_relation_nodes_sorted_checked,
+    EndpointIdentityCache, load_entity_by_node, load_relation_by_locator_cached,
+    projection_entity_nodes_sorted_checked, projection_relation_nodes_sorted_checked,
 };
 
 use super::{
@@ -99,6 +100,7 @@ pub(crate) fn recovered_generation_digest_from_database(
 
     let namespace_projection = physical_namespace_projection_map(manifest)?;
     let store = database.graph_store();
+    let mut endpoints = EndpointIdentityCache::default();
     for (_, locator) in projection_relation_nodes_sorted_checked(
         database,
         &physical_namespace,
@@ -106,16 +108,11 @@ pub(crate) fn recovered_generation_digest_from_database(
         check,
     )? {
         check()?;
-        let stored = load_relation_by_locator(database, locator)?;
-        let edge = store
-            .get_edge(stored.edge)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "recovered generation relation edge is missing".to_owned(),
-            })?;
+        let stored = load_relation_by_locator_cached(database, locator, &mut endpoints)?;
         let relation = GraphGenerationRelation::new(
             stored.relation.identity,
-            recovered_entity_ref(store.as_ref(), edge.src, &namespace_projection)?,
-            recovered_entity_ref(store.as_ref(), edge.dst, &namespace_projection)?,
+            recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?,
+            recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?,
             stored.relation.kind,
             stored.relation.properties,
         )?;
@@ -128,5 +125,5 @@ pub(crate) fn recovered_generation_digest_from_database(
         write_frame(&mut writer, "relation", &bytes)?;
     }
     writer.finish()?;
-    Ok(hex::encode(digest.finalize()))
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }

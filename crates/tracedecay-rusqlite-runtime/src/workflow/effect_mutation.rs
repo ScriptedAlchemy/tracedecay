@@ -46,9 +46,9 @@ pub(super) fn apply_workflow_effect(
 /// Applies one compare-and-swap lifecycle transition and maps its typed
 /// outcome onto the durable effect contract.
 ///
-/// Plan 32 keeps retire and reject terminal, so an illegal edge and a stale
-/// expected revision are both reported as conflicts rather than silently
-/// coerced; a replayed command returns the stored disposition unchanged.
+/// Retire and reject are terminal, so an illegal edge and a stale expected
+/// revision are both reported as conflicts rather than silently coerced; a
+/// replayed command returns the stored disposition unchanged.
 fn apply_lifecycle_command(
     transaction: &ExactSqlTransaction,
     command: &WorkflowDefinitionLifecycleCommand,

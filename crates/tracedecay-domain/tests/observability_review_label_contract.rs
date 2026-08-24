@@ -2,9 +2,7 @@
 //!
 //! These exhaust the label set, the independence/judgment combinations, the
 //! legal evidence requirement, the runtime-versus-outcome distinction, the
-//! censored-versus-unknown case, and late correction, as required by the
-//! "Canonical review and outcome labels" section of
-//! `docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md`.
+//! censored-versus-unknown case, and late correction.
 
 use tracedecay_domain::{
     CoverageStateV1, EvidenceHorizonV1, IndependentReviewEvidenceV1, LabelConflictProvenanceV1,

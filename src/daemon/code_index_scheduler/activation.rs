@@ -188,6 +188,7 @@ impl CodeIndexActivationV1 {
         self.activate()
     }
 
+    #[hotpath::measure]
     pub(in crate::daemon) fn activate(&self) -> bool {
         if !self.route_is_live() {
             return false;
@@ -201,7 +202,9 @@ impl CodeIndexActivationV1 {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => {}
+            Ok(_) => {
+                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_MOUNTING));
+            }
             Err(ACTIVATION_MOUNTING | ACTIVATION_MOUNTED) => return true,
             Err(_) => return false,
         }
@@ -209,6 +212,7 @@ impl CodeIndexActivationV1 {
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.state.store(ACTIVATION_IDLE, Ordering::Release);
+            hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
             return false;
         };
         let project_root = self.project_root.clone();
@@ -223,10 +227,12 @@ impl CodeIndexActivationV1 {
                 || route_registered.load(Ordering::Acquire) && !cancellation.is_cancelled();
             if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity) {
                 state.store(ACTIVATION_IDLE, Ordering::Release);
+                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
                 return;
             }
             if let Err(error) = mount().await {
                 state.store(ACTIVATION_IDLE, Ordering::Release);
+                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
                 tracing::warn!(
                     event = "code_index_activation",
                     project = %project_root.display(),
@@ -238,6 +244,7 @@ impl CodeIndexActivationV1 {
             }
             if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity) {
                 state.store(ACTIVATION_IDLE, Ordering::Release);
+                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
                 return;
             }
             let batch = {
@@ -245,6 +252,7 @@ impl CodeIndexActivationV1 {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.store(ACTIVATION_MOUNTED, Ordering::Release);
+                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_MOUNTED));
                 pending.take()
             };
             if route_is_live() && (!batch.paths.is_empty() || batch.overflow) {
@@ -263,6 +271,7 @@ impl CodeIndexActivationV1 {
     /// Accept exact after-edit hints immediately, even while the background
     /// mount is still opening. Returns `true` only when this exact live route
     /// accepted the paths for queued or direct delivery.
+    #[hotpath::measure]
     pub(in crate::daemon) async fn notify_hook_paths(
         &self,
         project_root: &Path,

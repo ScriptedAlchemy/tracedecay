@@ -344,7 +344,6 @@ pub struct WorkProductAttemptStore {
 
 impl WorkProductAttemptStore {
     /// Seeds a real Work-product graph through its immutable event journal.
-    /// This replaces legacy Work command/projection setup in integration tests.
     pub fn seed_task(&self, context: &RequestContext, task_id: TaskId, execution_admitted: bool) {
         let mut rows = self.inner.lock().expect("fixture store lock is available");
         if rows.graph.is_none() {

@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_hotspots` tool calls.
 pub(crate) async fn handle_hotspots(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

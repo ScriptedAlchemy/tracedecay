@@ -24,7 +24,8 @@ compiles.
   verify with `contracts:check`.
 - `plugin/` — host bundles (Claude, Codex, Cursor, Kimi, opencode).
 - `tests/` — integration test suites; `benches/` — criterion benches;
-  `eval/`/`evals/` — hermetic and adoption evals; `docs/` — plans and guides.
+  `benchmark_data/` — benchmark fixtures, harnesses, and provenance;
+  `evals/` — memory, hermetic, and agent-adoption evals; `docs/` — plans and guides.
 - `scripts/` — CI/dev gates (commit-msg check, bundle checks, release drift).
 
 ## Build & test

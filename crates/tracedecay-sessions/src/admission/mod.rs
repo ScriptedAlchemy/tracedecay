@@ -13,10 +13,6 @@
 //! * the bounded-wire helpers shared by every host input reader,
 //! * the record/spool bounds every provider discovery walk charges against,
 //! * and [`HostAdmission`], the dyn-safe port the root facade implements.
-//!
-//! Root wiring: `src/application/host_admission.rs` must drop its own copies of
-//! these values and re-export them from here, then add
-//! `impl HostAdmission for dyn HostAdmission`.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -26,8 +22,8 @@ use serde::Serialize;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
 };
-use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
+use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
 
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
@@ -65,16 +61,27 @@ pub struct HostDiscoveryQueueEntry {
     pub path: PathBuf,
 }
 
-/// Terminal disposition of one host-admission attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct HostAdmissionOutcome {
     pub status: HostAdmissionStatus,
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<&'static str>,
+    /// Typed recovery instruction for the in-process admission caller.
+    ///
+    /// This is deliberately omitted from host wire output: reason codes remain
+    /// bounded telemetry, while recovery decisions must not be reconstructed
+    /// from strings at another layer.
+    #[serde(skip)]
+    pub recovery: Option<HostAdmissionRecovery>,
 }
 
-/// Counts reported by one bounded projection-queue drain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostAdmissionRecovery {
+    BatchRequiresScalarFallback(ObservationBatchFallbackCause),
+    DeterministicContentRefusal,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostProjectionDrainOutcome {
     pub projected: u64,
@@ -85,7 +92,6 @@ pub struct HostProjectionDrainOutcome {
     pub session_ids: Vec<String>,
 }
 
-/// Which registered authority an admission call must be bound to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostAdmissionScope {
     Project,
@@ -102,6 +108,25 @@ impl HostAdmissionOutcome {
             status,
             retryable,
             reason_code,
+            recovery: None,
+        }
+    }
+
+    pub const fn batch_requires_scalar_fallback(cause: ObservationBatchFallbackCause) -> Self {
+        Self {
+            status: HostAdmissionStatus::Backpressured,
+            retryable: true,
+            reason_code: Some("batch_requires_scalar_fallback"),
+            recovery: Some(HostAdmissionRecovery::BatchRequiresScalarFallback(cause)),
+        }
+    }
+
+    pub const fn deterministic_content_refusal(reason_code: &'static str) -> Self {
+        Self {
+            status: HostAdmissionStatus::Degraded,
+            retryable: false,
+            reason_code: Some(reason_code),
+            recovery: Some(HostAdmissionRecovery::DeterministicContentRefusal),
         }
     }
 
@@ -254,6 +279,14 @@ impl HostAdmissionOutcome {
             Some("registered_authority_unavailable"),
         )
     }
+
+    pub const fn parse_offset_conflict() -> Self {
+        Self::new(
+            HostAdmissionStatus::Backpressured,
+            true,
+            Some("parse_offset_conflict"),
+        )
+    }
 }
 
 pub(crate) fn is_admission_cancellation(
@@ -280,6 +313,25 @@ pub trait HostAdmission: Send + Sync {
         &'a self,
         request: CaptureObservationRequest,
     ) -> AdmissionFuture<'a, CaptureObservationOutcome>;
+
+    /// Sanitizes then persists a bounded window through one store-owned
+    /// `persist_observations` call when the implementor owns that authority.
+    ///
+    /// The default walks [`Self::capture_observation`] so composition-root
+    /// façades keep compiling until they override. An empty window returns
+    /// empty without minting a skipped-authority success.
+    fn capture_observations<'a>(
+        &'a self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
+        Box::pin(async move {
+            let mut outcomes = Vec::with_capacity(requests.len());
+            for request in requests {
+                outcomes.push(self.capture_observation(request).await?);
+            }
+            Ok(outcomes)
+        })
+    }
 
     /// Advances a non-durable frame cursor without persisting a record.
     fn advance_non_durable_source_cursor<'a>(
@@ -330,6 +382,31 @@ pub trait HostAdmission: Send + Sync {
         offset: ParseOffset,
     ) -> AdmissionFuture<'a, ()>;
 
+    /// Replaces one typed parse-offset authority only when its exact prior
+    /// value still matches. This is intentionally separate from monotonic
+    /// transcript cursors: versioned state machines may move numeric fields in
+    /// either direction without weakening ordinary cursor ordering.
+    fn replace_parse_offset<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _path: &'a str,
+        _expected: ParseOffset,
+        _next: ParseOffset,
+    ) -> AdmissionFuture<'a, ()> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Atomically replaces two exact parse-offset authorities. This is the
+    /// only supported write for state whose validity spans both keys.
+    fn replace_parse_offset_pair<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _first: (&'a str, ParseOffset, ParseOffset),
+        _second: (&'a str, ParseOffset, ParseOffset),
+    ) -> AdmissionFuture<'a, ()> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
     /// Adds provider paths to the durable discovery queue and returns the
     /// stable identity of the final input path.
     fn enqueue_discovery_paths<'a>(
@@ -370,12 +447,11 @@ pub(crate) mod test_support {
     use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationIdV1};
     use tracedecay_runtime_core::privacy::RecordSanitizerV1;
     use tracedecay_store::observation::{
-        ObservationAdmissionPort, ObservationCaptureSink, ObservationCursorPort,
         ObservationPersistOutcome, ObservationStoreError, ObservationStoreResult,
     };
     use tracedecay_store::{
-        AnchoredObservationWrite, ObservationProjectionStatus, ObservationReplayRequest,
-        StoredObservation,
+        AnchoredObservationWrite, ObservationBatchPersistOutcome, ObservationProjectionStatus,
+        ObservationReplayRequest, ObservationStore, StoredObservation,
     };
 
     use crate::observation::{
@@ -449,7 +525,7 @@ pub(crate) mod test_support {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct MemoryObservationState {
         observations: Vec<StoredObservation>,
         cursors: Vec<ObservationSourceCursorV1>,
@@ -497,12 +573,11 @@ pub(crate) mod test_support {
         }
     }
 
-    impl ObservationCaptureSink for MemoryObservationStore {
-        async fn persist_admitted_observation(
-            &self,
+    impl MemoryObservationStore {
+        fn persist_one(
+            state: &mut MemoryObservationState,
             write: AnchoredObservationWrite,
         ) -> ObservationStoreResult<ObservationPersistOutcome> {
-            let mut state = self.state();
             if let Some(stored) = state.observations.iter().find(|stored| {
                 stored.observation().observation_id() == write.observation().observation_id()
             }) {
@@ -511,7 +586,7 @@ pub(crate) mod test_support {
                 ));
             }
             let actual = Self::current_cursor(
-                &state,
+                state,
                 write.next_cursor().source(),
                 write.next_cursor().scope(),
             );
@@ -541,13 +616,51 @@ pub(crate) mod test_support {
                     receipt.clone(),
                     ObservationProjectionStatus::Queued,
                 ));
-            Self::replace_cursor(&mut state, next_cursor);
+            Self::replace_cursor(state, next_cursor);
             Ok(ObservationPersistOutcome::Committed(receipt))
         }
     }
 
-    impl ObservationCursorPort for MemoryObservationStore {
-        async fn read_source_cursor(
+    impl ObservationStore for MemoryObservationStore {
+        async fn persist_observation(
+            &self,
+            write: AnchoredObservationWrite,
+        ) -> ObservationStoreResult<ObservationPersistOutcome> {
+            Self::persist_one(&mut self.state(), write)
+        }
+
+        async fn persist_observations(
+            &self,
+            writes: Vec<AnchoredObservationWrite>,
+        ) -> ObservationStoreResult<Vec<ObservationBatchPersistOutcome>> {
+            if writes.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut state = self.state();
+            let mut staged = state.clone();
+            let mut outcomes = Vec::with_capacity(writes.len());
+            for write in writes {
+                outcomes.push(Self::persist_one(&mut staged, write)?);
+            }
+            let outcomes = outcomes
+                .into_iter()
+                .map(|outcome| {
+                    let stored = staged
+                        .observations
+                        .iter()
+                        .find(|stored| {
+                            stored.observation().observation_id()
+                                == outcome.receipt().observation().observation_id()
+                        })
+                        .cloned();
+                    ObservationBatchPersistOutcome::new(outcome, stored)
+                })
+                .collect();
+            *state = staged;
+            Ok(outcomes)
+        }
+
+        async fn get_source_cursor(
             &self,
             source: &ObservationSourceIdentityV1,
             scope: &ObservationScopeV1,
@@ -555,7 +668,7 @@ pub(crate) mod test_support {
             Ok(Self::current_cursor(&self.state(), source, scope))
         }
 
-        async fn advance_admitted_source_cursor(
+        async fn advance_source_cursor(
             &self,
             advance: ObservationCursorAdvance,
         ) -> ObservationStoreResult<CursorAdvanceOutcome> {
@@ -574,10 +687,8 @@ pub(crate) mod test_support {
             Self::replace_cursor(&mut state, next_cursor.clone());
             Ok(CursorAdvanceOutcome::Committed)
         }
-    }
 
-    impl ObservationAdmissionPort for MemoryObservationStore {
-        async fn read_admitted_observation(
+        async fn get_observation(
             &self,
             observation_id: &CanonicalObservationIdV1,
         ) -> ObservationStoreResult<Option<StoredObservation>> {
@@ -589,7 +700,7 @@ pub(crate) mod test_support {
                 .cloned())
         }
 
-        async fn replay_admitted_observations(
+        async fn replay_observations(
             &self,
             request: ObservationReplayRequest,
         ) -> ObservationStoreResult<Vec<StoredObservation>> {
@@ -683,6 +794,9 @@ pub(crate) mod test_support {
                 ObservationApplicationError::Cancelled => {
                     HostAdmissionOutcome::retained_backpressured("admission_cancelled")
                 }
+                ObservationApplicationError::Store(
+                    ObservationStoreError::BatchRequiresScalarFallback { cause },
+                ) => HostAdmissionOutcome::batch_requires_scalar_fallback(cause),
                 _ => HostAdmissionOutcome::registered_authority_unavailable(),
             }
         }
@@ -703,6 +817,25 @@ pub(crate) mod test_support {
                 }
                 self.application()?
                     .capture_observation(request)
+                    .await
+                    .map_err(Self::application_error)
+            })
+        }
+
+        fn capture_observations<'a>(
+            &'a self,
+            requests: Vec<CaptureObservationRequest>,
+        ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
+            Box::pin(async move {
+                {
+                    let mut state = self.store.state();
+                    if state.capture_failures_remaining > 0 {
+                        state.capture_failures_remaining -= 1;
+                        return Err(HostAdmissionOutcome::registered_authority_unavailable());
+                    }
+                }
+                self.application()?
+                    .capture_observations(requests)
                     .await
                     .map_err(Self::application_error)
             })
@@ -739,7 +872,7 @@ pub(crate) mod test_support {
                     cancellation.cancel();
                 }
                 self.store
-                    .read_source_cursor(source, scope)
+                    .get_source_cursor(source, scope)
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
             })
@@ -867,6 +1000,74 @@ pub(crate) mod test_support {
                 state
                     .parse_offsets
                     .push((scope.clone(), path.to_owned(), offset));
+                Ok(())
+            })
+        }
+
+        fn replace_parse_offset<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            path: &'a str,
+            expected: ParseOffset,
+            next: ParseOffset,
+        ) -> AdmissionFuture<'a, ()> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let actual = state
+                    .parse_offsets
+                    .iter()
+                    .find(|(stored_scope, stored_path, _)| {
+                        stored_scope == scope && stored_path == path
+                    })
+                    .map(|(_, _, offset)| *offset)
+                    .unwrap_or_default();
+                if actual != expected {
+                    return Err(HostAdmissionOutcome::parse_offset_conflict());
+                }
+                state
+                    .parse_offsets
+                    .retain(|(stored_scope, stored_path, _)| {
+                        stored_scope != scope || stored_path != path
+                    });
+                state
+                    .parse_offsets
+                    .push((scope.clone(), path.to_owned(), next));
+                Ok(())
+            })
+        }
+
+        fn replace_parse_offset_pair<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            first: (&'a str, ParseOffset, ParseOffset),
+            second: (&'a str, ParseOffset, ParseOffset),
+        ) -> AdmissionFuture<'a, ()> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let actual = |path: &str| {
+                    state
+                        .parse_offsets
+                        .iter()
+                        .find(|(stored_scope, stored_path, _)| {
+                            stored_scope == scope && stored_path == path
+                        })
+                        .map(|(_, _, offset)| *offset)
+                        .unwrap_or_default()
+                };
+                if actual(first.0) != first.1 || actual(second.0) != second.1 {
+                    return Err(HostAdmissionOutcome::parse_offset_conflict());
+                }
+                state
+                    .parse_offsets
+                    .retain(|(stored_scope, stored_path, _)| {
+                        stored_scope != scope || (stored_path != first.0 && stored_path != second.0)
+                    });
+                state
+                    .parse_offsets
+                    .push((scope.clone(), first.0.to_owned(), first.2));
+                state
+                    .parse_offsets
+                    .push((scope.clone(), second.0.to_owned(), second.2));
                 Ok(())
             })
         }

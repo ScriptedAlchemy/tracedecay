@@ -10,18 +10,17 @@
 //! the lightweight project enrollment marker and inspect filesystem metadata,
 //! but it never creates an artifact, opens a database, reads database bytes,
 //! migrates, repairs, or otherwise touches a live store.
-//!
-//! Dead-code allowance lives on the parent `store_runtime` module until daemon
-//! construction wires this resolver.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock};
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_store::{
     BrainId, BrainNodeId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1,
     UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest as store_locator_digest,
@@ -31,6 +30,7 @@ use super::registry::{
     ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
     StoreRuntimeRegistryFuture, StoreRuntimeResolver,
 };
+use crate::profiled_lock::{ProfiledRwLock, ProfiledRwLockReadGuard, ProfiledRwLockWriteGuard};
 use crate::storage;
 
 mod graph;
@@ -164,19 +164,42 @@ pub enum LocalCodeStoreAuthorityRegistrationOutcomeV1 {
 /// project sessions database. Worktree/snapshot code shards need a separately
 /// typed graph-scope authority and are returned as unavailable rather than
 /// guessed from a branch name or path.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LocalStoreRuntimeResolverV1 {
     profile_authority: LocalProfileStoreAuthorityV1,
-    project_authorities: Arc<RwLock<BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>>>,
-    code_authorities: Arc<RwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
+    /// Read on every project resolution and written only by enrollment, so a
+    /// read here that waits is a registrant holding the map against the
+    /// resolve path.
+    project_authorities:
+        Arc<ProfiledRwLock<BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>>>,
+    /// Read on every code-shard resolution; also written by retirement, which
+    /// is the writer that can starve concurrent resolves.
+    code_authorities: Arc<ProfiledRwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
+}
+
+/// Hand-written because the instrumented lock wrapper has no `Debug`. The
+/// authority maps are omitted rather than printed, since formatting them would
+/// take the very locks this type exists to hand out.
+impl fmt::Debug for LocalStoreRuntimeResolverV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalStoreRuntimeResolverV1")
+            .field("profile_authority", &self.profile_authority)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalStoreRuntimeResolverV1 {
     pub fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
         Self {
             profile_authority,
-            project_authorities: Arc::new(RwLock::new(BTreeMap::new())),
-            code_authorities: Arc::new(RwLock::new(BTreeMap::new())),
+            project_authorities: Arc::new(hotpath::rw_lock!(
+                RwLock::new(BTreeMap::new()),
+                label = "runtime_core.store_runtime.resolver_project_authorities"
+            )),
+            code_authorities: Arc::new(hotpath::rw_lock!(
+                RwLock::new(BTreeMap::new()),
+                label = "runtime_core.store_runtime.resolver_code_authorities"
+            )),
         }
     }
 
@@ -267,7 +290,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn project_authorities_read(
         &self,
-    ) -> RwLockReadGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
+    ) -> ProfiledRwLockReadGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
         self.project_authorities
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -275,7 +298,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn project_authorities_write(
         &self,
-    ) -> RwLockWriteGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
+    ) -> ProfiledRwLockWriteGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
         self.project_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -283,7 +306,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn code_authorities_read(
         &self,
-    ) -> RwLockReadGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
+    ) -> ProfiledRwLockReadGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
         self.code_authorities
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -291,7 +314,7 @@ impl LocalStoreRuntimeResolverV1 {
 
     fn code_authorities_write(
         &self,
-    ) -> RwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
+    ) -> ProfiledRwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
         self.code_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -303,6 +326,15 @@ impl LocalStoreRuntimeResolverV1 {
     /// [`StoreRuntimeResolver`] adapts it to the registry's current generic
     /// infrastructure-failure channel without ever falling back to a locator.
     pub fn resolve_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
+        #[cfg(target_os = "linux")]
+        {
+            let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok();
+            self.resolve_key_with_filesystem_safety(key, &|path| match mountinfo.as_deref() {
+                Some(text) => filesystem_safety_from_linux_mountinfo(path, text),
+                None => undetectable_filesystem(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
         self.resolve_key_with_filesystem_safety(key, &local_filesystem_safety)
     }
 
@@ -456,7 +488,7 @@ impl LocalStoreRuntimeResolverV1 {
         canonical_profile_root: &Path,
         filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
     ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
-        let node_digest = hex::encode(Sha256::digest(node_id.as_str().as_bytes()));
+        let node_digest = sha256_hex(node_id.as_str().as_bytes());
         let canonical_store_root = canonical_or_prospective_directory(
             &canonical_profile_root
                 .join("remote")

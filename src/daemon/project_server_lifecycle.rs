@@ -3,10 +3,6 @@
 //!
 //! Retirement waits for in-flight requests before aborting, so a rekey or a
 //! shutdown never leaves a store mid-write.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::shutdown_coordination::ShutdownStatus;
@@ -214,6 +210,7 @@ pub(super) async fn retire_project_servers_now(servers: Vec<Arc<crate::mcp::McpS
     retire_project_servers(servers, None).await;
 }
 
+#[hotpath::measure]
 pub(super) async fn schedule_project_server_retirement(
     store_administration: &StoreAdministration,
     owner: StoreOwnerKey,
@@ -224,6 +221,24 @@ pub(super) async fn schedule_project_server_retirement(
         .acquire_project_server_retirement_admission()
         .await;
     admission.spawn_and_track(owner, retire_project_servers(servers, route_registered));
+}
+
+/// Owner eviction / failed-open retirement. The displaced server is drained
+/// through the same tracked admission as an upgrade, but the owner is gone, so
+/// the temporal scheduler must be released with it.
+#[hotpath::measure]
+pub(in crate::daemon) async fn retire_evicted_project_owner(
+    store_administration: &StoreAdministration,
+    owner: StoreOwnerKey,
+    servers: Vec<Arc<crate::mcp::McpServer>>,
+    route_registered: Option<Arc<AtomicBool>>,
+) {
+    store_administration
+        .session_temporal_refresh_schedulers()
+        .retire_project(&owner)
+        .await;
+    schedule_project_server_retirement(store_administration, owner, servers, route_registered)
+        .await;
 }
 
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).

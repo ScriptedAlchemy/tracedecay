@@ -1,34 +1,30 @@
 /** Plan 26 adoption outcomes from the canonical Observatory projection. */
 import type { ObservatoryReadModelV1 } from '../../contracts/generated.ts';
-import { readMetric, type PlanDimension } from './planDimension.ts';
+import {
+  dimensionCoverage,
+  readMetric,
+  type PlanDimension,
+  type PlanDimensionBand,
+} from './planDimension.ts';
 import { ADOPTION_FUNNEL_STAGES, type FunnelStageCount } from './observedFamilies.ts';
 
-/** Why no eligibility-side stage count reaches this surface. */
 const NO_ELIGIBILITY_PROJECTION =
   'the canonical Observatory projection has no eligibility evidence for this horizon';
 
-/** Why no outcome-side stage count reaches this surface. */
 const NO_OUTCOME_PROJECTION =
   'the canonical Observatory projection has no outcome evidence for this horizon';
 
-/** Why correct abstention is not read off any landed route. */
 const NO_ABSTENTION_PROJECTION =
   'a correct abstention needs the abstention and the independently observed absence of a right ' +
   'answer; RetrievalSynthesisObservedV1 records the abstention flag and ContextOutcomeObservedV1 ' +
   'records the outcome vocabulary, but no correct-abstention observation is available';
 
-/** Why the terminal stage is not taken from the diagnostics outcome tally. */
 export const OUTCOME_TALLY_NOT_TERMINAL =
   'the diagnostics by_outcome tally mixes hook results, tool results, and observability terminal ' +
   'results from every provider with no column to separate them, so it is not read as an adoption ' +
   'terminal count';
 
-/** One band of the view. */
-export interface OutcomeBand {
-  marker: string;
-  label: string;
-  dimensions: PlanDimension[];
-}
+export type OutcomeBand = PlanDimensionBand;
 
 /** Which recording family would carry each funnel stage, and the field name on
  * it. Named per stage so a card's reason points at one field rather than at a
@@ -72,7 +68,6 @@ export function funnelDimensions(model: ObservatoryReadModelV1): PlanDimension[]
   }));
 }
 
-/** The stage counts as the consistency check sees them. */
 export function funnelStageCounts(model: ObservatoryReadModelV1): FunnelStageCount[] {
   return ADOPTION_FUNNEL_STAGES.map((stage) => {
     const reading = readMetric(model.metrics, STAGE_METRIC[stage], STAGE_SOURCE[stage].reason);
@@ -148,10 +143,5 @@ export function outcomeCoverage(bands: readonly OutcomeBand[]): {
   required: number;
   unprojected: number;
 } {
-  const dimensions = bands.flatMap((band) => band.dimensions);
-  return {
-    measured: dimensions.filter((dimension) => dimension.reading.kind === 'measured').length,
-    required: dimensions.length,
-    unprojected: dimensions.filter((dimension) => dimension.reading.kind === 'unpublished').length,
-  };
+  return dimensionCoverage(bands);
 }

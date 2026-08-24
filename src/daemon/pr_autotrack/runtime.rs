@@ -51,9 +51,12 @@ pub(crate) fn spawn_with_administration(
 ) -> PrAutotrackTask {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
-    let task = tokio::spawn(async move {
-        run(administration, schedulers, task_cancellation).await;
-    });
+    let task = tokio::spawn(hotpath::future!(
+        async move {
+            run(administration, schedulers, task_cancellation).await;
+        },
+        label = "daemon.pr_autotrack.loop"
+    ));
     PrAutotrackTask { cancellation, task }
 }
 

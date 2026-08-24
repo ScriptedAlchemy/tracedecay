@@ -4,8 +4,8 @@
 //! throwaway checkout, installs SHA-256-verified local model bytes into an
 //! isolated `TRACEDECAY_DATA_DIR`, and proves in-process `FastEmbed` embeds
 //! and indexes it: a complete vector generation publishes while semantic
-//! activation stays off (Plan 20 compare-and-swap after a passing Plan 15
-//! evaluation) and exact/lexical/graph retrieval keep answering.
+//! activation stays off (compare-and-swap after a passing evaluation) and
+//! exact/lexical/graph retrieval keep answering.
 //!
 //! Hermetic, with two truthful outcomes: pass from pinned local bytes, or a
 //! `pending` line when the dedicated model cache has no verified bytes. The
@@ -186,7 +186,7 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
         "the published vectors must be bound to the verified installed artifact"
     );
 
-    // Callable is not activated: no evaluation ran and no Plan 20
+    // Callable is not activated: no evaluation ran and no
     // compare-and-swap was issued.
     let runtime_state = answered(
         &harness,

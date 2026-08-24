@@ -162,6 +162,22 @@ fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
     }
 }
 
+#[test]
+fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
+    assert_eq!(
+        mcp_tool_hotpath_identity("tracedecay_search", false),
+        "tracedecay_search"
+    );
+    assert_eq!(
+        mcp_tool_hotpath_identity("attacker-controlled-unknown-name", false),
+        "unknown"
+    );
+    assert_eq!(
+        mcp_tool_hotpath_identity("another-unknown-name", true),
+        "unknown"
+    );
+}
+
 /// The MCP deadline horizon asks this predicate which reads walk git, so it
 /// must stay in step with the git dispatch family rather than a name list.
 #[test]
@@ -210,6 +226,12 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         // attached. Probing only the attached state let the deferred group
         // resolve to nothing at all without failing this test.
         for executor_available in [true, false] {
+            assert_eq!(
+                mcp_tool_hotpath_identity(&definition.name, executor_available),
+                definition.name,
+                "{} must retain exact bounded Hotpath identity",
+                definition.name
+            );
             let group = classify_mcp_tool_dispatch_group(&definition.name, executor_available)
                 .unwrap_or_else(|| {
                     panic!(
@@ -1323,14 +1345,26 @@ fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
 #[test]
 fn the_ceiling_reports_a_typed_retryable_problem() {
     let error = tool_dispatch_deadline_error("tracedecay_context", TOOL_DISPATCH_CEILING);
-    let rendered = error.to_string();
-    assert!(
-        rendered.contains("tracedecay_context"),
-        "the problem must name the tool, got {rendered:?}",
+    let (reason_code, retryable, detail) = error
+        .project_route_context()
+        .expect("the ceiling must surface a typed project-route problem, not an opaque error");
+    assert_eq!(
+        reason_code, "tool_dispatch_deadline_exceeded",
+        "the ceiling must keep its own reason code so callers can branch on it",
     );
     assert!(
-        rendered.contains("dispatch ceiling"),
-        "the problem must name the ceiling, got {rendered:?}",
+        retryable,
+        "a dispatch-ceiling cancellation is retryable: nothing was committed",
+    );
+    // The typed fields carry the shape; only the detail names the subject, so
+    // these two checks assert information the typed fields cannot express.
+    assert!(
+        detail.contains("tracedecay_context"),
+        "the problem must name the tool it cancelled, got {detail:?}",
+    );
+    assert!(
+        detail.contains(&format!("{}s", TOOL_DISPATCH_CEILING.as_secs())),
+        "the problem must name the budget it enforced, got {detail:?}",
     );
 }
 

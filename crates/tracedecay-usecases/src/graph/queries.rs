@@ -57,11 +57,10 @@ impl<'a> GraphQueryManager<'a> {
         }
     }
 
-    pub async fn find_dead_code(
+    pub(crate) fn page_all_symbols(
         &self,
-        kinds: &[NodeKind],
-        include_public: bool,
-        limit: Option<usize>,
+        page_size: usize,
+        overflow_detail: &str,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
         let mut after = None;
         let mut symbols = Vec::new();
@@ -70,23 +69,33 @@ impl<'a> GraphQueryManager<'a> {
                 .reader
                 .symbols_page(
                     after.as_ref(),
-                    MAX_ANALYTICAL_SYMBOLS,
+                    page_size.max(1),
                     Arc::clone(&self.cancellation),
                 )
                 .map_err(|error| {
                     super::map_code_graph_read_runtime_error(map_projection_error(error))
                 })?;
             if symbols.len().saturating_add(page.symbols.len()) > MAX_ANALYTICAL_SYMBOLS {
-                return Err(unavailable(
-                    "verified dead-code census exceeded its analytical budget",
-                ));
+                return Err(unavailable(overflow_detail));
             }
             after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
             symbols.extend(page.symbols);
             if !page.has_more {
-                break;
+                return Ok(symbols);
             }
         }
+    }
+
+    pub async fn find_dead_code(
+        &self,
+        kinds: &[NodeKind],
+        include_public: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        let symbols = self.page_all_symbols(
+            MAX_ANALYTICAL_SYMBOLS,
+            "verified dead-code census exceeded its analytical budget",
+        )?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
@@ -321,30 +330,10 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|file| (file.logical_path.clone(), HashSet::new()))
             .collect::<HashMap<_, _>>();
-        let mut after = None;
-        let mut symbols = Vec::new();
-        loop {
-            let page = self
-                .reader
-                .symbols_page(
-                    after.as_ref(),
-                    max_dependency_edges.max(1),
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })?;
-            if symbols.len().saturating_add(page.symbols.len()) > MAX_ANALYTICAL_SYMBOLS {
-                return Err(unavailable(
-                    "verified graph symbol census exceeded its analytical budget",
-                ));
-            }
-            after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-            symbols.extend(page.symbols);
-            if !page.has_more {
-                break;
-            }
-        }
+        let symbols = self.page_all_symbols(
+            max_dependency_edges.max(1),
+            "verified graph symbol census exceeded its analytical budget",
+        )?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
@@ -392,30 +381,10 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
-        let mut after = None;
-        let mut symbols = Vec::new();
-        loop {
-            let page = self
-                .reader
-                .symbols_page(
-                    after.as_ref(),
-                    MAX_ANALYTICAL_SYMBOLS,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })?;
-            if symbols.len().saturating_add(page.symbols.len()) > MAX_ANALYTICAL_SYMBOLS {
-                return Err(unavailable(
-                    "verified health symbol census exceeded its analytical budget",
-                ));
-            }
-            after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-            symbols.extend(page.symbols);
-            if !page.has_more {
-                break;
-            }
-        }
+        let symbols = self.page_all_symbols(
+            MAX_ANALYTICAL_SYMBOLS,
+            "verified health symbol census exceeded its analytical budget",
+        )?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
@@ -510,7 +479,9 @@ impl<'a> GraphQueryManager<'a> {
     }
 }
 
-fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolRecordV1) -> bool {
+pub(crate) fn is_test_marker(
+    record: &tracedecay_code_index::lineage::LineageSymbolRecordV1,
+) -> bool {
     record.kind == "annotation_usage"
         && matches!(
             record.simple_name.as_str(),

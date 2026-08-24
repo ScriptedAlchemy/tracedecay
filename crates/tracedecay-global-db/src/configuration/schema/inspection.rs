@@ -1,5 +1,6 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::ConfigurationSchemaError;
@@ -149,7 +150,10 @@ pub(super) async fn configuration_definition_digest(
     let mut hasher = Sha256::new();
     hasher.update(DEFINITION_DIGEST_DOMAIN);
     hasher.update(canonical);
-    Ok(Some(format!("sha256:{}", hex::encode(hasher.finalize()))))
+    Ok(Some(encode_tagged_lowercase_hex(
+        "sha256:",
+        &hasher.finalize(),
+    )))
 }
 
 pub(super) async fn registered_store_is_empty(

@@ -21,6 +21,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, sha256_hex};
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 #[path = "profile_backup/error.rs"]
@@ -733,7 +734,7 @@ fn load_verified_backup(
     Ok(VerifiedCompleteProfileBackup {
         root,
         manifest,
-        manifest_sha256: hex::encode(Sha256::digest(&bytes)),
+        manifest_sha256: sha256_hex(&bytes),
     })
 }
 
@@ -1013,7 +1014,7 @@ fn sha256_file(path: &Path) -> Result<String, ProfileBackupError> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(hex::encode(digest.finalize()))
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), ProfileBackupError> {

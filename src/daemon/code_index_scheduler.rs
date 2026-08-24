@@ -7,19 +7,23 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
     io::{Read, Write},
+    num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::now_micros;
+use tracedecay_domain::canonical_text::{
+    encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
+};
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -33,8 +37,9 @@ use tracedecay_private_fs::{
     framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryReservationV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    ResidentMemoryAdjustmentFailureV1, ResidentMemoryAdmissionFailureV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryReservationV1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -91,6 +96,7 @@ use crate::{
 
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
+const CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1: &str = "code-index-build-workers-v1";
 
 const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
@@ -161,6 +167,11 @@ pub(super) struct SharedCodeIndexBytePoolV1 {
     physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     inserted: AtomicU64,
     reused: AtomicU64,
+    /// Map length recorded after the last dead-entry prune. Weak entries whose
+    /// `Arc` dropped are never removed by lookups, so `intern` prunes them once
+    /// the map doubles past this baseline, bounding growth over the daemon
+    /// lifetime at amortized O(1) per insert.
+    last_prune_len: AtomicUsize,
 }
 
 impl SharedCodeIndexBytePoolV1 {
@@ -183,6 +194,16 @@ impl SharedCodeIndexBytePoolV1 {
         let shared: Arc<[u8]> = Arc::from(bytes);
         pool.insert(digest.clone(), Arc::downgrade(&shared));
         self.inserted.fetch_add(1, Ordering::Relaxed);
+        if pool.len()
+            > self
+                .last_prune_len
+                .load(Ordering::Relaxed)
+                .saturating_mul(2)
+        {
+            pool.retain(|_, entry| entry.strong_count() > 0);
+            self.last_prune_len
+                .store(pool.len().max(1), Ordering::Relaxed);
+        }
         (digest, shared)
     }
 
@@ -418,6 +439,14 @@ impl Drop for HeldActiveDecodeV1 {
     }
 }
 
+/// Last validated publication pointer, reused when the on-disk file is unchanged.
+struct PublicationPointerMemoV1 {
+    mtime: Option<SystemTime>,
+    size: u64,
+    digest: String,
+    pointer: DurablePublicationPointerV1,
+}
+
 #[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
@@ -427,6 +456,7 @@ struct DaemonCodeIndexPublicationStoreV1 {
     project_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
+    pointer_memo: Arc<Mutex<Option<PublicationPointerMemoV1>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,6 +481,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             project_root: project_root.to_path_buf(),
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
+            pointer_memo: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -484,7 +515,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn state_digest(bytes: &[u8]) -> String {
-        format!("sha256:{}", sha256_hex(bytes))
+        encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
     }
 
     fn generation_index_digest(
@@ -513,7 +544,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Option<DurablePublicationPointerV1>, CodeIndexPublicationStoreErrorV1> {
         let metadata = match std::fs::metadata(&self.active_path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                *self
+                    .pointer_memo
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                return Ok(None);
+            }
             Err(error) => return Err(Self::unavailable(error)),
         };
         if metadata.len() > MAX_DURABLE_PUBLICATION_POINTER_BYTES {
@@ -521,7 +558,36 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its byte bound",
             ));
         }
+        let mtime = metadata.modified().ok();
+        let size = metadata.len();
+        {
+            let memo = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(memo) = memo.as_ref()
+                && memo.size == size
+                && memo.mtime.is_some()
+                && memo.mtime == mtime
+            {
+                return Ok(Some(memo.pointer.clone()));
+            }
+        }
         let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
+        let digest = Self::state_digest(&bytes);
+        {
+            let mut memo = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(memo) = memo.as_mut()
+                && memo.digest == digest
+            {
+                memo.mtime = mtime;
+                memo.size = size;
+                return Ok(Some(memo.pointer.clone()));
+            }
+        }
         let pointer: DurablePublicationPointerV1 =
             serde_json::from_slice(&bytes).map_err(|error| {
                 Self::corruption(format!(
@@ -635,7 +701,38 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its retention bounds",
             ));
         }
+        *self
+            .pointer_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
+            mtime,
+            size,
+            digest,
+            pointer: pointer.clone(),
+        });
         Ok(Some(pointer))
+    }
+
+    fn remember_publication_pointer(&self, pointer: &DurablePublicationPointerV1, bytes: &[u8]) {
+        let metadata = match std::fs::metadata(&self.active_path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                *self
+                    .pointer_memo
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                return;
+            }
+        };
+        *self
+            .pointer_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
+            mtime: metadata.modified().ok(),
+            size: metadata.len(),
+            digest: Self::state_digest(bytes),
+            pointer: pointer.clone(),
+        });
     }
 
     /// Serve one sealed generation by identity, decoding it at most once.
@@ -651,18 +748,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(None);
         };
-        if !pointer
+        // The pointer already names the active generation. Serve it from the
+        // pinned slot instead of decoding the active file a second time just to
+        // compare identities, and skip that decode entirely for historical pins.
+        if pointer.generation_id == generation_id.as_str() {
+            return self.load_active_shared();
+        }
+        let Some(entry) = pointer
             .generation_index
             .iter()
-            .any(|entry| entry.generation_id == generation_id.as_str())
-        {
+            .find(|entry| entry.generation_id == generation_id.as_str())
+        else {
             return Ok(None);
-        }
-        if let Some(active) = self.load_active_shared()?
-            && active.manifest().generation_id == *generation_id
-        {
-            return Ok(Some(active));
-        }
+        };
         let subject = DecodeSubjectV1::Generation(generation_id.clone());
         let lease = loop {
             let mut state = self.cache.lock_state()?;
@@ -690,7 +788,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         };
         // Decoded with NO cache lock held: unrelated readers and publishers keep
         // making progress while this runs.
-        let matched = self.load_indexed_generation(generation_id);
+        let matched = self.load_indexed_generation(generation_id, entry);
         if let Ok(Some(generation)) = matched.as_ref() {
             self.cache.remember(Arc::clone(generation))?;
         }
@@ -703,17 +801,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn load_indexed_generation(
         &self,
         generation_id: &CodeGenerationId,
+        entry: &DurableGenerationIndexEntryV1,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        let Some(pointer) = self.read_publication_pointer()? else {
-            return Ok(None);
-        };
-        let Some(entry) = pointer
-            .generation_index
-            .iter()
-            .find(|entry| entry.generation_id == generation_id.as_str())
-        else {
-            return Ok(None);
-        };
         let expected_file = format!(
             "generation-{}.json",
             entry
@@ -988,7 +1077,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
         let _ = self.load_active_shared()?;
-        let mut state = self.cache.lock_state()?;
+        let state = self.cache.lock_state()?;
         if state
             .active
             .as_ref()
@@ -1011,6 +1100,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 "retained history generation aliases the active generation identity",
             ));
         }
+        // Encode and fsync without the decoded-generation cache lock so
+        // readers are not parked across the durable write.
+        drop(state);
         let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
         let generation_size = u64::try_from(generation_bytes.len()).map_err(Self::unavailable)?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
@@ -1143,6 +1235,16 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .parent()
                 .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
         )?;
+        self.remember_publication_pointer(&pointer, &bytes);
+        let mut state = self.cache.lock_state()?;
+        if state
+            .active
+            .as_ref()
+            .map(|current| &current.manifest().generation_id)
+            != expected_active_generation
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
         let generation_id = generation.manifest().generation_id.clone();
         state.forget(&generation_id);
         match self.disposition {
@@ -1260,6 +1362,10 @@ struct CapturedCandidateV1 {
     captured: CodeIndexCapturedFileV1,
     receipt_id: SanitizationReceiptId,
     retained: Arc<[u8]>,
+    /// Charges both live source representations (interned `Arc` and production
+    /// input `Vec`) before the candidate can join a snapshot. The build copy's
+    /// half is released after production completes.
+    retained_reservation: Option<ResidentMemoryReservationV1>,
 }
 
 struct CapturedSnapshotV1 {
@@ -1272,6 +1378,9 @@ struct CapturedSnapshotV1 {
     /// snapshot's bytes so identical content in sibling worktrees can reuse
     /// them (physical sharing without identity aliasing).
     retained_bytes: Vec<Arc<[u8]>>,
+    /// Pointer-paired resident charges for `retained_bytes` plus their live
+    /// production-input copies. Empty sources need no nonzero reservation.
+    retained_reservations: Vec<ResidentMemoryReservationV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -1733,8 +1842,10 @@ impl DaemonCodeTextArtifactStoreV1 {
         let descriptor = DurableCodeTextArtifactDescriptorV1 {
             generation_id: generation.manifest().generation_id.clone(),
             artifact_file: format!("text-artifact-{artifact_hex}.bin"),
-            artifact_digest: ManifestDigest::new(format!("sha256:{artifact_hex}"))
-                .map_err(text_artifact_unavailable)?,
+            artifact_digest: ManifestDigest::from_sha256_bytes(
+                &hex::decode(&artifact_hex).map_err(text_artifact_unavailable)?,
+            )
+            .map_err(text_artifact_unavailable)?,
             artifact_size_bytes,
         };
         let final_path = artifacts_root.join(&descriptor.artifact_file);
@@ -2377,6 +2488,19 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     PublicationConflict(String),
     #[error("code-index ignored dependency admission refused: {0}")]
     IgnoredDependency(#[from] CodeIndexIgnoredDependencyRefusalV1),
+    #[error("code-index worker resident-memory admission refused: {0}")]
+    WorkerMemoryAdmission(#[from] ResidentMemoryAdmissionFailureV1),
+    #[error("code-index retained-source resident-memory admission refused: {0}")]
+    SnapshotMemoryAdmission(ResidentMemoryAdmissionFailureV1),
+    #[error("code-index retained-source resident-memory capacity is unavailable")]
+    SnapshotMemoryCapacityUnavailable,
+    #[error("code-index retained-source resident-memory adjustment failed: {0}")]
+    SnapshotMemoryAdjustment(ResidentMemoryAdjustmentFailureV1),
+    #[error("code-index worker plan refused: {0}")]
+    WorkerPlan(#[from] tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1),
+    #[cfg(not(test))]
+    #[error("code-index worker plan is not installed")]
+    WorkerPlanNotInstalled,
 }
 
 impl CodeIndexSchedulerErrorV1 {
@@ -2414,7 +2538,14 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::GraphActivationRefused(_)
             | Self::SemanticSchedule(_)
             | Self::PublicationConflict(_)
-            | Self::IgnoredDependency(_) => false,
+            | Self::IgnoredDependency(_)
+            | Self::WorkerMemoryAdmission(_)
+            | Self::SnapshotMemoryAdmission(_)
+            | Self::SnapshotMemoryCapacityUnavailable
+            | Self::SnapshotMemoryAdjustment(_)
+            | Self::WorkerPlan(_) => false,
+            #[cfg(not(test))]
+            Self::WorkerPlanNotInstalled => false,
         }
     }
 
@@ -2484,6 +2615,10 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
+    /// Holds the measured source-byte charges for
+    /// `retained_snapshot_bytes`; worker scratch is admitted separately only
+    /// after capture has completed.
+    _retained_snapshot_memory: Vec<ResidentMemoryReservationV1>,
     /// Process resident-memory authority artifact builds and readers reserve
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
@@ -2589,6 +2724,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             freshness_unknown,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
+            _retained_snapshot_memory: Vec::new(),
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
             )),
@@ -2617,6 +2753,106 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this scheduler's private standalone authority.
     pub(super) fn bind_resident_memory(&mut self, resident_memory: Arc<ProcessResidentMemoryV1>) {
         self.resident_memory = resident_memory;
+    }
+
+    /// Reserve the installed worker plan on the canonical process authority.
+    /// The returned RAII guard spans source capture and the complete production
+    /// build, releasing on success, typed failure, cancellation, or unwind.
+    fn reserve_worker_memory(
+        &self,
+    ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
+        self.ensure_worker_plan()?;
+        let workers = tracedecay_code_index::parallelism::indexing_workers();
+        let requested_bytes =
+            NonZeroU64::new(tracedecay_code_index::parallelism::worker_reservation_bytes(workers))
+                .ok_or_else(|| {
+                    CodeIndexSchedulerErrorV1::Identity(
+                        "code-index worker resident-memory reservation must be nonzero".to_owned(),
+                    )
+                })?;
+        let component = ResidentMemoryComponentIdV1::new(CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let generation_id = CodeGenerationId::new("code-index-worker-active")
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        self.resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id,
+                    component,
+                },
+                requested_bytes,
+            )
+            .map_err(CodeIndexSchedulerErrorV1::from)
+    }
+
+    fn reserve_snapshot_memory(
+        &self,
+        content_digest: &ContentDigest,
+        retained_bytes: usize,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexSchedulerErrorV1> {
+        let Some(requested_bytes) = u64::try_from(retained_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(NonZeroU64::new)
+        else {
+            if retained_bytes == 0 {
+                return Ok(None);
+            }
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index captured source charge exceeds u64".to_owned(),
+            ));
+        };
+        let component = ResidentMemoryComponentIdV1::new("code_index.snapshot.source_bytes.v1")
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let generation_id = CodeGenerationId::new(format!(
+            "code-index-snapshot-source.{}",
+            content_digest.as_str()
+        ))
+        .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        self.resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id,
+                    component,
+                },
+                requested_bytes,
+            )
+            .map(Some)
+            .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission)
+    }
+
+    fn finish_snapshot_build_memory(
+        reservations: &mut [ResidentMemoryReservationV1],
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        for reservation in reservations {
+            reservation
+                .shrink_to(reservation.reserved_bytes() / 2)
+                .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_worker_plan(&self) -> Result<(), CodeIndexSchedulerErrorV1> {
+        if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            let snapshot = self.resident_memory.snapshot();
+            tracedecay_code_index::parallelism::install_worker_plan(
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+                snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
+            )?;
+            Ok(())
+        }
+        #[cfg(not(test))]
+        {
+            Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
+        }
     }
 
     /// Replace the semantic `schedule_generation` hook on mount/remount. The hook
@@ -2834,6 +3070,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
+        self.ensure_worker_plan()?;
+        let _worker_memory = self.reserve_worker_memory()?;
         let _reconcile_guard = ReconcilePassGuard::enter(&self.reconcile_in_progress);
         // Re-resolve exact identity before indexing (tier-3 backstop). The
         // worktree must still be the same structural identity this scheduler is
@@ -2870,7 +3108,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .take();
             overflow_reconciled |= hints.overflow;
             let mut captured = self.capture_authoritative_snapshot(None)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             let active_generation = self
                 .publication
                 .load_active_shared()
@@ -2880,14 +3117,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             let latest_snapshot = active_generation
                 .as_ref()
-                .map(|generation| generation.snapshot().clone());
-            let unchanged_source = latest_snapshot.as_ref().is_some_and(|latest| {
+                .map(|generation| generation.snapshot());
+            let unchanged_source = latest_snapshot.is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision
             });
-            let active_content_identity = latest_snapshot
-                .as_ref()
-                .map(|snapshot| &snapshot.content_identity);
+            let active_content_identity =
+                latest_snapshot.map(|snapshot| &snapshot.content_identity);
             if self
                 .latest_content_identity
                 .as_ref()
@@ -2895,6 +3131,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 == Some(&captured.snapshot.content_identity)
                 && unchanged_source
             {
+                drop(std::mem::take(&mut captured.captured_files));
+                Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+                self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+                self._retained_snapshot_memory =
+                    std::mem::take(&mut captured.retained_reservations);
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(sampled_metadata, sampled_signature);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -2907,12 +3148,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Arc::clone(&self.epoch),
                 Arc::clone(&self.shutting_down),
             );
-            let changed_files = captured.changed_paths.clone();
+            // Only the content identity and changed-path count are needed after
+            // the build request takes ownership of the captured snapshot, so
+            // keep those instead of cloning every file record and changed path.
+            let snapshot_content_identity = captured.snapshot.content_identity.clone();
+            let reextracted_files = captured.changed_paths.len();
             let generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
-                    snapshot: captured.snapshot.clone(),
+                    snapshot: captured.snapshot,
                     captured_files: captured.captured_files,
-                    changed_files,
+                    changed_files: captured.changed_paths,
                     invalidations: BTreeSet::new(),
                     repository_parse_identity: captured.repository_parse_identity,
                     ignored_source_admissions: self.ignored_source_admissions.clone(),
@@ -2934,17 +3179,24 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
-                    self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
+                    Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+                    self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+                    self._retained_snapshot_memory =
+                        std::mem::take(&mut captured.retained_reservations);
+                    self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(sampled_metadata, sampled_signature);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
-                        snapshot_content_identity: captured.snapshot.content_identity,
+                        snapshot_content_identity,
                         overflow_reconciled,
                     }));
                 }
                 Err(error) => return Err(error.into()),
             };
-            self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-            self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
+            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+            self.latest_content_identity = Some(snapshot_content_identity);
+            self.mark_reconciled(sampled_metadata, sampled_signature);
 
             let changes = &generation.projection().request().changes;
             let lane_digest = canonical_sha256(&(
@@ -2970,7 +3222,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .iter()
                         .map(|file| file.file_occurrence_id.clone())
                         .collect(),
-                    reextracted_files: captured.changed_paths.len(),
+                    reextracted_files,
                     changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                     reused_chunks: changes.reused.len(),
                     overflow_reconciled,
@@ -3431,6 +3683,23 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
+        self.capture_admitted_candidate(registry, logical_path, control, explicitly_admitted)
+    }
+
+    fn ignored_admission_paths(&self) -> BTreeSet<&str> {
+        self.ignored_source_admissions
+            .iter()
+            .map(|admission| admission.logical_path.as_str())
+            .collect()
+    }
+
+    fn capture_admitted_candidate(
+        &self,
+        registry: &StaticLanguageRegistry,
+        logical_path: &str,
+        control: Option<&dyn CodeIndexExecutionControlV1>,
+        explicitly_admitted: bool,
+    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
         if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
             return Ok(None);
         }
@@ -3465,6 +3734,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // truthfully from gix. Deletions drop out of the present candidate set;
         // their tombstones flow through `changed_paths`.
         let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
+        let mut retained_reservations = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         if self.shutting_down.load(Ordering::Acquire) {
@@ -3493,6 +3763,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .map_err(|reason| match reason {
                     tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled => {
                         cancelled_code_index_reconcile()
+                    }
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable => {
+                        CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable
                     }
                     _ => CodeIndexSchedulerErrorV1::Git(format!(
                         "immutable HEAD-tree capture failed: {}",
@@ -3537,13 +3810,30 @@ impl CodeIndexWorktreeSchedulerV1 {
         // that same order and the lowest-index failure is the reported one,
         // so the captured snapshot is byte-identical to the sequential sweep.
         let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
+        let admitted_paths = self.ignored_admission_paths();
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates
                 .par_iter()
-                .map(|logical_path| self.capture_candidate(&registry, logical_path, control))
+                .map(|logical_path| {
+                    crate::code_index::parallelism::with_background_cpu_permit(|| {
+                        if self.shutting_down.load(Ordering::Acquire) {
+                            return Err(cancelled_code_index_reconcile());
+                        }
+                        ignored_dependencies::checkpoint_if_present(control)?;
+                        self.capture_admitted_candidate(
+                            &registry,
+                            logical_path,
+                            control,
+                            admitted_paths.contains(logical_path.as_str()),
+                        )
+                    })
+                })
                 .collect::<Vec<_>>()
-        });
+        })
+        .map_err(|error| {
+            CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(error))
+        })?;
 
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
@@ -3563,6 +3853,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
             };
             sanitization_receipts.insert(candidate.receipt_id);
+            if let Some(reservation) = candidate.retained_reservation {
+                retained_reservations.push(reservation);
+            }
             retained_bytes.push(candidate.retained);
             files.push(candidate.file);
             captured_files.push(candidate.captured);
@@ -3601,6 +3894,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
+            retained_reservations,
         })
     }
 }
@@ -3683,10 +3977,6 @@ fn snapshot_content_identity(
     content_digest(&bytes)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
 /// Streaming SHA-256 of one file's bytes, as 64 lowercase hex characters.
 /// Cancellation is checked before opening and after every bounded read, so a
 /// shutdown or superseding generation cannot strand publication in a
@@ -3749,7 +4039,10 @@ fn sha256_private_file_hex_and_size(
             "code text artifact named file changed while hashing".to_owned(),
         ));
     }
-    Ok((hex::encode(hasher.finalize()), file_metadata.len()))
+    Ok((
+        encode_lowercase_hex(&hasher.finalize()),
+        file_metadata.len(),
+    ))
 }
 
 fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {

@@ -7,10 +7,11 @@ use tracedecay_application::{
     Deadline, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
     EvidenceDomain, EvidenceIdentity, EvidencePacket, OperationBudgetUsage, OperationReceipt,
     PageState, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext, RequestId,
-    RetryDirective, SafeDiagnostic, TemporalState, WorkProjectionApplicationError,
-    WorkflowEffectTerminalV1,
+    RetryDirective, SafeDiagnostic, TemporalState, WorkProductApplicationErrorV1,
+    WorkProjectionApplicationError, WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_runtime_core::work_topology::WorkTopologyError;
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use crate::daemon_contract::{
@@ -47,18 +48,17 @@ pub(super) fn offer_work_blocked_interval_receipts(
 /// caller. Absence and denial share the concealed
 /// `not_found_or_not_authorized` answer so that probing an owner cannot reveal
 /// which of the two it is.
-pub(super) fn work_product_problem(
-    error: tracedecay_application::WorkProductApplicationErrorV1,
-) -> ApplicationProblem {
-    use tracedecay_application::WorkProductApplicationErrorV1 as Error;
-
+pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
     match error {
-        Error::NotAuthorized | Error::NotFoundOrNotAuthorized => {
+        WorkProductApplicationErrorV1::NotAuthorized
+        | WorkProductApplicationErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        Error::Cancelled => ApplicationProblem::cancelled_before_admission(),
-        Error::TimedOut => ApplicationProblem::timed_out_before_admission(),
-        Error::InvalidRequest => ApplicationProblem::InvalidRequest {
+        WorkProductApplicationErrorV1::Cancelled => {
+            ApplicationProblem::cancelled_before_admission()
+        }
+        WorkProductApplicationErrorV1::TimedOut => ApplicationProblem::timed_out_before_admission(),
+        WorkProductApplicationErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
             diagnostic: SafeDiagnostic {
                 code: "work.invalid_graph_operation".to_owned(),
                 message: "The Work graph request is invalid".to_owned(),
@@ -71,32 +71,40 @@ pub(super) fn work_product_problem(
         // slice's, not the journal's. The refusal therefore names the cause and
         // the remedy instead of hiding behind the concealed not-found answer
         // the old fail-closed refusal produced.
-        Error::SelectionCoverageIncomplete => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.selection_coverage_incomplete".to_owned(),
-                message: "The Work selection covers only part of the owner's journal, so no \
-                          graph mutation can be prepared or submitted against it; widen the \
-                          selection to the relation scopes the excluded events were admitted \
-                          under"
+        WorkProductApplicationErrorV1::SelectionCoverageIncomplete => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic {
+                    code: "work.selection_coverage_incomplete".to_owned(),
+                    message: "The Work selection covers only part of the owner's journal, so no \
+                              graph mutation can be prepared or submitted against it; widen the \
+                              selection to the relation scopes the excluded events were admitted \
+                              under"
+                        .to_owned(),
+                },
+                retry: RetryDirective::Never,
+                legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+            }
+        }
+        WorkProductApplicationErrorV1::VersionConflict => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "work.graph_version_conflict".to_owned(),
+                message: "The Work graph version does not match the request".to_owned(),
+            })
+        }
+        WorkProductApplicationErrorV1::RevisionConflict => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "work.graph_revision_conflict".to_owned(),
+                message: "The Work policy, configuration, or catalog revision changed".to_owned(),
+            })
+        }
+        WorkProductApplicationErrorV1::EvidenceContinuationStale => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "work.evidence_continuation_stale".to_owned(),
+                message: "The Work evidence continuation is stale; restart the evidence read"
                     .to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-        },
-        Error::VersionConflict => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.graph_version_conflict".to_owned(),
-            message: "The Work graph version does not match the request".to_owned(),
-        }),
-        Error::RevisionConflict => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.graph_revision_conflict".to_owned(),
-            message: "The Work policy, configuration, or catalog revision changed".to_owned(),
-        }),
-        Error::EvidenceContinuationStale => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.evidence_continuation_stale".to_owned(),
-            message: "The Work evidence continuation is stale; restart the evidence read"
-                .to_owned(),
-        }),
-        Error::IdempotencyConflict => ApplicationProblem::Conflict {
+            })
+        }
+        WorkProductApplicationErrorV1::IdempotencyConflict => ApplicationProblem::Conflict {
             diagnostic: SafeDiagnostic {
                 code: "work.graph_idempotency_conflict".to_owned(),
                 message: "The Work graph request key was reused with different input".to_owned(),
@@ -104,13 +112,15 @@ pub(super) fn work_product_problem(
             retry: RetryDirective::Never,
             legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
         },
-        Error::GraphAuthorityUnavailable
-        | Error::EventAuthorityUnavailable
-        | Error::EvidenceAuthorityUnavailable
-        | Error::ProposalAuthorityUnavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.graph_authority_unavailable".to_owned(),
-            message: "The Work graph authority is unavailable".to_owned(),
-        }),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+        | WorkProductApplicationErrorV1::EventAuthorityUnavailable
+        | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
+        | WorkProductApplicationErrorV1::ProposalAuthorityUnavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "work.graph_authority_unavailable".to_owned(),
+                message: "The Work graph authority is unavailable".to_owned(),
+            })
+        }
     }
 }
 
@@ -177,9 +187,8 @@ pub(in crate::daemon::service::invocation) fn work_blocked_interval_recovery_con
 /// attempt-list read reports. Absence of any Work events is the only
 /// non-error state: it names an empty scope, not a failing authority.
 pub(super) fn work_topology_problem(
-    error: tracedecay_runtime_core::work_topology::WorkTopologyError,
+    error: WorkTopologyError,
 ) -> Result<tracedecay_application::WorkAttemptTopologyStateV1, ApplicationProblem> {
-    use tracedecay_runtime_core::work_topology::WorkTopologyError;
     match error {
         WorkTopologyError::EmptyEvents => {
             Ok(tracedecay_application::WorkAttemptTopologyStateV1::Absent)
@@ -217,7 +226,6 @@ pub(super) fn work_topology_unavailable_problem(message: &str) -> ApplicationPro
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> ApplicationProblem {
     match error {
         WorkProjectionApplicationError::Admission(problem) => problem,
@@ -477,7 +485,6 @@ where
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn work_effect<T>(
     terminal: &WorkflowEffectTerminalV1,
     result: Option<T>,

@@ -441,7 +441,11 @@ pub fn prepare_semantic_evaluation_projection(
         request.changes.added_or_changed.len().max(1) as u64,
         Arc::clone(&cancellation),
     ));
-    let inner = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), progress);
+    let inner = RuntimeChunkVectorEncoderV1::new(
+        Arc::clone(&runtime),
+        progress,
+        authority.execution_max_threads(),
+    );
     let mut encoder = CachedSemanticEvaluationChunkEncoderV1::new(
         inner,
         authority.as_ref(),
@@ -500,7 +504,11 @@ pub fn measure_semantic_evaluation_projection_cancellation(
         request.changes.added_or_changed.len() as u64,
         Arc::clone(&cancellation),
     ));
-    let inner = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), Arc::clone(&progress));
+    let inner = RuntimeChunkVectorEncoderV1::new(
+        Arc::clone(&runtime),
+        Arc::clone(&progress),
+        authority.execution_max_threads(),
+    );
     let inner = CancelAfterFirstModelBatchV1 {
         inner,
         progress: Arc::clone(&progress),

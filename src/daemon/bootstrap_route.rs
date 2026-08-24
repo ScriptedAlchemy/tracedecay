@@ -3,10 +3,6 @@
 //! `daemon_bootstrap_response` answers initialize, notifications and the other
 //! project-independent calls so a client can hand shake without paying for a
 //! project admission.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use std::sync::OnceLock;
 

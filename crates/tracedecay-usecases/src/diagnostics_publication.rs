@@ -1,12 +1,8 @@
-//! Production write side for generation-bound diagnostics (Plan 35,
-//! "Universal managed diagnostics").
+//! Production write side for generation-bound diagnostics.
 //!
 //! [`crate::diagnostics_store::DiagnosticsStore`] persists diagnostics and
-//! [`crate::lsp_runtime::DiagnosticsStoreLspFeedbackProjection`]
-//! reads them back by anchor, but before this module nothing in production
-//! ever wrote a record: `publish_clean_generation` had test-only call sites,
-//! so the LSP Problems projection resolved no anchor and published nothing for
-//! any finding.
+//! [`crate::lsp_runtime::DiagnosticsStoreLspFeedbackProjection`] reads them
+//! back by anchor.
 //!
 //! The store's publication contract is deliberately snapshot-shaped: one clean
 //! generation is published exactly once, atomically, and clears every prior

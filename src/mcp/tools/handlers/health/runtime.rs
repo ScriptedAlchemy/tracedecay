@@ -116,11 +116,6 @@ async fn literal_workspace_placeholder_transcript_paths(
     paths
 }
 
-/// Handles `tracedecay_runtime` tool calls.
-///
-/// Issue #80 — surface process and database telemetry so users hitting
-/// unexpected CPU/RAM pressure can attach a structured snapshot to a
-/// bug report. The MCP wrapper just delegates to `runtime_telemetry`.
 async fn attach_doctor_report(
     value: &mut Value,
     reader: Option<&crate::dashboard::DoctorReportReader>,
@@ -144,6 +139,9 @@ async fn attach_doctor_report(
     };
 }
 
+/// Surfaces process and database telemetry so users hitting unexpected
+/// CPU/RAM pressure can attach a structured snapshot to a bug report.
+#[hotpath::measure]
 pub(crate) async fn handle_runtime(
     cg: &TraceDecay,
     args: Value,

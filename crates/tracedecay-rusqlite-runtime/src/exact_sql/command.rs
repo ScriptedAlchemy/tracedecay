@@ -54,6 +54,14 @@ pub(crate) enum WriterCommand {
 
 const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
 
+/// Takes SQLite's write lock on the worker thread, retrying while it is busy.
+///
+/// This is measured separately from the caller-side begin it serves. The two
+/// run on different threads — the caller waits on a channel while this waits on
+/// the lock — so reporting both under one label sums a queue wait and a lock
+/// wait into a single population whose mean and p95 describe neither. Keep the
+/// names distinct: the split is what says whether a slow begin was blocked by
+/// SQLite or merely by the worker being busy with something else.
 pub(super) fn begin_transaction_with_busy_retry<'connection>(
     connection: &'connection Connection,
     behavior: TransactionBehavior,
@@ -62,10 +70,12 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
-    retry_busy_begin(
-        || Transaction::new_unchecked(connection, behavior),
-        shutdown_requested,
-    )
+    hotpath::measure_block!("rusqlite.exact_sql.write_lock", {
+        retry_busy_begin(
+            || Transaction::new_unchecked(connection, behavior),
+            shutdown_requested,
+        )
+    })
 }
 
 pub(super) fn retry_busy_begin<T>(
@@ -147,6 +157,7 @@ pub(crate) enum TransactionCommand {
     },
 }
 
+#[hotpath::measure]
 pub(crate) fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,
@@ -242,20 +253,22 @@ pub(crate) fn run_writer_command(
                     return;
                 }
             };
-            let result = with_exact_sql_guard(
-                connection,
-                false,
-                false,
-                Some(Arc::clone(shutdown_requested)),
-                None,
-                true,
-                None,
-                crate::connection::authorize_writer,
-                false,
-                None,
-                None,
-                || execute_query_unchecked(connection, statement),
-            );
+            let result = hotpath::measure_block!("rusqlite.wal_checkpoint", {
+                with_exact_sql_guard(
+                    connection,
+                    false,
+                    false,
+                    Some(Arc::clone(shutdown_requested)),
+                    None,
+                    true,
+                    None,
+                    crate::connection::authorize_writer,
+                    false,
+                    None,
+                    None,
+                    || execute_query_unchecked(connection, statement),
+                )
+            });
             let _ = reply.send(result);
         }
         WriterCommand::Vacuum { reply, authority } => {
@@ -582,10 +595,12 @@ fn run_transaction(
                     );
                 }
                 let changed_rows = transaction.total_changes().saturating_sub(before);
-                let result = transaction
-                    .commit()
-                    .map(|()| ExactSqlCommitReceipt { changed_rows })
-                    .map_err(|error| sqlite_error("commit immediate transaction", error));
+                let result = hotpath::measure_block!("rusqlite.commit", {
+                    transaction
+                        .commit()
+                        .map(|()| ExactSqlCommitReceipt { changed_rows })
+                        .map_err(|error| sqlite_error("commit immediate transaction", error))
+                });
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,

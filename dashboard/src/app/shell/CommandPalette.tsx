@@ -36,11 +36,10 @@ function optionId(index: number): string {
   return `td-palette-option-${index}`;
 }
 
-/** Command palette (plan 11a): scope-aware search across workspaces (and,
- * as slices land, entities, saved deep links, and legal actions only).
- * Results carry the same truth metadata as lists.
- * Lazy-loaded from Shell after first open so @radix-ui/react-dialog stays out
- * of the initial shell chunk. */
+/** Command palette: scope-aware search across workspaces, registered
+ * projects, and page-provided entries. Results carry the same truth metadata
+ * as lists. Lazy-loaded from Shell after first open so @radix-ui/react-dialog
+ * stays out of the initial shell chunk. */
 export function CommandPalette({
   open,
   onOpenChange,

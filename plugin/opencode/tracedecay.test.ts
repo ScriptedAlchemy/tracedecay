@@ -1,12 +1,6 @@
 import { expect, test } from "bun:test"
 
-import TraceDecayMcpPlugin from "./tracedecay-mcp"
-import TraceDecayPlugin, { dispatch, dispatchAfterAck } from "./tracedecay"
-
-test("exports each installed module as the OpenCode plugin entrypoint", () => {
-  expect(TraceDecayPlugin).toBeTypeOf("function")
-  expect(TraceDecayMcpPlugin).toBeTypeOf("function")
-})
+import { dispatch, dispatchAfterAck } from "./tracedecay"
 
 test("dispatch lets the hook child finish instead of killing before durable spool", async () => {
   const startedAt = performance.now()

@@ -90,11 +90,8 @@ pub(super) fn audit_target_commitment(
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
         .map_err(|_| invalid_store_data("configuration audit redaction key is invalid"))?;
     mac.update(&authenticated);
-    ManifestDigest::new(format!(
-        "sha256:{}",
-        hex::encode(mac.finalize().into_bytes())
-    ))
-    .map_err(ConfigurationStoreError::from)
+    ManifestDigest::from_sha256_bytes(&mac.finalize().into_bytes())
+        .map_err(ConfigurationStoreError::from)
 }
 
 pub(super) async fn seal_audit_target<T: Serialize>(

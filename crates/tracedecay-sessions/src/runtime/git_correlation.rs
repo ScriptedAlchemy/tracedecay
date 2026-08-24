@@ -5,9 +5,10 @@
 //! project graph runtime and every query is evaluated from its verified
 //! snapshot. SQLite retains only resumable-history receipts and watermarks.
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::SessionMessageRecord;
@@ -542,6 +543,9 @@ impl SpanObservationDebounce {
     }
 
     pub fn should_record(&mut self, key: &str, ts: i64, min_interval_secs: i64) -> bool {
+        let stale_before = ts.saturating_sub(min_interval_secs);
+        self.last_write
+            .retain(|stored, last| stored == key || *last > stale_before);
         if self
             .last_write
             .get(key)
@@ -569,23 +573,30 @@ pub fn span_debounce_key(
     )
 }
 
-pub fn direct_commit_records(
+/// Parses each message's `metadata_json` once for both commit evidence and
+/// ingest span observations. The repository is discovered only after a
+/// message actually carries commit candidates.
+pub fn transcript_git_evidence(
     messages: &[SessionMessageRecord],
     project_root: &std::path::Path,
-) -> Vec<CommitSessionRecord> {
-    let Ok(repo) = gix::discover(project_root) else {
-        return Vec::new();
-    };
+) -> (Vec<CommitSessionRecord>, Vec<SpanObservation>) {
+    let mut repo: Option<gix::Repository> = None;
+    let mut repo_unavailable = false;
     let mut records = BTreeMap::<(String, String), CommitSessionRecord>::new();
+    let mut spans = Vec::new();
     for message in messages {
-        let Some(metadata) = message
-            .metadata_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-            .and_then(|value| value.as_object().cloned())
-        else {
+        let Some(parsed) = parsed_message_metadata(message) else {
             continue;
         };
+        let Some(metadata) = parsed.as_object() else {
+            continue;
+        };
+        if let Some(span) = span_observation_from_metadata(message, metadata) {
+            spans.push(span);
+        }
+        if repo_unavailable {
+            continue;
+        }
         for (key, relation, default_evidence, confidence) in [
             (
                 "produced_commit_candidates",
@@ -602,6 +613,18 @@ pub fn direct_commit_records(
         ] {
             let Some(candidates) = metadata.get(key).and_then(serde_json::Value::as_array) else {
                 continue;
+            };
+            let repo = match &mut repo {
+                Some(repo) => repo,
+                slot => match gix::discover(project_root) {
+                    Ok(discovered) => slot.insert(discovered),
+                    Err(_) => {
+                        // Keep spans already collected; later messages can
+                        // still contribute observations without commit rows.
+                        repo_unavailable = true;
+                        break;
+                    }
+                },
             };
             for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
                 let Ok(spec) = repo.rev_parse_single(candidate) else {
@@ -633,7 +656,7 @@ pub fn direct_commit_records(
                         .or_else(|| metadata.get("codex_git_branch"))
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned),
-                    worktree: metadata_worktree(&metadata)
+                    worktree: metadata_worktree(metadata)
                         .map(normalize_worktree)
                         .or_else(|| Some(normalize_worktree(&project_root.to_string_lossy()))),
                     committed_at: commit
@@ -656,37 +679,55 @@ pub fn direct_commit_records(
             }
         }
     }
-    records.into_values().collect()
+    (records.into_values().collect(), spans)
+}
+
+pub fn direct_commit_records(
+    messages: &[SessionMessageRecord],
+    project_root: &std::path::Path,
+) -> Vec<CommitSessionRecord> {
+    transcript_git_evidence(messages, project_root).0
 }
 
 pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
     messages
         .iter()
         .filter_map(|message| {
-            let timestamp = message.timestamp?;
-            let metadata =
-                serde_json::from_str::<serde_json::Value>(message.metadata_json.as_deref()?)
-                    .ok()?;
-            let metadata = metadata.as_object()?;
-            let worktree = metadata_worktree(metadata).filter(|path| !path.is_empty())?;
-            Some(SpanObservation {
-                provider: message.provider.clone(),
-                session_id: message.session_id.clone(),
-                thread_id: metadata
-                    .get("turn_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                branch: metadata
-                    .get("git_branch")
-                    .or_else(|| metadata.get("codex_git_branch"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                worktree: normalize_worktree(worktree),
-                ts: timestamp,
-                source: SpanSource::Ingest,
-            })
+            let parsed = parsed_message_metadata(message)?;
+            span_observation_from_metadata(message, parsed.as_object()?)
         })
         .collect()
+}
+
+fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {
+    message
+        .metadata_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+}
+
+fn span_observation_from_metadata(
+    message: &SessionMessageRecord,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Option<SpanObservation> {
+    let timestamp = message.timestamp?;
+    let worktree = metadata_worktree(metadata).filter(|path| !path.is_empty())?;
+    Some(SpanObservation {
+        provider: message.provider.clone(),
+        session_id: message.session_id.clone(),
+        thread_id: metadata
+            .get("turn_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        branch: metadata
+            .get("git_branch")
+            .or_else(|| metadata.get("codex_git_branch"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        worktree: normalize_worktree(worktree),
+        ts: timestamp,
+        source: SpanSource::Ingest,
+    })
 }
 
 /// Installs only relational receipts used by bounded history convergence.
@@ -839,7 +880,7 @@ fn commit_record_order(
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    sha256_hex(bytes)
 }
 
 fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {

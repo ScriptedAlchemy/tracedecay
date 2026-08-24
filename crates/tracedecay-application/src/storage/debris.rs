@@ -95,11 +95,11 @@ impl IncidentDebrisArtifactV1 {
 
 /// The single quarantine location debris is collected into, with metadata.
 ///
-/// Plan 38 §5 requires recovery/corruption artifacts to be written into one
-/// quarantined location with metadata, surfaced by Doctor and collected by the
-/// retention machinery — never left as loose siblings. This contract names that
-/// location (store-relative) and the retention window after which quarantined
-/// artifacts become collection-eligible.
+/// Recovery/corruption artifacts must be written into one quarantined
+/// location with metadata, surfaced by Doctor and collected by the
+/// retention machinery — never left as loose siblings. This contract names
+/// that location (store-relative) and the retention window after which
+/// quarantined artifacts become collection-eligible.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QuarantineContractV1 {

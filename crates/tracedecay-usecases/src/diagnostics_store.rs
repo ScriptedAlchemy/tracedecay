@@ -464,17 +464,31 @@ impl<'a> DiagnosticsStore<'a> {
                 ));
             }
 
-            for record in &records {
-                if store
-                    .record_by_anchor(&record.diagnostic_anchor)
-                    .await?
-                    .is_some()
-                {
+            if !records.is_empty() {
+                let placeholders = (1..=records.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut rows = store
+                    .conn
+                    .query(
+                        &format!(
+                            "SELECT diagnostic_anchor FROM generation_diagnostics \
+                             WHERE diagnostic_anchor IN ({placeholders})"
+                        ),
+                        records
+                            .iter()
+                            .map(|record| record.diagnostic_anchor.as_str().to_owned())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                if let Some(row) = rows.next().await.map_err(|e| db_error(operation, e))? {
+                    let anchor = row.get::<String>(0).map_err(|e| db_error(operation, e))?;
                     return Err(db_message(
                         operation,
                         format!(
-                            "diagnostic anchor {} is already bound to an immutable record",
-                            record.diagnostic_anchor
+                            "diagnostic anchor {anchor} is already bound to an immutable record"
                         ),
                     ));
                 }
@@ -1999,12 +2013,6 @@ mod tests {
                 .is_err(),
             "an empty newer overlay snapshot must still fence stale updates"
         );
-    }
-
-    #[test]
-    fn root_store_implements_diagnostic_persistence_port() {
-        fn assert_store<T: tracedecay_store::DiagnosticStore>() {}
-        assert_store::<DiagnosticsStore<'static>>();
     }
 
     #[tokio::test]

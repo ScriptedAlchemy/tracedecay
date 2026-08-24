@@ -3,10 +3,6 @@
 //! Covers the lifecycle-guarded open used by the Unix broker and the portable
 //! cached-open, warm-up and request paths, so a single route never opens twice
 //! and a draining daemon never starts a new one.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 
@@ -320,6 +316,7 @@ pub(super) async fn portable_cached_project_server(
 #[cfg(any(not(unix), test))]
 // Cohesive route-open context; a params struct would only move the same ownership bundle.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 async fn begin_portable_project_open(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,

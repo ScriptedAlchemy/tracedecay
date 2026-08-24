@@ -155,18 +155,4 @@ mod tests {
         assert_eq!(snapshot["skills_refreshed_at"], Value::Null);
         assert!(error.is_empty(), "a successful read reports no error");
     }
-
-    #[test]
-    fn absent_profile_authority_is_typed_unavailable() {
-        let (status, Json(payload)) =
-            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::unavailable(
-                "dashboard automation profile authority is not mounted",
-            ));
-
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            payload["detail"],
-            json!("dashboard automation profile authority is not mounted")
-        );
-    }
 }

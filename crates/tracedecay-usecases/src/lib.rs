@@ -66,38 +66,30 @@ pub(crate) fn register_test_schema_installer() {
 pub mod advisory;
 pub mod anchor_resolution;
 pub mod code_index;
-// Moved down from the root binary's `src/config/`; see `config/mod.rs`.
 pub mod config;
 pub mod configuration;
 pub mod context;
 pub mod dashboard_diagnostics;
-// Moved down from the root binary (`src/diagnose.rs`,
-// `src/diagnostics_store.rs`, `src/diagnostics_publication.rs`,
-// `src/diagnostics_query.rs`): their whole closure is the runtime kernel plus
-// `tracedecay-domain`/`tracedecay-store`.
 pub mod delivery;
 pub mod diagnose;
 pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;
 pub mod edit;
-// Widened from `pub(crate)`: the root shim re-exports this crate, and root
-// adapters (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
+// Public because the root shim re-exports this crate, and root adapters
+// (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
 pub mod event_lane;
-// Widened from `pub(crate)`: `tracedecay-global-db` reaches the runtime
-// external-source store through the root shim.
+// Public because `tracedecay-global-db` reaches the runtime external-source
+// store through the root shim.
+pub mod analytics_bridge;
 pub mod external_source_store;
 pub mod feedback;
-// Moved down from the root binary. `analytics_bridge` kept only its durable
-// hook-JSONL importer; `git_intelligence`/`git_query` are the native git
-// adapter and its read engine; `graph`/`retention`/`request_identity`/
-// `user_config` had kernel-only closures.
-pub mod analytics_bridge;
 pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;
 pub mod graph;
 pub mod host_admission;
+mod hotpath_observe;
 pub mod lsp_runtime;
 mod lsp_support;
 pub mod memory;

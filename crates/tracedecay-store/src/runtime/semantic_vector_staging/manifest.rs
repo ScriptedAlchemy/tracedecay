@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use super::super::StorageRuntimeContractErrorV1;
 use super::types::{
@@ -100,7 +101,7 @@ impl SemanticVectorChunkManifestAccumulator {
         self,
     ) -> Result<SemanticVectorChunkManifestDigest, StorageRuntimeContractErrorV1> {
         let digest = self.hasher.finalize();
-        SemanticVectorChunkManifestDigest::new(format!("sha256:{}", hex::encode(digest)))
+        SemanticVectorChunkManifestDigest::new(encode_tagged_lowercase_hex("sha256:", &digest))
     }
 }
 

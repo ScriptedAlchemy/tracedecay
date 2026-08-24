@@ -10,6 +10,7 @@ mod delete_recovery;
 mod filesystem_authority;
 mod rollback;
 
+pub(crate) use delete_recovery::ReferencedClosureCache;
 #[cfg(test)]
 pub use delete_recovery::delete_external_payload;
 pub use delete_recovery::{
@@ -34,6 +35,26 @@ pub async fn delete_external_payload_in_transaction(
 ) -> Result<PreparedPayloadDelete, LcmError> {
     delete_recovery::delete_external_payload_in_transaction(conn, storage_root, payload_ref, opts)
         .await
+}
+
+/// Prepares one member of a caller-owned deletion batch while sharing its
+/// exact reference closure. The caller deletes GC marks only for successful
+/// preparations, in one bounded statement after the batch.
+pub(crate) async fn prepare_external_payload_delete_in_transaction_with_cache(
+    conn: &(impl Executor + ?Sized),
+    storage_root: &Path,
+    payload_ref: &str,
+    opts: &DeleteOpts,
+    referenced: &mut ReferencedClosureCache,
+) -> Result<PreparedPayloadDelete, LcmError> {
+    delete_recovery::prepare_external_payload_delete_in_transaction_with_cache(
+        conn,
+        storage_root,
+        payload_ref,
+        opts,
+        referenced,
+    )
+    .await
 }
 
 pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
@@ -76,16 +97,7 @@ pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
 }
 
 fn is_external_payload_placeholder(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    [
-        "[externalized payload:",
-        "[gc'd externalized payload:",
-        "[externalized lcm ingest payload:",
-        "[externalized tool output:",
-        "[gc'd externalized tool output:",
-    ]
-    .iter()
-    .any(|prefix| lower.starts_with(prefix))
+    gc::is_known_payload_placeholder_prefix(value)
 }
 
 pub struct ExternalPayloadWrite<'a> {
@@ -340,26 +352,16 @@ async fn tombstoned_raw_ref_exists(
     conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
 ) -> Result<bool, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE content LIKE ?1 OR snippet_text LIKE ?1 OR index_text LIKE ?1 OR metadata_json LIKE ?1",
-            params![format!("%{payload_ref}%")],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        for index in 0..4 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            if value
-                .as_deref()
-                .is_some_and(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    gc::any_placeholder_text_row(
+        conn,
+        gc::PlaceholderScanScope::Unscoped,
+        &gc::gc_prefix_ref_like_patterns(payload_ref),
+        |row| {
+            row.texts()
+                .any(|text| gc::text_has_tombstoned_payload_ref(text, payload_ref))
+        },
+    )
+    .await
 }
 
 async fn ensure_current_raw_payload_ref(
@@ -454,3 +456,7 @@ pub async fn load_payload_metadata(
 #[cfg(test)]
 #[path = "payload/rollback_tests.rs"]
 mod rollback_tests;
+
+#[cfg(test)]
+#[path = "payload/tombstone_probe_tests.rs"]
+mod tombstone_probe_tests;

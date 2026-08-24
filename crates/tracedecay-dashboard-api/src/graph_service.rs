@@ -345,16 +345,9 @@ pub async fn search_payload(
     offset: i64,
 ) -> Result<GraphServiceReadV1<GraphSearchPayloadV1>, CodeGraphReadError> {
     let graph = admitted_graph(state, control, CallableCodeOperationKind::SymbolSearch).await?;
-    let needle = query.to_lowercase();
     let matched: Vec<_> = all_symbols(&graph)?
         .into_iter()
-        .filter(|symbol| {
-            needle.is_empty()
-                || symbol.metadata.as_ref().is_some_and(|metadata| {
-                    metadata.qualified_name.to_lowercase().contains(&needle)
-                        || metadata.simple_name.to_lowercase().contains(&needle)
-                })
-        })
+        .filter(|symbol| query.is_empty() || symbol_matches(symbol, query))
         .collect();
     let total = matched.len() as i64;
     let start = non_negative_usize(offset, "graph search offset")?.min(matched.len());
@@ -566,8 +559,10 @@ pub async fn subgraph_payload(
                     .map_err(map_projection_error)?,
             )?;
             let mut candidates = vec![seed.clone()];
+            let mut seen: BTreeSet<&SymbolOccurrenceId> = BTreeSet::new();
+            seen.insert(&seed);
             for edge in incoming.iter().chain(&outgoing) {
-                if !candidates.contains(&edge.neighbor.occurrence) {
+                if seen.insert(&edge.neighbor.occurrence) {
                     candidates.push(edge.neighbor.occurrence.clone());
                 }
             }
@@ -591,14 +586,17 @@ pub async fn subgraph_payload(
                 detail: "dashboard subgraph could not rank the complete generation".to_owned(),
             });
         }
+        // The completed ranking already measured every symbol of the
+        // generation, so its examination count is the census size — no second
+        // full `all_symbols` scan is needed to know whether the budget cut.
+        let census_size = ranking.symbols_examined;
         let selected = ranking
             .ranked
             .into_iter()
             .take(node_budget)
             .map(|degree| degree.occurrence)
             .collect::<Vec<_>>();
-        let all = all_symbols(&graph)?;
-        ("default", None, selected, all.len() > node_budget)
+        ("default", None, selected, census_size > node_budget)
     };
     let summaries = summaries_for(&graph, &selected)?;
     let degrees = degree_map(&graph, &selected)?;
@@ -778,11 +776,21 @@ fn degree_map(
         .collect())
 }
 
+/// ASCII case-insensitive substring test without allocating lowercased copies
+/// of either side. Non-ASCII bytes must match exactly, which is the right
+/// behavior for code identifiers.
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    needle.is_empty()
+        || haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 fn symbol_matches(symbol: &CodeGraphSymbolSummaryV1, query: &str) -> bool {
-    let needle = query.to_lowercase();
     symbol.metadata.as_ref().is_some_and(|metadata| {
-        metadata.qualified_name.to_lowercase().contains(&needle)
-            || metadata.simple_name.to_lowercase().contains(&needle)
+        contains_ascii_case_insensitive(&metadata.qualified_name, query)
+            || contains_ascii_case_insensitive(&metadata.simple_name, query)
     })
 }
 

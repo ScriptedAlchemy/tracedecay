@@ -102,7 +102,8 @@ use tracedecay_domain::CoverageStateV1;
 
 use crate::feedback::observations::{
     FeedbackCoverageV1, FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1,
-    FeedbackSystemMetricKindV1, FeedbackSystemMetricUnitV1,
+    FeedbackSystemMetricKindV1, FeedbackSystemMetricUnavailableReasonV1,
+    FeedbackSystemMetricUnitV1,
 };
 
 const EVENT_LIMIT: usize = 10_000;
@@ -434,7 +435,6 @@ const fn feedback_coverage_state(coverage: FeedbackCoverageV1) -> CoverageStateV
 const fn feedback_unavailable_reason(
     reason: crate::feedback::observations::FeedbackSystemMetricUnavailableReasonV1,
 ) -> &'static str {
-    use crate::feedback::observations::FeedbackSystemMetricUnavailableReasonV1;
     match reason {
         FeedbackSystemMetricUnavailableReasonV1::NoEligibleObservations => {
             "no_eligible_observations"

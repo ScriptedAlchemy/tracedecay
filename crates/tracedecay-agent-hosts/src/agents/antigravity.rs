@@ -27,7 +27,6 @@ use super::{
     doctor_check_mcp_registration, load_json_file,
 };
 
-/// Google Antigravity agent.
 pub struct AntigravityIntegration;
 
 fn mcp_config_path(home: &Path) -> std::path::PathBuf {
@@ -35,7 +34,7 @@ fn mcp_config_path(home: &Path) -> std::path::PathBuf {
 }
 
 /// Per-plugin file used by the Antigravity CLI. Holds the same shape as
-/// the IDE config so a future shared loader can read either location.
+/// the IDE config.
 fn cli_plugin_path(home: &Path) -> std::path::PathBuf {
     home.join(".gemini/antigravity-cli/plugins/tracedecay.json")
 }
@@ -64,27 +63,12 @@ impl AgentIntegration for AntigravityIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let ide_ok = {
-            let mcp_path = mcp_config_path(home);
-            if mcp_path.exists() {
-                let servers = load_json_file(&mcp_path).get("mcpServers").cloned();
-                servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
-            } else {
-                false
-            }
-        };
-        let cli_ok = {
-            let plugin_path = cli_plugin_path(home);
-            let has_entry = |path: &std::path::Path| {
-                if !path.exists() {
-                    return false;
-                }
-                let servers = load_json_file(path).get("mcpServers").cloned();
-                servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
-            };
-            has_entry(&plugin_path)
-        };
-        ide_ok || cli_ok
+        super::mcp_config_has_tracedecay(&mcp_config_path(home), "mcpServers", load_json_file)
+            || super::mcp_config_has_tracedecay(
+                &cli_plugin_path(home),
+                "mcpServers",
+                load_json_file,
+            )
     }
 }
 

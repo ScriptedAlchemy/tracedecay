@@ -43,12 +43,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -65,7 +70,6 @@ impl ExtractionState {
 }
 
 impl ProtoExtractor {
-    /// Extract code graph nodes and edges from a Protobuf source file.
     pub fn extract_proto(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -94,7 +98,6 @@ impl ProtoExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -149,7 +152,6 @@ impl ProtoExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package" => Self::visit_package(state, node),
@@ -226,7 +228,6 @@ impl ProtoExtractor {
             || "<unknown>".to_string(),
             |n| {
                 let text = state.node_text(n);
-                // Strip surrounding quotes
                 text.trim_matches('"').trim_matches('\'').to_string()
             },
         );
@@ -334,7 +335,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit message body for fields, nested messages, enums, oneofs.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "messageBody") {
             Self::visit_message_body(state, body);
@@ -473,7 +473,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit enum body for variants.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "enumBody") {
             Self::visit_enum_body(state, body);
@@ -603,7 +602,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit service body for rpc methods.
         state.node_stack.push((name, id));
         Self::visit_service_body(state, node);
         state.node_stack.pop();
@@ -640,7 +638,6 @@ impl ProtoExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::ProtoRpc, &name, start_line);
 
-        // Build signature from the full rpc text (first line)
         let text = state.node_text(node);
         let signature = text
             .lines()
@@ -761,10 +758,6 @@ impl ProtoExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper methods
-    // ----------------------------
 
     /// Extract docstrings from `// comment` lines preceding definitions.
     ///

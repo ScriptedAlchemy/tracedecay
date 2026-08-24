@@ -94,6 +94,13 @@ impl fmt::Debug for PayloadSource {
 }
 
 pub trait TemporalHydrationBackend: Send + Sync {
+    /// Snapshot-backed production reads cannot observe mid-hydration drift, so
+    /// the adapter may skip the post-read `resolve_current` recheck. Mutable
+    /// test doubles keep the default and still exercise revocation.
+    fn snapshot_is_stable(&self) -> bool {
+        false
+    }
+
     fn resolve_current<'a>(
         &'a self,
         snapshot: &'a TemporalExecutionSnapshot,
@@ -165,12 +172,14 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
             return Err(HydrationError::Unavailable);
         }
         control.checkpoint()?;
-        let current = match self.backend.resolve_current(snapshot, anchor_id).await? {
-            HydrationResolution::Available(current) => current,
-            HydrationResolution::Unavailable(_) => return Err(HydrationError::Unavailable),
-        };
-        if !same_payload_descriptor(&descriptor, &current) {
-            return Err(HydrationError::Unavailable);
+        if !self.backend.snapshot_is_stable() {
+            let current = match self.backend.resolve_current(snapshot, anchor_id).await? {
+                HydrationResolution::Available(current) => current,
+                HydrationResolution::Unavailable(_) => return Err(HydrationError::Unavailable),
+            };
+            if !same_payload_descriptor(&descriptor, &current) {
+                return Err(HydrationError::Unavailable);
+            }
         }
         if max_chunk_bytes == 0 && !bytes.is_empty() {
             return Err(HydrationError::BudgetExceeded {
@@ -344,10 +353,9 @@ pub(super) async fn session_message_from_hydrated_bytes(
     expected_session: &str,
     bytes: &[u8],
 ) -> Result<SessionMessageRecord, HydrationError> {
-    let text = String::from_utf8(bytes.to_vec()).map_err(|_| HydrationError::Unavailable)?;
+    let text = String::from_utf8(bytes.to_vec()).map_err(hydration_failure)?;
 
-    let generation =
-        i64::try_from(snapshot.watermarks().generation).map_err(|_| HydrationError::Unavailable)?;
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
     let project_key = snapshot
         .request()
         .authorized_root()
@@ -424,17 +432,17 @@ pub(super) async fn session_message_from_hydrated_bytes(
             .await
         }
     }
-    .map_err(|_| HydrationError::Unavailable)?;
+    .map_err(hydration_failure)?;
     let row = rows
         .next()
         .await
-        .map_err(|_| HydrationError::Unavailable)?
+        .map_err(hydration_failure)?
         .ok_or(HydrationError::Unavailable)?;
-    let message_id: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
-    let role: String = row.get(1).map_err(|_| HydrationError::Unavailable)?;
-    let ordinal: i64 = row.get(2).map_err(|_| HydrationError::Unavailable)?;
-    let provider: String = row.get(3).map_err(|_| HydrationError::Unavailable)?;
-    let session_id: String = row.get(4).map_err(|_| HydrationError::Unavailable)?;
+    let message_id: String = row.get(0).map_err(hydration_failure)?;
+    let role: String = row.get(1).map_err(hydration_failure)?;
+    let ordinal: i64 = row.get(2).map_err(hydration_failure)?;
+    let provider: String = row.get(3).map_err(hydration_failure)?;
+    let session_id: String = row.get(4).map_err(hydration_failure)?;
     let timestamp = row.get(5).ok();
     let kind = row.get(6).ok().or_else(|| Some("message".to_string()));
     let model = row.get(7).ok();
@@ -450,11 +458,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
         || compatibility_session
             .as_deref()
             .is_some_and(|compatibility_session| compatibility_session != session_id)
-        || rows
-            .next()
-            .await
-            .map_err(|_| HydrationError::Unavailable)?
-            .is_some()
+        || rows.next().await.map_err(hydration_failure)?.is_some()
     {
         return Err(HydrationError::Unavailable);
     }
@@ -493,28 +497,117 @@ fn canonical_projected_message(
         .map(|output| output.message().clone())
 }
 
+impl GlobalDbHydrationBackend<'_> {
+    #[hotpath::measure]
+    async fn resolve_current(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+    ) -> Result<HydrationResolution, HydrationError> {
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        let control = snapshot.request().execution_control();
+        control.checkpoint()?;
+        let resolution = resolve_current(
+            &self.read,
+            self.relation_authority.as_ref(),
+            snapshot,
+            anchor_id,
+        )
+        .await?;
+        control.checkpoint()?;
+        Ok(resolution)
+    }
+
+    #[hotpath::measure]
+    async fn read_bounded(
+        &self,
+        descriptor: &PayloadDescriptor,
+        max_bytes: usize,
+        control: &ExecutionControl,
+    ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        control.checkpoint()?;
+        match &descriptor.source {
+            PayloadSource::Occurrence {
+                provider,
+                session_id,
+                message_id,
+                source_observation_id,
+                projection_output_ordinal,
+            } => {
+                read_occurrence_content(
+                    &self.read,
+                    self.storage_root,
+                    descriptor,
+                    provider,
+                    session_id,
+                    message_id,
+                    source_observation_id,
+                    *projection_output_ordinal,
+                    max_bytes,
+                    control,
+                )
+                .await
+            }
+            PayloadSource::Summary {
+                session_id,
+                summary_id,
+            } => {
+                let mut rows = self
+                    .read
+                    .query(
+                        "SELECT summary_text
+                             FROM session_summary_nodes
+                             WHERE session_id = ?1 AND summary_id = ?2
+                               AND length(CAST(summary_text AS BLOB)) <= ?3",
+                        params![
+                            session_id.as_str(),
+                            summary_id.as_str(),
+                            i64::try_from(max_bytes).unwrap_or(i64::MAX)
+                        ],
+                    )
+                    .await
+                    .map_err(hydration_failure)?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(hydration_failure)?
+                    .ok_or(HydrationError::Unavailable)?;
+                let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
+                bounded_copy(content.as_bytes(), max_bytes, control)
+            }
+            PayloadSource::External {
+                provider,
+                session_id,
+                payload_ref,
+                char_count,
+            } => {
+                let content = read_verified_payload_content(
+                    self.storage_root,
+                    payload_ref,
+                    &descriptor.content_hash,
+                    descriptor.byte_count,
+                    *char_count,
+                )
+                .map_err(hydration_failure)?;
+                let _ = (provider, session_id);
+                bounded_copy(content.as_bytes(), max_bytes, control)
+            }
+        }
+    }
+}
+
 impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
+    fn snapshot_is_stable(&self) -> bool {
+        true
+    }
+
     fn resolve_current<'a>(
         &'a self,
         snapshot: &'a TemporalExecutionSnapshot,
         anchor_id: &'a RetrievalAnchorId,
     ) -> BackendFuture<'a, HydrationResolution> {
-        Box::pin(async move {
-            let control = snapshot.request().execution_control();
-            control.checkpoint()?;
-            let resolution = resolve_current(
-                &self.read,
-                self.relation_authority.as_ref(),
-                snapshot,
-                anchor_id,
-            )
-            .await
-            .unwrap_or(HydrationResolution::Unavailable(
-                HydrationStateV1::RetainedButUnavailable,
-            ));
-            control.checkpoint()?;
-            Ok(resolution)
-        })
+        Box::pin(self.resolve_current(snapshot, anchor_id))
     }
 
     fn read_bounded<'a>(
@@ -523,79 +616,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         max_bytes: usize,
         control: &'a ExecutionControl,
     ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
-        Box::pin(async move {
-            control.checkpoint()?;
-            match &descriptor.source {
-                PayloadSource::Occurrence {
-                    provider,
-                    session_id,
-                    message_id,
-                    source_observation_id,
-                    projection_output_ordinal,
-                } => {
-                    read_occurrence_content(
-                        &self.read,
-                        self.storage_root,
-                        descriptor,
-                        provider,
-                        session_id,
-                        message_id,
-                        source_observation_id,
-                        *projection_output_ordinal,
-                        max_bytes,
-                        control,
-                    )
-                    .await
-                }
-                PayloadSource::Summary {
-                    session_id,
-                    summary_id,
-                } => {
-                    let mut rows = self
-                        .read
-                        .query(
-                            "SELECT summary_text
-                             FROM session_summary_nodes
-                             WHERE session_id = ?1 AND summary_id = ?2
-                               AND length(CAST(summary_text AS BLOB)) <= ?3",
-                            params![
-                                session_id.as_str(),
-                                summary_id.as_str(),
-                                i64::try_from(max_bytes).unwrap_or(i64::MAX)
-                            ],
-                        )
-                        .await
-                        .map_err(|_| HydrationError::Unavailable)?;
-                    let row = rows
-                        .next()
-                        .await
-                        .map_err(|_| HydrationError::Unavailable)?
-                        .ok_or(HydrationError::Unavailable)?;
-                    let content = Zeroizing::new(
-                        row.get::<String>(0)
-                            .map_err(|_| HydrationError::Unavailable)?,
-                    );
-                    bounded_copy(content.as_bytes(), max_bytes, control)
-                }
-                PayloadSource::External {
-                    provider,
-                    session_id,
-                    payload_ref,
-                    char_count,
-                } => {
-                    let content = read_verified_payload_content(
-                        self.storage_root,
-                        payload_ref,
-                        &descriptor.content_hash,
-                        descriptor.byte_count,
-                        *char_count,
-                    )
-                    .map_err(|_| HydrationError::Unavailable)?;
-                    let _ = (provider, session_id);
-                    bounded_copy(content.as_bytes(), max_bytes, control)
-                }
-            }
-        })
+        Box::pin(self.read_bounded(descriptor, max_bytes, control))
     }
 }
 
@@ -622,24 +643,19 @@ async fn read_occurrence_content(
             [source_observation_id],
         )
         .await
-        .map_err(|_| HydrationError::Unavailable)?;
+        .map_err(hydration_failure)?;
     let row = rows
         .next()
         .await
-        .map_err(|_| HydrationError::Unavailable)?
+        .map_err(hydration_failure)?
         .ok_or(HydrationError::Unavailable)?;
-    let observation_json: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
-    if rows
-        .next()
-        .await
-        .map_err(|_| HydrationError::Unavailable)?
-        .is_some()
-    {
+    let observation_json: String = row.get(0).map_err(hydration_failure)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
         return Err(HydrationError::Unavailable);
     }
     control.checkpoint()?;
     let observation: DurableObservationV1 =
-        serde_json::from_str(&observation_json).map_err(|_| HydrationError::Unavailable)?;
+        serde_json::from_str(&observation_json).map_err(hydration_failure)?;
     if observation.observation_id().as_str() != source_observation_id
         || observation.source().provider().as_str() != provider
         || observation.source().session_id().as_str() != session_id
@@ -655,7 +671,7 @@ async fn read_occurrence_content(
 
     let raw_payload = raw::load_raw_message_by_identity(conn, provider, session_id, message_id)
         .await
-        .map_err(|_| HydrationError::Unavailable)?
+        .map_err(hydration_failure)?
         .ok_or(HydrationError::Unavailable)?;
     match raw_payload.storage_kind {
         LcmStorageKind::Inline
@@ -677,7 +693,7 @@ async fn read_occurrence_content(
                 &raw_payload.content_hash,
             )
             .await
-            .map_err(|_| HydrationError::Unavailable)?;
+            .map_err(hydration_failure)?;
             let HydrationResolution::Available(external) = resolution else {
                 return Err(HydrationError::Unavailable);
             };
@@ -696,7 +712,7 @@ async fn read_occurrence_content(
                 descriptor.byte_count,
                 *char_count,
             )
-            .map_err(|_| HydrationError::Unavailable)?;
+            .map_err(hydration_failure)?;
             bounded_copy(content.as_bytes(), max_bytes, control)
         }
         _ => Err(HydrationError::Unavailable),
@@ -708,12 +724,17 @@ fn content_matches_descriptor(content: &[u8], descriptor: &PayloadDescriptor) ->
         && content_hash_matches(&descriptor.content_hash, content)
 }
 
+pub(super) fn hydration_failure(error: impl std::fmt::Display) -> HydrationError {
+    tracing::error!(error = %error, "session temporal hydration failed");
+    HydrationError::Unavailable
+}
+
 async fn resolve_current(
     conn: &TemporalSqlRead<'_>,
     relation_authority: Option<&SessionHydrationRelationAuthority<'_>>,
     snapshot: &TemporalExecutionSnapshot,
     requested_anchor: &RetrievalAnchorId,
-) -> Result<HydrationResolution, ()> {
+) -> Result<HydrationResolution, HydrationError> {
     let mut anchor_rows = conn
         .query(
             "SELECT anchor_json, owner_json
@@ -721,14 +742,14 @@ async fn resolve_current(
             params![requested_anchor.as_str()],
         )
         .await
-        .map_err(|_| ())?;
-    let Some(anchor_row) = anchor_rows.next().await.map_err(|_| ())? else {
+        .map_err(hydration_failure)?;
+    let Some(anchor_row) = anchor_rows.next().await.map_err(hydration_failure)? else {
         return Ok(HydrationResolution::Unavailable(
             HydrationStateV1::Unauthorized,
         ));
     };
-    let anchor_json: String = anchor_row.get(0).map_err(|_| ())?;
-    let owner_json: String = anchor_row.get(1).map_err(|_| ())?;
+    let anchor_json: String = anchor_row.get(0).map_err(hydration_failure)?;
+    let owner_json: String = anchor_row.get(1).map_err(hydration_failure)?;
     let anchor: RetrievalAnchorRecord = match serde_json::from_str(&anchor_json) {
         Ok(anchor) => anchor,
         Err(_) => {
@@ -800,8 +821,8 @@ async fn resolve_occurrence(
     anchor_id: &RetrievalAnchorId,
     anchor: &RetrievalAnchorRecord,
     owner_json: &str,
-) -> Result<Option<HydrationResolution>, ()> {
-    let generation = i64::try_from(snapshot.watermarks().generation).map_err(|_| ())?;
+) -> Result<Option<HydrationResolution>, HydrationError> {
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
     let mut rows = match snapshot.retrieval_scope() {
         TemporalRetrievalScope::Session(session_id) => {
             conn.query(
@@ -825,7 +846,9 @@ async fn resolve_occurrence(
             let project_key = snapshot
                 .request()
                 .authorized_root()
-                .ok_or(())?
+                .ok_or_else(|| {
+                    hydration_failure("authorized root is required for root-scope hydration")
+                })?
                 .project_key();
             conn.query(
                 "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
@@ -852,18 +875,18 @@ async fn resolve_occurrence(
             .await
         }
     }
-    .map_err(|_| ())?;
-    let Some(row) = rows.next().await.map_err(|_| ())? else {
+    .map_err(hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(hydration_failure)? else {
         return Ok(None);
     };
-    let session_id: String = row.get(0).map_err(|_| ())?;
-    let message_id: String = row.get(1).map_err(|_| ())?;
-    let projection_output_ordinal: i64 = row.get(2).map_err(|_| ())?;
-    let source_observation_id: String = row.get(3).map_err(|_| ())?;
-    let provider: String = row.get(4).map_err(|_| ())?;
-    let content_hash: String = row.get(5).map_err(|_| ())?;
-    let byte_count = nonnegative_usize(row.get::<Option<i64>>(6).map_err(|_| ())?)?;
-    if rows.next().await.map_err(|_| ())?.is_some() {
+    let session_id: String = row.get(0).map_err(hydration_failure)?;
+    let message_id: String = row.get(1).map_err(hydration_failure)?;
+    let projection_output_ordinal: i64 = row.get(2).map_err(hydration_failure)?;
+    let source_observation_id: String = row.get(3).map_err(hydration_failure)?;
+    let provider: String = row.get(4).map_err(hydration_failure)?;
+    let content_hash: String = row.get(5).map_err(hydration_failure)?;
+    let byte_count = nonnegative_usize(row.get::<Option<i64>>(6).map_err(hydration_failure)?)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
         )));
@@ -917,8 +940,8 @@ async fn resolve_summary(
     anchor_id: &RetrievalAnchorId,
     anchor: &RetrievalAnchorRecord,
     owner_json: &str,
-) -> Result<Option<HydrationResolution>, ()> {
-    let generation = i64::try_from(snapshot.watermarks().generation).map_err(|_| ())?;
+) -> Result<Option<HydrationResolution>, HydrationError> {
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
     let mut rows = match snapshot.retrieval_scope() {
         TemporalRetrievalScope::Session(session_id) => {
             conn.query(
@@ -941,7 +964,9 @@ async fn resolve_summary(
             let project_key = snapshot
                 .request()
                 .authorized_root()
-                .ok_or(())?
+                .ok_or_else(|| {
+                    hydration_failure("authorized root is required for root-scope hydration")
+                })?
                 .project_key();
             conn.query(
                 "SELECT node.session_id, generation.generation,
@@ -971,18 +996,17 @@ async fn resolve_summary(
             .await
         }
     }
-    .map_err(|_| ())?;
-    let Some(row) = rows.next().await.map_err(|_| ())? else {
+    .map_err(hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(hydration_failure)? else {
         return Ok(None);
     };
-    // Copy the selected values before advancing for the uniqueness probe.
-    let session_id: String = row.get(0).map_err(|_| ())?;
-    let generation: i64 = row.get(1).map_err(|_| ())?;
-    let summary_id: String = row.get(2).map_err(|_| ())?;
-    let publication_json: String = row.get(3).map_err(|_| ())?;
-    let summary_bytes = row.get::<i64>(4).map_err(|_| ())?;
-    let availability: String = row.get(5).map_err(|_| ())?;
-    if rows.next().await.map_err(|_| ())?.is_some() {
+    let session_id: String = row.get(0).map_err(hydration_failure)?;
+    let generation: i64 = row.get(1).map_err(hydration_failure)?;
+    let summary_id: String = row.get(2).map_err(hydration_failure)?;
+    let publication_json: String = row.get(3).map_err(hydration_failure)?;
+    let summary_bytes = row.get::<i64>(4).map_err(hydration_failure)?;
+    let availability: String = row.get(5).map_err(hydration_failure)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
         )));
@@ -1009,20 +1033,23 @@ async fn resolve_summary(
         && serde_json::to_string(anchor.owner()).ok().as_deref() == Some(owner_json);
     let provider_matches = match snapshot.provider_scope() {
         Some(provider) => {
-            let relation_authority = relation_authority.ok_or(())?;
-            let session = SessionId::new(session_id.clone()).map_err(|_| ())?;
+            let relation_authority = relation_authority.ok_or_else(|| {
+                hydration_failure(
+                    "summary relation authority is required for provider-scoped hydration",
+                )
+            })?;
+            let session = SessionId::new(session_id.clone()).map_err(hydration_failure)?;
             summary_has_provider_evidence(
                 conn,
                 &relation_authority.store,
                 relation_authority.scope,
                 &session,
-                u64::try_from(generation).map_err(|_| ())?,
+                u64::try_from(generation).map_err(hydration_failure)?,
                 &summary_id,
                 provider,
                 snapshot.request().execution_control(),
             )
-            .await
-            .map_err(|_| ())?
+            .await?
         }
         None => true,
     };
@@ -1086,8 +1113,7 @@ async fn summary_has_provider_evidence(
     if source_anchors.is_empty() {
         return Ok(false);
     }
-    let encoded_anchors =
-        serde_json::to_string(&source_anchors).map_err(|_| HydrationError::Unavailable)?;
+    let encoded_anchors = serde_json::to_string(&source_anchors).map_err(hydration_failure)?;
     let mut rows = conn
         .query(
             "SELECT EXISTS (
@@ -1104,21 +1130,21 @@ async fn summary_has_provider_evidence(
             params![
                 encoded_anchors,
                 session_id.as_str(),
-                i64::try_from(generation).map_err(|_| HydrationError::Unavailable)?,
+                i64::try_from(generation).map_err(hydration_failure)?,
                 provider
             ],
         )
         .await
-        .map_err(|_| HydrationError::Unavailable)?;
+        .map_err(hydration_failure)?;
     let row = rows
         .next()
         .await
-        .map_err(|_| HydrationError::Unavailable)?
+        .map_err(hydration_failure)?
         .ok_or(HydrationError::Unavailable)?;
     let matched = row
         .get::<i64>(0)
         .map(|value| value == 1)
-        .map_err(|_| HydrationError::Unavailable)?;
+        .map_err(hydration_failure)?;
     control.checkpoint()?;
     Ok(matched)
 }
@@ -1148,8 +1174,8 @@ fn hydration_relation_error(
         | SessionRelationError::Unavailable
         | SessionRelationError::Conflict
         | SessionRelationError::DurabilityUncertain
-        | SessionRelationError::Corrupt
-        | SessionRelationError::Storage(_) => HydrationError::Unavailable,
+        | SessionRelationError::Corrupt => HydrationError::Unavailable,
+        SessionRelationError::Storage(error) => hydration_failure(error),
         SessionRelationError::ResetRequired => HydrationError::ResetRequired {
             resource: "session relation projection",
         },
@@ -1167,7 +1193,7 @@ async fn session_owner(
     conn: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &str,
-) -> Result<Option<ObservationScopeV1>, ()> {
+) -> Result<Option<ObservationScopeV1>, HydrationError> {
     let mut rows = conn
         .query(
             "SELECT project_key
@@ -1177,12 +1203,12 @@ async fn session_owner(
             params![provider, session_id],
         )
         .await
-        .map_err(|_| ())?;
-    let Some(row) = rows.next().await.map_err(|_| ())? else {
+        .map_err(hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(hydration_failure)? else {
         return Ok(None);
     };
-    let project_key: String = row.get(0).map_err(|_| ())?;
-    if rows.next().await.map_err(|_| ())?.is_some() {
+    let project_key: String = row.get(0).map_err(hydration_failure)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
         return Ok(None);
     }
     Ok(owner_from_project_key(project_key))
@@ -1284,10 +1310,10 @@ fn bounded_copy(
     Ok(copy)
 }
 
-fn nonnegative_usize(value: Option<i64>) -> Result<usize, ()> {
+fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
     value
         .and_then(|value| usize::try_from(value).ok())
-        .ok_or(())
+        .ok_or_else(|| hydration_failure("payload size is not a nonnegative usize"))
 }
 
 fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {

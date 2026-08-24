@@ -12,6 +12,7 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_store::SessionStoreResult;
 
 use super::operations::CanonicalPublicationManifest;
+use super::projection::observation_envelope_from_payload;
 use super::query::{generation_i64, storage, storage_message};
 use super::relations::{
     AgentHierarchyRelation, LogicalCopyRelation, SessionRelationError, SessionRelationProjection,
@@ -68,11 +69,13 @@ impl RegisteredGlobalDb {
         Ok((generation, relations))
     }
 
+    #[hotpath::measure]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<GraphWatermark> {
+        crate::hotpath_observe::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -127,6 +130,7 @@ impl RegisteredGlobalDb {
         }))
     }
 
+    #[hotpath::measure]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -143,6 +147,7 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        crate::hotpath_observe::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -235,6 +240,8 @@ impl RegisteredGlobalDb {
             )
             .await?;
         }
+        let recovered = u64::try_from(pending.len()).unwrap_or(u64::MAX);
+        crate::hotpath_observe::record_output_sessions(recovered);
         Ok(pending.len())
     }
 
@@ -492,7 +499,7 @@ async fn reconstruct_occurrences(
         )
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let envelope: CanonicalObservationEnvelopeV1 =
-            serde_json::from_value(observation.payload().clone())
+            observation_envelope_from_payload(observation.payload())
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let anchor: RetrievalAnchorRecord = serde_json::from_str(
             &row.get::<String>(2)

@@ -7,21 +7,22 @@ use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
-    ConfigurationValueKindV1, ConfigurationValueV1, ContextScoutSettingsV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-    RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
-    SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
+    CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
+    ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
+    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
@@ -31,13 +32,13 @@ use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
 use super::semantic::SemanticConfig;
 
-/// Canonical Plan 20 default for configured-tier proximity warnings.
+/// Canonical default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
 pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 4;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 5;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -101,7 +102,7 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
-        register_user_profile_settings(&mut registry)?;
+        register_project_stored_user_profile_settings(&mut registry)?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(ANALYZER_SETTINGS_SETTING_KEY)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
@@ -204,6 +205,7 @@ impl ConfigurationRegistry {
         register_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
             .iter()
+            .filter(|key| **key != USER_CODE_INDEX_WORKERS_SETTING_KEY)
             .map(|key| setting_key(key))
             .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
         let actual = registry
@@ -218,6 +220,17 @@ impl ConfigurationRegistry {
                 },
             ));
         }
+        Ok(registry)
+    }
+
+    /// Build the exact profile-session registry for the daemon-wide code-index
+    /// worker selection. This setting must be available before any project is
+    /// opened, so it cannot share the project-session snapshot authority.
+    pub fn profile_code_index_workers() -> Result<Self, ConfigurationRegistryError> {
+        let mut registry = Self {
+            definitions: BTreeMap::new(),
+        };
+        registry.register(code_index_worker_definition()?)?;
         Ok(registry)
     }
 
@@ -336,7 +349,7 @@ impl ConfigurationRegistry {
 /// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
-fn register_user_profile_settings(
+fn register_project_stored_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
     registry.register(SettingDefinitionV1 {
@@ -380,6 +393,21 @@ fn register_user_profile_settings(
         })?;
     }
     Ok(())
+}
+
+fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRegistryError> {
+    Ok(SettingDefinitionV1 {
+        key: setting_key(USER_CODE_INDEX_WORKERS_SETTING_KEY)?,
+        schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+        value_kind: ConfigurationValueKindV1::CodeIndexWorkerSelection,
+        default_value: ConfigurationValueV1::CodeIndexWorkerSelection(
+            CodeIndexWorkerSelectionV1::Automatic,
+        ),
+        sensitivity: SettingSensitivityV1::Public,
+        scope: SettingScopeV1::UserProfile,
+        restart_requirement: RestartRequirementV1::DaemonRestart,
+        deprecation: DeprecationStateV1::Active,
+    })
 }
 
 /// Canonical defaults for the project-scoped runtime settings.
@@ -727,6 +755,46 @@ mod user_profile_settings_tests {
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { minimum: 1, .. })
         ));
+    }
+
+    #[test]
+    fn code_index_workers_default_is_automatic_and_zero_exact_is_denied() {
+        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 5);
+        let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).expect("key");
+        let project_registry = ConfigurationRegistry::core().expect("project registry");
+        assert!(matches!(
+            project_registry.definition(&key),
+            Err(ConfigurationRegistryError::UnknownSetting(_))
+        ));
+
+        let registry =
+            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
+        assert_eq!(registry.definitions().count(), 1);
+        let definition = registry.definition(&key).expect("definition");
+
+        assert_eq!(definition.scope, SettingScopeV1::UserProfile);
+        assert_eq!(
+            definition.value_kind,
+            ConfigurationValueKindV1::CodeIndexWorkerSelection
+        );
+        assert_eq!(
+            definition.default_value,
+            ConfigurationValueV1::CodeIndexWorkerSelection(CodeIndexWorkerSelectionV1::Automatic)
+        );
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+        assert!(
+            registry
+                .validate_value(
+                    &key,
+                    &ConfigurationValueV1::CodeIndexWorkerSelection(
+                        CodeIndexWorkerSelectionV1::Exact { workers: 0 },
+                    ),
+                )
+                .is_err()
+        );
     }
 }
 

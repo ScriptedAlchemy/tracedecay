@@ -55,10 +55,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         // count. The resume cursor is an event sequence, so the page is only
         // resumable when the tasks it returns are exactly the tasks the
         // journal prefix `[0, to)` introduced: `delta` then continues the same
-        // walk from `to` and reaches every task this page left out. Capping by
-        // task count while pointing the cursor at the journal head instead
-        // named a sequence with nothing after it, so the remainder was
-        // unreachable.
+        // walk from `to` and reaches every task this page left out.
         let page = page_tasks(&events, 0, page_size)?;
         let projections = rebuild_selected(page.events(&events)?, &page.selected)?;
         let returned =

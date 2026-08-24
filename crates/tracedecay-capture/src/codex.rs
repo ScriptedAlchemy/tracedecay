@@ -72,6 +72,10 @@ pub fn normalize_codex_observation_with_location(
     )
 }
 
+/// Shared normalization work behind both public Codex entry points.
+/// Measuring here (rather than each thin wrapper) covers per-record capture
+/// cost exactly once regardless of caller.
+#[hotpath::measure]
 fn normalize_codex_observation_inner(
     native: &Value,
     session_id: &str,
@@ -310,29 +314,42 @@ fn append_codex_event_facts(
     }
 }
 
+fn codex_usage_counters(usage: &Value) -> [Option<u64>; 6] {
+    [
+        canonical_u64(usage.get("input_tokens")),
+        canonical_u64(
+            usage
+                .get("output_tokens")
+                .or_else(|| usage.get("completion_tokens")),
+        ),
+        canonical_u64(
+            usage
+                .get("cached_input_tokens")
+                .or_else(|| usage.get("cache_read_input_tokens")),
+        ),
+        canonical_u64(usage.get("cache_write_input_tokens")),
+        canonical_u64(
+            usage
+                .get("reasoning_output_tokens")
+                .or_else(|| usage.get("reasoning_tokens")),
+        ),
+        canonical_u64(usage.get("total_tokens")),
+    ]
+}
+
 fn append_uncorrelated_codex_usage_fact(
     payload: &Value,
     usage: &Value,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
-    let input_tokens = canonical_u64(usage.get("input_tokens"));
-    let output_tokens = canonical_u64(
-        usage
-            .get("output_tokens")
-            .or_else(|| usage.get("completion_tokens")),
-    );
-    let cache_read_tokens = canonical_u64(
-        usage
-            .get("cached_input_tokens")
-            .or_else(|| usage.get("cache_read_input_tokens")),
-    );
-    let cache_write_tokens = canonical_u64(usage.get("cache_write_input_tokens"));
-    let reasoning_tokens = canonical_u64(
-        usage
-            .get("reasoning_output_tokens")
-            .or_else(|| usage.get("reasoning_tokens")),
-    );
-    let total_tokens = canonical_u64(usage.get("total_tokens"));
+    let [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+    ] = codex_usage_counters(usage);
     let mut missing_dimensions = BTreeSet::from([
         ProviderUsageContractDimensionV1::Scope,
         ProviderUsageContractDimensionV1::CounterSemantics,
@@ -361,24 +378,14 @@ fn append_codex_usage_fact(
     native_field: &str,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
-    let input_tokens = canonical_u64(usage.get("input_tokens"));
-    let output_tokens = canonical_u64(
-        usage
-            .get("output_tokens")
-            .or_else(|| usage.get("completion_tokens")),
-    );
-    let cache_read_tokens = canonical_u64(
-        usage
-            .get("cached_input_tokens")
-            .or_else(|| usage.get("cache_read_input_tokens")),
-    );
-    let cache_write_tokens = canonical_u64(usage.get("cache_write_input_tokens"));
-    let reasoning_tokens = canonical_u64(
-        usage
-            .get("reasoning_output_tokens")
-            .or_else(|| usage.get("reasoning_tokens")),
-    );
-    let total_tokens = canonical_u64(usage.get("total_tokens"));
+    let [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+    ] = codex_usage_counters(usage);
     let counters = if [
         input_tokens,
         output_tokens,
@@ -437,15 +444,14 @@ fn append_codex_thread_goal_lifecycle_fact(
     let Some(goal) = payload.get("goal") else {
         return false;
     };
-    let Some(objective) = goal
+    if goal
         .get("objective")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|objective| !objective.is_empty())
-    else {
+        .is_none_or(str::is_empty)
+    {
         return false;
-    };
-    let _ = objective;
+    }
     let status = goal
         .get("status")
         .and_then(Value::as_str)

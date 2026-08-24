@@ -1,7 +1,7 @@
 /**
- * Canvas2D renderer for the CORTEX relief sheet (plan 11b `:191` — "Canvas2D
- * first: terrain contours, membranes and bundled flows are path-heavy 2D work
- * where Canvas2D plus offscreen layering is simpler and theme-safe").
+ * Canvas2D renderer for the CORTEX relief sheet. Terrain contours, membranes
+ * and bundled flows are path-heavy 2D work where Canvas2D plus offscreen
+ * layering is simpler and theme-safe.
  *
  * This module draws and decides nothing. It is handed a `CortexModel` whose
  * every position, radius and ring count was computed in `cortexRelief.ts` from

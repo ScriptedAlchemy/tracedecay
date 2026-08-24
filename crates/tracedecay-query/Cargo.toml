@@ -12,8 +12,9 @@ include = ["/src/**"]
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
 hex = "0.4"
 hmac = "0.13.0"
+hotpath.workspace = true
 roaring = { version = "=0.11.4", default-features = false }
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+rusqlite.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -30,6 +31,37 @@ zeroize = "1.9.0"
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
 test-helpers = ["tracedecay-temporal-query/test-helpers"]

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Schema creation for the tracedecay database.
 //!
 //! This binary creates every store at one final schema shape and never steps an

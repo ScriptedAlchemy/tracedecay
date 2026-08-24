@@ -16,8 +16,7 @@
 #![allow(clippy::wildcard_imports)]
 // Pedantic style lints allowed crate-wide (consistent with the allows above):
 // these are non-correctness stylistic findings whose "fixes" are signature or
-// control-flow churn that would ripple across callers on this in-flight
-// redesign branch. Kept as allows rather than risking a co-editor's work.
+// control-flow churn that would ripple across callers.
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::trivially_copy_pass_by_ref)]
 #![allow(clippy::unused_self)]
@@ -84,14 +83,12 @@ pub mod git_intelligence;
 pub use tracedecay_usecases::git_query;
 pub mod global_db;
 pub mod graph;
-pub mod hooks;
+mod hooks;
 #[cfg(test)]
 mod host_admission_test;
 pub mod lifecycle_lease;
 pub mod mcp;
 pub mod monitor;
-#[cfg(test)]
-mod os_str_bytes;
 mod path_scope;
 mod path_tree;
 pub mod privacy;
@@ -99,7 +96,6 @@ pub mod profile_backup;
 pub mod profile_registry_maintenance;
 pub mod project_registry;
 pub mod redundancy;
-mod repository_provenance;
 pub mod request_identity;
 pub mod resolution;
 pub mod retention;
@@ -118,7 +114,6 @@ pub mod serve;
 #[path = "sessions/ingest_tests.rs"]
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
-mod shell;
 mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;

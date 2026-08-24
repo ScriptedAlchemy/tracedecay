@@ -2,8 +2,7 @@
 //!
 //! These builders outlive `production_project_server`: the mount closure runs
 //! when the activation owner first admits indexing, and the three sinks stay
-//! reachable from the published MCP servers. Grouping them here keeps the
-//! composition root a readable sequence of phases.
+//! reachable from the published MCP servers.
 
 use super::*;
 

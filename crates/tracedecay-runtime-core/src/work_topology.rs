@@ -38,6 +38,7 @@ pub struct WorkTopologyProjectionV1 {
 }
 
 impl WorkTopologyProjectionV1 {
+    #[hotpath::measure]
     pub fn from_events(events: &[WorkEvent]) -> Result<Self, WorkTopologyError> {
         let authority = events
             .first()
@@ -265,6 +266,7 @@ impl fmt::Debug for WorkTopologyStore {
 }
 
 impl WorkTopologyStore {
+    #[hotpath::measure]
     pub fn publish_from_events(
         events: &[WorkEvent],
         check: &dyn Fn() -> Result<(), GraphDbError>,

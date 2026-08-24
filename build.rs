@@ -1,5 +1,5 @@
-//! Root build script: embeds the dashboard dist, renders the CLI logo, and
-//! bakes the build's commit identity. The plugin-bundle manifest moved to
+//! Root build script: embeds the dashboard dist and bakes the build's commit
+//! identity. The plugin-bundle manifest moved to
 //! `crates/tracedecay-agent-hosts/build.rs` with the `agents`/`automation`
 //! subsystems.
 //!
@@ -10,8 +10,8 @@
 //!
 //! - This script must never watch `dashboard/app-dist`, which Rsbuild cleans
 //!   and rewrites. Only frontend source and configuration inputs are watched.
-//! - Moving these generators into their own crate would not shield the root
-//!   from the churn: a dependency's build-script rerun recompiles its
+//! - Moving this dashboard generator into a dependency would not shield the
+//!   root from churn: a dependency's build-script rerun recompiles its
 //!   dependents unconditionally.
 
 use std::{
@@ -142,18 +142,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The plugin-bundle manifest (`$OUT_DIR/plugin_bundle_generated.rs`) moved
     // to `crates/tracedecay-agent-hosts/build.rs` along with its only consumer,
     // `agents::plugin_bundle`. Its `plugin/`-relative paths are rebased there.
-    let out_path = Path::new("src/resources/logo.ansi");
-    let logo_bytes = include_bytes!("src/resources/logo.png");
-    let ansi = logo_art::image_to_ansi(logo_bytes, 90);
-    // Only rewrite when the content differs: `cargo package` verification
-    // rejects packages whose build script modifies files in the source dir.
-    if !matches!(fs::read(out_path), Ok(current) if current == ansi.as_bytes())
-        && let Err(e) = fs::write(out_path, &ansi)
-    {
-        panic!("failed to write {}: {e}", out_path.display());
-    }
-    println!("cargo::rerun-if-changed=src/resources/logo.png");
-
     // Build identity: the commit this binary is compiled from and whether the
     // worktree was clean. Feeds the generated agent plugins' provenance header
     // (so a stale installed plugin is distinguishable from the binary that

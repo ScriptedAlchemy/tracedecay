@@ -8,7 +8,8 @@
 > matching, exactly as the Motivation section describes.
 >
 > TraceDecay's shipped LSP surface is a different design: a daemon-side
-> gateway/broker (`src/lsp_bridge.rs`, `src/diagnostics/lsp/`) reached through
+> gateway/broker (`crates/tracedecay-lsp/src/gateway.rs`,
+> `crates/tracedecay-lsp/src/bridge.rs`, `src/diagnostics/lsp/`) reached through
 > `tracedecay lsp servers` and `tracedecay lsp bridge`, serving diagnostics and
 > context projection to hosts rather than enriching the sync-time graph. Read
 > this file as a proposal for the sync-time path only.

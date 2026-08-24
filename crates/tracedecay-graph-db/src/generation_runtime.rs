@@ -21,7 +21,7 @@ use crate::recovery::{
 use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::state::{
-    latest_projection, load_entity_by_node, load_relation, load_relation_by_edge,
+    EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
     projection_entity_deletion_page_checked, projection_relation_deletion_page_checked,
 };
 use crate::{
@@ -134,6 +134,7 @@ impl GraphDb {
         self.apply_generation_unverified_with_digest(manifest, &expected, check)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.stage", impl_type = "GraphDb")]
     pub(crate) fn apply_generation_unverified_with_digest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -155,6 +156,19 @@ impl GraphDb {
             return Ok(commit);
         }
         let pages = generation_stage_pages(manifest)?;
+        #[cfg(feature = "hotpath")]
+        {
+            let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
+            crate::hotpath_observe::record_counts(
+                manifest.entities.len(),
+                manifest.relations.len(),
+                0,
+                generation_bytes,
+            );
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Staged,
+            );
+        }
         for (index, page) in pages.iter().enumerate() {
             check()?;
             self.apply_generation_stage_page_with_context(
@@ -177,7 +191,7 @@ impl GraphDb {
         manifest: &GraphGenerationManifest,
         context: &GenerationStageContext,
     ) -> Result<Option<GraphCommit>, GraphDbError> {
-        let _snapshot_gate = self.inner.snapshot_gate.upgradable_read();
+        let _snapshot_gate = self.wait_snapshot_gate_upgradable();
         let existing = {
             let guard = self.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -197,9 +211,7 @@ impl GraphDb {
         {
             return Ok(None);
         }
-        let mut verified = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut verified = self.wait_verified_generations_write()?;
         verified.collected.remove(&context.locator);
         verified.stored.insert(
             context.locator.clone(),
@@ -357,9 +369,7 @@ impl GraphDb {
                 ))
             },
             |_database, commit, ()| {
-                let mut verified = self.inner.verified_generations.write().map_err(|_| {
-                    GraphDbError::unavailable("verified graph generation state lock is poisoned")
-                })?;
+                let mut verified = self.wait_verified_generations_write()?;
                 verified.collected.remove(&context.locator);
                 verified.stored.insert(
                     context.locator.clone(),
@@ -370,6 +380,7 @@ impl GraphDb {
         )
     }
 
+    #[hotpath::measure(label = "graph_db.generation.reopen", impl_type = "GraphDb")]
     pub(crate) fn reopen_and_verify_existing_generation(
         &self,
         manifest: &GraphGenerationManifest,
@@ -390,12 +401,13 @@ impl GraphDb {
         // so it runs behind an upgradable claim: snapshot readers proceed
         // while every writer still queues behind this guard, keeping the
         // reopened rows stable for the digest.
-        let snapshot_gate = self.inner.snapshot_gate.write();
+        let snapshot_gate = self.wait_snapshot_gate_write();
         {
-            let mut database_guard =
-                self.inner.database.write().map_err(|_| {
-                    GraphDbError::unavailable("graph database write lock is poisoned")
-                })?;
+            let mut database_guard = crate::hotpath_observe::wait_lock(
+                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                || self.inner.database.write(),
+            )
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             self.ensure_available()?;
             check()?;
             let mut state_guard = self.state_write_guard()?;
@@ -484,12 +496,16 @@ impl GraphDb {
         // database file). The re-verification afterwards is read-only again,
         // so the gate downgrades back to upgradable and snapshot readers are
         // admitted while the repaired rows stream through the proof.
-        let write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
+        let write_gate = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
+            || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
+        );
         {
-            let mut database_guard =
-                self.inner.database.write().map_err(|_| {
-                    GraphDbError::unavailable("graph database write lock is poisoned")
-                })?;
+            let mut database_guard = crate::hotpath_observe::wait_lock(
+                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                || self.inner.database.write(),
+            )
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             let mut state_guard = self.state_write_guard()?;
             let mut quarantined_guard = self
                 .inner
@@ -536,14 +552,30 @@ impl GraphDb {
             verify_recovered_generation(database, manifest, expected, check)
         };
         match verify_result {
-            Ok(verified) => Ok((commit, verified)),
+            Ok(verified) => {
+                crate::hotpath_observe::record_counts(
+                    manifest.entities.len(),
+                    manifest.relations.len(),
+                    0,
+                    0,
+                );
+                crate::hotpath_observe::record_hydration_source(
+                    crate::hotpath_observe::HydrationSource::Recovered,
+                );
+                Ok((commit, verified))
+            }
             Err(error) => {
                 // Restoring the durable quarantine marker rewrites the file,
                 // so the failure path re-takes the exclusive claim.
-                let _write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
-                let mut database_guard = self.inner.database.write().map_err(|_| {
-                    GraphDbError::unavailable("graph database write lock is poisoned")
-                })?;
+                let _write_gate = crate::hotpath_observe::wait_lock(
+                    crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
+                    || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
+                );
+                let mut database_guard = crate::hotpath_observe::wait_lock(
+                    crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                    || self.inner.database.write(),
+                )
+                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
                 let mut state_guard = self.state_write_guard()?;
                 let mut quarantined_guard =
                     self.inner.quarantined_projections.write().map_err(|_| {
@@ -579,9 +611,7 @@ impl GraphDb {
         &self,
         lease: std::sync::Arc<VerifiedGenerationLease>,
     ) -> Result<Option<std::sync::Arc<VerifiedGenerationLease>>, GraphDbError> {
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.install(lease)
     }
 
@@ -589,9 +619,7 @@ impl GraphDb {
         &self,
         lease: &std::sync::Arc<VerifiedGenerationLease>,
     ) -> Result<(), GraphDbError> {
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.remember(lease)
     }
 
@@ -609,9 +637,7 @@ impl GraphDb {
                 .map(|projection| projection.commit)
         };
         let Some(commit) = commit else {
-            let mut state = self.inner.verified_generations.write().map_err(|_| {
-                GraphDbError::unavailable("verified graph generation state lock is poisoned")
-            })?;
+            let mut state = self.wait_verified_generations_write()?;
             state.known.remove(locator);
             state.quarantined.remove(locator);
             state.stored.remove(locator);
@@ -626,9 +652,7 @@ impl GraphDb {
             commit.watermark,
             check,
         )?;
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.known.remove(locator);
         state.quarantined.remove(locator);
         state.stored.remove(locator);
@@ -744,14 +768,19 @@ impl GraphDb {
         else {
             return Ok(None);
         };
-        let edge = database
-            .graph_store()
-            .get_edge(stored.edge)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "verified generation relation edge is missing".to_owned(),
-            })?;
-        let from = typed_entity_ref(database, edge.src, &namespace_projection)?;
-        let to = typed_entity_ref(database, edge.dst, &namespace_projection)?;
+        let mut endpoints = EndpointIdentityCache::default();
+        let from = typed_entity_ref(
+            database,
+            stored.source,
+            &namespace_projection,
+            &mut endpoints,
+        )?;
+        let to = typed_entity_ref(
+            database,
+            stored.target,
+            &namespace_projection,
+            &mut endpoints,
+        )?;
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -765,6 +794,7 @@ impl GraphDb {
         .map(Some)
     }
 
+    #[hotpath::measure(label = "graph_db.traversal.verified", impl_type = "GraphDb")]
     pub(crate) fn traverse_generation(
         &self,
         snapshot: &VerifiedGraphSnapshot,
@@ -793,6 +823,7 @@ impl GraphDb {
         let start = crate::state::load_entity(database, &head_namespace, &request.start)?
             .ok_or_else(|| GraphDbError::invalid("traversal start entity does not exist"))?;
         let store = database.graph_store();
+        let mut endpoints = EndpointIdentityCache::default();
         let mut queue = VecDeque::from([(start.node, 0_usize, None)]);
         let mut discovered = HashSet::from([start.node]);
         let mut visits = Vec::new();
@@ -807,7 +838,7 @@ impl GraphDb {
                 ));
             }
             visits.push(VerifiedTraversalVisit {
-                entity: typed_entity_ref(database, node, &namespace_projection)?,
+                entity: typed_entity_ref(database, node, &namespace_projection, &mut endpoints)?,
                 depth,
                 via_relation,
             });
@@ -849,21 +880,18 @@ impl GraphDb {
                     else {
                         continue;
                     };
-                    let stored = load_relation_by_edge(database, edge_id)?.ok_or_else(|| {
-                        GraphDbError::Corrupt {
-                            message: "verified traversal edge has no typed relation locator"
-                                .to_owned(),
-                        }
+                    let stored = load_relation_by_edge_cached(database, edge_id, &mut endpoints)?
+                        .ok_or_else(|| GraphDbError::Corrupt {
+                        message: "verified traversal edge has no typed relation locator".to_owned(),
                     })?;
-                    let neighbor_entity = load_entity_by_node(database, neighbor)?;
-                    let Some(entity_projection) = namespace_projection
-                        .get(&neighbor_entity.namespace)
-                        .cloned()
+                    let (neighbor_namespace, neighbor_identity) =
+                        endpoints.identity(database, neighbor)?;
+                    let Some(entity_projection) =
+                        namespace_projection.get(&neighbor_namespace).cloned()
                     else {
                         continue;
                     };
-                    let entity =
-                        GraphEntityRef::new(entity_projection, neighbor_entity.entity.identity);
+                    let entity = GraphEntityRef::new(entity_projection, neighbor_identity);
                     adjacent.push((
                         GraphRelationRef::new(relation_projection, stored.relation.identity),
                         entity,
@@ -885,6 +913,17 @@ impl GraphDb {
                 }
             }
         }
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = visits
+                .iter()
+                .filter(|visit| visit.via_relation.is_some())
+                .count();
+            crate::hotpath_observe::record_counts(visits.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Snapshot,
+            );
+        }
         Ok(VerifiedTraversalResult { visits })
     }
 
@@ -905,6 +944,11 @@ impl GraphDb {
         }
         if state.retiring.contains(locator) || state.collected.contains(locator) {
             return Err(GraphDbError::Conflict);
+        }
+        if let Some(installed) = state.heads.get(&locator.projection)
+            && installed.locator == *locator
+        {
+            return Ok(Some(std::sync::Arc::clone(installed)));
         }
         Ok(state.known.get(locator).and_then(std::sync::Weak::upgrade))
     }
@@ -943,12 +987,12 @@ impl GraphDb {
         let locator =
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let physical_namespace = locator.physical_namespace()?;
-        let _snapshot_gate = self.inner.snapshot_gate.write();
-        let mut database_guard = self
-            .inner
-            .database
-            .write()
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let mut database_guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+            || self.inner.database.write(),
+        )
+        .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         let mut format_state = self.state_write_guard()?;
         let mut projection_quarantine = self
             .inner
@@ -990,9 +1034,7 @@ impl GraphDb {
         *format_state = recovered_state;
         *projection_quarantine = recovered_quarantine;
         *database_guard = Some(recovered);
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.quarantine(locator);
         Ok(())
     }
@@ -1002,15 +1044,16 @@ fn typed_entity_ref(
     database: &grafeo_engine::GrafeoDB,
     node: grafeo_common::types::NodeId,
     namespace_projection: &BTreeMap<GraphNamespace, crate::GraphProjectionIdentity>,
+    cache: &mut EndpointIdentityCache,
 ) -> Result<GraphEntityRef, GraphDbError> {
-    let stored = load_entity_by_node(database, node)?;
+    let (namespace, identity) = cache.identity(database, node)?;
     let projection = namespace_projection
-        .get(&stored.namespace)
+        .get(&namespace)
         .cloned()
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "verified graph entity escapes snapshot dependency closure".to_owned(),
         })?;
-    Ok(GraphEntityRef::new(projection, stored.entity.identity))
+    Ok(GraphEntityRef::new(projection, identity))
 }
 
 fn generation_stage_pages(

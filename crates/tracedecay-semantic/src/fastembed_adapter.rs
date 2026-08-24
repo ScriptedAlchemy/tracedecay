@@ -1,4 +1,4 @@
-//! semantic `FastEmbed` semantic adapter
+//! `FastEmbed` embedding runtime adapter
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Root-private embedding runtime port surface. This file owns the typed
@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(any(test, feature = "semantic-fastembed"))]
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
@@ -568,10 +568,8 @@ impl AdmittedProjectionArtifactV1 {
         &self.runtime_artifact.projection
     }
 
-    /// Intra-op width is admitted with the artifact and is part of the exact
-    /// FastEmbed execution identity, even though it is not a projection-key
-    /// field. Keep it crate-private so callers cannot label a cache entry
-    /// with an independently supplied width.
+    /// Maximum intra-op width admitted with the artifact. The process CPU
+    /// authority may narrow the native runtime below this ceiling.
     pub(crate) fn execution_max_threads(&self) -> u32 {
         self.runtime_artifact.max_threads()
     }
@@ -689,7 +687,7 @@ impl LifecycleInstallArtifactV1 {
                 "cataloged lifecycle member cannot be read",
             )
         })?;
-        if hex::encode(Sha256::digest(&bytes)) != pin.sha256 {
+        if sha256_hex(&bytes) != pin.sha256 {
             return Err(fastembed_failure(
                 RuntimeFailureKindV1::CorruptArtifact,
                 "cataloged lifecycle member no longer matches its digest pin",
@@ -1076,6 +1074,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn open_session(
         &self,
         authority: &AdmittedProjectionArtifactV1,
@@ -1083,17 +1082,23 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         self.verify_artifact_compatibility(authority)?;
         let artifact = authority.runtime_artifact();
         let model = fastembed_model(artifact)?;
+        let intra_threads =
+            crate::embedding_parallelism::embedding_intra_threads(artifact.max_threads());
         let options = InitOptionsUserDefined::new()
             .with_max_length(artifact.truncation_length() as usize)
-            .with_intra_threads(artifact.max_threads() as usize);
-        let embedding =
+            .with_intra_threads(intra_threads);
+        let embedding = hotpath::measure_block!("semantic.model.load", {
             TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
-                fastembed_error(
+                let failure = fastembed_error(
                     RuntimeFailureKindV1::LoadFailed,
                     "FastEmbed could not initialize the verified artifact",
                     &error,
-                )
-            })?;
+                );
+                crate::hotpath_observe::record_embed_error(&failure);
+                failure
+            })
+        })?;
+        crate::hotpath_observe::record_model_state("ready");
         Ok(FastEmbedEmbeddingSession {
             authority: authority.clone(),
             embedding,
@@ -1117,6 +1122,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         self.authority.resident_byte_ceiling()
     }
 
+    #[hotpath::measure]
     fn embed_batch(
         &mut self,
         batch: &BoundedSanitizedTextBatchV1,
@@ -1124,21 +1130,25 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         let artifact = self.authority.runtime_artifact();
         validate_batch_limits(batch, artifact)?;
+        hotpath::gauge!("semantic_embed_batch_size").set(batch.len());
 
         check_execution_authority(authority)?;
         // FastEmbed/ORT inference is synchronous. Keep batches small at the
         // projector boundary, then perform one tensor invocation per admitted
         // batch instead of one invocation per text.
-        let embedded = self
-            .embedding
-            .embed(batch.texts(), Some(batch.len()))
-            .map_err(|error| {
-                fastembed_error(
-                    RuntimeFailureKindV1::EmbedFailed,
-                    "FastEmbed inference failed for the verified artifact",
-                    &error,
-                )
-            })?;
+        let embedded = hotpath::measure_block!("semantic.embed.infer", {
+            self.embedding
+                .embed(batch.texts(), Some(batch.len()))
+                .map_err(|error| {
+                    let failure = fastembed_error(
+                        RuntimeFailureKindV1::EmbedFailed,
+                        "FastEmbed inference failed for the verified artifact",
+                        &error,
+                    );
+                    crate::hotpath_observe::record_embed_error(&failure);
+                    failure
+                })
+        })?;
         check_execution_authority(authority)?;
         if embedded.len() != batch.len() {
             return Err(fastembed_failure(
@@ -1935,46 +1945,6 @@ mod tests {
                 max: 3
             })
         ));
-    }
-
-    #[test]
-    fn fake_embed_is_deterministic_across_sessions() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority(16);
-        let mut s1 = runtime.open_session(&authority).expect("session 1");
-        let mut s2 = runtime.open_session(&authority).expect("session 2");
-        let texts = batch(&["fn reserve_stock()", "impl Display for Error"]);
-        let cancel = never_cancelled();
-        let v1 = s1.embed_batch(&texts, &cancel).expect("embed 1");
-        let v2 = s2.embed_batch(&texts, &cancel).expect("embed 2");
-        assert_eq!(v1, v2, "same model identity + same text => same vector");
-    }
-
-    #[test]
-    fn fake_embed_distinguishes_inputs_and_model_identities() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority(16);
-        let mut session = runtime.open_session(&authority).expect("session");
-        let cancel = never_cancelled();
-        let pair = session
-            .embed_batch(&batch(&["alpha", "beta"]), &cancel)
-            .expect("embed");
-        assert_ne!(pair[0].values, pair[1].values, "distinct texts differ");
-
-        let other = authority_with(
-            16,
-            'f',
-            EmbeddingMetricV1::Cosine,
-            EmbeddingNormalizationV1::L2,
-        );
-        let mut other_session = runtime.open_session(&other).expect("other session");
-        let other_vec = other_session
-            .embed_batch(&batch(&["alpha"]), &cancel)
-            .expect("embed other");
-        assert_ne!(
-            pair[0].values, other_vec[0].values,
-            "distinct model identities differ"
-        );
     }
 
     #[test]

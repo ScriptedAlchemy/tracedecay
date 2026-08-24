@@ -7,11 +7,13 @@ use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::RegisteredGlobalDb;
 use super::query::{PERSIST_OPERATION, storage, storage_message};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use super::relations::SessionRelationError;
+use crate::hotpath_observe;
 
 mod derived;
 mod materialize;
@@ -23,8 +25,9 @@ mod tests;
 use materialize::materialize_session_temporal_refresh_batch_in_transaction;
 
 pub(super) use materialize::canonical_parent_message_resolver;
+pub(in crate::session_temporal) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
-    persist_session_temporal_projection_batch_in_transaction,
+    ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
 };
 pub(in crate::session_temporal) use receipts::digest_bytes;
@@ -36,6 +39,9 @@ const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
 const MAX_BASELINE_RELATION_ITEMS: usize = 100_000;
 
 impl RegisteredGlobalDb {
+    /// Discovers sessions that need temporal projection.
+    ///
+    #[hotpath::measure]
     pub async fn pending_session_temporal_refresh_requests_result(
         &self,
         limit: usize,
@@ -44,7 +50,10 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        hotpath_observe::record_snapshot_admissions(1);
         let limit = i64::try_from(limit).map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        // Visit only output-producing effects past each session's projection
+        // frontier. History-only (`output_count = 0`) rows never enter grouping.
         let mut rows = snapshot
             .query(
                 "WITH active AS (
@@ -70,17 +79,15 @@ impl RegisteredGlobalDb {
                  LEFT JOIN active ON active.session_id = effect.session_id
                  LEFT JOIN running ON running.session_id = effect.session_id
                  WHERE running.session_id IS NULL
+                   AND effect.output_count > 0
+                   AND effect.observation_sequence > COALESCE(
+                        CAST(json_extract(
+                            active.frozen_watermarks_json,
+                            '$.projection_frontier'
+                        ) AS INTEGER),
+                        0
+                   )
                  GROUP BY effect.session_id
-                 HAVING MAX(CASE
-                     WHEN effect.output_count > 0 THEN effect.observation_sequence
-                     ELSE NULL
-                 END) > COALESCE(
-                    CAST(json_extract(
-                        active.frozen_watermarks_json,
-                        '$.projection_frontier'
-                    ) AS INTEGER),
-                    0
-                )
                  ORDER BY effect.session_id
                  LIMIT ?1",
                 params![limit],
@@ -113,9 +120,11 @@ impl RegisteredGlobalDb {
                 SessionRefreshFrontierV1::new(observed_through, committed_through)?,
             ));
         }
+        hotpath_observe::record_output_sessions(u64::try_from(requests.len()).unwrap_or(u64::MAX));
         Ok(requests)
     }
 
+    #[hotpath::measure]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -125,6 +134,7 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        hotpath_observe::record_snapshot_admissions(1);
         let baseline_copy_count =
             if recovery.restart_state() == SessionRefreshRestartStateV1::BeginProjection {
                 let (scope, relation_store) = self
@@ -190,6 +200,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
+    #[hotpath::measure]
     pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,
@@ -198,8 +209,13 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let receipt =
-            persist_session_temporal_projection_batch_in_transaction(&transaction, &batch).await?;
+        let receipt = persist_session_temporal_projection_batch_in_transaction(
+            &transaction,
+            &batch,
+            &ExecutionControl::default(),
+            ProjectionProgressBaseline::Empty,
+        )
+        .await?;
         transaction
             .commit()
             .await

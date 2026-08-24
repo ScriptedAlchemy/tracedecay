@@ -4,9 +4,9 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  * The channel vocabulary the four Work projections speak.
  *
  * A channel is never estimated to fill a gap, and a channel that goes live is
- * live because a read proved it rather than because a read arrived. Plan 11c is
- * explicit: attempt counts, queue ages and wall-times are real or absent, and a
- * degenerate distribution is said rather than drawn.
+ * live because a read proved it rather than because a read arrived. Attempt
+ * counts, queue ages and wall-times are real or absent, and a degenerate
+ * distribution is said rather than drawn.
  */
 
 /**
@@ -21,7 +21,7 @@ export type WorkChannel<T> =
   | { readonly available: false; readonly state: DomainStateKind; readonly detail: string };
 
 /**
- * The measurements plan 11c asks a projection to encode that NO contract in
+ * The measurements a projection is asked to encode that NO contract in
  * this build carries, however many routes are mounted.
  *
  * Each is named for the measurement rather than for the route that would supply

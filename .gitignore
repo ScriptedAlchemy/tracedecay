@@ -21,7 +21,7 @@ __pycache__/
 *~
 *#
 
-# transient fact-store eval baseline (written by eval/hermetic corpus setup_cmd)
+# transient fact-store eval baseline (written by evals/hermetic corpus setup_cmd)
 .factstore_baseline_count
 
 # transient Playwright/axe verification output (screenshots and findings).

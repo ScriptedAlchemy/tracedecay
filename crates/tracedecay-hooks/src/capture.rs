@@ -45,7 +45,36 @@ pub enum NativeHookCaptureOutcomeV1 {
     Unavailable,
 }
 
+/// Single entry point for every native hook payload a host captures. This is
+/// the coarse boundary that matters for hook latency: it decodes, binds, and
+/// spools one event, so its cost and outcome mix stand in for the whole
+/// capture path without measuring the decode/bind/spool internals separately.
+#[hotpath::measure]
 pub fn capture_native_event_for_replay(
+    data_root: &Path,
+    source: NativeHookCaptureSourceV1,
+    payload: &[u8],
+    material: NativeEnvelopeMaterialV1,
+    now: UtcMicros,
+) -> NativeHookCaptureOutcomeV1 {
+    let outcome = capture_native_event_for_replay_inner(data_root, source, payload, material, now);
+    #[cfg(feature = "hotpath")]
+    {
+        let name = match outcome {
+            NativeHookCaptureOutcomeV1::Captured => "hooks.capture.outcome.captured",
+            NativeHookCaptureOutcomeV1::Unsupported => "hooks.capture.outcome.unsupported",
+            NativeHookCaptureOutcomeV1::Unbound => "hooks.capture.outcome.unbound",
+            NativeHookCaptureOutcomeV1::Rejected => "hooks.capture.outcome.rejected",
+            NativeHookCaptureOutcomeV1::Full => "hooks.capture.outcome.full",
+            NativeHookCaptureOutcomeV1::ResetRequired => "hooks.capture.outcome.reset_required",
+            NativeHookCaptureOutcomeV1::Unavailable => "hooks.capture.outcome.unavailable",
+        };
+        hotpath::gauge!(name).inc(1);
+    }
+    outcome
+}
+
+fn capture_native_event_for_replay_inner(
     data_root: &Path,
     source: NativeHookCaptureSourceV1,
     payload: &[u8],

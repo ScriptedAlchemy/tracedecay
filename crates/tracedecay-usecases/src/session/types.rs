@@ -99,7 +99,16 @@ impl SessionRequestBinding {
             .identity
             .session_request_scope()
             .map_err(|_| SessionAuthorizationError::UnresolvedApplicationScope)?;
-        if &scope != context.scope() {
+        // Project, repository, and worktree are checkout identity and are the
+        // only partition keys of a session store. The branch reference is not:
+        // the mounted identity records the label the *graph scope* was
+        // registered under, while the request context carries whatever label
+        // HEAD happens to hold. Those diverge on every ordinary branch switch,
+        // and comparing whole scopes (directly or through the derived
+        // `scope_digest`) turned that label move into an authorization refusal
+        // — every session read on a checkout serving another branch answered
+        // `WrongScope`, which surfaces as `not_found_or_not_authorized`.
+        if !scope.identifies_same_checkout(context.scope()) {
             return Err(SessionAuthorizationError::WrongScope);
         }
         if self.cancellation.application_token_id()
@@ -1211,6 +1220,81 @@ mod tests {
             wrong_grant.validate_context(&context),
             Err(SessionAuthorizationError::WrongContext)
         );
+    }
+
+    fn rebranched_binding(context: &TestRequestContext, branch: &str) -> SessionRequestBinding {
+        let route = context.identity().git_route().unwrap();
+        SessionRequestBinding::new(
+            ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.primary").unwrap(),
+                ProjectId::new("project.tracedecay").unwrap(),
+                SessionStoreId::new("store.project.tracedecay").unwrap(),
+                SessionRootId::new("root.project.tracedecay").unwrap(),
+                ResolvedGitRoute::new(
+                    route.repository_id().clone(),
+                    route.worktree_id().clone(),
+                    BranchId::new(branch).unwrap(),
+                ),
+            ),
+            context.capability_digest(),
+            context.policy_digest(),
+            context.configuration_digest(),
+            context.binding.cancellation.clone(),
+            context.binding.budgets,
+        )
+    }
+
+    #[test]
+    fn binding_admits_the_same_checkout_under_a_moved_branch_label() {
+        let context = context();
+        // The mounted session identity records the branch its graph scope was
+        // registered under; the request context records whatever branch HEAD
+        // currently points at. A session store is partitioned by
+        // project/repository/worktree only, so the divergent label must not be
+        // reported as an authorization refusal.
+        let moved = rebranched_binding(&context, "branch.registered-elsewhere");
+        assert_ne!(
+            moved.identity().session_request_scope().unwrap(),
+            *context.scope()
+        );
+        assert_eq!(moved.validate_context(&context), Ok(()));
+    }
+
+    #[test]
+    fn binding_still_fails_closed_on_a_foreign_checkout() {
+        let context = context();
+        let route = context.identity().git_route().unwrap();
+        for foreign in [
+            ResolvedGitRoute::new(
+                RepositoryId::new("repository.other").unwrap(),
+                route.worktree_id().clone(),
+                route.branch_id().clone(),
+            ),
+            ResolvedGitRoute::new(
+                route.repository_id().clone(),
+                WorktreeId::new("worktree.other").unwrap(),
+                route.branch_id().clone(),
+            ),
+        ] {
+            let binding = SessionRequestBinding::new(
+                ResolvedSessionIdentity::for_project(
+                    ProfileId::new("profile.primary").unwrap(),
+                    ProjectId::new("project.tracedecay").unwrap(),
+                    SessionStoreId::new("store.project.tracedecay").unwrap(),
+                    SessionRootId::new("root.project.tracedecay").unwrap(),
+                    foreign,
+                ),
+                context.capability_digest(),
+                context.policy_digest(),
+                context.configuration_digest(),
+                context.binding.cancellation.clone(),
+                context.binding.budgets,
+            );
+            assert_eq!(
+                binding.validate_context(&context),
+                Err(SessionAuthorizationError::WrongScope)
+            );
+        }
     }
 
     #[test]

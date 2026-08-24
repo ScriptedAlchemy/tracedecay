@@ -18,6 +18,7 @@ pub mod feedback;
 pub mod handoff;
 mod http;
 pub mod multi_root;
+mod observe;
 pub mod read_model;
 pub mod remote;
 mod retained;

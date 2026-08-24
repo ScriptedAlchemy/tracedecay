@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+from lib.process_control import terminate
+
 
 TIMEOUT_SECONDS = 30
 
@@ -41,19 +43,6 @@ def read_frame(payload: bytes) -> dict[str, object]:
     if not isinstance(value, dict):
         fail("packaged LSP bridge returned a non-object JSON-RPC response")
     return value
-
-
-def terminate(process: subprocess.Popen[bytes] | None) -> None:
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        # SIGKILL cannot be refused; wait without a timeout so a slow reap
-        # here can never mask the real failure being propagated.
-        process.wait()
 
 
 def daemon_command(

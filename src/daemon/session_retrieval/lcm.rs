@@ -3,6 +3,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
@@ -31,13 +32,13 @@ use super::{
 
 impl DaemonSessionRetrievalService {
     fn lcm_authorization_binding(&self, provider: &str) -> String {
-        format!(
-            "sha256:{}",
-            hex::encode(message_search_digest(
+        encode_tagged_lowercase_hex(
+            "sha256:",
+            &message_search_digest(
                 b"tracedecay.mcp.lcm.authorization.v1\0",
                 &self.root.identity,
                 Some(provider),
-            ))
+            ),
         )
     }
 
@@ -64,7 +65,7 @@ impl DaemonSessionRetrievalService {
             "authorization": self.lcm_authorization_binding(provider),
         })
         .to_string();
-        format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())))
+        encode_tagged_lowercase_hex("sha256:", &Sha256::digest(encoded.as_bytes()))
     }
 
     fn lcm_temporal_view(&self, result: &TemporalKernelResult) -> SessionTemporalMetadataView {

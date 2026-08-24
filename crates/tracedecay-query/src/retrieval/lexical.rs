@@ -138,8 +138,6 @@ fn split_identifier_parts(token: &str) -> impl Iterator<Item = String> + '_ {
     parts.into_iter()
 }
 
-/// Typed lexical fields over code-search result grains.
-///
 /// Whole exact terms and language-profiled subtokens are distinct fields.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LexicalFieldV1 {
@@ -462,6 +460,7 @@ impl<P> LexicalLaneRetriever for LexicalLane<P>
 where
     P: LexicalPostingReadPort,
 {
+    #[hotpath::measure(label = "query.lane.lexical")]
     fn retrieve_lexical(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -478,16 +477,24 @@ where
             }
             Err(error) => return Err(error),
         };
-        match outcome {
-            RetrieverOutcome::Complete(batch) => Ok(RetrieverOutcome::Complete(
-                self.enforce_batch(request, &batch)?,
-            )),
-            RetrieverOutcome::Partial { value, reason } => Ok(RetrieverOutcome::Partial {
+        let outcome = match outcome {
+            RetrieverOutcome::Complete(batch) => {
+                RetrieverOutcome::Complete(self.enforce_batch(request, &batch)?)
+            }
+            RetrieverOutcome::Partial { value, reason } => RetrieverOutcome::Partial {
                 value: self.enforce_batch(request, &value)?,
                 reason,
-            }),
-            outcome => Ok(outcome),
-        }
+            },
+            outcome => outcome,
+        };
+        crate::hotpath_metrics::record_lane(
+            "query.lane.lexical.candidates",
+            "query.lane.lexical.examined",
+            "query.lane.lexical.results",
+            "query.lane.lexical.residency",
+            &outcome,
+        );
+        Ok(outcome)
     }
 }
 

@@ -2,7 +2,7 @@
  * Tool activity, derived from the analytics diagnostics fold.
  *
  * The Agents page already ranks `by_mcp_tool` — WHICH tools were called most.
- * Plan 11 asks for tool activity, which is a different question: how much of
+ * Tool activity is a different question: how much of
  * what the connected agents did was tool use at all, what kind of tool use it
  * was, and which agent did it. Those live in members of
  * `AnalyticsDiagnosticsPayloadV1` this page was decoding and then dropping:

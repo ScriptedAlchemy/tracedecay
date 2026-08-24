@@ -29,15 +29,22 @@ pub fn db_value_to_json(value: DbValue) -> Value {
 pub async fn collect_rows(
     mut rows: Rows,
 ) -> std::result::Result<Vec<Value>, tracedecay_runtime_core::db::engine::Error> {
+    let column_count = rows.column_count();
+    let names: Vec<String> = (0..column_count)
+        .map(|idx| {
+            rows.column_name(idx)
+                .map_or_else(|| format!("col{idx}"), ToOwned::to_owned)
+        })
+        .collect();
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {
-        let mut obj = Map::new();
-        for idx in 0..rows.column_count() {
-            let name = rows
-                .column_name(idx)
-                .map_or_else(|| format!("col{idx}"), ToOwned::to_owned);
-            let value = row.get::<DbValue>(idx).unwrap_or(DbValue::Null);
-            obj.insert(name, db_value_to_json(value));
+        let mut obj = Map::with_capacity(names.len());
+        for (idx, name) in names.iter().enumerate() {
+            let Ok(column) = i32::try_from(idx) else {
+                break;
+            };
+            let value = row.get::<DbValue>(column).unwrap_or(DbValue::Null);
+            obj.insert(name.clone(), db_value_to_json(value));
         }
         out.push(Value::Object(obj));
     }

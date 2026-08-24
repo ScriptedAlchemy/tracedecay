@@ -86,6 +86,7 @@ struct SessionTemporalRefreshWorkerTelemetry {
     retry_class: Option<SessionTemporalRefreshRetryClass>,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
     historical_state: SessionHistoricalServingState,
+    depths_published: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +108,7 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             retry_class: None,
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
             historical_state: SessionHistoricalServingState::Current,
+            depths_published: true,
         }
     }
 }
@@ -118,6 +120,7 @@ pub(super) struct SessionTemporalRefreshWakeState {
     pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
     pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
     pub(super) busy: AtomicBool,
+    history_retry_pending: AtomicBool,
     pub(super) pass_count: std::sync::atomic::AtomicUsize,
     pub(super) wake: tokio::sync::Notify,
     pub(super) idle: tokio::sync::Notify,
@@ -136,6 +139,7 @@ impl Default for SessionTemporalRefreshWakeState {
             terminal_attempts: std::sync::Mutex::new(HashSet::new()),
             recovery_cycle_pending: std::sync::Mutex::new(VecDeque::new()),
             busy: AtomicBool::new(false),
+            history_retry_pending: AtomicBool::new(false),
             pass_count: std::sync::atomic::AtomicUsize::new(0),
             wake: tokio::sync::Notify::new(),
             idle: tokio::sync::Notify::new(),
@@ -156,11 +160,19 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        let dirty = self.dirty.swap(false, Ordering::AcqRel);
+        if dirty {
+            hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(-1.0);
+        }
+        dirty
     }
 
     pub(super) fn take_historical_dirty(&self) -> bool {
-        self.historical_dirty.swap(false, Ordering::AcqRel)
+        let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
+        if dirty {
+            hotpath::gauge!("session_temporal_refresh_history_dirty").inc(-1.0);
+        }
+        dirty
     }
 
     pub(super) fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
@@ -195,8 +207,13 @@ impl SessionTemporalRefreshWakeState {
             target.requeue_request(request);
         }
         self.observe_queued_backlog(0);
-        if self.take_dirty() || target.has_requests() {
+        let projection_dirty = self.take_dirty();
+        let historical_dirty = self.take_historical_dirty();
+        if projection_dirty || target.has_requests() {
             target.wake();
+        }
+        if historical_dirty {
+            target.wake_history();
         }
     }
 
@@ -223,13 +240,62 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn wake(&self) {
-        self.dirty.store(true, Ordering::Release);
+        self.requeue_projection();
         self.wake.notify_one();
     }
 
+    pub(super) fn requeue_projection(&self) {
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(1.0);
+        }
+    }
+
     pub(super) fn wake_history(&self) {
-        self.historical_dirty.store(true, Ordering::Release);
-        self.wake();
+        if !self.historical_dirty.swap(true, Ordering::AcqRel) {
+            hotpath::gauge!("session_temporal_refresh_history_dirty").inc(1.0);
+        }
+        self.wake.notify_one();
+    }
+
+    pub(super) fn has_pending_work(&self) -> bool {
+        self.dirty.load(Ordering::Acquire) || self.historical_dirty.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_worker_busy(&self) {
+        if !self.busy.swap(true, Ordering::AcqRel) {
+            hotpath::gauge!("session_temporal_refresh_workers_busy").inc(1.0);
+        }
+    }
+
+    pub(super) fn mark_worker_idle(&self) {
+        if self.busy.swap(false, Ordering::AcqRel) {
+            hotpath::gauge!("session_temporal_refresh_workers_busy").inc(-1.0);
+        }
+    }
+
+    pub(super) fn clear_worker_instrumentation(&self) {
+        self.clear_worker_activity_instrumentation();
+        self.take_dirty();
+        self.take_historical_dirty();
+    }
+
+    pub(super) fn clear_worker_activity_instrumentation(&self) {
+        self.mark_worker_idle();
+        self.update_history_retry_state(false);
+    }
+
+    pub(super) fn history_retry_pending(&self) -> bool {
+        self.history_retry_pending.load(Ordering::Acquire)
+    }
+
+    pub(super) fn update_history_retry_state(&self, pending: bool) {
+        if self.history_retry_pending.swap(pending, Ordering::AcqRel) != pending {
+            hotpath::gauge!("session_temporal_refresh_history_retrying").inc(if pending {
+                1.0
+            } else {
+                -1.0
+            });
+        }
     }
 
     pub(super) fn mark_running(&self) {
@@ -257,6 +323,23 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
+        match outcome {
+            SessionHistoricalIngestOutcome::Complete => {
+                hotpath::gauge!("session_temporal_refresh_history_complete").inc(1.0);
+            }
+            SessionHistoricalIngestOutcome::Pending { .. } => {
+                hotpath::gauge!("session_temporal_refresh_history_pending").inc(1.0);
+            }
+            SessionHistoricalIngestOutcome::Retryable { .. } => {
+                hotpath::gauge!("session_temporal_refresh_history_retryable").inc(1.0);
+            }
+            SessionHistoricalIngestOutcome::Blocked { .. } => {
+                hotpath::gauge!("session_temporal_refresh_history_blocked").inc(1.0);
+            }
+            SessionHistoricalIngestOutcome::Cancelled => {
+                hotpath::gauge!("session_temporal_refresh_history_cancelled").inc(1.0);
+            }
+        }
         let state = match outcome {
             SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
             SessionHistoricalIngestOutcome::Pending { .. } => {
@@ -315,10 +398,15 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub(super) fn observe_durable_backlog(&self, backlog: usize) {
-        self.telemetry
+        let mut telemetry = self
+            .telemetry
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .durable_backlog = backlog;
+            .unwrap_or_else(PoisonError::into_inner);
+        if telemetry.depths_published {
+            hotpath::gauge!("session_temporal_refresh_durable_depth")
+                .inc(bounded_depth(backlog) - bounded_depth(telemetry.durable_backlog));
+        }
+        telemetry.durable_backlog = backlog;
     }
 
     pub(super) fn record_pass(&self, durable_backlog: usize, made_progress: bool) {
@@ -326,6 +414,7 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let previous = telemetry.durable_backlog;
         telemetry.durable_backlog = durable_backlog;
         telemetry.last_pass_made_progress = made_progress;
         if made_progress {
@@ -336,13 +425,22 @@ impl SessionTemporalRefreshWakeState {
                 .min(i64::MAX as u128) as i64;
             telemetry.last_progress_at_unix_micros = Some(micros);
         }
+        if telemetry.depths_published {
+            hotpath::gauge!("session_temporal_refresh_durable_depth")
+                .inc(bounded_depth(durable_backlog) - bounded_depth(previous));
+        }
     }
 
     fn observe_queued_backlog(&self, backlog: usize) {
-        self.telemetry
+        let mut telemetry = self
+            .telemetry
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .queued_backlog = backlog;
+            .unwrap_or_else(PoisonError::into_inner);
+        if telemetry.depths_published {
+            hotpath::gauge!("session_temporal_refresh_queue_depth")
+                .inc(bounded_depth(backlog) - bounded_depth(telemetry.queued_backlog));
+        }
+        telemetry.queued_backlog = backlog;
     }
 
     fn status(&self) -> SessionTemporalRefreshWorkerStatus {
@@ -453,10 +551,27 @@ impl SessionTemporalRefreshWakeState {
         let _requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.completion_control.cancel();
+            self.clear_worker_instrumentation();
+            self.clear_depth_instrumentation();
             self.mark_stopped();
             self.cancellation.notify_waiters();
             self.wake.notify_waiters();
         }
+    }
+
+    fn clear_depth_instrumentation(&self) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !telemetry.depths_published {
+            return;
+        }
+        hotpath::gauge!("session_temporal_refresh_queue_depth")
+            .inc(-bounded_depth(telemetry.queued_backlog));
+        hotpath::gauge!("session_temporal_refresh_durable_depth")
+            .inc(-bounded_depth(telemetry.durable_backlog));
+        telemetry.depths_published = false;
     }
 
     pub(super) fn completion_control(&self) -> ExecutionControl {
@@ -475,8 +590,19 @@ impl SessionTemporalRefreshWakeState {
 
     #[cfg(test)]
     pub(super) fn is_idle(&self) -> bool {
-        !self.busy.load(Ordering::Acquire) && !self.dirty.load(Ordering::Acquire)
+        !self.busy.load(Ordering::Acquire) && !self.has_pending_work()
     }
+}
+
+impl Drop for SessionTemporalRefreshWakeState {
+    fn drop(&mut self) {
+        self.clear_worker_instrumentation();
+        self.clear_depth_instrumentation();
+    }
+}
+
+fn bounded_depth(depth: usize) -> f64 {
+    depth.min(u32::MAX as usize) as f64
 }
 
 pub(super) struct TerminalAttemptGuard<'a> {
@@ -659,7 +785,10 @@ impl SessionTemporalRefreshWake {
         state.wake();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let idle = enabled_idle_notification(&state);
+            let idle = hotpath::future!(
+                enabled_idle_notification(&state),
+                label = "session_temporal_refresh.idle_wait"
+            );
             let pass_count = state.pass_count.load(Ordering::Acquire);
             let busy = state.busy.load(Ordering::Acquire);
             let dirty = state.dirty.load(Ordering::Acquire);
@@ -769,5 +898,21 @@ mod tests {
                 .last_progress_at_unix_micros
                 .is_some()
         );
+    }
+
+    #[test]
+    fn cancellation_clears_pending_worker_instrumentation() {
+        let state = SessionTemporalRefreshWakeState::default();
+        state.requeue_projection();
+        state.wake_history();
+        state.mark_worker_busy();
+        state.update_history_retry_state(true);
+
+        state.cancel();
+
+        assert!(!state.dirty.load(Ordering::Acquire));
+        assert!(!state.historical_dirty.load(Ordering::Acquire));
+        assert!(!state.busy.load(Ordering::Acquire));
+        assert!(!state.history_retry_pending());
     }
 }

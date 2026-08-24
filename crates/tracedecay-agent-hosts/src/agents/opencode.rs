@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `OpenCode` agent integration.
 //!
 //! Handles `TraceDecay`'s MCP and custom LSP registration in `OpenCode`'s config,
@@ -29,7 +28,6 @@ use super::{
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 
-/// `OpenCode` agent.
 pub struct OpenCodeIntegration;
 
 const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../../../plugin/opencode/tracedecay.ts");
@@ -363,8 +361,6 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // Config path resolution
 // ---------------------------------------------------------------------------
 
-/// Returns the path to opencode config (global).
-///
 /// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME` —
 /// but only when `home` *is* this process user's home. See
 /// [`ambient_xdg_config_home`].
@@ -413,8 +409,6 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
         .join("opencode/opencode.json")
 }
 
-/// Returns the path to the global AGENTS.md prompt file.
-///
 /// Resolution depends only on which prompt *file* exists, never on whether the
 /// `~/.config/opencode` directory exists. The directory is created by
 /// TraceDecay's own managed artifacts (`plugins/`, `agent/`, `command/`,
@@ -568,10 +562,12 @@ fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
 /// receipt-backed first-party catalog and explicit artifact refresh.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     let encoded = serde_json::to_string(tracedecay_bin)?;
-    Ok(vec![(
-        OPENCODE_PLUGIN_RELATIVE,
-        OPENCODE_PLUGIN_SOURCE.replace("\"__TRACEDECAY_BIN__\"", &encoded),
-    )])
+    let rendered = OPENCODE_PLUGIN_SOURCE.replace(
+        &format!("\"{}\"", super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER),
+        &encoded,
+    );
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "OpenCode plugin")?;
+    Ok(vec![(OPENCODE_PLUGIN_RELATIVE, rendered)])
 }
 
 /// Deploy the managed plugin to a path `OpenCode`'s own loader discovers.
@@ -581,6 +577,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
 /// origin beside this file rather than replace it (see [`plugin_cli`]). The
 /// destination is checked rather than assumed so a future refactor cannot
 /// quietly deploy where the host never scans.
+#[hotpath::measure(label = "opencode_plugin_install")]
 fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
     if !plugin_cli::is_host_discovered_plugin_path(path) {
         return Err(TraceDecayError::Config {
@@ -901,7 +898,6 @@ fn opencode_original_config_path(config_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
-/// Remove tracedecay rules from AGENTS.md.
 fn uninstall_prompt_rules(prompt_path: &Path) {
     super::prompt_rules::remove_prompt_rules(prompt_path, PROMPT_RULE_MARKER);
 }
@@ -910,7 +906,6 @@ fn uninstall_prompt_rules(prompt_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check opencode.json has tracedecay registered.
 fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     let config_path = opencode_config_path(home);
     if !config_path.exists() {
@@ -963,23 +958,13 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     }
 }
 
-/// Check AGENTS.md contains tracedecay rules.
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
-    let prompt_path = opencode_prompt_path(home);
-    if prompt_path.exists() {
-        let has_rules = std::fs::read_to_string(&prompt_path)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass("AGENTS.md contains tracedecay rules");
-        } else {
-            dc.fail(
-                "AGENTS.md missing tracedecay rules — run `tracedecay install --agent opencode`",
-            );
-        }
-    } else {
-        dc.warn("AGENTS.md does not exist");
-    }
+    super::doctor_check_prompt_contains_tracedecay(
+        dc,
+        &opencode_prompt_path(home),
+        "AGENTS.md",
+        "opencode",
+    );
 }
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {

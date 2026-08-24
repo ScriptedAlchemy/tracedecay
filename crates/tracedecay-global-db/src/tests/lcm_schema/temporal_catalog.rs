@@ -167,6 +167,21 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "idx_session_occurrences_message",
         ),
         (
+            "SELECT occurrence.occurrence_id
+             FROM session_occurrences AS occurrence
+             JOIN session_temporal_observation_effects AS effect
+               ON effect.observation_id = occurrence.source_observation_id
+              AND effect.session_id = occurrence.session_id
+             WHERE occurrence.session_id = 'session-one'
+               AND occurrence.generation = 1
+               AND occurrence.message_id = 'message-one'
+             ORDER BY effect.observation_sequence,
+                      occurrence.projection_output_ordinal,
+                      occurrence.occurrence_id
+             LIMIT 1",
+            "idx_session_occurrences_message",
+        ),
+        (
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
@@ -439,12 +454,8 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                INDEXED BY idx_session_occurrences_root_generation_order
                ON o.session_id = frozen.session_id
               AND o.generation = frozen.generation
-             JOIN observations AS provider_observation
-               ON provider_observation.observation_id = o.source_observation_id
              WHERE frozen.state = 'active'
-               AND (NULL IS NULL OR json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ) = NULL)
+               AND (NULL IS NULL OR o.source_provider = NULL)
                AND o.knowledge_at >= 0
                AND o.knowledge_at < 12500
                AND (
@@ -469,12 +480,8 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                INDEXED BY idx_session_occurrences_root_generation_order
                ON o.session_id = frozen.session_id
               AND o.generation = frozen.generation
-             JOIN observations AS provider_observation
-               ON provider_observation.observation_id = o.source_observation_id
              WHERE frozen.state = 'active'
-               AND (NULL IS NULL OR json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ) = NULL)
+               AND (NULL IS NULL OR o.source_provider = NULL)
                AND o.knowledge_at >= 0
                AND o.knowledge_at < 12500
                AND (
@@ -502,12 +509,8 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                INDEXED BY idx_session_occurrences_root_generation_order
                ON o.session_id = frozen.session_id
               AND o.generation = frozen.generation
-             JOIN observations AS provider_observation
-               ON provider_observation.observation_id = o.source_observation_id
              WHERE frozen.state = 'active'
-               AND ('claude' IS NULL OR json_extract(
-                   provider_observation.observation_json, '$.identity.source.provider'
-               ) = 'claude')
+               AND ('claude' IS NULL OR o.source_provider = 'claude')
                AND o.knowledge_at >= 0
                AND o.knowledge_at < 12500
                AND (

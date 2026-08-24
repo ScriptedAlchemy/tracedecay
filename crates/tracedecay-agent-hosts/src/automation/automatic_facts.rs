@@ -21,6 +21,7 @@ use cap_std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{ActorId, Confidence, FactCategoryV1, ProvenanceId, RunId};
 use tracedecay_store::{
     FactReadControl, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
@@ -292,7 +293,7 @@ pub async fn inspect_shipped_fact_proposals(
             return Ok(ShippedFactProposalDisposition::Absent);
         }
     };
-    let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    let source_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
     let store = match serde_json::from_slice::<ShippedFactProposalStoreV1>(&bytes) {
         Ok(store) => store,
         Err(error) => {

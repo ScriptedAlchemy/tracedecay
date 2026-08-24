@@ -9,8 +9,8 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 pub use tracedecay_domain::{
     EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
     EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
@@ -29,11 +29,7 @@ pub struct Sha256DigestHex(String);
 impl Sha256DigestHex {
     pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
         let value = value.into();
-        if value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
+        if is_lowercase_hex(&value, 64) {
             Ok(Self(value))
         } else {
             Err(ManifestValidationErrorV1::MalformedHexDigest {
@@ -43,9 +39,7 @@ impl Sha256DigestHex {
     }
 
     pub fn of_bytes(bytes: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        Self(hex::encode(hasher.finalize()))
+        Self(sha256_hex(bytes))
     }
 
     pub fn as_str(&self) -> &str {
@@ -247,13 +241,21 @@ impl ModelArtifactManifestV1 {
     /// Canonical bytes of the complete immutable manifest. serde emits struct
     /// fields in declaration order and the manifest contains no maps, so this
     /// encoding is byte-stable across processes and platforms.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_else(|_| panic!("manifest serialization is infallible"))
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ManifestValidationErrorV1> {
+        serde_json::to_vec(self)
+            .map_err(|error| ManifestValidationErrorV1::NonCanonicalEncoding(error.to_string()))
     }
 
     /// SHA-256 over `canonical_bytes`. Stable manifest and artifact identity.
     pub fn canonical_digest(&self) -> Sha256DigestHex {
-        Sha256DigestHex::of_bytes(&self.canonical_bytes())
+        match self.canonical_bytes() {
+            Ok(bytes) => Sha256DigestHex::of_bytes(&bytes),
+            Err(error) => {
+                // Writing this schema to a Vec cannot fail; keep the existing
+                // infallible digest contract used by artifact admission.
+                unreachable!("model artifact manifest serialization failed: {error}")
+            }
+        }
     }
 
     /// Identity used by artifact storage and receipts.
@@ -273,7 +275,7 @@ impl ModelArtifactManifestV1 {
         let manifest: Self = serde_json::from_slice(bytes)
             .map_err(|e| ManifestValidationErrorV1::NonCanonicalEncoding(e.to_string()))?;
         manifest.validate()?;
-        if manifest.to_canonical_bytes() != bytes {
+        if manifest.to_canonical_bytes()? != bytes {
             return Err(ManifestValidationErrorV1::NonCanonicalEncoding(
                 "input bytes differ from the canonical manifest encoding".to_string(),
             ));
@@ -282,7 +284,7 @@ impl ModelArtifactManifestV1 {
     }
 
     /// Serialize to canonical JSON bytes (round-trips through `parse`).
-    pub fn to_canonical_bytes(&self) -> Vec<u8> {
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ManifestValidationErrorV1> {
         self.canonical_bytes()
     }
 
@@ -513,7 +515,7 @@ mod tests {
     #[test]
     fn manifest_round_trip_preserves_every_field() {
         let manifest = sample_manifest();
-        let bytes = manifest.to_canonical_bytes();
+        let bytes = manifest.to_canonical_bytes().unwrap();
         let parsed = ModelArtifactManifestV1::parse(&bytes).unwrap();
         assert_eq!(manifest, parsed);
     }
@@ -521,9 +523,10 @@ mod tests {
     #[test]
     fn canonical_bytes_and_digest_are_stable_across_reserialization() {
         let manifest = sample_manifest();
-        let first = manifest.canonical_bytes();
-        let reparsed = ModelArtifactManifestV1::parse(&manifest.to_canonical_bytes()).unwrap();
-        let second = reparsed.canonical_bytes();
+        let first = manifest.canonical_bytes().unwrap();
+        let reparsed =
+            ModelArtifactManifestV1::parse(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        let second = reparsed.canonical_bytes().unwrap();
         assert_eq!(first, second);
         assert_eq!(manifest.canonical_digest(), reparsed.canonical_digest());
         assert_eq!(
@@ -634,7 +637,7 @@ mod tests {
 
         let mut manifest = sample_manifest();
         manifest.payload.tokenizer_digest = Sha256DigestHex::new(hex::encode([0xab; 32])).unwrap();
-        let text = String::from_utf8(manifest.to_canonical_bytes()).unwrap();
+        let text = String::from_utf8(manifest.to_canonical_bytes().unwrap()).unwrap();
         let corrupted = text.replacen(
             &hex::encode([0xab; 32]),
             &hex::encode([0xab; 32]).to_uppercase(),
@@ -649,7 +652,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_noncanonical_and_unknown_fields() {
-        let canonical = sample_manifest().to_canonical_bytes();
+        let canonical = sample_manifest().to_canonical_bytes().unwrap();
         let mut padded = b" ".to_vec();
         padded.extend_from_slice(&canonical);
         assert!(matches!(

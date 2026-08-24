@@ -3,13 +3,10 @@
 //! Codex rollouts carry far more than the `user_message`/`agent_message`
 //! conversation turns: patch applications, shell (`exec_command`) tool calls,
 //! plan updates, per-turn boundaries, MCP tool calls (including `TraceDecay`'s
-//! own), web searches, and sub-agent routing. Before this module those lines
-//! were dropped (`message_from_line` returned `None` for every non-message
-//! `event_msg`, and generic `response_item` tool events were only cataloged as
-//! opaque `tool_event` rows). Here they become compact, provider-neutral rows
-//! with the shared kind vocabulary used by the Claude/Cursor ingestion work
-//! (`file_edit`, `tool_call`, `plan`, `turn_boundary`, `web_search`,
-//! `subagent_activity`).
+//! own), web searches, and sub-agent routing. This module turns those lines
+//! into compact, provider-neutral rows with the shared kind vocabulary used by
+//! the Claude/Cursor ingestion (`file_edit`, `tool_call`, `plan`,
+//! `turn_boundary`, `web_search`, `subagent_activity`).
 //!
 //! Guardrails:
 //! * Text columns stay short (a command line, a stdout summary, a query). Heavy
@@ -1643,7 +1640,6 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.role, "tool");
         assert_eq!(row.kind.as_deref(), Some("tool_call"));
-        // The command text is searchable (the whole point of the fix).
         assert_eq!(row.text, "gh pr merge 366");
         assert_eq!(row.tool_names.as_deref(), Some("exec_command"));
         // Keyed on the call offset, not the output offset.

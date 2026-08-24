@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use crate::runtime::git_correlation::backfill::history_progress::initial_reflog_content_chain;
 
@@ -612,7 +613,7 @@ fn present_source_generation(
     hasher.update(modified.as_secs().to_le_bytes());
     hasher.update(modified.subsec_nanos().to_le_bytes());
     hash_file_identity(&mut hasher, path, metadata)?;
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
 }
 
 fn verify_reflog_termination(
@@ -706,7 +707,10 @@ fn absent_source_generation(path: &Path) -> Result<String, BoundedBackfillInterr
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-git-reflog-absent-source-v1\0");
     hash_path(&mut hasher, path);
-    Ok(format!("absent:sha256:{}", hex::encode(hasher.finalize())))
+    Ok(encode_tagged_lowercase_hex(
+        "absent:sha256:",
+        &hasher.finalize(),
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -733,7 +737,7 @@ fn extend_content_chain(
     hasher.update(absolute_line_start.to_le_bytes());
     hasher.update((line.len() as u64).to_le_bytes());
     hasher.update(line);
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
 }
 
 pub(in super::super) fn verify_source(

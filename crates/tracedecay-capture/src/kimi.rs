@@ -10,6 +10,8 @@ use tracedecay_domain::{
 };
 
 use crate::ObservationRecordParseErrorV1;
+use crate::content::content_is_empty;
+use crate::timestamp::timestamp_secs;
 
 const PROVIDER: &str = "kimi";
 const COMPACTION_PREFIX: &str =
@@ -23,6 +25,7 @@ pub fn native_record_id(
         .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
 }
 
+#[hotpath::measure]
 pub fn normalize_observation(
     native: &Value,
     session_id: &str,
@@ -53,7 +56,7 @@ pub fn normalize_observation(
                             .get("model")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
-                        timestamp: timestamp_secs(native.get("timestamp")),
+                        timestamp: native.get("timestamp").and_then(timestamp_secs),
                     });
                     if content_text(&message_content)
                         .is_some_and(|text| text.starts_with(COMPACTION_PREFIX))
@@ -87,7 +90,7 @@ pub fn normalize_observation(
         }),
     }
 
-    let timestamp = timestamp_secs(native.get("timestamp"));
+    let timestamp = native.get("timestamp").and_then(timestamp_secs);
     let mut evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range);
     if let Some(timestamp) = timestamp {
@@ -141,34 +144,26 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
         .or_else(|| native.get("content"))
         .filter(|value| value.is_object())
         .unwrap_or(native);
-    let input_tokens = canonical_u64(
-        usage
-            .get("input_tokens")
-            .or_else(|| usage.get("prompt_tokens")),
+    let input_tokens = usage_u64(usage, &["input_tokens", "prompt_tokens"]);
+    let output_tokens = usage_u64(usage, &["output_tokens", "completion_tokens"]);
+    let cache_read_tokens = usage_u64(
+        usage,
+        &[
+            "cache_read_input_tokens",
+            "cached_input_tokens",
+            "cache_read_tokens",
+        ],
     );
-    let output_tokens = canonical_u64(
-        usage
-            .get("output_tokens")
-            .or_else(|| usage.get("completion_tokens")),
+    let cache_write_tokens = usage_u64(
+        usage,
+        &[
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cache_write_tokens",
+        ],
     );
-    let cache_read_tokens = canonical_u64(
-        usage
-            .get("cache_read_input_tokens")
-            .or_else(|| usage.get("cached_input_tokens"))
-            .or_else(|| usage.get("cache_read_tokens")),
-    );
-    let cache_write_tokens = canonical_u64(
-        usage
-            .get("cache_creation_input_tokens")
-            .or_else(|| usage.get("cache_write_input_tokens"))
-            .or_else(|| usage.get("cache_write_tokens")),
-    );
-    let reasoning_tokens = canonical_u64(
-        usage
-            .get("reasoning_tokens")
-            .or_else(|| usage.get("reasoning_output_tokens")),
-    );
-    let total_tokens = canonical_u64(usage.get("total_tokens"));
+    let reasoning_tokens = usage_u64(usage, &["reasoning_tokens", "reasoning_output_tokens"]);
+    let total_tokens = usage_u64(usage, &["total_tokens"]);
     if [
         input_tokens,
         output_tokens,
@@ -209,6 +204,12 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
             ProviderUsageContractDimensionV1::Correlation,
         ]),
     });
+}
+
+fn usage_u64(usage: &Value, aliases: &[&str]) -> Option<u64> {
+    aliases
+        .iter()
+        .find_map(|key| canonical_u64(usage.get(*key)))
 }
 
 fn canonical_u64(value: Option<&Value>) -> Option<u64> {
@@ -314,32 +315,6 @@ fn content_text(content: &Value) -> Option<&str> {
                 .and_then(Value::as_str)
         })
     })
-}
-
-fn content_is_empty(content: &Value) -> bool {
-    match content {
-        Value::Null => true,
-        Value::String(text) => text.trim().is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Object(map) => map.is_empty(),
-        Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
-fn timestamp_secs(value: Option<&Value>) -> Option<i64> {
-    value
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-        })
-        .map(|timestamp| {
-            if timestamp >= 1_000_000_000_000 {
-                timestamp / 1000
-            } else {
-                timestamp
-            }
-        })
 }
 
 const fn invalid() -> ObservationRecordParseErrorV1 {

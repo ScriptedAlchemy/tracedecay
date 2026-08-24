@@ -553,10 +553,13 @@ fn temporal_automation_serializer_preserves_citations_bounds_and_hashes() {
         "recent_session_slices": replay,
         "temporal_coverage": serialized.coverage,
     });
-    let first_hash = canonical_evidence_hash(&evidence);
+    let first_hash = canonical_evidence_hash(&evidence).expect("canonical evidence hash");
     evidence["hits"][0]["message_id"] = json!("message-2");
     assert!(first_hash.starts_with("sha256:"));
-    assert_ne!(first_hash, canonical_evidence_hash(&evidence));
+    assert_ne!(
+        first_hash,
+        canonical_evidence_hash(&evidence).expect("canonical evidence hash")
+    );
 }
 
 #[test]
@@ -625,7 +628,7 @@ fn canonical_evidence_is_permutation_stable_and_request_bound() {
         "hits": second.hits,
         "temporal_coverage": second.coverage,
     });
-    let digest = canonical_evidence_hash(&first_value);
+    let digest = canonical_evidence_hash(&first_value).expect("canonical evidence hash");
 
     assert_eq!(first_value, second_value);
     assert_eq!(first_value["hits"][0]["provider"], json!("codex"));
@@ -638,10 +641,16 @@ fn canonical_evidence_is_permutation_stable_and_request_bound() {
 
     let mut provider_mutation = first_value.clone();
     provider_mutation["provider"] = json!("cursor");
-    assert_ne!(digest, canonical_evidence_hash(&provider_mutation));
+    assert_ne!(
+        digest,
+        canonical_evidence_hash(&provider_mutation).expect("canonical evidence hash")
+    );
     let mut query_mutation = first_value;
     query_mutation["query"] = json!("different request");
-    assert_ne!(digest, canonical_evidence_hash(&query_mutation));
+    assert_ne!(
+        digest,
+        canonical_evidence_hash(&query_mutation).expect("canonical evidence hash")
+    );
 }
 
 #[tokio::test]

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-05-25
 //! Runtime telemetry snapshot for diagnosing CPU/RAM regressions
 //! (issue #80).
 //!
@@ -7,16 +6,18 @@
 //! sizes, journal mode) so users hitting unexpected resource pressure
 //! can attach a structured snapshot to a bug report.
 //!
-//! `cpu_percent` requires a refresh interval to be meaningful — sysinfo
-//! reports CPU% as a delta between two refreshes. [`collect`] performs
-//! the refresh, sleeps for [`CPU_SAMPLE_WINDOW`], then refreshes again.
-//! Callers therefore pay ~200 ms latency per snapshot.
+//! `cpu_percent` is the process-tick delta over [`CPU_SAMPLE_WINDOW`].
+//! sysinfo 0.32 on Linux computes `cpu_usage()` only for
+//! `ProcessesToUpdate::All`; a targeted PID refresh updates utime/stime
+//! but leaves usage at 0. Linux therefore uses the same `/proc/self/stat`
+//! utime+stime authority as semantic evaluation. Callers pay ~200 ms
+//! latency per snapshot.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
@@ -232,6 +233,7 @@ pub async fn collect_with_integrity(
     collect_with_integrity_and_generation_census(cg, include_integrity, None).await
 }
 
+#[hotpath::measure]
 pub(crate) async fn collect_with_integrity_and_generation_census(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
@@ -425,6 +427,70 @@ fn sample_process() -> Result<ProcessSnapshot> {
     sample_process_with_window(CPU_SAMPLE_WINDOW)
 }
 
+/// Linux process CPU ticks (`utime + stime`) from `/proc/self/stat`.
+///
+/// Shared with semantic evaluation so runtime and quality samples use one
+/// process-tick authority.
+pub(crate) fn read_linux_process_cpu_ticks() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let fields = stat.get(stat.rfind(')')? + 1..)?.split_whitespace();
+        let fields = fields.collect::<Vec<_>>();
+        let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+        let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
+        user_ticks.checked_add(system_ticks)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+pub(crate) fn linux_clock_ticks_per_second() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        static TICKS_PER_SECOND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        if let Some(ticks) = TICKS_PER_SECOND.get() {
+            return Some(*ticks);
+        }
+        let output = std::process::Command::new("getconf")
+            .arg("CLK_TCK")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let ticks = std::str::from_utf8(&output.stdout)
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|ticks| *ticks != 0)?;
+        let _ = TICKS_PER_SECOND.set(ticks);
+        Some(ticks)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn cpu_percent_from_linux_ticks(
+    start_ticks: u64,
+    end_ticks: u64,
+    elapsed: Duration,
+    ticks_per_second: u64,
+) -> Option<f32> {
+    let wall_secs = elapsed.as_secs_f64();
+    if wall_secs <= 0.0 || ticks_per_second == 0 {
+        return Some(0.0);
+    }
+    let cpu_secs = end_ticks.saturating_sub(start_ticks) as f64 / ticks_per_second as f64;
+    Some((cpu_secs / wall_secs * 100.0) as f32)
+}
+
+#[hotpath::measure]
 fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnapshot> {
     let pid = Pid::from_u32(std::process::id());
 
@@ -444,11 +510,16 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
             .with_memory(sysinfo::MemoryRefreshKind::new().with_ram())
             .with_cpu(sysinfo::CpuRefreshKind::new()),
     );
-    // Two reads bracketing a sleep are required: sysinfo reports
-    // `cpu_usage()` as the delta between successive refreshes.
+    // Memory and identity still come from a targeted PID refresh. Linux
+    // `cpu_usage()` stays 0 after `ProcessesToUpdate::Some`; CPU% is the
+    // `/proc/self/stat` tick delta over the same window.
+    let start_ticks = read_linux_process_cpu_ticks();
+    let sampled_at = Instant::now();
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
     std::thread::sleep(cpu_sample_window);
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
+    let elapsed = sampled_at.elapsed();
+    let end_ticks = read_linux_process_cpu_ticks();
 
     let process = sys.process(pid).ok_or_else(|| {
         TraceDecayError::Io(std::io::Error::other(
@@ -462,12 +533,29 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
             "runtime telemetry could not sample host capacity",
         )));
     }
+    let cpu_percent = match (start_ticks, end_ticks, linux_clock_ticks_per_second()) {
+        (Some(start), Some(end), Some(ticks_per_second)) => {
+            cpu_percent_from_linux_ticks(start, end, elapsed, ticks_per_second).ok_or_else(
+                || {
+                    TraceDecayError::Io(std::io::Error::other(
+                        "runtime telemetry could not convert Linux process ticks to CPU percent",
+                    ))
+                },
+            )?
+        }
+        _ if cfg!(target_os = "linux") => {
+            return Err(TraceDecayError::Io(std::io::Error::other(
+                "runtime telemetry could not read Linux process ticks",
+            )));
+        }
+        _ => process.cpu_usage(),
+    };
 
     Ok(ProcessSnapshot {
         pid: std::process::id(),
         rss_bytes: process.memory(),
         virtual_bytes: process.virtual_memory(),
-        cpu_percent: process.cpu_usage(),
+        cpu_percent,
         uptime_secs: process.run_time(),
         system_cpu_count,
         system_total_memory_bytes,
@@ -485,6 +573,7 @@ pub(crate) async fn collect_database(
     collect_database_with_generation_census(cg, include_integrity, None).await
 }
 
+#[hotpath::measure]
 async fn collect_database_with_generation_census(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
@@ -528,7 +617,7 @@ async fn collect_database_with_generation_census(
         },
     };
     let generation_census = match generation_census_reader {
-        Some(reader) => reader().await,
+        Some(reader) => hotpath::future!(reader(), label = "runtime_generation_census").await,
         None => GenerationCensusSnapshot::Unavailable {
             reason: GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
@@ -797,6 +886,79 @@ mod tests {
         assert_eq!(
             occupancy.general.available + occupancy.general.leased + occupancy.general.limbo,
             occupancy.general.workers
+        );
+    }
+
+    #[test]
+    fn cpu_percent_from_linux_ticks_is_cpu_seconds_over_wall() {
+        assert_eq!(
+            cpu_percent_from_linux_ticks(10, 110, Duration::from_secs(1), 100),
+            Some(100.0)
+        );
+        assert_eq!(
+            cpu_percent_from_linux_ticks(0, 50, Duration::from_secs(2), 100),
+            Some(25.0)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_runtime_cpu_percent_follows_proc_tick_delta_not_sysinfo_pid_refresh() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let worker = {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut acc = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    acc = acc.wrapping_mul(1_664_525).wrapping_add(1);
+                }
+                std::hint::black_box(acc);
+            })
+        };
+        let start_ticks = read_linux_process_cpu_ticks().expect("procfs ticks before sample");
+        let sysinfo_cpu = {
+            let pid = Pid::from_u32(std::process::id());
+            let refresh = ProcessRefreshKind::new().with_cpu().with_memory();
+            let mut sys = System::new_with_specifics(
+                RefreshKind::new()
+                    .with_memory(sysinfo::MemoryRefreshKind::new().with_ram())
+                    .with_cpu(sysinfo::CpuRefreshKind::new()),
+            );
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                refresh,
+            );
+            std::thread::sleep(Duration::from_millis(200));
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                refresh,
+            );
+            sys.process(pid)
+                .expect("sysinfo must still see this pid")
+                .cpu_usage()
+        };
+        let snap = sample_process_with_window(Duration::from_millis(200))
+            .expect("runtime CPU sample must observe the serving process");
+        let end_ticks = read_linux_process_cpu_ticks().expect("procfs ticks after sample");
+        stop.store(true, Ordering::Relaxed);
+        worker.join().expect("busy worker");
+
+        assert!(
+            end_ticks > start_ticks,
+            "tick authority must observe work during the sample window ({start_ticks} -> {end_ticks})"
+        );
+        assert!(
+            sysinfo_cpu.abs() < f32::EPSILON,
+            "sysinfo 0.32 Linux leaves cpu_usage at 0 after Some(&[pid]); that field is not CPU authority (observed {sysinfo_cpu})"
+        );
+        assert!(
+            snap.cpu_percent > 0.0,
+            "cpu_percent must come from /proc tick deltas, not sysinfo cpu_usage() after Some(&[pid]); got {}",
+            snap.cpu_percent
         );
     }
 

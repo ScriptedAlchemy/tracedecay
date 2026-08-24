@@ -58,8 +58,8 @@ export function SettingsPage() {
     DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
   );
   const readUrl = scopedUrl(scope, '/api/settings');
-  // Both patch routes are addressed through the project gateway, so whether
-  // this scope accepts a write bears on both scopes' editors.
+  // Project and ordinary user writes are addressed through the project gateway.
+  // The ProfileSessions worker resource deliberately is not.
   const writability = scopeWritable(scope);
 
   return (
@@ -71,8 +71,10 @@ export function SettingsPage() {
             writable={writableScopes(envelope.legal_actions, writability)}
             writability={writability}
             readUrl={readUrl}
+            codeIndexWorkerReadUrl="/api/settings"
             projectPatchUrl={scopedUrl(scope, '/api/settings/project')}
             userPatchUrl={scopedUrl(scope, '/api/settings/user')}
+            codeIndexWorkerPatchUrl="/api/settings/user/code-index-workers"
             onApplied={() => void settings.refetch()}
           />
         )}
@@ -84,12 +86,10 @@ export function SettingsPage() {
 /**
  * Which settings scopes the server currently authorizes a write for.
  *
- * Both editable scopes settle through the one cataloged daemon configuration
- * effect (`configuration_batch`) — a user write dispatches the same effect
- * under the profile identity bound by the daemon handshake — so a dashboard
- * without that control plane omits the action and both editors go read-only.
- * Offering either editor anyway would put a control on screen whose only
- * outcome is a 503.
+ * Project and ordinary user settings settle through `configuration_batch` and
+ * the selected project's gateway. Code-index workers are a profile-global
+ * ProfileSessions resource: only its own advertised operation controls its
+ * availability, never the selected-project gateway.
  */
 function writableScopes(
   legalActions: readonly DashboardLegalActionRefV1[],
@@ -102,6 +102,10 @@ function writableScopes(
   return {
     project: settingsWriteGate(authorizes('configuration_batch'), writability),
     user: settingsWriteGate(authorizes('configuration_batch'), writability),
+    codeIndexWorkers: settingsWriteGate(authorizes('profile_code_index_worker_selection'), {
+      state: 'writable',
+      target: 'your TraceDecay profile',
+    }),
   };
 }
 
@@ -139,16 +143,20 @@ function SettingsSurface({
   writable,
   writability,
   readUrl,
+  codeIndexWorkerReadUrl,
   projectPatchUrl,
   userPatchUrl,
+  codeIndexWorkerPatchUrl,
   onApplied,
 }: {
   payload: SettingsPayloadV1;
   writable: WritableScopes;
   writability: ScopeWritability;
   readUrl: string;
+  codeIndexWorkerReadUrl: string;
   projectPatchUrl: string;
   userPatchUrl: string;
+  codeIndexWorkerPatchUrl: string;
   onApplied: () => void;
 }) {
   const model = useMemo(() => buildSettingsModel(payload), [payload]);
@@ -301,8 +309,10 @@ function SettingsSurface({
                   writable={writable}
                   writability={writability}
                   readUrl={readUrl}
+                  codeIndexWorkerReadUrl={codeIndexWorkerReadUrl}
                   projectPatchUrl={projectPatchUrl}
                   userPatchUrl={userPatchUrl}
+                  codeIndexWorkerPatchUrl={codeIndexWorkerPatchUrl}
                   onApplied={onApplied}
                 />
               ) : null}

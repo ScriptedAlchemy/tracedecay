@@ -10,8 +10,9 @@ TraceDecay host packaging has two independent layers:
   core hooks, skills, receipts, or another companion.
 
 Compiled `HostBundleManifestV1` values are the first-party installation
-catalog. A dry run verifies schema, compatibility, and content identity and reports owned paths, competing-extension claims,
-backups, and the host-specific rollback seam without opening a writer. Apply,
+catalog. A dry run verifies schema, compatibility, and content identity and
+reports owned paths, competing-extension claims, backups, and the
+host-specific rollback seam without opening a writer. Apply,
 update, repair, and uninstall require explicit confirmation and use atomic
 backups, ownership receipts, and interrupted-operation recovery. Unrelated
 host configuration is parsed with the host adapter's JSON/TOML library and is
@@ -26,7 +27,12 @@ never replaced wholesale.
   It starts the TraceDecay bridge through `vscode-languageclient`, forwards
   bounded diagnostics for one admitted workspace, and does not start or claim
   a second language analyzer. Hooks, MCP, CLI, and authorized feedback reads
-  remain separate routes.
+  remain separate routes. The extension commits
+  `plugin/cursor-native-extension/embedded/extension.js` so the Rust host
+  bundle can embed it at compile time without Node; `npm run check:embedded`
+  guards drift. That is an intentional offline-packaging exception, opposite
+  the dashboard's gitignored `app-dist/` rebuilt by `build.rs`. See
+  `plugin/cursor-native-extension/README.md`.
 - **Cursor cloud, Codex, Hermes, and Kiro:** only their evidenced hook, MCP,
   and CLI routes are declared. Missing LSP/native-diagnostics APIs stay typed
   unavailable.
@@ -47,8 +53,9 @@ never replaced wholesale.
   custom TraceDecay LSP entries are merged with the existing JSON config.
   Upstream analyzer brokering is disabled by default so OpenCode's built-ins
   and TraceDecay never claim the same analyzer. A globally installed older
-  TraceDecay binary may not recognize `lsp bridge --stdio`; Doctor validates the installed
-  configuration without relabeling the packaged capability unavailable.
+  TraceDecay binary may not recognize `lsp bridge --stdio`; Doctor validates
+  the installed configuration without relabeling the packaged capability
+  unavailable.
 
 OpenCode command files are prompt-template command artifacts owned and
 receipted by the optional **Agent** component. An agent-referenced prompt file

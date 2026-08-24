@@ -14,7 +14,6 @@ use crate::admission::{DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MA
 /// upper bound for the `Metadata` / `FileType` values touched per entry.
 const ENTRY_METADATA_CHARGE_BYTES: u64 = std::mem::size_of::<std::fs::Metadata>() as u64;
 
-/// Allocation bounds for one transcript discovery walk or path-list filter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TranscriptDiscoveryBounds {
     /// Maximum retained file paths (units).
@@ -55,7 +54,6 @@ impl TranscriptDiscoveryBounds {
     }
 }
 
-/// Which discovery budget stopped retention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileDiscoveryLimit {
     FileCount,
@@ -74,6 +72,8 @@ pub struct FileDiscoveryReport {
     pub skipped_oversized_entries: u64,
     /// Cumulative path + metadata bytes charged for retained + skipped decisions.
     pub bytes_charged: u64,
+    /// File entries examined for retention, including oversized and cap skips.
+    pub files_considered: u64,
 }
 
 impl FileDiscoveryReport {
@@ -107,8 +107,6 @@ pub fn os_str_byte_len(value: &std::ffi::OsStr) -> usize {
     }
 }
 
-/// Apply discovery bounds to an already-materialized path list.
-///
 /// Prefer [`collect_files_with_ext_bounded`] for filesystem walks so bounds are
 /// enforced before collection. This helper exists for trait defaults and tests.
 pub fn bound_path_list(
@@ -147,16 +145,27 @@ pub fn bound_path_list(
         out.push(path);
     }
 
+    let files_considered = u64::try_from(out.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(skipped_oversized_entries);
+    #[cfg(feature = "hotpath")]
+    crate::runtime::pipeline_metrics::record_discovery_files(
+        files_considered,
+        u64::try_from(out.len()).unwrap_or(u64::MAX),
+        bytes_charged,
+    );
     FileDiscoveryReport {
         paths: out,
         truncated,
         skipped_oversized_entries,
         bytes_charged,
+        files_considered,
     }
 }
 
 /// Recursively collect files with `ext` under `dir`, enforcing discovery bounds
 /// before retaining each path. Directory symlinks are not followed.
+#[hotpath::measure]
 pub fn collect_files_with_ext_bounded(
     dir: &Path,
     ext: &str,
@@ -171,13 +180,22 @@ pub fn collect_files_with_ext_bounded(
         truncated: None,
         skipped_oversized_entries: 0,
         bytes_charged: 0,
+        files_considered: 0,
     };
     state.walk(dir, 0);
+    #[cfg(feature = "hotpath")]
+    crate::runtime::pipeline_metrics::record_discovery_files(
+        state.files_considered,
+        u64::try_from(state.paths.len()).unwrap_or(u64::MAX),
+        state.bytes_charged,
+    );
+    crate::runtime::pipeline_metrics::record_sweep_outcome(state.truncated.is_none());
     FileDiscoveryReport {
         paths: state.paths,
         truncated: state.truncated,
         skipped_oversized_entries: state.skipped_oversized_entries,
         bytes_charged: state.bytes_charged,
+        files_considered: state.files_considered,
     }
 }
 
@@ -189,6 +207,7 @@ struct WalkState<'a> {
     truncated: Option<FileDiscoveryLimit>,
     skipped_oversized_entries: u64,
     bytes_charged: u64,
+    files_considered: u64,
 }
 
 impl WalkState<'_> {
@@ -199,6 +218,7 @@ impl WalkState<'_> {
         if depth > self.max_depth {
             return;
         }
+        crate::runtime::pipeline_metrics::record_dir_enumerated();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -256,6 +276,7 @@ impl WalkState<'_> {
     }
 
     fn try_retain(&mut self, path: PathBuf) {
+        self.files_considered = self.files_considered.saturating_add(1);
         if self.truncated.is_some() {
             return;
         }

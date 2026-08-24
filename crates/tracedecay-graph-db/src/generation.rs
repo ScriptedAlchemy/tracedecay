@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_store::runtime::{
     GraphDependencyGenerationClosureDigestV1, GraphDependencyGenerationIdentityV1,
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
@@ -177,6 +178,10 @@ impl GraphGenerationManifest {
         Ok(manifest)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.replay.hydrate",
+        impl_type = "GraphGenerationManifest"
+    )]
     pub fn from_replay(
         publication: &GraphPublicationReplayV1,
         provider: &dyn GraphGenerationManifestProvider,
@@ -227,6 +232,15 @@ impl GraphGenerationManifest {
             return Err(GraphDbError::Conflict);
         }
         check()?;
+        crate::hotpath_observe::record_counts(
+            manifest.entities.len(),
+            manifest.relations.len(),
+            1,
+            0,
+        );
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Replay,
+        );
         Ok(manifest)
     }
 
@@ -246,9 +260,19 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Vec<u8>, GraphDbError> {
         self.validate_checked(check)?;
-        self.replay_source_payload(
-            GraphGenerationReplaySource::InlineManifest(self.clone()),
+        // Serialize the same externally-tagged `inline_manifest` shape as
+        // `GraphGenerationReplaySource::InlineManifest` without cloning the
+        // entity/relation payload into an owned enum just to write it.
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        enum InlineReplaySourceView<'a> {
+            InlineManifest(&'a GraphGenerationManifest),
+        }
+        checked_canonical_bytes(
+            &InlineReplaySourceView::InlineManifest(self),
             check,
+            "canonical graph generation replay",
+            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
         )
     }
 
@@ -291,9 +315,9 @@ impl GraphGenerationManifest {
                 "failed to encode graph dependency generation closure: {error}"
             ))
         })?;
-        GraphDependencyGenerationClosureDigestV1::new(format!(
-            "sha256:{}",
-            hex::encode(digest.finalize())
+        GraphDependencyGenerationClosureDigestV1::new(encode_tagged_lowercase_hex(
+            "sha256:",
+            &digest.finalize(),
         ))
         .map_err(|error| GraphDbError::invalid(error.to_string()))
     }
@@ -591,6 +615,7 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
 /// `expected_recovered_digest`, a verified head's digest, or a digest the
 /// caller computed from the manifest once). Verification never
 /// re-canonicalizes the manifest itself.
+#[hotpath::measure(label = "graph_db.generation.recover.verify")]
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
     manifest: &GraphGenerationManifest,
@@ -820,7 +845,7 @@ fn recovered_generation_digest(
         write_frame(&mut writer, "relation", &bytes)?;
     }
     writer.finish()?;
-    Ok(hex::encode(digest.finalize()))
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }
 
 fn write_frame(

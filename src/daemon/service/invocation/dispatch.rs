@@ -22,8 +22,24 @@ impl DaemonInvocationService {
         &self,
         project_root: &Path,
     ) -> Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1> {
+        self.admit_project_request_resolved(project_root, None)
+    }
+
+    pub(in crate::daemon) fn admit_project_request_resolved(
+        &self,
+        project_root: &Path,
+        canonical_root: Option<&Path>,
+    ) -> Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1> {
+        let resolved;
+        let canonical_root = match canonical_root {
+            Some(canonical_root) => Some(canonical_root),
+            None => {
+                resolved = project_root.canonicalize().ok();
+                resolved.as_deref()
+            }
+        };
         self.project_runtimes
-            .admit_request(project_root, project_root.canonicalize().ok().as_deref())
+            .admit_request(project_root, canonical_root)
     }
 
     /// Executes a closed request after daemon socket authentication.
@@ -101,6 +117,7 @@ impl DaemonInvocationService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     async fn invoke_with_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -139,8 +156,16 @@ impl DaemonInvocationService {
         let operation = request.operation();
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
-        // so dispatch sees one consistent view of the project.
-        let canonical_root = project_root.and_then(|root| root.canonicalize().ok());
+        // so dispatch sees one consistent view of the project. A pre-admitted
+        // lease already stored the canonicalize result; reuse it.
+        let canonical_root = match (project_root, project_admission) {
+            (Some(project_root), Some(project_admission)) => project_admission
+                .admitted_canonical_root()
+                .map(ToOwned::to_owned)
+                .or_else(|| project_root.canonicalize().ok()),
+            (Some(project_root), None) => project_root.canonicalize().ok(),
+            (None, _) => None,
+        };
         let runtimes = match (project_root, project_admission) {
             (Some(project_root), Some(project_admission)) => {
                 self.project_runtimes.request_runtimes_with_admission(

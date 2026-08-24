@@ -22,7 +22,7 @@
 //!   hash; combined with `mtime` it detects rewrites. On change the whole
 //!   document is re-parsed and re-upserted — idempotent `ON CONFLICT` upserts
 //!   make re-adding unchanged messages a no-op.
-//! * [`read_new_rows`] — **`RowCursor`**: SQLite-backed stores (Zed, Copilot CLI
+//! * [`read_new_rows`](crate::runtime::shared::read_new_rows) — **`RowCursor`**: SQLite-backed stores (Zed, Copilot CLI
 //!   `session-store.db`). `position` is the last-seen `rowid`; we select rows
 //!   with a greater `rowid`.
 //!
@@ -34,6 +34,10 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -50,12 +54,6 @@ pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
 use crate::admission::{HostAdmission, WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
-#[allow(unused_imports)]
-pub use crate::runtime::shared::{
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
-    usage_counters_from,
-};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -68,8 +66,83 @@ pub(super) enum HostProviderCoverage {
     Unavailable = 3,
 }
 
-pub(super) async fn persist_host_provider_coverage(
+impl HostProviderCoverage {
+    pub(super) fn from_file_id(file_id: u64) -> Option<Self> {
+        match file_id {
+            1 => Some(Self::Complete),
+            2 => Some(Self::Partial),
+            3 => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+/// Durable typed Codex discovery frontier for project-scoped admission.
+pub(super) const CODEX_HISTORY_FRONTIER_KEY: &str = "tracedecay-internal:codex-history-frontier:v2";
+pub(super) const CODEX_HISTORY_EPOCH_KEY: &str = "tracedecay-internal:codex-history-epoch:v2";
+
+pub(super) async fn read_host_provider_coverage(
     admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    provider: &'static str,
+) -> TranscriptIngestResult<Option<HostProviderCoverage>> {
+    let key = format!("host-coverage://{provider}/v1");
+    let offset = admission
+        .get_parse_offset(scope, &key)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
+        })?;
+    Ok(offset.and_then(|stored| HostProviderCoverage::from_file_id(stored.file_id)))
+}
+
+pub(super) async fn read_codex_history_frontier(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+) -> TranscriptIngestResult<crate::runtime::codex::CodexDiscoveryFrontier> {
+    let stored_frontier = admission
+        .get_parse_offset(scope, CODEX_HISTORY_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })?
+        .unwrap_or_default();
+    let stored_epoch = admission
+        .get_parse_offset(scope, CODEX_HISTORY_EPOCH_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })?
+        .unwrap_or_default();
+    crate::runtime::codex::CodexDiscoveryFrontier::from_parse_offsets(stored_frontier, stored_epoch)
+}
+
+pub(super) async fn persist_codex_history_frontier(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    expected: crate::runtime::codex::CodexDiscoveryFrontier,
+    frontier: crate::runtime::codex::CodexDiscoveryFrontier,
+) -> TranscriptIngestResult<()> {
+    let (frontier_offset, epoch_offset) = frontier.into_parse_offsets();
+    let (expected_frontier, expected_epoch) = expected.into_parse_offsets();
+    admission
+        .replace_parse_offset_pair(
+            scope,
+            (
+                CODEX_HISTORY_FRONTIER_KEY,
+                expected_frontier,
+                frontier_offset,
+            ),
+            (CODEX_HISTORY_EPOCH_KEY, expected_epoch, epoch_offset),
+        )
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
+        })
+}
+
+pub(super) async fn persist_host_provider_coverage(
+    admission: &(impl HostAdmission + ?Sized),
     scope: &ObservationScopeV1,
     provider: &'static str,
     coverage: HostProviderCoverage,
@@ -143,6 +216,13 @@ pub enum TranscriptIngestError {
     InvalidFrameState { provider: &'static str },
     #[error("{provider} blocking source scan did not join successfully")]
     BlockingScanTaskFailed { provider: &'static str },
+    #[error("{provider} background resource is unavailable: {resource}")]
+    BackgroundResourceUnavailable {
+        provider: &'static str,
+        resource: &'static str,
+    },
+    #[error("Codex discovery frontier is invalid: {detail}")]
+    InvalidCodexDiscoveryFrontier { detail: &'static str },
     #[error("{provider} transcript has no injective source identity: {path}")]
     InvalidSourceIdentity {
         provider: &'static str,
@@ -447,6 +527,7 @@ async fn ingest_one<S: TranscriptIngestStore>(
 /// Persist an already parsed transcript through the ordered transcript commit
 /// and graph-publication boundary. Observation coordinators reuse this after
 /// their one-pass privacy parse and Claude fold.
+#[hotpath::measure]
 pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,
@@ -483,10 +564,8 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         return Ok(TranscriptIngestStats::default());
     }
     protect_parsed_transcript_structural_ids(&mut parsed)?;
-    let commit_records =
-        crate::runtime::git_correlation::direct_commit_records(&parsed.messages, project_root);
-    let span_observations =
-        crate::runtime::git_correlation::ingest_span_observations(&parsed.messages);
+    let (commit_records, span_observations) =
+        crate::runtime::git_correlation::transcript_git_evidence(&parsed.messages, project_root);
     let draft = parsed.draft;
     let existing = store.get_session(provider, &draft.session_id).await?;
     let started_at = existing
@@ -674,12 +753,13 @@ pub use discovery::{
     bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
 };
 
+pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 pub use jsonl::try_stream_new_jsonl_raw_strict;
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
-    RawJsonlFrameReader, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,
-    try_stream_new_jsonl_raw_strict_with_resume,
+    RawJsonlFrameReader, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,
+    STRICT_JSONL_BATCH_BYTES, try_stream_new_jsonl_raw_strict_with_resume,
 };
 pub use jsonl::{JsonlLine, NewJsonl, stream_new_jsonl};
 #[cfg(test)]
@@ -714,6 +794,10 @@ pub fn preflight_strict_jsonl(
 /// Full contents of a changed file plus the advanced cursor.
 pub struct ChangedFile {
     pub contents: String,
+    /// Sidecar file contents when [`read_changed_with_companion`] hashed a
+    /// companion; `None` when the companion is absent or the primary-only
+    /// reader produced this change.
+    pub companion_contents: Option<String>,
     pub new_cursor: StoredCursor,
 }
 
@@ -744,6 +828,7 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Opt
 
     Some(ChangedFile {
         contents,
+        companion_contents: None,
         new_cursor: StoredCursor {
             position: hash,
             mtime,
@@ -772,7 +857,7 @@ pub fn read_changed_with_companion(
     let mtime = file_mtime_secs(&meta);
     let contents = read_file_to_string_bounded(primary, max_bytes)?;
     let primary_hash = content_hash64(&contents);
-    let (companion_hash, companion_mtime) = companion
+    let companion = companion
         .is_file()
         .then(|| {
             let companion_meta = match std::fs::metadata(companion) {
@@ -786,10 +871,13 @@ pub fn read_changed_with_companion(
             Some((
                 content_hash64(&companion_contents),
                 file_mtime_secs(&companion_meta),
+                companion_contents,
             ))
         })
-        .flatten()
-        .unwrap_or((0, 0));
+        .flatten();
+    let (companion_hash, companion_mtime, companion_contents) = companion
+        .map(|(hash, mtime, contents)| (hash, mtime, Some(contents)))
+        .unwrap_or((0, 0, None));
     let combined_hash = content_hash64(&format!("{primary_hash:016x}:{companion_hash:016x}"));
     let combined_mtime = mtime.max(companion_mtime);
 
@@ -802,6 +890,7 @@ pub fn read_changed_with_companion(
 
     Some(ChangedFile {
         contents,
+        companion_contents,
         new_cursor: StoredCursor {
             position: combined_hash,
             mtime: combined_mtime,
@@ -873,19 +962,16 @@ fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: 
 fn stable_jsonl_file_id(
     file: &mut std::fs::File,
     meta: &std::fs::Metadata,
-) -> std::io::Result<u64> {
+) -> std::io::Result<(u64, u64)> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-file-id-v1");
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         hasher.update(meta.dev().to_le_bytes());
         hasher.update(meta.ino().to_le_bytes());
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
         if let Ok(information) = tracedecay_runtime_core::windows_file::information(file) {
             hasher.update(information.volume_serial_number.to_le_bytes());
             hasher.update(information.file_index.to_le_bytes());
@@ -908,20 +994,21 @@ fn stable_jsonl_file_id(
             }
         }
     }
-    hasher.update(jsonl_head_fingerprint(file)?.to_le_bytes());
+    let (head, identity_window_bytes) = jsonl_head_fingerprint(file)?;
+    hasher.update(head.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_be_bytes(bytes))
+    Ok((u64::from_be_bytes(bytes), identity_window_bytes))
 }
 
 pub(super) fn jsonl_file_identity(path: &Path) -> std::io::Result<u64> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
-    stable_jsonl_file_id(&mut file, &metadata)
+    Ok(stable_jsonl_file_id(&mut file, &metadata)?.0)
 }
 
-fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
+fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<(u64, u64)> {
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
@@ -931,13 +1018,14 @@ fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
         .by_ref()
         .take(JSONL_HEAD_FINGERPRINT_BYTES as u64)
         .read_until(b'\n', &mut buf)?;
+    let window = u64::try_from(buf.len()).unwrap_or(u64::MAX);
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-head-v1");
     hasher.update(&buf);
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_be_bytes(bytes))
+    Ok((u64::from_be_bytes(bytes), window))
 }
 
 /// Stable 64-bit content hash prefix suitable for the existing integer

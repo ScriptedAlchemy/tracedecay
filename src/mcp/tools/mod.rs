@@ -15,7 +15,9 @@ pub(crate) mod renderers;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::sync::LazyLock;
 
 pub(crate) use binding::{
     mcp_dispatch_contract, tool_dispatches_registered_project_reader,
@@ -87,9 +89,25 @@ impl LegacyToolCompatibilityOwner {
     pub fn admits(
         tool_name: &str,
     ) -> std::result::Result<bool, dispatch::McpDispatchMetadataError> {
-        Ok(get_tool_definitions()?
-            .iter()
-            .any(|definition| definition.name == tool_name))
+        // Every dispatched compatibility tool call asks this, and rebuilding
+        // the full schema catalog per call was the dominant per-dispatch cost.
+        // The advertised name set is process-stable: the definitions are
+        // static and the only host gate (`ast_grep_available`) is resolved
+        // once per process, so membership is answered from a cached set.
+        static ADVERTISED_TOOL_NAMES: LazyLock<std::result::Result<HashSet<String>, String>> =
+            LazyLock::new(|| {
+                Ok(get_tool_definitions()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .map(|definition| definition.name)
+                    .collect())
+            });
+        match &*ADVERTISED_TOOL_NAMES {
+            Ok(names) => Ok(names.contains(tool_name)),
+            Err(error) => Err(dispatch::McpDispatchMetadataError::Initialization(
+                error.clone(),
+            )),
+        }
     }
 }
 

@@ -11,13 +11,17 @@ impl CppExtractor {
     /// Extract a function definition (has a body).
     pub(super) fn visit_function_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         let in_class = state.class_depth > 0;
+        // Extract the name once: the constructor/destructor checks and the
+        // node itself all need it, and each extraction is a declarator
+        // subtree search plus an allocation.
+        let extracted_name = Self::extract_function_name(state, node).map(str::to_owned);
         if in_class {
-            if Self::is_constructor(state, node) {
-                Self::visit_constructor(state, node);
+            if Self::is_constructor(state, extracted_name.as_deref()) {
+                Self::visit_constructor(state, node, extracted_name.as_deref());
                 return;
             }
-            if Self::is_destructor(state, node) {
-                Self::visit_destructor(state, node);
+            if Self::is_destructor(node, extracted_name.as_deref()) {
+                Self::visit_destructor(state, node, extracted_name.as_deref());
                 return;
             }
         }
@@ -30,8 +34,7 @@ impl CppExtractor {
         } else {
             Visibility::Pub
         };
-        let name =
-            Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
+        let name = extracted_name.unwrap_or_else(|| "<anonymous>".to_owned());
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -90,20 +93,18 @@ impl CppExtractor {
         }
     }
 
-    pub(super) fn is_constructor(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        let name = Self::extract_function_name(state, node);
-        if let Some(name) = &name
+    pub(super) fn is_constructor(state: &ExtractionState, name: Option<&str>) -> bool {
+        if let Some(name) = name
             && let Some((class_name, _)) = state.node_stack.last()
-            && name == class_name
+            && name == class_name.as_str()
         {
             return true;
         }
         false
     }
 
-    pub(super) fn is_destructor(state: &ExtractionState, node: TsNode<'_>) -> bool {
-        let name = Self::extract_function_name(state, node);
-        if let Some(name) = &name
+    pub(super) fn is_destructor(node: TsNode<'_>, name: Option<&str>) -> bool {
+        if let Some(name) = name
             && name.starts_with('~')
         {
             return true;
@@ -111,9 +112,12 @@ impl CppExtractor {
         find_descendant_by_kind(node, "destructor_name").is_some()
     }
 
-    pub(super) fn visit_constructor(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name =
-            Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
+    pub(super) fn visit_constructor(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        name: Option<&str>,
+    ) {
+        let name = name.unwrap_or("<anonymous>").to_string();
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -162,8 +166,13 @@ impl CppExtractor {
         }
     }
 
-    pub(super) fn visit_destructor(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::extract_function_name(state, node)
+    pub(super) fn visit_destructor(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        name: Option<&str>,
+    ) {
+        let name = name
+            .map(str::to_string)
             .unwrap_or_else(|| Self::extract_destructor_name(state, node));
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
@@ -215,7 +224,7 @@ impl CppExtractor {
 
     pub(super) fn extract_destructor_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(dtor) = find_descendant_by_kind(node, "destructor_name") {
-            return state.node_text(dtor);
+            return state.node_str(dtor).to_string();
         }
         if let Some((class_name, _)) = state.node_stack.last() {
             return format!("~{class_name}");
@@ -223,44 +232,42 @@ impl CppExtractor {
         "~<unknown>".to_string()
     }
 
-    pub(super) fn extract_function_name(
-        state: &ExtractionState,
+    pub(super) fn extract_function_name<'a>(
+        state: &'a ExtractionState,
         node: TsNode<'_>,
-    ) -> Option<String> {
+    ) -> Option<&'a str> {
         if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
             if let Some(dtor) = find_direct_child_by_kind(declarator, "destructor_name") {
-                return Some(state.node_text(dtor));
+                return Some(state.node_str(dtor));
             }
             if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_str(ident));
             }
             if let Some(ident) = find_direct_child_by_kind(declarator, "field_identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_str(ident));
             }
             if let Some(qi) = find_direct_child_by_kind(declarator, "qualified_identifier")
                 && let Some(ident) = find_direct_child_by_kind(qi, "identifier")
             {
-                return Some(state.node_text(ident));
+                return Some(state.node_str(ident));
             }
             if let Some(ident) = find_direct_child_by_kind(declarator, "parenthesized_declarator")
                 && let Some(inner_ident) = find_descendant_by_kind(ident, "identifier")
             {
-                return Some(state.node_text(inner_ident));
+                return Some(state.node_str(inner_ident));
             }
             if let Some(ident) = find_direct_child_by_kind(declarator, "type_identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_str(ident));
             }
         }
         None
     }
 
     pub(super) fn extract_function_signature(state: &ExtractionState, node: TsNode<'_>) -> String {
-        let text = state.node_text(node);
-        if let Some(brace_pos) = text.find('{') {
-            text[..brace_pos].trim().to_string()
-        } else {
-            text.trim().trim_end_matches(';').trim().to_string()
-        }
+        // Slice to the body child's start_byte so a `{` in a default
+        // argument or trailing requires-clause cannot truncate the
+        // header, and the body is never borrowed.
+        state.signature_up_to_body(node)
     }
 
     pub(super) fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -290,13 +297,13 @@ impl CppExtractor {
 
     pub(super) fn visit_class_method_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         let is_pure_virtual = Self::is_pure_virtual(state, node);
-        let name =
-            Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
+        let name = Self::extract_function_name(state, node)
+            .unwrap_or("<anonymous>")
+            .to_string();
         if let Some((class_name, _)) = state.node_stack.last()
             && name == *class_name
         {
-            let text = state.node_text(node);
-            let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+            let signature = Some(Self::extract_function_signature(state, node));
             let docstring = Self::extract_docstring(state, node);
             let start_line = node.start_position().row as u32;
             let end_line = node.end_position().row as u32;
@@ -341,8 +348,7 @@ impl CppExtractor {
             }
             return;
         }
-        let text = state.node_text(node);
-        let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+        let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -400,7 +406,8 @@ impl CppExtractor {
         let Some(name) = Self::extract_variable_name(state, node) else {
             return;
         };
-        let text = state.node_text(node);
+        let name = name.to_string();
+        let text = state.node_str(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -450,10 +457,10 @@ impl CppExtractor {
         } else {
             Visibility::Pub
         };
-        let name =
-            Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let text = state.node_text(node);
-        let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+        let name = Self::extract_function_name(state, node)
+            .unwrap_or("<anonymous>")
+            .to_string();
+        let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -508,7 +515,8 @@ impl CppExtractor {
         let Some(name) = Self::extract_variable_name(state, node) else {
             return;
         };
-        let text = state.node_text(node);
+        let name = name.to_string();
+        let text = state.node_str(node);
         let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -552,27 +560,27 @@ impl CppExtractor {
         }
     }
 
-    pub(super) fn extract_variable_name(
-        state: &ExtractionState,
+    pub(super) fn extract_variable_name<'a>(
+        state: &'a ExtractionState,
         node: TsNode<'_>,
-    ) -> Option<String> {
+    ) -> Option<&'a str> {
         if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
             if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_str(ident));
             }
             if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator")
                 && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
             {
-                return Some(state.node_text(ident));
+                return Some(state.node_str(ident));
             }
         }
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return Some(state.node_text(ident));
+            return Some(state.node_str(ident));
         }
         if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator")
             && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
         {
-            return Some(state.node_text(ident));
+            return Some(state.node_str(ident));
         }
         None
     }

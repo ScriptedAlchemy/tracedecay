@@ -22,14 +22,11 @@ use super::{
     GitHubProviderLifecycleV1, GitHubReviewAnchorSeedV1, GitHubSourceAccessAuthorityV1,
 };
 use crate::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
+use crate::git_intelligence::NativeGitIntelligence;
 use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
-// The native `git` spawn adapter lives beside its consumer in this crate's
-// own `git_intelligence` module (moved down from the root's
-// `src/git_intelligence.rs`, which is now a compatibility shim).
-use crate::git_intelligence::NativeGitIntelligence;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.advisory.github.code-anchor.v1";
@@ -902,13 +899,11 @@ fn body_sanitization_receipt(
         PayloadReferenceV1::for_payload(&serde_json::Value::String(retained_body.to_owned()))
             .ok()?;
     let sanitizer_version = ComponentVersion::new(BODY_SANITIZER_VERSION_V1).ok()?;
-    let retained_matches_provider = ManifestDigest::new(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(retained_body.as_bytes()))
-    ))
-    .ok()
-    .as_ref()
-        == Some(provider_body_digest);
+    let retained_matches_provider =
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(retained_body.as_bytes()))
+            .ok()
+            .as_ref()
+            == Some(provider_body_digest);
     let (disposition, sensitivity) = if retained_matches_provider {
         (
             SanitizerDispositionV1::Accepted,
@@ -1007,8 +1002,7 @@ fn git_historical_blob(
 }
 
 fn content_digest(bytes: &[u8]) -> Option<ContentDigest> {
-    let digest = Sha256::digest(bytes);
-    ContentDigest::new(format!("sha256:{}", hex::encode(digest))).ok()
+    Some(ContentDigest::of_bytes(bytes))
 }
 
 fn valid_relative_path(value: &str) -> bool {
@@ -1037,11 +1031,7 @@ mod receipt_tests {
     use super::*;
 
     fn provider_digest(body: &str) -> ManifestDigest {
-        ManifestDigest::new(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(body.as_bytes()))
-        ))
-        .unwrap()
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(body.as_bytes())).unwrap()
     }
 
     #[test]

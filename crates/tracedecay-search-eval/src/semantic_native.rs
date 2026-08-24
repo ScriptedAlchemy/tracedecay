@@ -22,9 +22,7 @@ use super::candidate_output::{ProfileSpecV1, ResourceSampleV1};
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageError, FusionStageInput,
 };
-/// Deterministic local executor admitted from one verified artifact. The trait
-/// now lives beside its supertrait in the query kernel; this re-export keeps
-/// the evaluator's contract surface stable for existing callers.
+/// Deterministic local executor admitted from one verified artifact.
 pub use tracedecay_query::retrieval::rerank::AdmittedNativeRerankExecutorV1;
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
@@ -76,7 +74,7 @@ impl<T> SemanticNativeStageResultV1<T> {
     }
 }
 
-/// Channel-removal comparisons required by Plans 15 and 31.
+/// Channel-removal comparisons for native semantic evaluation.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticChannelAblationV1 {
@@ -106,7 +104,7 @@ pub struct SemanticNativeStageMeasurementV1 {
     pub output_candidates: u64,
 }
 
-/// query lane work completed before the semantic/fusion comparison.
+/// Query-lane work completed before the semantic/fusion comparison.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticNativeQueryStageMeasurementsV1 {
@@ -1158,7 +1156,7 @@ mod tests {
             &crate::checked_in_fixture_root()
                 .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
         )
-        .expect("checked-in Plan 15 workload")
+        .expect("checked-in search-quality workload")
     }
 
     #[test]

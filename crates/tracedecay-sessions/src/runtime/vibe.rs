@@ -57,7 +57,6 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
     "vibe_session_location_provenance",
 );
 
-/// Vibe session locator + parser.
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
@@ -264,10 +263,7 @@ async fn capture_vibe_path(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
     let Some(meta) = source.scoped_meta(path, project_root) else {
-        return Ok(JsonlObservationAdmissionProgress {
-            bytes_consumed: 0,
-            source_deferred: false,
-        });
+        return Ok(JsonlObservationAdmissionProgress::default());
     };
     let provider = ProviderId::new(PROVIDER)
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
@@ -293,7 +289,7 @@ async fn capture_vibe_path(
     admit_jsonl_observations(
         request,
         |_| (),
-        move |(), bytes, range, _| {
+        move |(), bytes, range, _, _prepared, _hints| {
             let native_record_id = vibe_capture::native_record_id(&session_id, range)
                 .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
             match parse_normalized_observation_record_v1(
@@ -367,11 +363,22 @@ fn collect_eligible_messages_jsonl(
         &mut skipped_oversized_entries,
         &mut bytes_charged,
     );
+    let files_considered = u64::try_from(paths.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(skipped_oversized_entries);
+    #[cfg(feature = "hotpath")]
+    crate::runtime::pipeline_metrics::record_discovery_files(
+        files_considered,
+        u64::try_from(paths.len()).unwrap_or(u64::MAX),
+        bytes_charged,
+    );
+    crate::runtime::pipeline_metrics::record_sweep_outcome(truncated.is_none());
     FileDiscoveryReport {
         paths,
         truncated,
         skipped_oversized_entries,
         bytes_charged,
+        files_considered,
     }
 }
 

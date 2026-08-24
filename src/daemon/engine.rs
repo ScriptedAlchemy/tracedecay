@@ -3,10 +3,6 @@
 //!
 //! Holds the store administration, invocation state, open gates, owner
 //! registries and lifecycle handles that one daemon generation owns.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 use std::collections::HashSet;
@@ -160,8 +156,6 @@ impl DaemonEngine {
         self
     }
 
-    /// Installs the config-driven git-metadata watcher on this engine. Called
-    /// once by `run_foreground_unix` before the accept loop.
     /// A doctor-facing read of one project's watch coverage; `git_watcher` is
     /// module-private, so the core Doctor route reads through this accessor.
     pub(super) async fn git_watcher_health(
@@ -171,6 +165,8 @@ impl DaemonEngine {
         self.git_watcher.health_value(project_root).await
     }
 
+    /// Installs the config-driven git-metadata watcher on this engine. Called
+    /// once by `run_foreground_unix` before the accept loop.
     pub(super) fn with_git_watcher(mut self, watcher: git_watch::GitWatcher) -> Self {
         self.git_watcher = watcher;
         self
@@ -394,6 +390,7 @@ impl DaemonEngine {
         ))
     }
 
+    #[hotpath::measure]
     pub(super) async fn begin_project_open(
         &self,
         handshake: DaemonHandshake,
@@ -453,6 +450,7 @@ impl DaemonEngine {
         }
     }
 
+    #[hotpath::measure]
     pub(super) async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,

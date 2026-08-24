@@ -1,11 +1,4 @@
-//! OpenCode one-analyzer journey (Plan 27 / Plan 35 host-proof minimum).
-//!
-//! Plan 27 "Direct acceptance": *"OpenCode conformance starts the TraceDecay
-//! custom LSP with an existing language analyzer present and proves exactly one
-//! analyzer owns that language before, during, and after install, repair,
-//! rollback, and uninstall while TraceDecay findings still project."*
-//! Plan 35 "Direct acceptance": *"OpenCode retains exactly one analyzer per
-//! language through install, repair, rollback, and uninstall."*
+//! OpenCode one-analyzer journey (Plan 27 / Plan 35).
 //!
 //! The proof is a real spawn counter, not a configuration assertion: the fake
 //! analyzer appends one line every time its process starts, so "a second

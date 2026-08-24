@@ -124,7 +124,6 @@ pub enum GitHubStackSignalExpandUnavailableV1 {
     Cancelled,
 }
 
-/// The one bounded result produced by stack-signal expansion.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum GitHubStackSignalExpandSurfaceResultV1 {

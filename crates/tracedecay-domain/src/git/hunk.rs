@@ -9,8 +9,8 @@ use crate::research::{DomainError, ManifestDigest, RepositoryId, WorktreeId, can
 
 use super::*;
 
-/// `HunkRef` operation direction (Plan 36): working tree to index, or index
-/// to HEAD/base. No other direction is encodable.
+/// `HunkRef` operation direction: working tree to index, or index to
+/// HEAD/base. No other direction is encodable.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -63,7 +63,6 @@ impl GitIndexEntryExpectationV1 {
     }
 }
 
-/// Build a full-selection bitmap for the requested hunk-line span.
 pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
     if line_count == 0 {
         return vec![0];
@@ -77,8 +76,7 @@ pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
     bitmap
 }
 
-/// Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
-/// compare-and-swap contract"). A hunk is identified by exact repository,
+/// Immutable hunk identity for compare-and-swap. A hunk is identified by exact repository,
 /// direction, path, expected base/index/worktree identity, normalized hunk
 /// header, context and patch digests, and the preview that issued the
 /// reference — never by display ordinal or line number alone.

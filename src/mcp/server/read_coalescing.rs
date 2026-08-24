@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
 use crate::mcp::tools::{ToolResult, mcp_dispatch_contract};
 use crate::support::weak_registry::WeakRegistry;
@@ -119,18 +119,25 @@ impl ReadFlight {
 }
 
 impl ReadFlightLeader {
-    pub(super) fn complete(mut self, result: ToolResult) -> Arc<ToolResult> {
-        let result = Arc::new(result);
+    pub(super) fn complete(mut self, result: ToolResult) -> ToolResult {
+        self.finished = true;
+        self.remove_registration();
+        // Deregistration closes this flight to new followers (a later
+        // identical claim starts its own flight), so a lone strong reference
+        // proves nobody is waiting and the result can be handed back without
+        // the shared-state round trip and clone.
+        if Arc::strong_count(&self.flight) == 1 {
+            return result;
+        }
+        let shared = Arc::new(result);
         *self
             .flight
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ReadFlightState::Complete(Arc::clone(&result));
-        self.finished = true;
-        self.remove_registration();
+            ReadFlightState::Complete(Arc::clone(&shared));
         self.flight.completed.notify_waiters();
-        result
+        Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone())
     }
 
     fn remove_registration(&self) {
@@ -186,22 +193,19 @@ fn read_flight_key(
     arguments: &Value,
     scope_prefix: Option<&str>,
 ) -> ReadFlightKey {
-    let mut hasher = Sha256::new();
-    hasher.update(engine_identity.len().to_le_bytes());
-    hasher.update(engine_identity.as_bytes());
-    hasher.update(tool_name.len().to_le_bytes());
-    hasher.update(tool_name.as_bytes());
-    if let Some(scope_prefix) = scope_prefix {
-        hasher.update([1]);
-        hasher.update(scope_prefix.len().to_le_bytes());
-        hasher.update(scope_prefix.as_bytes());
-    } else {
-        hasher.update([0]);
-    }
     let arguments = serde_json::to_vec(arguments).unwrap_or_default();
-    hasher.update(arguments.len().to_le_bytes());
-    hasher.update(arguments);
-    ReadFlightKey(hasher.finalize().into())
+    let scope_present: &[u8] = if scope_prefix.is_some() { b"1" } else { b"0" };
+    let scope = scope_prefix.unwrap_or_default();
+    ReadFlightKey(canonical_framed_sha256_bytes(
+        b"tracedecay.mcp.read-flight.v1",
+        &[
+            engine_identity.as_bytes(),
+            tool_name.as_bytes(),
+            scope_present,
+            scope.as_bytes(),
+            &arguments,
+        ],
+    ))
 }
 
 #[cfg(test)]

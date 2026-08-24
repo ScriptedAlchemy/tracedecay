@@ -88,36 +88,7 @@ impl AdmittedRoot {
     /// forms, then compares decoded filesystem path components rather than raw
     /// URI prefixes.
     pub fn contains_document(&self, document_uri: &str) -> bool {
-        let Some((root_url, root_path)) = strict_file_uri_path(&self.uri) else {
-            return false;
-        };
-        let Some((document_url, document_path)) = strict_file_uri_path(document_uri) else {
-            return false;
-        };
-        if root_url.host_str() != document_url.host_str() {
-            return false;
-        }
-        let lexical_match = document_path
-            .strip_prefix(&root_path)
-            .is_ok_and(|relative| {
-                !relative.as_os_str().is_empty()
-                    && relative
-                        .components()
-                        .all(|component| matches!(component, Component::Normal(_)))
-            });
-        if !lexical_match {
-            return false;
-        }
-        let Ok(canonical_root) = root_path.canonicalize() else {
-            return true;
-        };
-        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
-        else {
-            return false;
-        };
-        existing_ancestor
-            .canonicalize()
-            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+        DocumentConfinement::for_root(self).is_some_and(|root| root.contains(document_uri))
     }
 
     pub(crate) fn document_root_depth(&self, document_uri: &str) -> Option<usize> {
@@ -255,15 +226,12 @@ pub fn percent_hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// The feedback-cycle trigger source used by document lifecycle requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticTrigger {
     DocumentSave,
     ExplicitDocumentDiagnostics,
 }
 
-/// A bounded request sent from the gateway to the existing feedback-cycle
-/// application boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedbackCycleRequest {
     pub root_uri: String,
@@ -271,7 +239,6 @@ pub struct FeedbackCycleRequest {
     pub trigger: DiagnosticTrigger,
 }
 
-/// A scheduler/application outcome for a feedback-cycle request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FeedbackCycleResponse {
     Accepted,
@@ -297,7 +264,6 @@ where
     }
 }
 
-/// Methods represented by this bounded LSP gateway surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayMethod {
     TextDocumentDiagnostic,
@@ -345,7 +311,6 @@ impl GatewayMethod {
     }
 }
 
-/// The reason a request cannot be served by this session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MethodUnavailableReason {
     ExplicitlyUnavailable,
@@ -368,7 +333,6 @@ impl MethodUnavailable {
     pub const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
 }
 
-/// The protocol dispatch outcome used by request handlers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GatewayResponse<T> {
     Value(T),
@@ -390,21 +354,18 @@ impl<T> GatewayResponse<T> {
     }
 }
 
-/// LSP `Location` payload shape used by navigation responses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspLocation {
     pub uri: String,
     pub range: LspRange,
 }
 
-/// LSP `Hover` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hover {
     pub contents: String,
     pub range: Option<LspRange>,
 }
 
-/// LSP `DocumentSymbol` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentSymbol {
     pub name: String,
@@ -415,7 +376,6 @@ pub struct DocumentSymbol {
     pub children: Vec<DocumentSymbol>,
 }
 
-/// LSP `SymbolInformation` payload shape used by semantic providers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSymbol {
     pub name: String,
@@ -424,7 +384,6 @@ pub struct WorkspaceSymbol {
     pub location: LspLocation,
 }
 
-/// LSP `CallHierarchyItem` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallHierarchyItem {
     pub name: String,
@@ -435,21 +394,18 @@ pub struct CallHierarchyItem {
     pub selection_range: LspRange,
 }
 
-/// LSP `CallHierarchyIncomingCall` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IncomingCall {
     pub from: CallHierarchyItem,
     pub from_ranges: Vec<LspRange>,
 }
 
-/// LSP `CallHierarchyOutgoingCall` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutgoingCall {
     pub to: CallHierarchyItem,
     pub from_ranges: Vec<LspRange>,
 }
 
-/// LSP `SignatureHelp` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignatureHelp {
     pub signatures: Vec<String>,
@@ -457,7 +413,6 @@ pub struct SignatureHelp {
     pub active_parameter: Option<u32>,
 }
 
-/// LSP `TypeHierarchyItem` payload shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypeHierarchyItem {
     pub name: String,
@@ -724,7 +679,6 @@ impl LspSemanticOperationOutcome {
 
 pub type LspRuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
-/// Cancellation handle for a runtime task spawned on behalf of an LSP broker.
 pub trait LspRuntimeTask: Send + Sync {
     fn abort(&self);
 }
@@ -737,7 +691,6 @@ pub trait LspRuntimeSpawner: Send + Sync {
 const MAX_RUNTIME_FAILURE_CLASS_BYTES: usize = 96;
 pub const MAX_SEMANTIC_OPERATIONS: usize = MAX_PENDING_REQUESTS * 2;
 
-/// Bounded protocol-safe failure class returned by a runtime authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspRuntimeFailure {
     class: String,
@@ -775,7 +728,6 @@ pub trait FeedbackCycleRuntimePort: Send + Sync {
     ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>>;
 }
 
-/// Bounded non-blocking trigger for canonical feedback work.
 pub struct FeedbackCycleAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn FeedbackCycleRuntimePort>,
@@ -816,7 +768,6 @@ impl FeedbackCyclePort for FeedbackCycleAdapter {
     }
 }
 
-/// Canonical asynchronous owner for one standard analyzer request.
 pub trait LspSemanticRequestAuthority: Send + Sync {
     fn start(
         &self,
@@ -834,7 +785,6 @@ struct SemanticRequestKey {
     request_id: LspRequestId,
 }
 
-/// Bounded non-blocking semantic broker over an asynchronous authority.
 pub struct SemanticProviderAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn LspSemanticRequestAuthority>,
@@ -968,7 +918,6 @@ impl SemanticProviderPort for SemanticProviderAdapter {
     }
 }
 
-/// Cancellation authority for graph/analyzer operations shared by a session.
 pub trait LspAnalyzerCancellationAuthority: Send + Sync {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
 }
@@ -1153,49 +1102,101 @@ pub fn project_semantic_outcome(
     }
 }
 
+/// Cached root identity for one confinement pass. `contains_document` would
+/// otherwise re-parse the admitted URI and re-canonicalize the root for every
+/// location in a semantic response.
+struct DocumentConfinement {
+    root_host: Option<String>,
+    root_path: PathBuf,
+    canonical_root: Option<PathBuf>,
+}
+
+impl DocumentConfinement {
+    fn for_root(root: &AdmittedRoot) -> Option<Self> {
+        let (root_url, root_path) = strict_file_uri_path(&root.uri)?;
+        Some(Self {
+            root_host: root_url.host_str().map(str::to_owned),
+            canonical_root: root_path.canonicalize().ok(),
+            root_path,
+        })
+    }
+
+    fn contains(&self, document_uri: &str) -> bool {
+        let Some((document_url, document_path)) = strict_file_uri_path(document_uri) else {
+            return false;
+        };
+        if self.root_host.as_deref() != document_url.host_str() {
+            return false;
+        }
+        let lexical_match = document_path
+            .strip_prefix(&self.root_path)
+            .is_ok_and(|relative| {
+                !relative.as_os_str().is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+            });
+        if !lexical_match {
+            return false;
+        }
+        let Some(canonical_root) = self.canonical_root.as_ref() else {
+            return true;
+        };
+        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
+        else {
+            return false;
+        };
+        existing_ancestor
+            .canonicalize()
+            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+    }
+}
+
 fn confine_semantic_response(
     root: &AdmittedRoot,
     response: SemanticResponse,
 ) -> (SemanticResponse, bool) {
+    let confinement = DocumentConfinement::for_root(root);
+    let contains = |uri: &str| confinement.as_ref().is_some_and(|root| root.contains(uri));
     match response {
         SemanticResponse::Locations(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.uri));
+            values.retain(|value| contains(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::Locations(values), omitted)
         }
         SemanticResponse::WorkspaceSymbols(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.location.uri));
+            values.retain(|value| contains(&value.location.uri));
             let omitted = before != values.len();
             (SemanticResponse::WorkspaceSymbols(values), omitted)
         }
         SemanticResponse::CallHierarchyItems(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.uri));
+            values.retain(|value| contains(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::CallHierarchyItems(values), omitted)
         }
         SemanticResponse::IncomingCalls(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.from.uri));
+            values.retain(|value| contains(&value.from.uri));
             let omitted = before != values.len();
             (SemanticResponse::IncomingCalls(values), omitted)
         }
         SemanticResponse::OutgoingCalls(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.to.uri));
+            values.retain(|value| contains(&value.to.uri));
             let omitted = before != values.len();
             (SemanticResponse::OutgoingCalls(values), omitted)
         }
         SemanticResponse::TypeHierarchyItems(mut values) => {
             let before = values.len();
-            values.retain(|value| root.contains_document(&value.uri));
+            values.retain(|value| contains(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::TypeHierarchyItems(values), omitted)
         }
         SemanticResponse::RenameCandidate(RenameCandidateResult::Available(candidate))
-            if !root.contains_document(&candidate.document_uri) =>
+            if !contains(&candidate.document_uri) =>
         {
             (
                 SemanticResponse::RenameCandidate(RenameCandidateResult::Unavailable {
@@ -2187,17 +2188,6 @@ where
         }
     }
 
-    /// Compatibility alias for callers that already made the semantic port
-    /// explicit. New daemon integration should prefer [`Self::new`].
-    pub fn with_semantic_provider(
-        root: AdmittedRoot,
-        capabilities: EffectiveCapabilities,
-        feedback_cycle: P,
-        semantic_provider: S,
-    ) -> Self {
-        Self::new(root, capabilities, feedback_cycle, semantic_provider)
-    }
-
     pub fn root(&self) -> &AdmittedRoot {
         self.workspace.primary()
     }
@@ -2351,6 +2341,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp_gateway_semantic_request", impl_type = "DaemonLspGateway")]
     pub fn semantic_request(
         &self,
         request_id: &LspRequestId,

@@ -110,8 +110,7 @@ impl IntoResponse for RemoteHttpRejection {
                 // Contract construction failures are internal and may contain
                 // implementation details; consume them at the HTTP boundary
                 // without exposing unsafe diagnostics to an unauthenticated client.
-                drop(error);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                crate::http::application_contract_error_response(error)
             }
         }
     }
@@ -174,17 +173,19 @@ where
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
-        let authorization = authorization_header(&parts.headers)
-            .map_err(|_| concealed_authentication_rejection())?;
-        let credential = authorization.into_credential();
-        let session = state
-            .credential_admission
-            .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
-            .map_err(|_| concealed_authentication_rejection())?;
-        Ok(Self {
-            session,
-            credential,
-            request: PhantomData,
+        hotpath::measure_block!("api.http.admission", {
+            let authorization = authorization_header(&parts.headers)
+                .map_err(|_| concealed_authentication_rejection())?;
+            let credential = authorization.into_credential();
+            let session = state
+                .credential_admission
+                .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
+                .map_err(|_| concealed_authentication_rejection())?;
+            Ok(Self {
+                session,
+                credential,
+                request: PhantomData,
+            })
         })
     }
 }
@@ -226,23 +227,25 @@ where
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
-        let authorization = authorization_header(&parts.headers)
-            .map_err(|_| concealed_authentication_rejection())?;
-        let grant_credential = authorization.into_credential();
-        let session = state
-            .credential_admission
-            .admit_before_body(
-                &grant_credential,
-                <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
-                (state.clock)(),
-            )
-            .map_err(|_| concealed_authentication_rejection())?;
-        let enrollment_credential = enrollment_credential(&parts.headers)
-            .map_err(|_| concealed_authentication_rejection())?;
-        Ok(Self {
-            session,
-            grant_credential,
-            enrollment_credential,
+        hotpath::measure_block!("api.http.admission", {
+            let authorization = authorization_header(&parts.headers)
+                .map_err(|_| concealed_authentication_rejection())?;
+            let grant_credential = authorization.into_credential();
+            let session = state
+                .credential_admission
+                .admit_before_body(
+                    &grant_credential,
+                    <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
+                    (state.clock)(),
+                )
+                .map_err(|_| concealed_authentication_rejection())?;
+            let enrollment_credential = enrollment_credential(&parts.headers)
+                .map_err(|_| concealed_authentication_rejection())?;
+            Ok(Self {
+                session,
+                grant_credential,
+                enrollment_credential,
+            })
         })
     }
 }
@@ -315,61 +318,78 @@ where
     Request: DeserializeOwned + RemoteSessionBoundProtocolBodyV1 + Send + 'static,
     Port::Output: Serialize + Send + 'static,
 {
-    let Json(request) = match payload {
-        Ok(payload) => payload,
-        Err(_) => return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
-    };
-    let RemotePreBodyAdmissionV1 {
-        mut session,
-        credential,
-        ..
-    } = admission;
-    if Request::bind_authenticated_session(&session, &request.request).is_err() {
-        return Err(concealed_authentication_rejection());
-    }
-    if Request::REAUTHORIZE_BEFORE_EXECUTION {
-        session = match state
-            .credential_admission
-            .reauthorize_publication(&session, (state.clock)())
-        {
-            Ok(session) => session,
-            Err(_) => return Err(concealed_authentication_rejection()),
-        };
-        if Request::bind_authenticated_session(&session, &request.request).is_err() {
-            return Err(concealed_authentication_rejection());
-        }
-    }
-    let Some(enrollment_deadline) = session.enrollment_expires_at() else {
-        return Err(concealed_authentication_rejection());
-    };
-    let deadline = request
-        .request
-        .body
-        .execution_expires_at()
-        .map_or(enrollment_deadline, |request_deadline| {
-            request_deadline.min(enrollment_deadline)
+    let (request, credential, control, mut cancel_on_drop, service) =
+        hotpath::measure_block!("api.http.admission", {
+            let Json(request) = match payload {
+                Ok(payload) => payload,
+                Err(_) => {
+                    return invalid_remote_request_response()
+                        .map_err(RemoteHttpRejection::Contract);
+                }
+            };
+            let RemotePreBodyAdmissionV1 {
+                mut session,
+                credential,
+                ..
+            } = admission;
+            if Request::bind_authenticated_session(&session, &request.request).is_err() {
+                return Err(concealed_authentication_rejection());
+            }
+            if Request::REAUTHORIZE_BEFORE_EXECUTION {
+                session = match state
+                    .credential_admission
+                    .reauthorize_publication(&session, (state.clock)())
+                {
+                    Ok(session) => session,
+                    Err(_) => return Err(concealed_authentication_rejection()),
+                };
+                if Request::bind_authenticated_session(&session, &request.request).is_err() {
+                    return Err(concealed_authentication_rejection());
+                }
+            }
+            let Some(enrollment_deadline) = session.enrollment_expires_at() else {
+                return Err(concealed_authentication_rejection());
+            };
+            let deadline = request
+                .request
+                .body
+                .execution_expires_at()
+                .map_or(enrollment_deadline, |request_deadline| {
+                    request_deadline.min(enrollment_deadline)
+                });
+            let cancellation = match CancellationSignal::active(format!(
+                "cancel.remote.http.{}",
+                request.request.request_id.as_str()
+            )) {
+                Ok(cancellation) => cancellation,
+                Err(_) => {
+                    return invalid_remote_request_response()
+                        .map_err(RemoteHttpRejection::Contract);
+                }
+            };
+            let cancel_on_drop = CancelRemoteRequestOnDropV1 {
+                cancellation: cancellation.clone(),
+                clock: state.clock,
+                armed: true,
+            };
+            let control = RemoteProtocolExecutionControlV1 {
+                deadline,
+                cancellation,
+            };
+            (
+                request,
+                credential,
+                control,
+                cancel_on_drop,
+                Arc::clone(&state.service),
+            )
         });
-    let cancellation = match CancellationSignal::active(format!(
-        "cancel.remote.http.{}",
-        request.request.request_id.as_str()
-    )) {
-        Ok(cancellation) => cancellation,
-        Err(_) => return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
-    };
-    let mut cancel_on_drop = CancelRemoteRequestOnDropV1 {
-        cancellation: cancellation.clone(),
-        clock: state.clock,
-        armed: true,
-    };
-    let control = RemoteProtocolExecutionControlV1 {
-        deadline,
-        cancellation,
-    };
-    let service = Arc::clone(&state.service);
-    let execution = tokio::task::spawn_blocking(move || {
-        service.execute_controlled(request.request, credential, control)
-    })
-    .await;
+    let execution = hotpath::measure_block!("api.http.handler", {
+        tokio::task::spawn_blocking(move || {
+            service.execute_controlled(request.request, credential, control)
+        })
+        .await
+    });
     cancel_on_drop.disarm();
     match execution {
         Ok(Ok(response)) => Ok(remote_protocol_response(response.into())),
@@ -386,23 +406,30 @@ async fn enrollment_route<Port>(
 where
     Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static,
 {
-    let Json(request) = match payload {
-        Ok(payload) => payload,
-        Err(_) => return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
-    };
-    if <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
-        &admission.session,
-        &request.request,
-    )
-    .is_err()
-    {
-        return Err(concealed_authentication_rejection());
-    }
-    match state.service.execute_enrollment(
-        request.request,
-        admission.grant_credential,
-        admission.enrollment_credential,
-    ) {
+    let request = hotpath::measure_block!("api.http.admission", {
+        let Json(request) = match payload {
+            Ok(payload) => payload,
+            Err(_) => {
+                return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract);
+            }
+        };
+        if <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+            &admission.session,
+            &request.request,
+        )
+        .is_err()
+        {
+            return Err(concealed_authentication_rejection());
+        }
+        request
+    });
+    match hotpath::measure_block!("api.http.handler", {
+        state.service.execute_enrollment(
+            request.request,
+            admission.grant_credential,
+            admission.enrollment_credential,
+        )
+    }) {
         Ok(response) => Ok(remote_protocol_response(response.into())),
         Err(error) => Err(RemoteHttpRejection::Contract(error)),
     }
@@ -430,23 +457,27 @@ fn enrollment_credential(
 fn remote_protocol_response<T: Serialize>(response: RemoteHttpResponseV1<T>) -> Response {
     let status = match &response.response.result {
         Ok(_) => StatusCode::OK,
-        Err(problem) => match problem.problem.kind() {
-            ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-            ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-            ApplicationProblemKind::Conflict
-            | ApplicationProblemKind::PartialEffect
-            | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-            ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-            ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
+        Err(problem) => {
+            let kind = problem.problem.kind();
+            crate::observe::record_error_class(kind);
+            match kind {
+                ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
+                ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
+                ApplicationProblemKind::Conflict
+                | ApplicationProblemKind::PartialEffect
+                | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
+                ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
+                ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
+                ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
+                ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
+                ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
             }
-            ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
-            ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-            ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-            ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-        },
+        }
     };
-    (status, Json(response)).into_response()
+    crate::observe::json_response(status, &response)
 }
 
 fn concealed_authentication_response() -> Result<Response, ApplicationContractError> {

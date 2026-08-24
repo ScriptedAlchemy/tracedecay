@@ -128,25 +128,10 @@ impl RootAuthorityChannel {
                           json_extract(summary.publication_json, '$.provider')
                       AND authority_session.project_key = ?{project_param}
                      WHERE authority_anchor.anchor_id = input.anchor_id
-                       AND (
-                           (authority_session.project_key = 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                           OR
-                           (authority_session.project_key <> 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                            AND json_extract(authority_anchor.owner_json, '$.project_id')
-                                = authority_session.project_key)
-                           OR
-                           (json_extract(authority_anchor.owner_json, '$.kind') = 'session'
-                            AND json_extract(authority_anchor.owner_json, '$.project_key')
-                                = authority_session.project_key
-                            AND json_extract(authority_anchor.owner_json, '$.session_id')
-                                = summary.session_id
-                            AND json_extract(authority_anchor.owner_json, '$.provider')
-                                = authority_session.provider)
-                       )
+                       AND {}
                      LIMIT 1
-                 )"
+                 )",
+                anchor_owner_authority_predicate!(with_session_owner: "summary.session_id"),
             ),
             Self::Derived => format!(
                 "EXISTS (
@@ -164,30 +149,17 @@ impl RootAuthorityChannel {
                        ON first_occurrence.session_id = evidence.session_id
                       AND first_occurrence.generation = evidence.generation
                       AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-                     JOIN observations AS source_observation
-                       ON source_observation.observation_id =
-                          first_occurrence.source_observation_id
                      JOIN sessions AS authority_session
                        ON authority_session.session_id = evidence.session_id
-                      AND authority_session.provider = COALESCE(json_extract(
-                          source_observation.observation_json,
-                          '$.identity.source.provider'
-                      ), 'claude')
+                      AND authority_session.provider = first_occurrence.source_provider
                       AND authority_session.project_key = ?{project_param}
                      WHERE authority_anchor.anchor_id = input.anchor_id
                        AND (?{provider_param} IS NULL
                             OR authority_session.provider = ?{provider_param})
-                       AND (
-                           (authority_session.project_key = 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                           OR
-                           (authority_session.project_key <> 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                            AND json_extract(authority_anchor.owner_json, '$.project_id')
-                                = authority_session.project_key)
-                       )
+                       AND {}
                      LIMIT 1
-                 )"
+                 )",
+                anchor_owner_authority_predicate!(),
             ),
             Self::Occurrence => format!(
                 "EXISTS (
@@ -201,30 +173,17 @@ impl RootAuthorityChannel {
                        ON generation.session_id = occurrence.session_id
                       AND generation.generation = occurrence.generation
                       AND generation.state = 'active'
-                     JOIN observations AS source_observation
-                       ON source_observation.observation_id =
-                          occurrence.source_observation_id
                      JOIN sessions AS authority_session
                        ON authority_session.session_id = occurrence.session_id
-                      AND authority_session.provider = COALESCE(json_extract(
-                          source_observation.observation_json,
-                          '$.identity.source.provider'
-                      ), 'claude')
+                      AND authority_session.provider = occurrence.source_provider
                       AND authority_session.project_key = ?{project_param}
                      WHERE authority_anchor.anchor_id = input.anchor_id
                        AND (?{provider_param} IS NULL
                             OR authority_session.provider = ?{provider_param})
-                       AND (
-                           (authority_session.project_key = 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                           OR
-                           (authority_session.project_key <> 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                            AND json_extract(authority_anchor.owner_json, '$.project_id')
-                                = authority_session.project_key)
-                       )
+                       AND {}
                      LIMIT 1
-                 )"
+                 )",
+                anchor_owner_authority_predicate!(),
             ),
         }
     }

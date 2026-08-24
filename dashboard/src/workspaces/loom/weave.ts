@@ -36,6 +36,7 @@
  * read serves them as provider-qualified rows, and the selected-thread rail
  * renders those rows without projecting a made-up continuous coordinate.
  */
+import type { LcmMessageV1 } from '../../contracts/generated.ts';
 import { packTrack, type LoomSpan } from './tracks.ts';
 
 /**
@@ -222,16 +223,20 @@ export function extentOf(threads: readonly WeaveThread[]): WeaveExtent | null {
  * the same columns, lanes and widths, so a screenshot is stable and a refetch
  * never reshuffles the picture under the reader.
  *
+ * Accepts either raw wire rows or a `threadsFrom` reading, so a caller that
+ * already reduced the rows (to measure the extent for `minGapSeconds`) does
+ * not pay the reduction twice.
+ *
  * `minGapSeconds` is the time-space equivalent of a few pixels — two threads
  * closer together than this would touch on screen, so packing treats them as
  * overlapping and gives them separate sub-columns. It is a parameter rather
  * than a constant because only the renderer knows the current scale.
  */
 export function composeWeave(
-  sessions: readonly WeaveSession[],
+  input: readonly WeaveSession[] | { threads: WeaveThread[]; undated: number },
   minGapSeconds = 0,
 ): Weave & { undated: number } {
-  const { threads, undated } = threadsFrom(sessions);
+  const { threads, undated } = 'threads' in input ? input : threadsFrom(input);
   const extent = extentOf(threads);
   const messageCeiling = threads.reduce(
     (max, thread) => Math.max(max, thread.messages),
@@ -356,21 +361,25 @@ export interface ChainSummary {
  * ordinal has no synthetic replacement; its wire position is the only order
  * the response supplied. Both the summary and the playback cursor consume
  * this one ordering helper so they cannot drift apart.
+ *
+ * Every field is drawn from the generated `LcmMessageV1` wire contract, so a
+ * contract change reaches this module through the type system instead of
+ * drifting past a hand-written mirror. All but the id stay optional because
+ * the chain reads what a row actually has — absent quantities stay absent.
  */
-export interface ChainMessageInput {
-  message_id: string;
-  role?: string | null | undefined;
-  content?: string | null | undefined;
-  ordinal?: number | null | undefined;
-  timestamp?: number | null | undefined;
-  tool_name?: string | null | undefined;
-  token_count?: number | null | undefined;
-  token_count_provenance?:
-    | 'o200k_approximate'
-    | 'unavailable'
-    | null
-    | undefined;
-}
+export type ChainMessageInput = Pick<LcmMessageV1, 'message_id'> &
+  Partial<
+    Pick<
+      LcmMessageV1,
+      | 'role'
+      | 'content'
+      | 'ordinal'
+      | 'timestamp'
+      | 'tool_name'
+      | 'token_count'
+      | 'token_count_provenance'
+    >
+  >;
 
 export function orderChainMessages<T extends ChainMessageInput>(messages: readonly T[]): T[] {
   return messages

@@ -368,13 +368,11 @@ impl DoctorStorageFindingV1 {
         Ok(Self { kind, finding })
     }
 
-    /// The typed subclass this finding belongs to.
     #[must_use]
     pub fn kind(&self) -> DoctorStorageFindingKindV1 {
         self.kind
     }
 
-    /// The underlying canonical finding.
     #[must_use]
     pub fn finding(&self) -> &DoctorFindingV1 {
         &self.finding

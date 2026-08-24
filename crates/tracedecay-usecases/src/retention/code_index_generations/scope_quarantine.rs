@@ -9,11 +9,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::io;
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+use std::os::fd::AsRawFd;
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, ambient_authority};
+#[cfg(any(unix, windows))]
+use cap_std::fs::MetadataExt;
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 
@@ -383,7 +389,6 @@ fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
     let metadata = directory.metadata(".")?;
     #[cfg(unix)]
     let (modified_secs, modified_nanos) = {
-        use cap_std::fs::MetadataExt;
         (
             metadata.mtime(),
             u32::try_from(metadata.mtime_nsec())
@@ -407,20 +412,11 @@ fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
         modified_secs,
         modified_nanos,
         #[cfg(unix)]
-        device: {
-            use cap_std::fs::MetadataExt;
-            metadata.dev()
-        },
+        device: metadata.dev(),
         #[cfg(unix)]
-        inode: {
-            use cap_std::fs::MetadataExt;
-            metadata.ino()
-        },
+        inode: metadata.ino(),
         #[cfg(windows)]
-        created_100ns: {
-            use cap_std::fs::MetadataExt;
-            metadata.creation_time()
-        },
+        created_100ns: metadata.creation_time(),
     })
 }
 
@@ -496,9 +492,6 @@ fn rename_noreplace(
 ) -> io::Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-
         let from = CString::new(from.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
         let to = CString::new(to.as_bytes())
@@ -522,9 +515,6 @@ fn rename_noreplace(
     }
     #[cfg(target_os = "macos")]
     {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-
         let from = CString::new(from.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
         let to = CString::new(to.as_bytes())

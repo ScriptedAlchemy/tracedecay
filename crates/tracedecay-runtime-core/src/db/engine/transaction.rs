@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
 };
 
 use tracedecay_rusqlite_runtime::exact_sql::{
@@ -11,6 +11,7 @@ use super::{
     IntoParams, Result, Rows, Value,
     connection::{Runtime, statement},
 };
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionBehavior {
@@ -20,7 +21,11 @@ pub enum TransactionBehavior {
 }
 
 pub struct Transaction {
-    runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
+    /// Serializes every statement issued against one open write transaction.
+    /// The lock is held across the blocking rusqlite call, so it is where a
+    /// transaction that has already won `BEGIN IMMEDIATE` makes its remaining
+    /// statements queue behind each other.
+    runtime: Arc<ProfiledMutex<Option<RuntimeTransaction>>>,
     #[cfg(any(test, feature = "test-helpers"))]
     connection_runtime: Arc<dyn Runtime>,
 }
@@ -33,7 +38,10 @@ impl Transaction {
         #[cfg(not(any(test, feature = "test-helpers")))]
         let _ = connection_runtime;
         Self {
-            runtime: Arc::new(Mutex::new(Some(runtime))),
+            runtime: Arc::new(hotpath::mutex!(
+                Mutex::new(Some(runtime)),
+                label = "runtime_core.db.transaction_runtime"
+            )),
             #[cfg(any(test, feature = "test-helpers"))]
             connection_runtime,
         }
@@ -176,7 +184,7 @@ impl Transaction {
     }
 }
 
-fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
+fn lock_runtime<T>(runtime: &ProfiledMutex<T>) -> Result<ProfiledMutexGuard<'_, T>> {
     runtime
         .lock()
         .map_err(|_| super::Error::Runtime("exact SQL transaction lock poisoned".to_owned()))
@@ -209,7 +217,7 @@ mod tests {
 
     #[test]
     fn poisoned_transaction_lock_returns_a_typed_error() {
-        let runtime = Mutex::new(());
+        let runtime = hotpath::mutex!(Mutex::new(()), label = "test.transaction_runtime");
         let _ = std::panic::catch_unwind(|| {
             let _guard = runtime.lock().unwrap();
             panic!("poison transaction lock");

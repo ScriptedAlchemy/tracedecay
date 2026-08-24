@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-08
 //! Where OpenCode's own plugin CLI owns TraceDecay's plugin — and where it
 //! does not.
 //!

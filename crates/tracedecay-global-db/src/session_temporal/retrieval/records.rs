@@ -164,6 +164,8 @@ pub(super) fn build_record_query_with_relations(
     }
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);
     let record_scope = RecordScopeSql::new(scope, scope_param, generation_param);
+    let retained_summary_provider =
+        retained_summary_provider_predicate(provider_param, &record_scope.summary_generation);
     let sql = format!(
         "WITH candidate_input(
              ordinal, session_id, anchor_id, derived_kind, retriever_record_id
@@ -215,14 +217,10 @@ pub(super) fn build_record_query_with_relations(
                ON o.retrieval_anchor_id = c.anchor_id
               {occurrence_condition}
              {occurrence_generation_join}
-             JOIN observations AS occurrence_provider
-               ON occurrence_provider.observation_id = o.source_observation_id
              {occurrence_join}
              WHERE c.derived_kind IS NULL
                AND {occurrence_predicate}
-               AND (?{provider_param} IS NULL OR COALESCE(json_extract(
-                   occurrence_provider.observation_json, '$.identity.source.provider'
-               ), 'claude') = ?{provider_param})
+               AND (?{provider_param} IS NULL OR o.source_provider = ?{provider_param})
                AND length(CAST(o.occurrence_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.valid_time_json AS BLOB)) <= ?{item_cap_param}
@@ -253,14 +251,10 @@ pub(super) fn build_record_query_with_relations(
               AND o.occurrence_id = member.occurrence_id
               {occurrence_condition}
              {occurrence_generation_join}
-             JOIN observations AS occurrence_provider
-               ON occurrence_provider.observation_id = o.source_observation_id
              {occurrence_join}
              WHERE c.derived_kind IS NOT NULL
                AND {occurrence_predicate}
-               AND (?{provider_param} IS NULL OR COALESCE(json_extract(
-                   occurrence_provider.observation_json, '$.identity.source.provider'
-               ), 'claude') = ?{provider_param})
+               AND (?{provider_param} IS NULL OR o.source_provider = ?{provider_param})
                AND length(CAST(o.occurrence_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(c.anchor_id AS BLOB)) <= ?{item_cap_param}
@@ -286,17 +280,11 @@ pub(super) fn build_record_query_with_relations(
                AND (?{provider_param} IS NULL OR EXISTS (
                    SELECT 1
                    FROM session_occurrences AS assertion_source
-                   JOIN observations AS assertion_provider
-                     ON assertion_provider.observation_id =
-                        assertion_source.source_observation_id
                    WHERE assertion_source.session_id = a.session_id
                      AND assertion_source.generation = a.generation
                      AND assertion_source.retrieval_anchor_id =
                          json_extract(a.evidence_json, '$.source_anchor_id')
-                     AND COALESCE(json_extract(
-                         assertion_provider.observation_json,
-                         '$.identity.source.provider'
-                     ), 'claude') = ?{provider_param}
+                     AND assertion_source.source_provider = ?{provider_param}
                    LIMIT 1
                ))
                AND length(CAST(a.assertion_id AS BLOB)) <= ?{item_cap_param}
@@ -322,17 +310,13 @@ pub(super) fn build_record_query_with_relations(
                ON target.retrieval_anchor_id = c.anchor_id
               {target_condition}
              {target_generation_join}
-             JOIN observations AS copy_provider
-               ON copy_provider.observation_id = target.source_observation_id
              JOIN copy_relation AS e
                ON e.ordinal = c.ordinal
               AND e.session_id = target.session_id
               AND e.occurrence_id = target.occurrence_id
              {copy_join}
              WHERE {copy_predicate}
-               AND (?{provider_param} IS NULL OR COALESCE(json_extract(
-                   copy_provider.observation_json, '$.identity.source.provider'
-               ), 'claude') = ?{provider_param})
+               AND (?{provider_param} IS NULL OR target.source_provider = ?{provider_param})
                AND length(CAST(e.occurrence_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(e.copied_from_occurrence_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(e.proof_json AS BLOB)) <= ?{item_cap_param}
@@ -381,26 +365,7 @@ pub(super) fn build_record_query_with_relations(
                ON availability.summary_id = n.summary_id
               AND {availability_condition}
              WHERE {summary_predicate}
-               AND (?{provider_param} IS NULL OR EXISTS (
-                   SELECT 1
-                   FROM retained_summary_anchor AS retained
-                   JOIN session_occurrences AS summary_source_occurrence
-                     ON summary_source_occurrence.retrieval_anchor_id =
-                        retained.anchor_id
-                    AND summary_source_occurrence.session_id = n.session_id
-                    AND summary_source_occurrence.generation = {summary_generation}
-                   JOIN observations AS summary_source_provider
-                     ON summary_source_provider.observation_id =
-                        summary_source_occurrence.source_observation_id
-                   WHERE COALESCE(json_extract(
-                       summary_source_provider.observation_json,
-                       '$.identity.source.provider'
-                   ), 'claude') = ?{provider_param}
-                     AND retained.ordinal = c.ordinal
-                     AND retained.session_id = n.session_id
-                     AND retained.summary_id = n.summary_id
-                   LIMIT 1
-               ))
+               AND {retained_summary_provider}
                AND length(CAST(n.summary_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(n.source_horizon_json AS BLOB)) <= ?{item_cap_param}
@@ -526,26 +491,7 @@ pub(super) fn build_record_query_with_relations(
               AND {availability_condition}
              WHERE {summary_predicate}
                AND ss.source_ordinal < ?{source_count_cap_param}
-               AND (?{provider_param} IS NULL OR EXISTS (
-                   SELECT 1
-                   FROM retained_summary_anchor AS retained
-                   JOIN session_occurrences AS retained_occurrence
-                     ON retained_occurrence.retrieval_anchor_id =
-                        retained.anchor_id
-                    AND retained_occurrence.session_id = n.session_id
-                    AND retained_occurrence.generation = {summary_generation}
-                   JOIN observations AS retained_provider
-                     ON retained_provider.observation_id =
-                        retained_occurrence.source_observation_id
-                   WHERE COALESCE(json_extract(
-                       retained_provider.observation_json,
-                       '$.identity.source.provider'
-                   ), 'claude') = ?{provider_param}
-                     AND retained.ordinal = c.ordinal
-                     AND retained.session_id = n.session_id
-                     AND retained.summary_id = n.summary_id
-                   LIMIT 1
-               ))
+               AND {retained_summary_provider}
                AND length(CAST(n.summary_id AS BLOB))
                    + length(CAST(COALESCE(
                        ss.source_anchor_id, source_summary.summary_anchor_id
@@ -612,8 +558,28 @@ pub(super) fn build_record_query_with_relations(
         summary_relation_input = summary_relation_input,
         summary_source_input = summary_source_input,
         retained_summary_anchor_input = retained_summary_anchor_input,
+        retained_summary_provider = retained_summary_provider,
     );
     Ok(RecordQuery { sql, params })
+}
+
+fn retained_summary_provider_predicate(provider_param: usize, summary_generation: &str) -> String {
+    format!(
+        "(?{provider_param} IS NULL OR EXISTS (
+                   SELECT 1
+                   FROM retained_summary_anchor AS retained
+                   JOIN session_occurrences AS summary_source_occurrence
+                     ON summary_source_occurrence.retrieval_anchor_id =
+                        retained.anchor_id
+                    AND summary_source_occurrence.session_id = n.session_id
+                    AND summary_source_occurrence.generation = {summary_generation}
+                   WHERE summary_source_occurrence.source_provider = ?{provider_param}
+                     AND retained.ordinal = c.ordinal
+                     AND retained.session_id = n.session_id
+                     AND retained.summary_id = n.summary_id
+                   LIMIT 1
+               ))"
+    )
 }
 
 fn copy_relation_values(

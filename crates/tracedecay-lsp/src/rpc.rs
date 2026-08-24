@@ -106,6 +106,7 @@ pub(crate) fn partial_failure_data(coverage: String, detail: Option<String>) -> 
     data
 }
 
+#[hotpath::measure(label = "lsp_symbols_semantic_assemble")]
 pub(crate) fn semantic_response_value(response: SemanticResponse) -> Value {
     match response {
         SemanticResponse::Locations(value) => locations_value(value),
@@ -335,6 +336,7 @@ pub(crate) fn hover_value(hover: Option<Hover>) -> Value {
     })
 }
 
+#[hotpath::measure(label = "lsp_symbols_document_assemble")]
 pub(crate) fn document_symbols_value(symbols: Vec<DocumentSymbol>) -> Value {
     Value::Array(symbols.into_iter().map(document_symbol_value).collect())
 }
@@ -349,6 +351,7 @@ fn document_symbol_value(symbol: DocumentSymbol) -> Value {
     })
 }
 
+#[hotpath::measure(label = "lsp_symbols_workspace_assemble")]
 pub(crate) fn workspace_symbols_value(symbols: Vec<WorkspaceSymbol>) -> Value {
     Value::Array(
         symbols

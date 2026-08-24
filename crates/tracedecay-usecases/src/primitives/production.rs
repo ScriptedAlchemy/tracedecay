@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::grep_analysis::{
@@ -25,6 +26,7 @@ use tracedecay_application::{
     OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
     ResolvedScope, RetrievalEvidence, TemporalState,
 };
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
@@ -59,7 +61,7 @@ use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
 };
 use crate::graph::health_delta::compute_verified_health_delta;
-use crate::graph::queries::GraphQueryManager;
+use crate::graph::queries::{GraphQueryManager, is_test_marker};
 use crate::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
     request_graph_cancellation,
@@ -133,6 +135,24 @@ fn completed<T>(
     })
 }
 
+fn empty_primitive_page() -> PageState {
+    PageState {
+        sort_contract_id: PRIMITIVE_SORT_CONTRACT.clone(),
+        sort_revision: 1,
+        total: Some(0),
+        returned: 0,
+        cursor: None,
+        expires_at: None,
+    }
+}
+
+fn primitive_page(
+    total: Option<u64>,
+    returned: u64,
+) -> Result<PageState, ApplicationContractError> {
+    PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, total, returned)
+}
+
 fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOutcome<T> {
     RetrievalPortOutcome::Failed(RetrievalEvidence {
         payload: None,
@@ -152,8 +172,7 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         omissions: Vec::new(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(0), 0)
-            .unwrap_or_else(|_| panic!("empty page")),
+        page: empty_primitive_page(),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -216,8 +235,7 @@ fn omitted_evidence<T>(
         }],
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, None, 0)
-            .unwrap_or_else(|_| panic!("diagnostic unavailable page")),
+        page: empty_primitive_page(),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -264,8 +282,10 @@ fn diagnostics_result(
     let next_cursor_text = next_cursor
         .as_ref()
         .map(|cursor| cursor.as_str().to_owned());
-    let mut page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(total), returned)
-        .unwrap_or_else(|_| panic!("diagnostic result page"));
+    let mut page = match primitive_page(Some(total), returned) {
+        Ok(page) => page,
+        Err(_) => return failed(EvidenceDomain::Diagnostic, finished_at),
+    };
     page.cursor = next_cursor.map(|cursor| PageCursor::Opaque { cursor });
     page.expires_at = page.cursor.as_ref().and_then(|_| {
         finished_at
@@ -430,7 +450,6 @@ fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCove
 }
 
 fn now_observed() -> UtcMicros {
-    use std::time::{SystemTime, UNIX_EPOCH};
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -458,36 +477,32 @@ fn all_code_graph_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
-    const MAX_SYMBOLS: usize = 500_000;
     const PAGE_SIZE: usize = 4_096;
-    let mut after = None;
-    let mut symbols = Vec::new();
-    loop {
-        let page = graph
-            .symbols_page(after.as_ref(), PAGE_SIZE, Arc::clone(&cancellation))
-            .map_err(|_| ())?;
-        if symbols.len().saturating_add(page.symbols.len()) > MAX_SYMBOLS {
-            return Err(());
-        }
-        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-        symbols.extend(page.symbols);
-        if !page.has_more {
-            return Ok(symbols);
-        }
-    }
+    GraphQueryManager::new(graph, cancellation)
+        .page_all_symbols(
+            PAGE_SIZE,
+            "verified symbol census exceeded its analytical budget",
+        )
+        .map_err(|_| ())
 }
 
-fn symbol_at_location(
+fn logical_file_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
     file: &str,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
+    graph
+        .symbols_in_logical_file(file, 100_000, cancellation)
+        .map_err(|_| ())
+}
+
+fn symbol_at_line(
+    symbols: &[CodeGraphSymbolSummaryV1],
     line_1based: u32,
 ) -> Result<Option<CodeGraphSymbolSummaryV1>, ()> {
     let line = line_1based.checked_sub(1).ok_or(())?;
-    let mut enclosing = graph
-        .symbols_in_logical_file(file, 100_000, cancellation)
-        .map_err(|_| ())?
-        .into_iter()
+    let mut enclosing = symbols
+        .iter()
         .filter(|symbol| {
             symbol.metadata.as_ref().is_some_and(|metadata| {
                 metadata.line_span > 0
@@ -506,13 +521,26 @@ fn symbol_at_location(
             .cmp(&right.metadata.as_ref().map(|metadata| metadata.line_span))
             .then(left.occurrence.cmp(&right.occurrence))
     });
-    Ok(enclosing.into_iter().next())
+    Ok(enclosing.into_iter().next().cloned())
 }
 
 fn test_annotation_evidence(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    cache: &Mutex<
+        Option<(
+            CodeGenerationId,
+            std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+        )>,
+    >,
 ) -> Result<std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>, ()> {
+    let generation = graph.generation().clone();
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_generation, cached)) = &*guard
+        && cached_generation == &generation
+    {
+        return Ok(cached.clone());
+    }
     let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation))?;
     let occurrences = symbols
         .iter()
@@ -520,15 +548,7 @@ fn test_annotation_evidence(
         .collect::<Vec<_>>();
     let markers = symbols
         .iter()
-        .filter(|symbol| {
-            symbol.metadata.as_ref().is_some_and(|metadata| {
-                metadata.kind == "annotation_usage"
-                    && matches!(
-                        metadata.simple_name.as_str(),
-                        "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-                    )
-            })
-        })
+        .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
         .map(|symbol| symbol.occurrence.clone())
         .collect::<std::collections::HashSet<_>>();
     let edges = graph
@@ -539,11 +559,15 @@ fn test_annotation_evidence(
             cancellation,
         )
         .map_err(|_| ())?;
-    Ok(edges
+    let evidence = edges
         .into_iter()
         .filter(|edge| markers.contains(&edge.edge.from_occurrence))
         .map(|edge| edge.edge.to_occurrence)
-        .collect())
+        .collect::<std::collections::HashSet<_>>();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((generation, evidence.clone()));
+    }
+    Ok(evidence)
 }
 
 fn files_for_occurrences(
@@ -661,6 +685,12 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 }
             };
             let mut matches = Vec::with_capacity(scan.hits.len());
+            // Hits cluster within files, so the per-file symbol list is read
+            // from the graph once and reused for every hit in that file.
+            let mut symbols_by_file: std::collections::HashMap<
+                String,
+                Vec<CodeGraphSymbolSummaryV1>,
+            > = std::collections::HashMap::new();
             // A graph read that fails cannot distinguish "this line is in no
             // symbol" from "the enclosing symbol could not be read", so the
             // page reports itself incomplete rather than attributing the hit
@@ -670,14 +700,19 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
-                let enclosing = match symbol_at_location(
-                    &reader,
-                    Arc::clone(&graph_cancellation),
-                    &hit.file,
-                    hit.line,
-                ) {
+                if !symbols_by_file.contains_key(&hit.file)
+                    && let Ok(symbols) =
+                        logical_file_symbols(&reader, Arc::clone(&graph_cancellation), &hit.file)
+                {
+                    symbols_by_file.insert(hit.file.clone(), symbols);
+                }
+                let enclosing = match symbols_by_file
+                    .get(&hit.file)
+                    .ok_or(())
+                    .and_then(|symbols| symbol_at_line(symbols, hit.line))
+                {
                     Ok(enclosing) => enclosing,
-                    Err(_) => {
+                    Err(()) => {
                         unread_enclosing_symbols = true;
                         None
                     }
@@ -754,11 +789,20 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
 
 pub struct TraceDecayTestPrimitivePortV1 {
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+    annotation_evidence: Mutex<
+        Option<(
+            CodeGenerationId,
+            std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+        )>,
+    >,
 }
 
 impl TraceDecayTestPrimitivePortV1 {
     pub fn new(code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
-        Self { code_graph }
+        Self {
+            code_graph,
+            annotation_evidence: Mutex::new(None),
+        }
     }
 }
 
@@ -799,8 +843,11 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             } else {
                 return test_primitive_failed(context);
             };
-            let Ok(test_evidence) = test_annotation_evidence(&reader, Arc::clone(&cancellation))
-            else {
+            let Ok(test_evidence) = test_annotation_evidence(
+                &reader,
+                Arc::clone(&cancellation),
+                &self.annotation_evidence,
+            ) else {
                 return test_primitive_failed(context);
             };
             let mut coverage_map = Vec::new();
@@ -940,8 +987,11 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             ) else {
                 return test_primitive_failed(context);
             };
-            let Ok(test_annotations) = test_annotation_evidence(&reader, Arc::clone(&cancellation))
-            else {
+            let Ok(test_annotations) = test_annotation_evidence(
+                &reader,
+                Arc::clone(&cancellation),
+                &self.annotation_evidence,
+            ) else {
                 return test_primitive_failed(context);
             };
             let Ok(files_with_inline_tests) =
@@ -1196,7 +1246,7 @@ fn storage_status_history_path(
     digest.update(store_path.as_bytes());
     data_root
         .join("storage-status-history-v1")
-        .join(format!("{}.json", hex::encode(digest.finalize())))
+        .join(format!("{}.json", encode_lowercase_hex(&digest.finalize())))
 }
 
 fn update_storage_status_history(
@@ -1651,16 +1701,27 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a FileMetadataPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
         Box::pin(async move {
-            let mut files = Vec::new();
+            let root = self.source_runtime.project_root().to_path_buf();
+            let mut handles = Vec::with_capacity(request.files.len());
             for file in &request.files {
-                let path = self.source_runtime.project_root().join(file);
-                let meta = tokio::fs::metadata(&path).await.ok();
-                files.push(FileMetadataRecord {
-                    file: file.clone(),
-                    language: None,
-                    indexed_at: None,
-                    byte_size: meta.map(|value| value.len()),
-                });
+                let path = root.join(file);
+                let file = file.clone();
+                handles.push(tokio::spawn(async move {
+                    let meta = tokio::fs::metadata(path).await.ok();
+                    FileMetadataRecord {
+                        file,
+                        language: None,
+                        indexed_at: None,
+                        byte_size: meta.map(|value| value.len()),
+                    }
+                }));
+            }
+            let mut files = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle.await {
+                    Ok(record) => files.push(record),
+                    Err(_) => return failed(EvidenceDomain::Source, now_observed()),
+                }
             }
             completed(
                 FileMetadataPrimitiveResult { files },
@@ -2372,14 +2433,23 @@ fn attributed_tests_outcome(
         visited,
         eligible,
         Some(EvidenceAuthority {
-            evidence_id: EvidenceIdentity::new(format!(
+            evidence_id: match EvidenceIdentity::new(format!(
                 "evidence.test-attribution.{}",
                 join.test_watermark
                     .evidence_digest
                     .as_str()
                     .trim_start_matches("sha256:")
-            ))
-            .unwrap_or_else(|_| panic!("validated attribution digest yields evidence identity")),
+            )) {
+                Ok(identity) => identity,
+                Err(_) => {
+                    return affected_tests_unavailable(
+                        request,
+                        finished_at,
+                        OmissionReason::Failed,
+                        FreshnessState::Unknown,
+                    );
+                }
+            },
             source_kind: "test_attribution".to_owned(),
             producer: "code_index".to_owned(),
             scope,
@@ -2478,8 +2548,7 @@ fn affected_tests_evidence(
             .collect(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, eligible, returned)
-            .unwrap_or_else(|_| panic!("affected-tests page")),
+        page: primitive_page(eligible, returned).unwrap_or_else(|_| empty_primitive_page()),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,

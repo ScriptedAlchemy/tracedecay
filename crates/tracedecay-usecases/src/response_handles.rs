@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{
     DURABLE_REMOVAL_TOMBSTONE_PREFIX, PrivateStoreIo, reject_symlink_components,
@@ -13,6 +14,11 @@ use tracedecay_runtime_core::storage::{
 };
 
 pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
+
+/// Converts a UTC-micros clock sample to the second resolution the handle store uses.
+pub fn micros_to_seconds(value: UtcMicros) -> i64 {
+    value.0.div_euclid(1_000_000)
+}
 
 const HANDLE_HEX_CHARS: usize = 24;
 const HANDLE_PREFIX: &str = "rh_";
@@ -562,7 +568,12 @@ fn is_corrupt_record_error(error: &TraceDecayError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+
+    use fs2::FileExt;
 
     use super::*;
     use tracedecay_runtime_core::storage::{
@@ -647,11 +658,10 @@ mod tests {
             panic!("concurrent response handle was not retrievable");
         };
         assert_eq!(persisted.content, "shared payload");
+    }
 
-        use fs2::FileExt as _;
-        use std::sync::mpsc;
-        use std::time::Duration;
-
+    #[test]
+    fn inventory_fails_closed_when_the_root_lock_is_held() {
         let root = tempfile::tempdir().unwrap();
         let leaf = root.path().file_name().unwrap().to_str().unwrap();
         let lock_path = root
@@ -728,8 +738,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::symlink;
-
             let owner = tempfile::tempdir().unwrap();
             let attacker = tempfile::tempdir().unwrap();
             let stored =

@@ -158,9 +158,7 @@ where
 
 pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
-        TraceDecayError::Config { .. } | TraceDecayError::Parse { .. } => {
-            RetainedSurfaceExecutionErrorV1::InvalidRequest
-        }
+        TraceDecayError::Config { .. } => RetainedSurfaceExecutionErrorV1::InvalidRequest,
         TraceDecayError::ProjectRoute {
             retryable: false, ..
         } => RetainedSurfaceExecutionErrorV1::Conflict,

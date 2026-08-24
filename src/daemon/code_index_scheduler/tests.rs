@@ -1080,9 +1080,9 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
                 )
             })
             .collect(),
-        // Plan 15 pipeline step 7: approximate candidates calibrate only within
-        // a declared score domain, so the profile must cover every raw-score
-        // domain the daemon lanes emit.
+        // Approximate candidates calibrate only within a declared score
+        // domain, so the profile must cover every raw-score domain the
+        // daemon lanes emit.
         score_domain_calibrations: [
             (
                 RetrieverKind::ExactLiteral,
@@ -9415,7 +9415,7 @@ async fn wait_for_event_to_ready(
     }
 }
 
-/// The installed Plan 26 observability lane must persist one canonical index
+/// The installed observability lane must persist one canonical index
 /// lifecycle observation when a reconcile publishes a generation, and the
 /// retrieval-pipeline families when a query composition completes, all in the
 /// one project observation store.

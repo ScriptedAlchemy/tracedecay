@@ -45,12 +45,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -86,10 +91,7 @@ fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
 }
 
 impl BatchExtractor {
-    /// Extract code graph nodes and edges from a Batch source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Batch source code to parse.
     pub fn extract_batch(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -119,7 +121,6 @@ impl BatchExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -175,7 +176,6 @@ impl BatchExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit one top-level child of the root program node.
     ///
     /// Batch files use labels as function-like constructs. Labels are top-level
     /// siblings in the AST (not containers). We group code between consecutive
@@ -269,7 +269,6 @@ impl BatchExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -279,7 +278,6 @@ impl BatchExtractor {
             });
         }
 
-        // Extract call sites from siblings belonging to this label's body.
         Self::extract_label_call_sites(state, children, label_index, &id);
     }
 
@@ -347,7 +345,6 @@ impl BatchExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -357,10 +354,6 @@ impl BatchExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract docstrings from `REM` or `::` comment lines preceding a label.
     ///
@@ -441,7 +434,6 @@ impl BatchExtractor {
             }
         }
 
-        // Recurse into children.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {

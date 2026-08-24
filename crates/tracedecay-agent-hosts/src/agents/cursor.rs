@@ -11,11 +11,11 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
+    UpdatePluginOutcome, backup_and_write_json, load_json_file, load_jsonc_file_strict,
+    mcp_config_has_tracedecay, safe_write_text_file, uninstall_mcp_server_entry,
 };
 
-/// Cursor agent.
 pub struct CursorIntegration;
 
 /// Model-invocable skills shipped by the Cursor plugin.
@@ -345,6 +345,7 @@ fn remove_retired_global_cursor_memory_rule(home: &Path) -> Result<bool> {
     Ok(true)
 }
 
+#[hotpath::measure(label = "cursor_plugin_install")]
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     remove_retired_global_cursor_memory_rule(home)?;
     let install_dir = cursor_plugin_install_dir(home);
@@ -420,7 +421,9 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
             }
         }
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&hooks)?);
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "Cursor hooks")?;
+    Ok(rendered)
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
@@ -657,9 +660,7 @@ fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn legacy_mcp_has_tracedecay(mcp_path: &Path) -> bool {
-    load_json_file(mcp_path)
-        .get("mcpServers")
-        .is_some_and(|servers| servers.get("tracedecay").is_some())
+    mcp_config_has_tracedecay(mcp_path, "mcpServers", load_json_file)
 }
 
 fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
@@ -697,7 +698,16 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
         super::ensure_project_local_safe_path(project_path, path)?;
     }
     if legacy_mcp {
-        uninstall_mcp_server(&mcp_path);
+        uninstall_mcp_server_entry(
+            &mcp_path,
+            "mcpServers",
+            load_json_file,
+            McpUninstallPolicy {
+                prune_empty_root: true,
+                remove_empty_file: true,
+                durable_remove: false,
+            },
+        )?;
     }
     if legacy_hooks {
         remove_legacy_project_hooks(&hooks_path)?;
@@ -763,60 +773,6 @@ fn legacy_hooks_have_tracedecay(hooks_path: &Path) -> bool {
 fn legacy_rule_has_tracedecay(rule_path: &Path) -> bool {
     std::fs::read_to_string(rule_path)
         .is_ok_and(|contents| contents.contains("tracedecay MCP tools"))
-}
-
-/// Remove the tracedecay MCP server entry from a Cursor `mcp.json`, deleting the
-/// file when it becomes empty and otherwise backing up before rewriting.
-fn uninstall_mcp_server(mcp_path: &Path) {
-    if !mcp_path.exists() {
-        eprintln!("  {} not found, skipping", mcp_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(mcp_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    };
-
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    }
-
-    let is_empty = settings.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "mcpServers" && v.as_object().is_some_and(serde_json::Map::is_empty))
-    });
-
-    if is_empty {
-        std::fs::remove_file(mcp_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            mcp_path.display()
-        );
-    } else if backup_and_write_json(mcp_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            mcp_path.display()
-        );
-    }
 }
 
 fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {

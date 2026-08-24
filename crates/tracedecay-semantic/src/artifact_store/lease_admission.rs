@@ -1,7 +1,5 @@
 //! Artifact lease acquisition/release and runtime admission for
-//! ModelArtifactStore. Split out of artifact_store.rs to keep the facade
-//! under the 1000-line hygiene ceiling; pure structural move, no behavior
-//! change.
+//! ModelArtifactStore.
 
 use super::*;
 
@@ -275,10 +273,17 @@ impl ModelArtifactStore {
         let inventory = self
             .load_inventory_locked()
             .map_err(|_| SemanticCapabilityDisabledV1::StorageFailure)?;
-        let record = inventory
-            .records
-            .get(&digest.to_string())
-            .ok_or(SemanticCapabilityDisabledV1::MissingArtifact)?;
+        let record = match inventory.records.get(&digest.to_string()) {
+            Some(record) => {
+                crate::hotpath_observe::record_artifact_cache(true);
+                record
+            }
+            None => {
+                crate::hotpath_observe::record_artifact_cache(false);
+                crate::hotpath_observe::record_model_failure("missing_artifact");
+                return Err(SemanticCapabilityDisabledV1::MissingArtifact);
+            }
+        };
         if let Some((lease_id, kind)) = required_lease
             && !inventory
                 .leases
@@ -291,18 +296,25 @@ impl ModelArtifactStore {
                     })
                 })
         {
-            return Err(SemanticCapabilityDisabledV1::LeaseUnavailable);
+            let error = SemanticCapabilityDisabledV1::LeaseUnavailable;
+            crate::hotpath_observe::record_capability_error(&error);
+            return Err(error);
         }
         match record.state {
             ArtifactInventoryStateV1::Installed | ArtifactInventoryStateV1::RetainedForRollback => {
             }
             ArtifactInventoryStateV1::Revoked => {
-                return Err(SemanticCapabilityDisabledV1::RevokedArtifact);
+                let error = SemanticCapabilityDisabledV1::RevokedArtifact;
+                crate::hotpath_observe::record_capability_error(&error);
+                return Err(error);
             }
             ArtifactInventoryStateV1::Quarantined => {
-                return Err(SemanticCapabilityDisabledV1::QuarantinedArtifact);
+                let error = SemanticCapabilityDisabledV1::QuarantinedArtifact;
+                crate::hotpath_observe::record_capability_error(&error);
+                return Err(error);
             }
             ArtifactInventoryStateV1::Staged | ArtifactInventoryStateV1::Verified => {
+                crate::hotpath_observe::record_model_failure("missing_artifact");
                 return Err(SemanticCapabilityDisabledV1::MissingArtifact);
             }
         }
@@ -311,16 +323,29 @@ impl ModelArtifactStore {
             || record.manifest_digest != manifest.canonical_digest()
             || record.members != manifest.payload.members
         {
-            return Err(SemanticCapabilityDisabledV1::IdentityMismatch);
+            let error = SemanticCapabilityDisabledV1::IdentityMismatch;
+            crate::hotpath_observe::record_capability_error(&error);
+            return Err(error);
         }
-        self.verify_artifact_record(record)
-            .map_err(|_| SemanticCapabilityDisabledV1::CorruptArtifact)?;
-        check_compatibility(&manifest.payload.runtime, env)?;
-        check_resource_ceiling(&manifest.payload.resource_ceiling, env)?;
+        self.verify_artifact_record(record).map_err(|_| {
+            let error = SemanticCapabilityDisabledV1::CorruptArtifact;
+            crate::hotpath_observe::record_capability_error(&error);
+            error
+        })?;
+        check_compatibility(&manifest.payload.runtime, env).inspect_err(|error| {
+            crate::hotpath_observe::record_capability_error(error);
+        })?;
+        check_resource_ceiling(&manifest.payload.resource_ceiling, env).inspect_err(|error| {
+            crate::hotpath_observe::record_capability_error(error);
+        })?;
         let directory = self
             .artifacts_dir
             .open_dir_nofollow(digest.as_str())
-            .map_err(|_| SemanticCapabilityDisabledV1::CorruptArtifact)?;
+            .map_err(|_| {
+                let error = SemanticCapabilityDisabledV1::CorruptArtifact;
+                crate::hotpath_observe::record_capability_error(&error);
+                error
+            })?;
         Ok(AdmittedArtifactV1 {
             artifact_digest: digest.clone(),
             manifest_digest: manifest.canonical_digest(),
@@ -346,7 +371,11 @@ impl ModelArtifactStore {
                 .records
                 .get(&digest.to_string())
                 .and_then(|record| record.manifest.clone())
-                .ok_or(SemanticCapabilityDisabledV1::MissingArtifact)?
+                .ok_or_else(|| {
+                    crate::hotpath_observe::record_artifact_cache(false);
+                    crate::hotpath_observe::record_model_failure("missing_artifact");
+                    SemanticCapabilityDisabledV1::MissingArtifact
+                })?
         };
         self.admit_for_runtime(digest, &manifest, env, 0)
     }
@@ -367,7 +396,11 @@ impl ModelArtifactStore {
                 .records
                 .get(&digest.to_string())
                 .and_then(|record| record.manifest.clone())
-                .ok_or(SemanticCapabilityDisabledV1::MissingArtifact)?
+                .ok_or_else(|| {
+                    crate::hotpath_observe::record_artifact_cache(false);
+                    crate::hotpath_observe::record_model_failure("missing_artifact");
+                    SemanticCapabilityDisabledV1::MissingArtifact
+                })?
         };
         self.admit_for_runtime_with_required_lease(
             digest,

@@ -1,7 +1,5 @@
 //! Daemon PR-branch auto-tracking (opt-in via `sync.auto_track_pr_branches`).
 //!
-//! # What this does
-//!
 //! When a project enables `sync.auto_track_pr_branches`, a daemon poll loop
 //! discovers the open pull requests on the repo's `origin` remote and activates
 //! each same-repo PR head as a registered linked worktree through the daemon's
@@ -33,7 +31,7 @@
 //! Discovery classifies a PR as a fork when its head SHA matches no `refs/heads/*`
 //! ref on `origin` (or, via `gh`, when `isCrossRepository` is true). Supporting
 //! forks would mean fetching untrusted `refs/pull/N/head` from arbitrary
-//! repositories; that is deliberately out of scope for the first cut.
+//! repositories; that is deliberately out of scope.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -41,8 +39,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::ProjectId;
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
@@ -54,6 +52,14 @@ const BRANCH_LIFECYCLE_CONTENDED: &str = "branch_lifecycle_contended";
 
 fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
+}
+
+async fn git_authority_available(repo_root: &Path) -> bool {
+    let repo = repo_root.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::worktree::git_worktree_root(&repo).is_some())
+        .await
+        .ok()
+        .unwrap_or(false)
 }
 
 /// Outcome of a successful manual branch-head activation.
@@ -78,25 +84,28 @@ pub(crate) struct ManualBranchArtifactsV1 {
     pub(crate) worktree: PathBuf,
     pub(crate) tracking_ref: String,
     pub(crate) label: String,
+    /// Digest of the raw branch name, computed once at construction; both the
+    /// worktree directory and the lifecycle lock file derive from it.
+    branch_digest: String,
 }
 
 impl ManualBranchArtifactsV1 {
     pub(crate) fn for_branch(data_root: &Path, branch: &str) -> Self {
-        let digest = hex::encode(Sha256::digest(branch.as_bytes()));
+        let branch_digest = sha256_hex(branch.as_bytes());
         Self {
             branch: branch.to_owned(),
-            worktree: data_root.join("branch-worktrees").join(digest),
+            worktree: data_root.join("branch-worktrees").join(&branch_digest),
             tracking_ref: format!("refs/tracedecay/branch/{branch}"),
             label: format!("tracedecay/track/{branch}"),
+            branch_digest,
         }
     }
 
     fn lifecycle_lock_path(&self, data_root: &Path) -> PathBuf {
-        let digest = hex::encode(Sha256::digest(self.branch.as_bytes()));
         data_root
             .join("branch-worktrees")
             .join(".lifecycle")
-            .join(format!("{digest}.lock"))
+            .join(format!("{}.lock", self.branch_digest))
     }
 }
 
@@ -866,7 +875,7 @@ async fn activate_manual_branch_with_administration(
             "code-index scheduler authority is unavailable for branch activation",
         ));
     };
-    if crate::worktree::git_worktree_root(repo_root).is_none() {
+    if !git_authority_available(repo_root).await {
         return Err(ManualBranchActivationError::git_unavailable(
             "git authority is unavailable for branch activation",
         ));
@@ -1980,7 +1989,7 @@ async fn track_pr(
             "code-index scheduler authority is unavailable for PR worktree activation",
         ));
     };
-    if crate::worktree::git_worktree_root(repo_root).is_none() {
+    if !git_authority_available(repo_root).await {
         return Err("git authority is unavailable for PR worktree activation".to_string());
     }
 
@@ -2149,14 +2158,15 @@ async fn cleanup_failed_track(
 ) -> std::result::Result<ManagedPr, String> {
     match remove_pr_store(repo_root, data_root, label, administration).await {
         Ok(()) => {
-            cleanup_pr_worktree(
+            cleanup_pr_worktree_off_runtime(
                 repo_root,
                 data_root,
                 pr,
                 head_sha,
                 true,
-                administration.command_control,
-            );
+                administration.command_control.clone(),
+            )
+            .await;
             Err(original_reason.to_string())
         }
         Err(cleanup_reason) => Err(format!(
@@ -2252,14 +2262,15 @@ async fn untrack_pr(
         return Err("managed PR entry does not own the requested branch artifacts".to_string());
     }
     remove_pr_store(repo_root, data_root, label, administration).await?;
-    cleanup_pr_worktree(
+    cleanup_pr_worktree_off_runtime(
         repo_root,
         data_root,
         managed.pr,
         &managed.head_sha,
         !is_legacy,
-        administration.command_control,
-    );
+        administration.command_control.clone(),
+    )
+    .await;
     Ok(())
 }
 
@@ -2280,13 +2291,25 @@ async fn sweep_orphan_pr_worktrees(
     administration: PrStoreAdministration<'_>,
 ) {
     let worktrees_dir = data_root.join("pr-worktrees");
-    let Ok(entries) = std::fs::read_dir(&worktrees_dir) else {
-        return;
+    let entries = match tokio::task::spawn_blocking({
+        let worktrees_dir = worktrees_dir.clone();
+        move || {
+            std::fs::read_dir(&worktrees_dir).map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name())
+                    .collect::<Vec<_>>()
+            })
+        }
+    })
+    .await
+    {
+        Ok(Ok(entries)) => entries,
+        Ok(Err(_)) | Err(_) => return,
     };
     let managed_prs: std::collections::BTreeSet<u64> =
         state.managed.values().map(|m| m.pr).collect();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for name in entries {
         let Some(number) = name
             .to_str()
             .and_then(|n| n.strip_prefix("pr-"))
@@ -2300,14 +2323,15 @@ async fn sweep_orphan_pr_worktrees(
         let label = pr_label(number);
         match remove_pr_store(repo_root, data_root, &label, administration).await {
             Ok(()) => {
-                cleanup_pr_worktree(
+                cleanup_pr_worktree_off_runtime(
                     repo_root,
                     data_root,
                     number,
                     "",
                     true,
-                    administration.command_control,
-                );
+                    administration.command_control.clone(),
+                )
+                .await;
                 log_daemon_event(
                     "pr_autotrack",
                     &[
@@ -2320,6 +2344,40 @@ async fn sweep_orphan_pr_worktrees(
             }
             Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
         }
+    }
+}
+
+async fn cleanup_pr_worktree_off_runtime(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    expected_head: &str,
+    remove_synthetic_branch: bool,
+    command_control: PrCommandControl,
+) {
+    let repo_root = repo_root.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    let expected_head = expected_head.to_owned();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        cleanup_pr_worktree(
+            &repo_root,
+            &data_root,
+            pr,
+            &expected_head,
+            remove_synthetic_branch,
+            &command_control,
+        );
+    })
+    .await
+    {
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("action", "cleanup_task_failed".to_string()),
+                ("pr", pr.to_string()),
+                ("reason", error.to_string()),
+            ],
+        );
     }
 }
 

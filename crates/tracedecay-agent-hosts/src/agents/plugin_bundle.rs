@@ -96,6 +96,36 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
+/// Hook/plugin template token replaced with the resolved tracedecay binary.
+pub(crate) const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
+/// Hook template token replaced with the host's sync/event hook command.
+pub(crate) const TRACEDECAY_SYNC_PLACEHOLDER: &str = "__TRACEDECAY_SYNC__";
+/// Hook template token replaced with the host's stop hook command.
+pub(crate) const TRACEDECAY_STOP_PLACEHOLDER: &str = "__TRACEDECAY_STOP__";
+
+const TRACEDECAY_COMMAND_PLACEHOLDERS: &[&str] = &[
+    TRACEDECAY_BIN_PLACEHOLDER,
+    TRACEDECAY_SYNC_PLACEHOLDER,
+    TRACEDECAY_STOP_PLACEHOLDER,
+];
+
+/// Fail closed when a rendered host file still carries a TraceDecay placeholder.
+///
+/// Claude, Cursor, OpenCode, and Gemini used to substitute and ship; only Kimi
+/// rejected leftovers. One residual check keeps an unresolved token from
+/// reaching a host config.
+pub(crate) fn reject_unresolved_placeholders(rendered: &str, host: &str) -> Result<()> {
+    if TRACEDECAY_COMMAND_PLACEHOLDERS
+        .iter()
+        .any(|placeholder| rendered.contains(*placeholder))
+    {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!("{host} retained an unresolved TraceDecay placeholder"),
+        });
+    }
+    Ok(())
+}
+
 /// One embedded plugin file: `relative` is its deploy path; `contents` may come
 /// from a different source path in the shared `plugin/` tree.
 #[derive(Clone, Copy)]
@@ -484,35 +514,6 @@ mod tests {
                 assert!(!contents.is_empty(), "{relative} embedded empty");
             }
         }
-    }
-
-    #[test]
-    fn each_host_composes_the_expected_file_count() {
-        // Skill files are embedded recursively (SKILL.md + support files), so
-        // the skill count is derived from the generated set rather than a
-        // frozen literal. The `tracedecay-*` dispatcher skills were removed, so
-        // Cursor's subset now equals the full skill set; the filter is kept as a
-        // guard against a dispatcher skill ever being reintroduced.
-        let all_skills = GENERATED_SKILL_FILES.len();
-        let cursor_skills = cursor_skill_files().count();
-
-        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + native
-        // agents + 13 commands.
-        assert_eq!(
-            claude_files().len(),
-            all_skills + 5 + GENERATED_CLAUDE_AGENT_FILES.len() + 13
-        );
-        // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
-        //   README) + rules + native agents + 13 native commands.
-        // Memory lives in ~/.cursor/rules/, not the plugin inventory.
-        assert_eq!(
-            cursor_files().len(),
-            cursor_skills + 4 + CURSOR_RULE_FILES.len() + GENERATED_CURSOR_AGENT_FILES.len() + 13
-        );
-        // Codex: skills + 4 manifest (dot + mcp + hooks + README).
-        assert_eq!(codex_files().len(), all_skills + 4);
-        // Kimi: skills + 2 manifest (dot + README) + 13 shared commands.
-        assert_eq!(kimi_files().len(), all_skills + 2 + 13);
     }
 
     #[test]

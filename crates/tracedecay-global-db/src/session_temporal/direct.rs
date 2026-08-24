@@ -52,11 +52,11 @@ pub async fn resolve_expand_target(
     }
 }
 
-/// `ObservationSourceIdentityV1` omits `provider` on the wire whenever it is the
-/// default (`claude`), so every SQL comparison against `observation_json` must
-/// restore that default before matching — exactly as the candidate, hydration,
-/// and derived-evidence queries do. Matching the bare `json_extract` misses
-/// every Claude observation, which reports a live message as deleted.
+/// Provider matching reads `session_occurrences.source_provider`, the
+/// projection-materialized column that already restores the wire default
+/// (`ObservationSourceIdentityV1` omits `provider` when it is `claude`), so no
+/// direct read re-parses `observation_json` per row — exactly as the candidate,
+/// hydration, and derived-evidence queries do.
 async fn resolve_occurrence_anchor(
     read: &TemporalSqlRead<'_>,
     provider: &str,
@@ -73,17 +73,9 @@ async fn resolve_occurrence_anchor(
                ON occurrence.session_id = raw.session_id
               AND occurrence.generation = generation.generation
               AND occurrence.message_id = raw.message_id
-             JOIN observations AS observation
-               ON observation.observation_id = occurrence.source_observation_id
              WHERE raw.provider = ?1
                AND raw.store_id = ?2
-               AND COALESCE(
-                   json_extract(
-                       observation.observation_json,
-                       '$.identity.source.provider'
-                   ),
-                   'claude'
-               ) = ?1
+               AND occurrence.source_provider = ?1
              ORDER BY occurrence.occurrence_id
              LIMIT 2",
             params![provider, store_id],
@@ -178,18 +170,10 @@ async fn resolve_external_anchor(
                ON occurrence.session_id = raw.session_id
               AND occurrence.generation = generation.generation
               AND occurrence.message_id = raw.message_id
-             JOIN observations AS observation
-               ON observation.observation_id = occurrence.source_observation_id
              WHERE raw.provider = ?1
                AND raw.session_id = ?2
                AND raw.payload_ref = ?3
-               AND COALESCE(
-                   json_extract(
-                       observation.observation_json,
-                       '$.identity.source.provider'
-                   ),
-                   'claude'
-               ) = ?1
+               AND occurrence.source_provider = ?1
              ORDER BY occurrence.occurrence_id
              LIMIT 2",
             params![provider, session_id.as_str(), payload_ref],

@@ -602,29 +602,31 @@ pub async fn overview(
 pub async fn costs(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<CostsReadModelV1>> {
-    let model = costs_model(&state).await;
-    let metrics = model.usage.iter().chain(&model.estimated_cost);
-    let eligible = metrics.clone().count() as u64;
-    let known = metrics
-        .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
-        .count() as u64;
-    let envelope = if model.current && known == eligible {
-        DashboardEnvelopeV1::ready(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(eligible, "metrics"),
-            model,
-        )
-    } else {
-        DashboardEnvelopeV1::partial(
-            scope_from_state(&state),
-            eligible,
-            known,
-            "metrics",
-            vec!["incomplete_metric_coverage".to_owned()],
-            model,
-        )
-    };
-    Json(envelope)
+    hotpath::measure_block!("dashboard.savings.costs", {
+        let model = costs_model(&state).await;
+        let metrics = model.usage.iter().chain(&model.estimated_cost);
+        let eligible = metrics.clone().count() as u64;
+        let known = metrics
+            .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
+            .count() as u64;
+        let envelope = if model.current && known == eligible {
+            DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(eligible, "metrics"),
+                model,
+            )
+        } else {
+            DashboardEnvelopeV1::partial(
+                scope_from_state(&state),
+                eligible,
+                known,
+                "metrics",
+                vec!["incomplete_metric_coverage".to_owned()],
+                model,
+            )
+        };
+        Json(envelope)
+    })
 }
 
 // `costs_http` / `costs_export` are deleted with their last caller, for the
@@ -849,66 +851,73 @@ pub async fn ledger(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
 ) -> Json<Value> {
-    let (range, since) = match range_since(params.range.as_deref()) {
-        Ok(range) => range,
-        Err(error) => return Json(read_failed_block(error)),
-    };
-    let Some(gdb) = state.savings_db.as_deref() else {
-        return Json(json!({
-            "available": false,
+    hotpath::measure_block!("dashboard.savings.ledger", {
+        let (range, since) = match range_since(params.range.as_deref()) {
+            Ok(range) => range,
+            Err(error) => return Json(read_failed_block(error)),
+        };
+        let Some(gdb) = state.savings_db.as_deref() else {
+            return Json(json!({
+                "available": false,
+                "db": state.savings_db_path,
+                "range": range,
+            }));
+        };
+
+        let total = gdb.sum_savings(None, since).await;
+        let history = gdb.savings_history(None, since).await;
+        let conn = gdb.read_connection();
+        const SAVED_TOKENS_EXPR: &str = "COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0)";
+        let by_tool = query_rows(
+            &conn,
+            &format!(
+                "SELECT tool_name,
+                {SAVED_TOKENS_EXPR} AS saved_tokens,
+                COUNT(*) AS calls
+         FROM savings_ledger WHERE ts >= ?1
+         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50"
+            ),
+            params![since],
+        )
+        .await
+        .unwrap_or_default();
+        let by_project = query_rows(
+            &conn,
+            &format!(
+                "SELECT project_path,
+                {SAVED_TOKENS_EXPR} AS saved_tokens,
+                COUNT(*) AS calls
+         FROM savings_ledger WHERE ts >= ?1
+         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50"
+            ),
+            params![since],
+        )
+        .await
+        .unwrap_or_default();
+
+        Json(json!({
+            "available": true,
             "db": state.savings_db_path,
             "range": range,
-        }));
-    };
-
-    let total = gdb.sum_savings(None, since).await;
-    let history = gdb.savings_history(None, since).await;
-    let conn = gdb.read_connection();
-    let by_tool = query_rows(
-        &conn,
-        "SELECT tool_name,
-                COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
-                COUNT(*) AS calls
-         FROM savings_ledger WHERE ts >= ?1
-         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50",
-        params![since],
-    )
-    .await
-    .unwrap_or_default();
-    let by_project = query_rows(
-        &conn,
-        "SELECT project_path,
-                COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
-                COUNT(*) AS calls
-         FROM savings_ledger WHERE ts >= ?1
-         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50",
-        params![since],
-    )
-    .await
-    .unwrap_or_default();
-
-    Json(json!({
-        "available": true,
-        "db": state.savings_db_path,
-        "range": range,
-        "since": since,
-        "total": { "saved_tokens": total.saved_tokens, "calls": total.calls },
-        "by_day": history.iter().map(|day| json!({
-            "day": day.day,
-            "saved_tokens": day.saved_tokens,
-            "calls": day.calls,
-        })).collect::<Vec<_>>(),
-        "by_tool": by_tool.iter().map(|row| json!({
-            "tool": str_field(row, "tool_name"),
-            "saved_tokens": i64_field(row, "saved_tokens"),
-            "calls": i64_field(row, "calls"),
-        })).collect::<Vec<_>>(),
-        "by_project": by_project.iter().map(|row| json!({
-            "project": str_field(row, "project_path"),
-            "saved_tokens": i64_field(row, "saved_tokens"),
-            "calls": i64_field(row, "calls"),
-        })).collect::<Vec<_>>(),
-    }))
+            "since": since,
+            "total": { "saved_tokens": total.saved_tokens, "calls": total.calls },
+            "by_day": history.iter().map(|day| json!({
+                "day": day.day,
+                "saved_tokens": day.saved_tokens,
+                "calls": day.calls,
+            })).collect::<Vec<_>>(),
+            "by_tool": by_tool.iter().map(|row| json!({
+                "tool": str_field(row, "tool_name"),
+                "saved_tokens": i64_field(row, "saved_tokens"),
+                "calls": i64_field(row, "calls"),
+            })).collect::<Vec<_>>(),
+            "by_project": by_project.iter().map(|row| json!({
+                "project": str_field(row, "project_path"),
+                "saved_tokens": i64_field(row, "saved_tokens"),
+                "calls": i64_field(row, "calls"),
+            })).collect::<Vec<_>>(),
+        }))
+    })
 }
 
 /// GET `/api/plugins/savings/sessions?range=&limit=&offset=`
@@ -920,26 +929,197 @@ pub async fn sessions(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SessionsParams>,
 ) -> Response {
-    let (range, since) = match range_since(params.range.as_deref()) {
-        Ok(range) => range,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(read_failed_block(error)),
-            )
-                .into_response();
+    hotpath::measure_block!("dashboard.savings.sessions", {
+        let (range, since) = match range_since(params.range.as_deref()) {
+            Ok(range) => range,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(read_failed_block(error)),
+                )
+                    .into_response();
+            }
+        };
+        let limit = coerce_limit(params.limit, 25, 100);
+        let offset = params.offset.unwrap_or(0).max(0);
+        let Some(db) = state.lcm_db.as_deref() else {
+            return match decode_contract::<SavingsSessionsPayloadV1>(
+                json!({
+                "available": false,
+                "db": state.lcm_db_path,
+                "range": range,
+                "sessions": [],
+                "total": 0,
+                }),
+                "savings sessions",
+            ) {
+                Ok(payload) => Json(payload).into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"status": "contract_invalid", "error": error})),
+                )
+                    .into_response(),
+            };
+        };
+        let conn = db.read_connection();
+
+        let page_sql = "
+            SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
+                   s.is_subagent,
+                   (SELECT MAX(m.timestamp) FROM session_messages m
+                     WHERE m.provider = s.provider AND m.session_id = s.session_id) AS last_message_at
+            FROM sessions s
+            WHERE ?1 = 0 OR COALESCE(s.started_at,
+                  (SELECT MAX(m.timestamp) FROM session_messages m
+                    WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
+            ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
+            LIMIT ?2 OFFSET ?3";
+        let page = query_rows(&conn, page_sql, params![since, limit, offset])
+            .await
+            .unwrap_or_default();
+        let total = query_i64(
+            &conn,
+            "SELECT COUNT(*) FROM sessions s
+             WHERE ?1 = 0 OR COALESCE(s.started_at,
+                   (SELECT MAX(m.timestamp) FROM session_messages m
+                     WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1",
+            params![since],
+        )
+        .await;
+
+        let overlay = token_count::non_usage_message_tokens(&state).await;
+        let provider_scope = provider_usage_scope(&state);
+        let provider_usage = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
+            (Some(usage_db), Some(scope)) => {
+                Some(provider_usage_aggregate(usage_db, scope, None, None).await)
+            }
+            _ => None,
+        };
+        let usage_deltas = provider_usage
+            .as_ref()
+            .filter(|usage| usage.coverage == ProviderUsageCoverageV1::Complete)
+            .map(|usage| usage.deltas.as_slice());
+        let session_model_tiers = overlay.as_deref().map(|messages| {
+            fold_overlay(messages, |msg| {
+                Some((
+                    msg.provider.clone(),
+                    msg.session_id.clone(),
+                    msg.model.clone(),
+                ))
+            })
+        });
+
+        // One grouped aggregate over the page's (provider, session_id) pairs —
+        // previously each page row ran its own aggregate query (N+1, up to 100
+        // round-trips re-running the json_extract CTE per page render). The
+        // VALUES list joins as the outer loop so each pair stays an indexed
+        // probe of session_messages (a row-value `IN (VALUES …)` predicate does
+        // not get pushed into the index and full-scans instead). The global
+        // `messages DESC` order keeps each session's model rows descending after
+        // bucketing, matching the old per-session ORDER BY.
+        let mut model_rows_by_session: HashMap<(String, String), Vec<Value>> = HashMap::new();
+        if !page.is_empty() {
+            let tuples = vec!["(?, ?)"; page.len()].join(", ");
+            let agg_sql = format!(
+                "SELECT provider, session_id, model, {TOKEN_AGG_COLUMNS}
+                 FROM (VALUES {tuples}) pairs
+                 JOIN ({MESSAGE_TOKENS_CTE}) ON provider = pairs.column1
+                                            AND session_id = pairs.column2
+                 GROUP BY provider, session_id, model
+                 ORDER BY messages DESC"
+            );
+            let mut agg_params: Vec<DbValue> = Vec::with_capacity(page.len() * 2);
+            for row in &page {
+                agg_params.push(DbValue::Text(str_field(row, "provider").to_string()));
+                agg_params.push(DbValue::Text(str_field(row, "session_id").to_string()));
+            }
+            let rows = query_rows(&conn, &agg_sql, params_from_iter(agg_params))
+                .await
+                .unwrap_or_default();
+            for row in rows {
+                let key = (
+                    str_field(&row, "provider").to_string(),
+                    str_field(&row, "session_id").to_string(),
+                );
+                model_rows_by_session.entry(key).or_default().push(row);
+            }
         }
-    };
-    let limit = coerce_limit(params.limit, 25, 100);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let Some(db) = state.lcm_db.as_deref() else {
-        return match decode_contract::<SavingsSessionsPayloadV1>(
+
+        let mut sessions_json = Vec::with_capacity(page.len());
+        for row in &page {
+            let provider = str_field(row, "provider");
+            let session_id = str_field(row, "session_id");
+            let model_rows = model_rows_by_session
+                .remove(&(provider.to_string(), session_id.to_string()))
+                .unwrap_or_default();
+
+            let mut messages = 0;
+            let mut provider_usage_events = 0;
+            let mut tokenized_messages = 0;
+            let mut estimated_messages = 0;
+            let models: Vec<Value> = model_rows
+                .iter()
+                .map(|model_row| {
+                    let model = str_field(model_row, "model");
+                    let tiers = session_model_tiers.as_ref().and_then(|map| {
+                        map.get(&(
+                            provider.to_string(),
+                            session_id.to_string(),
+                            model.to_string(),
+                        ))
+                    });
+                    let mut block = token_block(model_row, tiers);
+                    let (event_count, actual) = usage_deltas.map_or((0, None), |deltas| {
+                        actual_for_deltas(deltas.iter().filter(|delta| {
+                            delta.provider == provider
+                                && delta.session_id == session_id
+                                && delta.model.as_deref().unwrap_or_default() == model
+                                && (since == 0
+                                    || delta
+                                        .native_timestamp
+                                        .is_some_and(|timestamp| timestamp >= since))
+                        }))
+                    });
+                    apply_provider_actual(&mut block, event_count, actual);
+                    messages += i64_field(&block, "messages");
+                    provider_usage_events += i64_field(&block, "provider_usage_events");
+                    tokenized_messages += i64_field(&block, "tokenized_messages");
+                    estimated_messages += i64_field(&block, "estimated_messages");
+                    merge(
+                        block,
+                        json!({
+                            "model": model_value(model),
+                            "tokenizer": tokenizer_block(model),
+                        }),
+                    )
+                })
+                .collect();
+
+            sessions_json.push(json!({
+                "provider": provider,
+                "session_id": session_id,
+                "title": row.get("title").cloned().unwrap_or(Value::Null),
+                "started_at": row.get("started_at").cloned().unwrap_or(Value::Null),
+                "last_message_at": row.get("last_message_at").cloned().unwrap_or(Value::Null),
+                "is_subagent": i64_field(row, "is_subagent") != 0,
+                "messages": messages,
+                "provider_usage_events": provider_usage_events,
+                "tokenized_messages": tokenized_messages,
+                "estimated_messages": estimated_messages,
+                "cost_basis": basis_label(tokenized_messages, messages),
+                "models": models,
+            }));
+        }
+
+        match decode_contract::<SavingsSessionsPayloadV1>(
             json!({
-            "available": false,
-            "db": state.lcm_db_path,
-            "range": range,
-            "sessions": [],
-            "total": 0,
+                "available": true,
+                "db": state.lcm_db_path,
+                "scope": state.lcm_scope,
+                "range": range,
+                "since": since,
+                "total": total,
+                "sessions": sessions_json,
             }),
             "savings sessions",
         ) {
@@ -949,177 +1129,8 @@ pub async fn sessions(
                 Json(json!({"status": "contract_invalid", "error": error})),
             )
                 .into_response(),
-        };
-    };
-    let conn = db.read_connection();
-
-    let page_sql = "
-        SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
-               s.is_subagent,
-               (SELECT MAX(m.timestamp) FROM session_messages m
-                 WHERE m.provider = s.provider AND m.session_id = s.session_id) AS last_message_at
-        FROM sessions s
-        WHERE ?1 = 0 OR COALESCE(s.started_at,
-              (SELECT MAX(m.timestamp) FROM session_messages m
-                WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
-        ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
-        LIMIT ?2 OFFSET ?3";
-    let page = query_rows(&conn, page_sql, params![since, limit, offset])
-        .await
-        .unwrap_or_default();
-    let total = query_i64(
-        &conn,
-        "SELECT COUNT(*) FROM sessions s
-         WHERE ?1 = 0 OR COALESCE(s.started_at,
-               (SELECT MAX(m.timestamp) FROM session_messages m
-                 WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1",
-        params![since],
-    )
-    .await;
-
-    let overlay = token_count::non_usage_message_tokens(&state).await;
-    let provider_scope = provider_usage_scope(&state);
-    let provider_usage = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
-        (Some(usage_db), Some(scope)) => {
-            Some(provider_usage_aggregate(usage_db, scope, None, None).await)
         }
-        _ => None,
-    };
-    let usage_deltas = provider_usage
-        .as_ref()
-        .filter(|usage| usage.coverage == ProviderUsageCoverageV1::Complete)
-        .map(|usage| usage.deltas.as_slice());
-    let session_model_tiers = overlay.as_deref().map(|messages| {
-        fold_overlay(messages, |msg| {
-            Some((
-                msg.provider.clone(),
-                msg.session_id.clone(),
-                msg.model.clone(),
-            ))
-        })
-    });
-
-    // One grouped aggregate over the page's (provider, session_id) pairs —
-    // previously each page row ran its own aggregate query (N+1, up to 100
-    // round-trips re-running the json_extract CTE per page render). The
-    // VALUES list joins as the outer loop so each pair stays an indexed
-    // probe of session_messages (a row-value `IN (VALUES …)` predicate does
-    // not get pushed into the index and full-scans instead). The global
-    // `messages DESC` order keeps each session's model rows descending after
-    // bucketing, matching the old per-session ORDER BY.
-    let mut model_rows_by_session: HashMap<(String, String), Vec<Value>> = HashMap::new();
-    if !page.is_empty() {
-        let tuples = vec!["(?, ?)"; page.len()].join(", ");
-        let agg_sql = format!(
-            "SELECT provider, session_id, model, {TOKEN_AGG_COLUMNS}
-             FROM (VALUES {tuples}) pairs
-             JOIN ({MESSAGE_TOKENS_CTE}) ON provider = pairs.column1
-                                        AND session_id = pairs.column2
-             GROUP BY provider, session_id, model
-             ORDER BY messages DESC"
-        );
-        let mut agg_params: Vec<DbValue> = Vec::with_capacity(page.len() * 2);
-        for row in &page {
-            agg_params.push(DbValue::Text(str_field(row, "provider").to_string()));
-            agg_params.push(DbValue::Text(str_field(row, "session_id").to_string()));
-        }
-        let rows = query_rows(&conn, &agg_sql, params_from_iter(agg_params))
-            .await
-            .unwrap_or_default();
-        for row in rows {
-            let key = (
-                str_field(&row, "provider").to_string(),
-                str_field(&row, "session_id").to_string(),
-            );
-            model_rows_by_session.entry(key).or_default().push(row);
-        }
-    }
-
-    let mut sessions_json = Vec::with_capacity(page.len());
-    for row in &page {
-        let provider = str_field(row, "provider");
-        let session_id = str_field(row, "session_id");
-        let model_rows = model_rows_by_session
-            .remove(&(provider.to_string(), session_id.to_string()))
-            .unwrap_or_default();
-
-        let mut messages = 0;
-        let mut provider_usage_events = 0;
-        let mut tokenized_messages = 0;
-        let mut estimated_messages = 0;
-        let models: Vec<Value> = model_rows
-            .iter()
-            .map(|model_row| {
-                let model = str_field(model_row, "model");
-                let tiers = session_model_tiers.as_ref().and_then(|map| {
-                    map.get(&(
-                        provider.to_string(),
-                        session_id.to_string(),
-                        model.to_string(),
-                    ))
-                });
-                let mut block = token_block(model_row, tiers);
-                let (event_count, actual) = usage_deltas.map_or((0, None), |deltas| {
-                    actual_for_deltas(deltas.iter().filter(|delta| {
-                        delta.provider == provider
-                            && delta.session_id == session_id
-                            && delta.model.as_deref().unwrap_or_default() == model
-                            && (since == 0
-                                || delta
-                                    .native_timestamp
-                                    .is_some_and(|timestamp| timestamp >= since))
-                    }))
-                });
-                apply_provider_actual(&mut block, event_count, actual);
-                messages += i64_field(&block, "messages");
-                provider_usage_events += i64_field(&block, "provider_usage_events");
-                tokenized_messages += i64_field(&block, "tokenized_messages");
-                estimated_messages += i64_field(&block, "estimated_messages");
-                merge(
-                    block,
-                    json!({
-                        "model": model_value(model),
-                        "tokenizer": tokenizer_block(model),
-                    }),
-                )
-            })
-            .collect();
-
-        sessions_json.push(json!({
-            "provider": provider,
-            "session_id": session_id,
-            "title": row.get("title").cloned().unwrap_or(Value::Null),
-            "started_at": row.get("started_at").cloned().unwrap_or(Value::Null),
-            "last_message_at": row.get("last_message_at").cloned().unwrap_or(Value::Null),
-            "is_subagent": i64_field(row, "is_subagent") != 0,
-            "messages": messages,
-            "provider_usage_events": provider_usage_events,
-            "tokenized_messages": tokenized_messages,
-            "estimated_messages": estimated_messages,
-            "cost_basis": basis_label(tokenized_messages, messages),
-            "models": models,
-        }));
-    }
-
-    match decode_contract::<SavingsSessionsPayloadV1>(
-        json!({
-            "available": true,
-            "db": state.lcm_db_path,
-            "scope": state.lcm_scope,
-            "range": range,
-            "since": since,
-            "total": total,
-            "sessions": sessions_json,
-        }),
-        "savings sessions",
-    ) {
-        Ok(payload) => Json(payload).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"status": "contract_invalid", "error": error})),
-        )
-            .into_response(),
-    }
+    })
 }
 
 /// GET `/api/plugins/savings/models?range=`

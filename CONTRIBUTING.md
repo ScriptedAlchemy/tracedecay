@@ -23,9 +23,8 @@ after build" assertion. CI builds the bundle once in the `dashboard-assets`
 job and every Rust job downloads it as an artifact. GitHub Releases ship
 prebuilt binaries; workspace Cargo packages are private.
 
-The full `cargo nextest run --workspace --all-features` suite has not yet had a
-clean end-to-end run in this checkout. Run it and read the failures rather than
-assuming a green baseline; treat new failures in code you touched as yours.
+Do not assume a green baseline for the full suite: run it and read the
+failures; treat new failures in code you touched as yours.
 
 ## Final V2 storage
 
@@ -47,19 +46,12 @@ This tree map is for source orientation only. The
 precedence and acceptance.
 
 ```
-src/
-  extraction/    Language-specific extractors (tree-sitter based)
-  db/            Database abstraction over the rusqlite runtime
-  graph/         Knowledge graph queries and traversal
-  mcp/           MCP server (tools + handlers)
-  context/       Context builder for AI-ready output
-  resolution/    Cross-file reference resolution
-  sync.rs        Incremental sync engine
-  main.rs        CLI entry point
-tests/           Integration tests (one per module/language)
-tests/fixtures/  Sample source files for extraction tests
-vendor/          Vendored tree-sitter grammars
-docs/            Design docs and guides
+src/             Main tracedecay crate (daemon, MCP tools, sessions, application)
+crates/          Workspace members (code-extraction, graph-db, domain, hosts, …)
+dashboard/       Embedded React dashboard
+plugin/          Host bundles (Claude, Codex, Cursor, Kimi, OpenCode)
+tests/           Integration suites
+docs/            Design docs and the V2 roadmap
 ```
 
 ## Feature Flags
@@ -136,14 +128,14 @@ section so the contributor command and blocking/advisory split still match CI.
 ## Adding a New Language Extractor
 
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
-2. Create `src/extraction/{lang}_extractor.rs` implementing the `Extractor` trait.
-3. Register it in the `LanguageRegistry` with a feature flag (e.g., `lang-{name}`).
-4. Add a fixture file `tests/fixtures/sample.{ext}` and a test module `tests/extraction_suite/{lang}.rs`, then register it with a `mod {lang};` declaration in `tests/extraction_suite/main.rs`.
-5. Update the feature flag tables in `Cargo.toml` and this document.
+2. Create `crates/tracedecay-code-extraction/src/{lang}_extractor.rs` implementing the `LanguageExtractor` trait.
+3. Register it in `LanguageRegistry` with a feature flag (e.g., `lang-{name}`) in that crate's `lib.rs` and `Cargo.toml`.
+4. Add a test module `crates/tracedecay-code-extraction/tests/{lang}.rs` (inline source or a fixture under `crates/tracedecay-code-extraction/fixtures/`).
+5. Update the feature flag tables in that crate's `Cargo.toml` and this document.
 
 ## Validating Plugins and Skills
 
-Changes under `plugin/` or `src/agents/` are covered
+Changes under `plugin/` or `crates/tracedecay-agent-hosts/` are covered
 by a layered validation system: vendored JSON-schema checks, per-host skill
 frontmatter contracts, cross-bundle sync/parity tests, and a CI
 schema-validation workflow. `plugin/skills/` is the shared source of truth for
@@ -186,9 +178,8 @@ contract change instead.
 ## Running Specific Tests
 
 ```bash
-# All extractor tests for a specific language (module inside the
-# consolidated extraction_suite binary)
-cargo nextest run -E 'binary(=extraction_suite) and test(/^rust::/)'
+# All extractor tests for a specific language
+cargo nextest run -p tracedecay-code-extraction --test rust
 
 # A single test by name
 cargo nextest run test_find_stale_files
@@ -231,7 +222,8 @@ behavior.
 - Target `beta` for experimental or breaking changes.
 - Keep PRs focused — one logical change per PR.
 - Include test coverage for new behavior.
-- Update `CHANGELOG.md` under an `[Unreleased]` section.
+- Do not hand-edit `CHANGELOG.md`; release automation generates it from
+  conventional commit messages.
 
 ## Reporting Issues
 

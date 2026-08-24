@@ -228,9 +228,17 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     match client {
                         Ok(Some(mut client)) => {
                             mark_analyzer_ready(&inner, &analyzer_root);
-                            let result = client
-                                .semantic_request(request, &cancellation, inner.timeouts)
-                                .await;
+                            // Boxed: this future covers the whole semantic
+                            // request dispatch, so it is the widest one held
+                            // across an await in the spawned task. With
+                            // profiling enabled it grows past the point where
+                            // keeping it inline is worth the stack it costs.
+                            let result = Box::pin(client.semantic_request(
+                                request,
+                                &cancellation,
+                                inner.timeouts,
+                            ))
+                            .await;
                             // Cancellation drops `read_message_until` wherever
                             // it was suspended, so any bytes it had already
                             // consumed into its local header/body buffers are

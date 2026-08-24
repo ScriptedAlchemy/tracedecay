@@ -47,7 +47,7 @@ pub struct ProjectSettingsPatchV1 {
     pub context_scout: Option<bool>,
 }
 
-/// The effective Plan 20 Context Scout value in one configuration snapshot.
+/// The effective Context Scout value in one configuration snapshot.
 /// The registry always resolves this key; a snapshot predating the key reads
 /// as the canonical stock state, which is disabled.
 pub fn effective_context_scout_settings(

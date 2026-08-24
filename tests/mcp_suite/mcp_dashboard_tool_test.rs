@@ -8,7 +8,7 @@ use std::time::Duration;
 
 #[cfg(feature = "test-transport")]
 use crate::common::http_agent;
-use serde_json::{Value, json};
+use serde_json::json;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -18,6 +18,7 @@ use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
+use crate::support::extract_text;
 #[cfg(feature = "test-transport")]
 use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
 
@@ -200,16 +201,6 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
         handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"action": "stop"}))
             .await;
     assert!(extract_text(&stop2).contains("not_running"));
-}
-
-fn extract_text(v: &Value) -> String {
-    v.get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|a| a.first())
-        .and_then(|t| t.get("text"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string()
 }
 
 #[cfg(feature = "test-transport")]

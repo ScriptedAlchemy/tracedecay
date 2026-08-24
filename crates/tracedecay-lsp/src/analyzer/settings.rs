@@ -14,7 +14,6 @@ use super::error::{AnalyzerResult, AnalyzerRuntimeError};
 
 const SETTINGS_FILENAME: &str = "code_diagnostics_settings.json";
 
-/// Daemon-owned idle whole-project diagnostics mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleBackfillMode {
@@ -23,7 +22,6 @@ pub enum IdleBackfillMode {
     Idle,
 }
 
-/// Per-language Code Diagnostics settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageDiagnosticsSettings {
     #[serde(default = "default_enabled")]

@@ -332,8 +332,10 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             &observations,
             &cancellation,
             &crate::config::RetentionConfig::default(),
+            None,
         )
-        .await,
+        .await
+        .is_complete(),
         "the bounded census defers code retention while a later vector remains"
     );
     assert!(
@@ -347,8 +349,10 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             &observations,
             &cancellation,
             &crate::config::RetentionConfig::default(),
+            None,
         )
-        .await,
+        .await
+        .is_complete(),
         "the retained activation lease remains a successful non-mutating observation"
     );
     assert!(
@@ -396,8 +400,10 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             &observations,
             &cancellation,
             &crate::config::RetentionConfig::default(),
+            None,
         )
-        .await,
+        .await
+        .is_complete(),
         "the vector retirement action defers source-code collection"
     );
     assert!(first_source_file.is_file());
@@ -430,8 +436,10 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             &restarted_observations,
             &restarted_cancellation,
             &crate::config::RetentionConfig::default(),
+            None,
         )
-        .await;
+        .await
+        .is_complete();
         if converged {
             break;
         }
@@ -583,8 +591,10 @@ async fn run_generation_cadence(
         &resources.store_administration.store_telemetry_sampling(),
         &tracedecay_usecases::context::CancellationToken::new(),
         &crate::config::RetentionConfig::default(),
+        None,
     )
     .await
+    .is_complete()
 }
 
 #[cfg(feature = "semantic-fastembed")]

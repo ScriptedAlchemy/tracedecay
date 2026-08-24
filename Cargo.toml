@@ -5,6 +5,7 @@ members = [
     "crates/tracedecay-application",
     "crates/tracedecay-automation",
     "crates/tracedecay-capture",
+    "crates/tracedecay-cli",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
     "crates/tracedecay-dashboard-api",
@@ -39,8 +40,8 @@ ignored-paths = [
     # `--example fastembed_distribution_acceptance`. It is deliberately not a
     # source-repo target, so its "unlinked file" report is a false positive.
     "tests/distribution/fastembed/acceptance.rs",
-    "eval/hermetic/fixtures/tool-args/*.rs",
-    "eval/hermetic/fixtures/tool-args-other/*.rs",
+    "evals/hermetic/fixtures/tool-args/*.rs",
+    "evals/hermetic/fixtures/tool-args-other/*.rs",
     "evals/agent_adoption/fixture_broken/*.rs",
     "tests/fixtures/context_eval_project/src/**/*.rs",
     "tests/fixtures/search_quality/corpus/**/*.rs",
@@ -54,10 +55,16 @@ ignored-paths = [
 edition = "2024"
 
 [workspace.dependencies]
+# Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
+# the macros must always resolve, and with no profiling feature selected the
+# crate pulls only `hotpath-macros` and expands every macro to a no-op, so
+# production builds carry no measurable weight.
+hotpath = { version = "0.24", default-features = false, features = ["threads"] }
 grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.42", default-features = false }
 grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 
 [package]
 name = "tracedecay"
@@ -92,11 +99,11 @@ include = [
     "/tests/fixtures/redundancy_eval_labeled.json",
     "/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
-    "/benchmarks/queries/default.toml",
-    "/benchmarks/claude-observation/**",
-    "/benchmarks/session-temporal/**",
-    "/benchmarks/query-code-index/**",
-    "/benchmarks/search-quality/query-fallback-report-v1.json",
+    "/benchmark_data/queries/default.toml",
+    "/benchmark_data/claude-observation/**",
+    "/benchmark_data/session-temporal/**",
+    "/benchmark_data/query-code-index/**",
+    "/benchmark_data/search-quality/query-fallback-report-v1.json",
     "/scripts/run-session-temporal-benchmark.sh",
     "/plugin/.claude-plugin/**",
     "/plugin/.cursor-plugin/**",
@@ -130,6 +137,104 @@ include = [
 # production`; `--all-features` is test-only because it includes
 # `test-transport`.
 default = ["production"]
+
+# Opt-in profiling. Never in `default` and never in `production`: with no
+# profiling feature selected every hotpath macro expands to a no-op, so the
+# instrumented call sites below compile identically in both modes.
+#
+# `hotpath` alone gives wall-clock timing. The other three layer on top of it:
+# `hotpath-alloc` installs the counting global allocator, `hotpath-cpu` adds
+# on-CPU sampling, and `hotpath-mcp` exposes the live query server (port 6771
+# by default, `HOTPATH_MCP_PORT` overrides). `hotpath/tokio` is required by
+# `hotpath::tokio_runtime!`, which this binary registers with the explicit
+# runtime handle it builds in `async_main`.
+#
+# The per-crate passthroughs matter because the profiling features change what
+# `#[hotpath::measure]` expands to: a library crate compiled without them
+# reports no allocation or CPU samples even when the binary enables profiling.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    # The daemon serves its HTTP application surface with axum 0.8 and reaches
+    # GitHub through ureq 3, and hotpath instruments both natively. Matching the
+    # versions we already depend on, so no second HTTP stack is introduced.
+    "hotpath/axum-0-8",
+    "hotpath/ureq-3",
+    "tracedecay-agent-hosts/hotpath",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-dashboard-api/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-sdk/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-temporal-query/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-sdk/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-sdk/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
+# Binary-only: the live query server runs in this process, so no library crate
+# needs a passthrough for it.
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = [
     "token-counting",
     "lite",
@@ -149,12 +254,15 @@ token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard
 # has it, and a build that indexes code but not its docs is not a shippable
 # tier. Its grammar lives in the (monolithic) large bundle, so `lite` now links
 # that bundle — the compile-weight cost of making docs unconditional.
-lite = ["tracedecay-code-index/lite", "lang-markdown"]
+lite = ["tracedecay-code-index/lite"]
 
-medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
-full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
+medium = ["tracedecay-code-index/medium"]
+full = ["tracedecay-code-index/full"]
 
-# Language features backed by the bundled tree-sitter grammar crate.
+# These aliases are intentionally repeated at the binary boundary: Cargo
+# cannot expose a dependency feature as a caller-selectable local feature.
+# Tier membership remains owned by tracedecay-code-extraction and reaches this
+# package through the aggregate forwards above.
 lang-dart = ["tracedecay-code-index/lang-dart"]
 lang-pascal = ["tracedecay-code-index/lang-pascal"]
 lang-php = ["tracedecay-code-index/lang-php"]
@@ -221,10 +329,6 @@ semantic-fastembed = [
 [lib]
 name = "tracedecay"
 
-[[bin]]
-name = "tracedecay"
-path = "src/main.rs"
-
 # Plan 36 portability: symlink-alias snapshot capture (test-transport only).
 [[test]]
 name = "git_index_snapshot_root_canonicalization"
@@ -251,19 +355,6 @@ path = "tests/typed_terminal_restart_acceptance.rs"
 required-features = ["test-transport"]
 
 [[test]]
-name = "host_lifecycle_cli_acceptance"
-path = "tests/host_lifecycle_cli_acceptance.rs"
-required-features = ["test-transport"]
-
-# OpenCode one-analyzer conformance journey (Plans 27/35): drives the real CLI
-# lifecycle with a pre-existing analyzer and the broker's ownership gates; the
-# rollback phase uses the test-transport fault hook.
-[[test]]
-name = "opencode_one_analyzer_journey"
-path = "tests/opencode_one_analyzer_journey.rs"
-required-features = ["test-transport"]
-
-[[test]]
 name = "graph_rebuild_status_test"
 path = "tests/graph_rebuild_status_test.rs"
 required-features = ["test-transport"]
@@ -280,15 +371,9 @@ name = "v2_surface_mount_conformance"
 path = "tests/v2_surface_mount_conformance.rs"
 required-features = ["test-transport"]
 
-# Drives the seven-step production Work loop — create, evidence, proposal,
-# acceptance, admission, a real spawned provider step, receipt, replan —
-# through one live daemon's published HTTP application endpoint.
-[[test]]
-name = "work_loop_journey"
-path = "tests/work_loop_journey.rs"
-required-features = ["test-transport"]
 [dependencies]
 axum = "0.8"
+hotpath.workspace = true
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 tower = "0.5"
@@ -298,6 +383,7 @@ tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts", version = "0.
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "crates/tracedecay-automation", version = "0.1.0" }
+tracedecay-capture = { path = "crates/tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "crates/tracedecay-dashboard-api", version = "0.1.0" }
@@ -350,7 +436,6 @@ crossterm = "0.28"
 fs2 = "0.4"
 same-file = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-shell-words = "1.1"
 open = "5.3"
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
@@ -392,7 +477,6 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [build-dependencies]
-logo-art = "0.2"
 serde_json = "1"
 
 [dev-dependencies]

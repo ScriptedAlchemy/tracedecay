@@ -681,30 +681,33 @@ where
 {
     pub fn into_http_response(self) -> Response {
         let status = self.http_status();
-        (status, Json(self.into_http_json())).into_response()
+        if let Err(problem) = &self.result {
+            crate::observe::record_error_class(problem.problem.kind());
+        }
+        let envelope = self.into_http_json();
+        crate::observe::json_response(status, &envelope)
     }
 }
 
 /// Encode a canonical problem for HTTP routes that do not have a catalog
 /// binding, such as operation-event subscription and cancellation.
 pub fn application_problem_response(application: ApplicationProblemEnvelope) -> Response {
+    crate::observe::record_error_class(application.problem.kind());
     let status = application_problem_status(application.problem.kind());
-    (
+    crate::observe::json_response(
         status,
-        Json(HttpJsonEnvelope::<Value>::Problem(Box::new(
-            HttpProblemEnvelope {
-                binding_id: None,
-                application,
-            },
-        ))),
+        &HttpJsonEnvelope::<Value>::Problem(Box::new(HttpProblemEnvelope {
+            binding_id: None,
+            application,
+        })),
     )
-        .into_response()
 }
 
 /// Report an internal contract violation before a canonical problem envelope
 /// exists. There is no truthful application-problem body to return in this
 /// case, because constructing that body is what failed.
 pub(crate) fn application_contract_error_response(_error: ApplicationContractError) -> Response {
+    crate::observe::record_contract_error_class();
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
@@ -949,46 +952,13 @@ async fn invoke_route<O>(
 where
     O: HttpApplicationOwners,
 {
-    let Query(page) = match page {
-        Ok(page) => page,
-        Err(_) => {
-            return invalid_request_response(
-                request_id,
-                "http.invalid_query",
-                "The HTTP query is invalid",
-            );
-        }
+    let request = match hotpath::measure_block!("api.http.admission", {
+        admit_http_application_request(operation, request_id, controls, page, body)
+    }) {
+        Ok(request) => request,
+        Err(response) => return *response,
     };
-    let page = match PageRequest::new(page.page_size, page.cursor) {
-        Ok(page) => page,
-        Err(_) => {
-            return invalid_request_response(
-                request_id,
-                "http.invalid_page",
-                "The requested HTTP page is invalid",
-            );
-        }
-    };
-    let Json(body) = match body {
-        Ok(body) => body,
-        Err(_) => {
-            return invalid_request_response(
-                request_id,
-                "http.invalid_body",
-                "The HTTP request body is invalid or exceeds the configured limit",
-            );
-        }
-    };
-
-    let owner_kind = operation.owner_kind();
-    let request = HttpApplicationRequest {
-        operation,
-        request_id,
-        page,
-        deadline: Some(controls.deadline),
-        cancellation: controls.cancellation,
-        body,
-    };
+    let owner_kind = request.operation.owner_kind();
     let invocation = match owner_kind {
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
         HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
@@ -999,10 +969,59 @@ where
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
         HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
     };
-    match invocation.await {
+    match hotpath::measure_block!("api.http.handler", invocation.await) {
         Ok(result) => result.into_http_response(),
         Err(error) => application_contract_error_response(error),
     }
+}
+
+/// The rejection `Response` dwarfs the admitted request, so it is boxed: the
+/// allocation lands only on the rejection path, which is the rare one.
+fn admit_http_application_request(
+    operation: HttpApplicationOperation,
+    request_id: RequestId,
+    controls: HttpApplicationControls,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<HttpApplicationRequest, Box<Response>> {
+    let Query(page) = match page {
+        Ok(page) => page,
+        Err(_) => {
+            return Err(Box::new(invalid_request_response(
+                request_id,
+                "http.invalid_query",
+                "The HTTP query is invalid",
+            )));
+        }
+    };
+    let page = match PageRequest::new(page.page_size, page.cursor) {
+        Ok(page) => page,
+        Err(_) => {
+            return Err(Box::new(invalid_request_response(
+                request_id,
+                "http.invalid_page",
+                "The requested HTTP page is invalid",
+            )));
+        }
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return Err(Box::new(invalid_request_response(
+                request_id,
+                "http.invalid_body",
+                "The HTTP request body is invalid or exceeds the configured limit",
+            )));
+        }
+    };
+    Ok(HttpApplicationRequest {
+        operation,
+        request_id,
+        page,
+        deadline: Some(controls.deadline),
+        cancellation: controls.cancellation,
+        body,
+    })
 }
 
 #[cfg(test)]

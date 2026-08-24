@@ -133,6 +133,7 @@ const SEMANTIC_EMBEDS_PER_COMMIT: usize =
 ///
 /// Returns immediately after enqueueing; artifact load, model download, and
 /// indexing run asynchronously and never join into ordinary search.
+#[hotpath::measure]
 pub fn schedule_saved_code_generation<LoadArtifact, StageProjection, StageFuture>(
     handle: &DaemonSemanticRuntimeHandleV1,
     generation: &CodeIndexPublishedGenerationV1,
@@ -178,6 +179,14 @@ pub struct ProductionSemanticRuntimeV1 {
     code_index_store_root: PathBuf,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     resources: SemanticResourceCeilings,
+    vector_read_cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
+}
+
+struct CachedPublishedVectorsV1 {
+    generation: VectorGenerationIdV1,
+    search_index_key: SemanticSearchIndexKeyV1,
+    source_generation: CodeGenerationId,
+    port: Arc<PublishedSemanticVectorReadPortV1>,
 }
 
 /// The handles every stage of one scheduled projection shares.
@@ -332,6 +341,7 @@ impl ProductionSemanticRuntimeV1 {
             code_index_store_root,
             lifecycle,
             resources,
+            vector_read_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -679,7 +689,7 @@ impl ProductionSemanticRuntimeV1 {
             .build_id()
             .clone();
 
-        // Replay workload (Plan 31): the first writer begins the durable
+        // Replay workload: the first writer begins the durable
         // stage and dies before committing; a fresh store partition recovers
         // that stage and drives the identical prepared batch through commit
         // and publication. This measures the real replay path — durable
@@ -1244,6 +1254,7 @@ impl ProductionSemanticRuntimeV1 {
     /// succeed. Daemon publication holds this as its final lease through
     /// commit, so lifecycle writers cannot change the evaluated model between
     /// validation and durable profile publication.
+    #[hotpath::measure]
     pub async fn acquire_verified_evaluation_target_publication_lease(
         &self,
         verification: &SemanticEvaluationLifecycleVerificationV1,
@@ -1341,6 +1352,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Freeze vector-pointer mutation while a freshness-bound accepted profile
     /// publication commits. Every vector mutation enters this same writer
     /// lane, so a validated revision/generation remains exact for the lease.
+    #[hotpath::measure]
     pub async fn acquire_vector_publication_lease(
         &self,
         expected_revision: i64,
@@ -1412,6 +1424,7 @@ impl ProductionSemanticRuntimeV1 {
             .is_some()
     }
 
+    #[hotpath::measure]
     fn schedule_saved_generation_fair(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -1420,6 +1433,7 @@ impl ProductionSemanticRuntimeV1 {
         self.schedule_saved_generation_inner(generation, Some(lease))
     }
 
+    #[hotpath::measure]
     fn schedule_saved_generation_inner(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -1430,7 +1444,12 @@ impl ProductionSemanticRuntimeV1 {
             generation.manifest(),
             self.resources,
         ) {
-            Ok(projection) => projection,
+            Ok(projection) => {
+                crate::hotpath_observe::semantic_candidate_chunks(
+                    generation.chunks().chunks().len(),
+                );
+                projection
+            }
             Err(_) => {
                 return schedule_saved_code_generation(
                     &self.handle,
@@ -1735,6 +1754,39 @@ impl ProductionSemanticRuntimeV1 {
         scheduled
     }
 
+    fn cached_vector_read_port(
+        &self,
+        active: PublishedVectorGenerationV1,
+        search_index_key: SemanticSearchIndexKeyV1,
+        code_generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<Arc<PublishedSemanticVectorReadPortV1>, SemanticQueryServiceError> {
+        if let Ok(guard) = self.vector_read_cache.lock()
+            && let Some(cached) = guard.as_ref()
+            && cached.generation == *active.generation_id()
+            && cached.search_index_key == search_index_key
+            && cached.source_generation == *active.source_generation()
+        {
+            return Ok(Arc::clone(&cached.port));
+        }
+        let port = Arc::new(
+            PublishedSemanticVectorReadPortV1::new(
+                active,
+                search_index_key.clone(),
+                code_generation,
+            )
+            .map_err(|_| SemanticQueryServiceError::InvalidFallback)?,
+        );
+        if let Ok(mut guard) = self.vector_read_cache.lock() {
+            *guard = Some(CachedPublishedVectorsV1 {
+                generation: port.generation.clone(),
+                search_index_key,
+                source_generation: port.source_generation.clone(),
+                port: Arc::clone(&port),
+            });
+        }
+        Ok(port)
+    }
+
     /// Real application consumer for the optional semantic lane. The exact
     /// configuration-pinned generation is loaded before composition; indexing/download never
     /// enters this request path.
@@ -1822,18 +1874,17 @@ impl ProductionSemanticRuntimeV1 {
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
-        let vectors = PublishedSemanticVectorReadPortV1::new(
+        let vectors = self.cached_vector_read_port(
             active,
             request.search_index_key.clone(),
             code_generation,
-        )
-        .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        )?;
         compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
             handle: &self.handle,
             request,
             generation: &complete,
             calibration,
-            vectors: &vectors,
+            vectors: vectors.as_ref(),
             control,
             mode,
             fallback,
@@ -2112,6 +2163,11 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             }
             let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+            crate::hotpath_observe::semantic_model_resident_bytes(
+                artifact_bytes
+                    .model
+                    .saturating_add(artifact_bytes.tokenizer),
+            );
             if artifact_bytes.model != required.resources.model_bytes
                 || artifact_bytes.tokenizer != required.resources.tokenizer_bytes
             {
@@ -2406,7 +2462,7 @@ fn block_on_semantic_evaluation<Output>(
     future: impl Future<Output = Result<Output, SemanticRuntimeScheduleFailureV1>>,
 ) -> Result<Output, SemanticRuntimeScheduleFailureV1> {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(future),
+        Ok(_) => Err(SemanticRuntimeScheduleFailureV1::Runtime),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2690,7 +2746,7 @@ fn semantic_projection_request(
     let mut changes = if incremental {
         source.changes.clone()
     } else {
-        let mut changes = ChangedCodeChunkSetV1 {
+        ChangedCodeChunkSetV1 {
             from_generation: None,
             to_generation: generation.manifest().generation_id.clone(),
             manifest_digest: source.changes.manifest_digest.clone(),
@@ -2706,14 +2762,12 @@ fn semantic_projection_request(
                 .collect(),
             deleted: Vec::new(),
             reused: Vec::new(),
-        };
-        changes.manifest_digest = changes
-            .compute_digest()
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
-        changes
+        }
     };
-    // Recompute the manifest digest even for an incremental retarget so a
-    // malformed source handoff cannot cross the semantic boundary.
+    // One digest computation serves both branches: it derives the digest of a
+    // freshly built full-rebuild change set, and it recomputes an incremental
+    // retarget's digest so a malformed source handoff cannot cross the
+    // semantic boundary.
     changes.manifest_digest = changes
         .compute_digest()
         .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
@@ -2867,28 +2921,6 @@ fn projection_case_sample_from_prepared(
     }
 }
 
-/// Application search admits semantics only when `query_factory` observes an
-/// exact cache match for the already-authorized request tuple.
-pub fn semantic_lane_readiness_for_request<'a>(
-    handle: &DaemonSemanticRuntimeHandleV1,
-    request: &'a SemanticRetrievalRequestV1<'a>,
-    generation: &'a CompleteSemanticGenerationV1,
-    calibration: Option<&'a SemanticCalibrationProfileV1>,
-) -> SemanticLaneReadinessV1<'a> {
-    match handle.query_factory(
-        &request.code_generation,
-        &request.vector_generation,
-        request.projection.projection_key(),
-    ) {
-        Some(_) => SemanticLaneReadinessV1::Ready {
-            request,
-            generation,
-            calibration,
-        },
-        None => SemanticLaneReadinessV1::Unavailable(index_state_from_status(handle.status())),
-    }
-}
-
 fn execute_calibrated_semantic_query<'a, L>(
     lane: &'a L,
     readiness: SemanticLaneReadinessV1<'a>,
@@ -2962,26 +2994,13 @@ where
         mode,
         fallback,
     } = parameters;
-    let readiness = semantic_lane_readiness_for_request(handle, request, generation, calibration);
-    match readiness {
-        SemanticLaneReadinessV1::Ready {
-            request,
-            generation,
-            calibration,
-        } => {
-            let Some(factory) = handle.query_factory(
-                &request.code_generation,
-                &request.vector_generation,
-                request.projection.projection_key(),
-            ) else {
-                // Atomically current generation is the only admission path.
-                return execute_calibrated_semantic_query(
-                    &NeverCalledSemanticLane,
-                    SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Incompatible),
-                    mode,
-                    fallback,
-                );
-            };
+    let factory = handle.query_factory(
+        &request.code_generation,
+        &request.vector_generation,
+        request.projection.projection_key(),
+    );
+    match factory {
+        Some(factory) => {
             let embedder = factory.create(control, request.budget.deadline_micros);
             let lane = SemanticCodeRetriever::new(&embedder, vectors, control);
             execute_calibrated_semantic_query(
@@ -2995,9 +3014,12 @@ where
                 fallback,
             )
         }
-        unavailable @ SemanticLaneReadinessV1::Unavailable(_) => {
-            execute_calibrated_semantic_query(&NeverCalledSemanticLane, unavailable, mode, fallback)
-        }
+        None => execute_calibrated_semantic_query(
+            &NeverCalledSemanticLane,
+            SemanticLaneReadinessV1::Unavailable(index_state_from_status(handle.status())),
+            mode,
+            fallback,
+        ),
     }
 }
 

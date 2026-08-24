@@ -59,10 +59,12 @@ impl ProjectRuntimeRegistryV1 {
         }
         drop(runtimes);
         drop(fences);
+        hotpath::gauge!("request_in_flight").inc(1.0);
         Some(ProjectRuntimeRequestLeaseV1 {
             inner: Arc::new(super::ProjectRuntimeRequestLeaseInnerV1 {
                 registry: self.clone(),
                 roots: candidate_roots,
+                canonical_root: canonical_root.map(Path::to_path_buf),
             }),
         })
     }

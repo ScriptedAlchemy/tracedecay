@@ -809,16 +809,15 @@ impl GitHubReadOnlyClientV1 {
         if !target.validate() || !config.validate() {
             return None;
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let builder = ureq::Agent::config_builder()
             .timeout_global(Some(config.request_timeout))
             .timeout_connect(Some(config.connect_timeout))
             .timeout_recv_response(Some(config.socket_timeout))
             .timeout_recv_body(Some(config.socket_timeout))
             .https_only(true)
             .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
+            .http_status_as_error(false);
+        let agent: ureq::Agent = super::instrument_github_ureq_agent(builder).build().into();
         Some(Self {
             agent,
             target,
@@ -1281,16 +1280,15 @@ impl GitHubCiReadOnlyClientV1 {
         {
             return None;
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let builder = ureq::Agent::config_builder()
             .timeout_global(Some(config.request_timeout))
             .timeout_connect(Some(config.connect_timeout))
             .timeout_recv_response(Some(config.socket_timeout))
             .timeout_recv_body(Some(config.socket_timeout))
             .https_only(true)
             .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
+            .http_status_as_error(false);
+        let agent: ureq::Agent = super::instrument_github_ureq_agent(builder).build().into();
         Some(Self {
             agent,
             target,

@@ -141,8 +141,8 @@ use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
     SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
 };
-// Re-exported so the long tail of daemon-internal call sites can keep naming the
-// contract through `service::invocation::` while the split settles.
+// Re-exported so daemon-internal call sites can keep naming the contract
+// through `service::invocation::`.
 #[cfg(test)]
 pub(crate) use crate::daemon_contract::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
@@ -154,8 +154,6 @@ pub(crate) use crate::daemon_contract::{
     HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
     WorkApplicationOutcomeV1,
 };
-// Wire-shape fixtures build application commands the dispatch path no longer
-// names directly now that request construction lives with the contract.
 use crate::db::Database;
 use crate::errors::TraceDecayError;
 use crate::production_semantic_authorities;

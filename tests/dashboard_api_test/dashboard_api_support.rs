@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
 pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::Command;
@@ -114,14 +112,6 @@ impl Drop for DashboardServer {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-pub(crate) fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, None, false, port)
-}
-
-pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, None, false, port)
 }
 
 pub(crate) fn spawn_dashboard_server_with_host_runtime(

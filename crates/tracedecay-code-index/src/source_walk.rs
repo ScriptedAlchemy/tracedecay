@@ -80,6 +80,7 @@ impl GeneratedDirScope {
     }
 }
 
+#[hotpath::measure]
 pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
     let has_positive_override = overrides

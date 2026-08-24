@@ -230,17 +230,12 @@ impl QueryMcpReadAdmissionV1 {
         }
         Ok(expected)
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn revoke(&self) {
-        self.route_registered.store(false, Ordering::Release);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tracedecay_application::ResolvedScope;
     use tracedecay_domain::{
@@ -321,7 +316,16 @@ mod tests {
     #[test]
     fn stale_expired_and_revoked_grants_fail_closed() {
         let scope = scope("project.one", "worktree.one");
-        let admission = admission(&scope);
+        let route_registered = Arc::new(AtomicBool::new(true));
+        let admission = admit_query_mcp_read_at(
+            &id::<BrainId>("brain.fixture"),
+            &id::<UserProfileId>("profile.fixture"),
+            &scope.project_id,
+            &scope,
+            UtcMicros(10),
+            Arc::clone(&route_registered),
+        )
+        .expect("admission");
         let authority = admission.search_authority();
         let stale = code_search::CodeIndexSearchAuthorityV1 {
             principal: authority.principal.clone(),
@@ -346,7 +350,7 @@ mod tests {
             ),
             Err(QueryMcpAdmissionUnavailableV1::Expired)
         );
-        admission.revoke();
+        route_registered.store(false, Ordering::Release);
         assert_eq!(
             admission.authorize_at(
                 &scope,

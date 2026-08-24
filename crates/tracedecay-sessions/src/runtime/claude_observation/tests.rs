@@ -892,6 +892,28 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
 }
 
 #[tokio::test]
+async fn complete_claude_pass_persists_host_provider_coverage() {
+    let fixture = Fixture::new("coverage-session");
+    fixture.write_record("coverage searchable", "coverage-secret");
+    let source = fixture.source("coverage-session");
+    let stats = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .expect("complete Claude pass");
+    assert_eq!(stats.deferred_sources, 0);
+    let coverage = fixture
+        .admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://claude/v1")
+        .await
+        .unwrap()
+        .expect("Claude coverage watermark");
+    assert_eq!(
+        coverage.file_id,
+        crate::runtime::source::HostProviderCoverage::Complete as u64
+    );
+}
+
+#[tokio::test]
 async fn partial_backlog_and_cancellation_never_advance_observation_state() {
     let fixture = Fixture::new("deferred-session");
     fs::write(&fixture.transcript, b"{\"type\":\"user\"").expect("write partial Claude frame");

@@ -11,10 +11,12 @@ pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_c
 #[doc(hidden)]
 pub mod exact_sql;
 pub mod handoff;
+mod hotpath_observe;
 mod ledger;
 pub mod maintenance;
 mod operation;
 mod persistence;
+mod profiled_lock;
 pub mod read_consistency;
 pub mod reader;
 pub mod remote;
@@ -42,9 +44,11 @@ pub use checkpoint::{
 };
 pub use operation::StorageOperationExecutor;
 pub use telemetry::{
-    SqliteStoreSizeTelemetryPort, WriterBatchMetrics, WriterBatchTotals,
-    WriterClientServiceSnapshot, WriterCommitSnapshot, WriterOperationCounters,
-    WriterQueueSnapshot, WriterServiceCounts, WriterTelemetrySnapshot,
+    ReaderAdmissionSnapshot, SqliteStoreSizeTelemetryPort, SqliteVmSnapshot, WalCheckpointSample,
+    WalCheckpointSnapshot, WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot,
+    WriterCommitSnapshot, WriterLockWorkSnapshot, WriterOperationCounters, WriterQueueSnapshot,
+    WriterServiceCounts, WriterTelemetrySnapshot, WriterTransactionMetrics,
+    WriterTransactionOutcome, WriterTransactionTotals,
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,

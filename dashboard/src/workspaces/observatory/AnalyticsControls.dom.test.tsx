@@ -320,6 +320,15 @@ function settingsPayload() {
       store_root: '/store',
     },
     user: {
+      code_index_worker_status: {
+        available_logical_cpus: 4,
+        configured: { mode: 'automatic' },
+        effective_workers: 4,
+        environment_override_workers: null,
+        limiting_reason: 'automatic_all_cores',
+        memory_safe_workers: 6,
+      },
+      code_index_workers: { mode: 'automatic' },
       configuration_revision_id: 'revision-1',
       configuration_snapshot_id: 'snapshot-1',
       extraction_timeout_secs: 30,

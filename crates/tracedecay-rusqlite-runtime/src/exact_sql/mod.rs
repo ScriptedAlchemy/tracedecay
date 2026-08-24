@@ -401,7 +401,9 @@ impl ExactSqlHandle {
         &self,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
-        self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
+        hotpath::measure_block!("rusqlite.begin_read_snapshot", {
+            self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
+        })
     }
 
     /// Read snapshot under an explicit priority. A pinned snapshot holds its
@@ -422,12 +424,25 @@ impl ExactSqlHandle {
         (self.health_snapshot)(max_wait)
     }
 
+    /// Opens an immediate exact-SQL transaction, measured as the whole caller
+    /// round trip.
+    ///
+    /// The span covers dispatching to the exact-SQL worker, waiting for that
+    /// single thread to reach this command, and the lock acquisition it then
+    /// performs — not the lock alone. Long-running commands on the same worker
+    /// (vacuum, WAL truncation, a long-lease transaction) are therefore visible
+    /// here as begin latency even when SQLite was never contended, which is the
+    /// distinction `rusqlite.exact_sql.write_lock` exists to make.
     pub fn begin_immediate(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
+        hotpath::measure_block!("rusqlite.exact_sql.begin_immediate", {
+            self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
+        })
     }
 
     pub fn begin_deferred(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        self.begin_transaction(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
+        hotpath::measure_block!("rusqlite.begin_deferred", {
+            self.begin_transaction(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
+        })
     }
 
     /// Begins the only transaction mode whose lease renews on progress.
@@ -449,10 +464,12 @@ impl ExactSqlHandle {
                 "long-lease transaction requires attached write authority".to_owned(),
             ));
         }
-        self.begin_transaction(
-            TransactionBehavior::Immediate,
-            TransactionPolicy::AuthorizedLongLease,
-        )
+        hotpath::measure_block!("rusqlite.begin_authorized_long_lease_immediate", {
+            self.begin_transaction(
+                TransactionBehavior::Immediate,
+                TransactionPolicy::AuthorizedLongLease,
+            )
+        })
     }
 
     fn begin_transaction(
@@ -694,7 +711,7 @@ fn execute_request(
         Some(Arc::clone(&insert_tracker)),
         || match request {
             SqlRequest::Validate(statement) => connection
-                .prepare(&statement.sql)
+                .prepare_cached(&statement.sql)
                 .map(|_| SqlResult::Validated)
                 .map_err(|error| sqlite_error("validate statement", error)),
             SqlRequest::Execute(statement) => {
@@ -776,6 +793,7 @@ fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     }
 }
 
+#[hotpath::measure]
 fn execute_statement(
     connection: &Connection,
     statement: ExactSqlStatement,
@@ -785,11 +803,12 @@ fn execute_statement(
         .into_iter()
         .map(ExactSqlValue::into_rusqlite);
     let mut prepared = connection
-        .prepare(&statement.sql)
+        .prepare_cached(&statement.sql)
         .map_err(|error| sqlite_error("prepare execute", error))?;
     let changed_rows = prepared
         .execute(params_from_iter(values))
         .map_err(|error| sqlite_error("execute", error))?;
+    crate::telemetry::observe_statement(&prepared);
     Ok(ExactSqlExecuteResult {
         changed_rows,
         last_insert_rowid: connection.last_insert_rowid(),
@@ -862,6 +881,7 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
     })
 }
 
+#[hotpath::measure]
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
@@ -888,7 +908,7 @@ fn execute_query_unchecked(
     request: ExactSqlStatement,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     let mut statement = connection
-        .prepare(&request.sql)
+        .prepare_cached(&request.sql)
         .map_err(|error| sqlite_error("prepare query", error))?;
     let columns = statement
         .column_names()
@@ -943,6 +963,8 @@ fn execute_query_unchecked(
         }
         rows.push(ExactSqlRow { values });
     }
+    drop(query);
+    crate::telemetry::observe_statement(&statement);
     Ok(ExactSqlRows { columns, rows })
 }
 

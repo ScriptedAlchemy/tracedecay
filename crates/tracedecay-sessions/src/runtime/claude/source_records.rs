@@ -644,7 +644,8 @@ pub(super) fn structured_marker_from_line(
     }
 }
 
-/// Common ISO-8601 timestamp read for a top-level record.
+/// Read a record's `cwd`, falling back to the canonical envelope's session
+/// location fact.
 pub(super) fn record_cwd(record: &Value) -> Option<PathBuf> {
     if let Some(cwd) = record
         .get("cwd")

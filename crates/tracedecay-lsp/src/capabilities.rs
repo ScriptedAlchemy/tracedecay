@@ -513,7 +513,6 @@ impl EffectiveCapabilities {
     }
 }
 
-/// A typed capability outcome suitable for later JSON-RPC error mapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CapabilityAvailability {
     Available,
@@ -529,7 +528,6 @@ pub enum CapabilityUnavailableReason {
     UpstreamCapabilityMissing,
 }
 
-/// A protocol-facing description of an unavailable capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityUnavailable {
     pub capability: &'static str,

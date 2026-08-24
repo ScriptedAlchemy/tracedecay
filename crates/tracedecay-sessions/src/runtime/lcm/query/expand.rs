@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::*;
 
+#[hotpath::measure]
 pub async fn expand(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -26,6 +27,7 @@ pub async fn expand(
             } else {
                 externalized_ref.clone()
             };
+            crate::runtime::pipeline_metrics::record_lcm_retrieval(1);
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
                 content,
@@ -53,6 +55,7 @@ pub async fn expand(
                 request.source_limit,
             );
             let summary_sources = slice_summary_sources(sources, request.content_slice);
+            crate::runtime::pipeline_metrics::record_lcm_retrieval(1);
             Ok(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content,
@@ -91,6 +94,7 @@ pub async fn expand(
                     || expansion.offset.saturating_add(expansion.char_count)
                         < expansion.total_char_count,
             };
+            crate::runtime::pipeline_metrics::record_lcm_retrieval(1);
             Ok(LcmExpandResponse {
                 kind: "external_payload".to_string(),
                 content: expansion.content,

@@ -23,7 +23,6 @@ fn test_dockerfile_extract_from_stages() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // FROM instructions with AS create named stages -- map to Module nodes
     let modules: Vec<_> = result
         .nodes
         .iter()
@@ -49,7 +48,6 @@ fn test_dockerfile_extract_env_vars() {
         .iter()
         .filter(|n| n.kind == NodeKind::Const)
         .collect();
-    // ENV instructions -> Const nodes
     assert!(
         consts.iter().any(|n| n.name == "CARGO_HOME"),
         "consts: {:?}",

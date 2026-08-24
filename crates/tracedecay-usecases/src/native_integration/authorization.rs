@@ -1,7 +1,7 @@
 //! Production native-integration authorization.
 //!
-//! Plan 36 keeps stack resolution, preflight, and apply as separate
-//! capabilities, so this port never treats one as evidence for another: a
+//! Stack resolution, preflight, and apply stay separate capabilities, so
+//! this port never treats one as evidence for another: a
 //! preflight grant cannot satisfy an apply request, and general repository
 //! write, shell, query, or preflight permission is insufficient for apply.
 //!
@@ -126,8 +126,8 @@ impl NativeIntegrationAuthorizationPort for DaemonNativeIntegrationAuthorization
     /// Reauthorizes apply.
     ///
     /// `before_ref_commit` is deliberately not used to vary any predicate.
-    /// Plan 36 requires the daemon to reauthorize "before the first durable
-    /// mutation and again before ref commit", and the second check is only
+    /// The daemon must reauthorize before the first durable
+    /// mutation and again before ref commit, and the second check is only
     /// meaningful if it is exactly as strict as the first — a boundary that
     /// relaxed anything would be a bypass rather than a re-check. The flag
     /// stays in the signature so the coordinator's two call sites remain

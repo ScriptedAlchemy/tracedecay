@@ -305,9 +305,6 @@ fn lsp_diagnostic_to_compiler_diagnostic(
     }
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_constructors
-// ---------------------------------------------------------------------------
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod diagnostics_warming_tests {

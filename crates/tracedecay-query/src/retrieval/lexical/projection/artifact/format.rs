@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkId,
-    ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
-    RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    ExactFieldV1, ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision,
+    ManifestDigest, RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
@@ -18,9 +19,24 @@ use super::CodeLexicalArtifactErrorV1;
 /// partially interpreted against this schema.
 // Revision 3 replaces the branch-local computed finalization cursor with
 // native table keys. Revision 4 adds document-leading indexes so verifying
-// one document's receipt never scans an unrelated generation.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 4;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v4\0";
+// one document's receipt never scans an unrelated generation. Revision 5
+// adds the term-leading statistics index and term-selective document index
+// required by batched lexical reads.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 5;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v5\0";
+const REQUIRED_ARTIFACT_INDEXES_V5: [(&str, &str, &[&str]); 3] = [
+    (
+        "term_postings",
+        "term_postings_by_document",
+        &["document_id", "field", "term", "frequency"],
+    ),
+    (
+        "term_postings",
+        "term_postings_by_document_term",
+        &["document_id", "term", "field", "frequency"],
+    ),
+    ("term_stats", "term_stats_by_term", &["term", "field"]),
+];
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
 pub(super) const SECTION_NAMES: [&str; 11] = [
     "source_pages",
@@ -35,6 +51,64 @@ pub(super) const SECTION_NAMES: [&str; 11] = [
     "term_stats",
     "vocabulary",
 ];
+
+pub(super) fn verify_required_artifact_indexes(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut statement = connection
+        .prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?1) WHERE key = 1 ORDER BY seqno")
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact index schema is unreadable: {error}"
+            ))
+        })?;
+    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V5 {
+        let partial: Option<i64> = connection
+            .query_row(
+                "SELECT partial FROM pragma_index_list(?1) WHERE name = ?2",
+                [table, index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                CodeLexicalArtifactErrorV1::Incompatible(format!(
+                    "artifact index {index} is unreadable: {error}"
+                ))
+            })?;
+        let columns = statement
+            .query_map([index], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| {
+                CodeLexicalArtifactErrorV1::Incompatible(format!(
+                    "artifact index {index} is unreadable: {error}"
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                CodeLexicalArtifactErrorV1::Incompatible(format!(
+                    "artifact index {index} is unreadable: {error}"
+                ))
+            })?;
+        if partial != Some(0)
+            || !columns
+                .iter()
+                .map(|(column, descending, collation)| {
+                    (column.as_str(), *descending, collation.as_str())
+                })
+                .eq(expected_columns.iter().map(|column| (*column, 0, "BINARY")))
+        {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact index {index} has columns {columns:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires {expected_columns:?}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -196,7 +270,7 @@ pub(super) fn manifest_digest<T: Serialize + ?Sized>(
             .to_le_bytes(),
     );
     hasher.update(bytes);
-    ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
@@ -240,6 +314,13 @@ pub(super) fn artifact_digest(
 }
 
 pub(super) fn encode_field(field: LexicalFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
+    serde_json::to_string(&field)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
+pub(super) fn encode_exact_field(
+    field: ExactFieldV1,
+) -> Result<String, CodeLexicalArtifactErrorV1> {
     serde_json::to_string(&field)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }

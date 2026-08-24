@@ -1,9 +1,5 @@
-// Rust guideline compliant 2025-10-17
 //! MCP server that reads JSON-RPC 2.0 messages from stdin and writes
 //! responses to stdout.
-//!
-//! The server exposes code graph tools via the Model Context Protocol,
-//! allowing AI assistants to query the code graph interactively.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -85,7 +81,6 @@ pub(crate) use session_refresh::*;
 pub(crate) use staleness::*;
 pub(crate) use tool_errors::*;
 
-/// Runtime statistics for the MCP server.
 pub struct ServerStats {
     started_at: Instant,
     total_requests: AtomicU64,
@@ -212,7 +207,6 @@ pub(crate) struct SourceEditRollbackInvocationV1 {
 pub(crate) type SourceEditRollbackExecutor =
     Arc<dyn Fn(SourceEditRollbackInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
-/// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
@@ -243,14 +237,12 @@ pub struct McpServer {
     diagnostics_cache: crate::diagnostics::DiagnosticsCache,
     diagnostics_lsp: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
-    /// `Arc` so the retained D4 background-refresh task can hold a cheap
+    /// `Arc` so the retained background-refresh task can hold a cheap
     /// clone and swap in the freshly synced map on completion.
     file_token_map: Arc<std::sync::Mutex<HashMap<String, u64>>>,
-    /// Running total of tokens saved by serving from the graph.
-    tokens_saved: AtomicU64,
-    /// Tokens already flushed to the worldwide counter this session.
-    last_flushed_tokens: AtomicU64,
-    /// UNIX timestamp of last worldwide flush (0 = never).
+    tokens_saved: Option<AtomicU64>,
+    last_flushed_tokens: Option<AtomicU64>,
+    /// UNIX timestamp of last worldwide flush (`0` = never).
     last_flush_at: AtomicI64,
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
@@ -341,9 +333,7 @@ pub struct McpServer {
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
     hook_project_routes: SharedHookProjectRouteCache,
-    /// Cached latest-version check result.
     version_cache: std::sync::Mutex<VersionCheckState>,
-    /// Pending JSON-RPC notifications to send before the next response.
     pending_notifications: std::sync::Mutex<Vec<Value>>,
     /// When the MCP server was started from a subdirectory of the project root,
     /// this holds the relative path prefix (e.g. `"src/mcp"`). Listing tools
@@ -364,28 +354,28 @@ pub struct McpServer {
     /// when no mismatch exists (the common case) or detection was skipped
     /// (not a git repo / git missing). Computed once at startup so we
     /// spawn at most one pair of `git rev-parse` per session no matter how
-    /// many tool calls fire. See [`crate::worktree`] and #312.
+    /// many tool calls fire. See [`crate::worktree`].
     worktree_mismatch: Option<crate::worktree::WorktreeIndexMismatch>,
-    /// Startup code-index catch-up lifecycle (D1): dispatch claim, retained
+    /// Startup code-index catch-up lifecycle: dispatch claim, retained
     /// task handle, and readiness state behind one lock. Historical session
     /// convergence is owned by the daemon scheduler, not this server.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
-    /// `true` while a retained sync-on-read refresh (D4) is in flight.
+    /// `true` while a retained sync-on-read refresh is in flight.
     /// Single-flights the background refresh: `compare_exchange`d to `true`
-    /// before spawning and cleared on completion. Also read by the D7
+    /// before spawning and cleared on completion. Also read by the
     /// staleness banner so an in-progress refresh emits the informational
     /// "refresh in progress" note instead of the manual-sync warning.
     /// `Arc` so the retained refresh task holds a cheap clone to clear it on
     /// completion.
     background_refresh_running: Arc<AtomicBool>,
     /// UNIX timestamp (secs) of the most recent sync-on-read background
-    /// refresh spawn (D4). Gates the read-refresh cooldown independently of
+    /// refresh spawn. Gates the read-refresh cooldown independently of
     /// [`last_staleness_check_at`](Self::last_staleness_check_at), which
     /// gates the *blocking* edit-tool path — the two cooldowns must not
     /// share a stamp or one path would starve the other.
     last_background_refresh_at: AtomicI64,
-    /// UNIX timestamp (secs) at which the most recent background refresh (D4)
-    /// *completed*. `0` = never. Read by the D7 staleness banner so a refresh
+    /// UNIX timestamp (secs) at which the most recent background refresh
+    /// *completed*. `0` = never. Read by the staleness banner so a refresh
     /// that finished within `read_cooldown_secs` suppresses the banner
     /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
     /// the retained refresh task can stamp it on completion.
@@ -518,17 +508,13 @@ impl McpServer {
         self.doctor_report_published.store(true, Ordering::Release);
     }
 
-    /// Creates a new MCP server backed by the given code graph.
-    ///
     /// Index freshness for source-editing tools is maintained by a lazy
     /// staleness check ([`maybe_sync_if_stale`](Self::maybe_sync_if_stale))
-    /// gated by a 30 s cooldown — there is no background watcher task. This
-    /// replaces the
-    /// `notify-debouncer-full` watcher removed in v6.x (#80), which was
-    /// the source of severe CPU and memory pressure on large monorepos
-    /// where nested ignored directories (`apps/*/node_modules`,
-    /// `packages/*/target`) drove unbounded event traffic and `FileId`
-    /// cache growth.
+    /// gated by a 30 s cooldown — there is no background watcher task.
+    /// A standing watcher was the source of severe CPU and memory pressure
+    /// on large monorepos where nested ignored directories
+    /// (`apps/*/node_modules`, `packages/*/target`) drove unbounded event
+    /// traffic and `FileId` cache growth.
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
@@ -643,14 +629,16 @@ impl McpServer {
         let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
         let resolver_slot = Arc::clone(&active_server_slot);
-        let active_root = canonical_or_original(&retained_root);
+        let active_root = crate::lifecycle_lease::canonical_or_original(&retained_root);
         let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
             let retained_servers = retained_servers.clone();
             let resolver_slot = Arc::clone(&resolver_slot);
             let active_root = active_root.clone();
             Box::pin(async move {
-                let requested = canonical_or_original(&request.requested_worktree_root);
-                let registered = canonical_or_original(&request.registered_root);
+                let requested =
+                    crate::lifecycle_lease::canonical_or_original(&request.requested_worktree_root);
+                let registered =
+                    crate::lifecycle_lease::canonical_or_original(&request.registered_root);
                 let project_id = request
                     .owner
                     .as_ref()
@@ -658,7 +646,7 @@ impl McpServer {
                 let mut matches = Vec::new();
                 for server in &retained_servers {
                     let graph = server.cg_snapshot().await;
-                    let root = canonical_or_original(graph.project_root());
+                    let root = crate::lifecycle_lease::canonical_or_original(graph.project_root());
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });
@@ -773,11 +761,24 @@ impl McpServer {
             host_admission_test_runtime,
         } = context;
         let file_token_map = HashMap::new();
-        let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
-        // Register this project in the global DB with its current tokens
-        if let Some(ref gdb) = accounting_db {
-            gdb.upsert(cg.project_root(), persisted).await;
+        let persisted_tokens_saved = match cg.get_tokens_saved().await {
+            Ok(persisted) => Some(persisted),
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %cg.project_root().display(),
+                    %error,
+                    "MCP token accounting is unavailable because its durable baseline could not be read"
+                );
+                None
+            }
+        };
+        // Register this project in the global DB with its current tokens.
+        // A failed read must not upsert 0 as if the project saved nothing.
+        if let Some(gdb) = accounting_db.as_ref() {
+            if let Some(persisted) = persisted_tokens_saved {
+                gdb.upsert(cg.project_root(), persisted).await;
+            }
         } else if global_db.is_none() {
             // Name the gap where it is created. Every later savings and
             // analytics write from this server is a no-op (see
@@ -791,7 +792,7 @@ impl McpServer {
 
         // Detect borrowed-worktree index once at startup so every read
         // tool can cheaply prefix a heads-up. Two git rev-parse spawns
-        // worst case (#312). spawn_blocking because the underlying
+        // worst case. spawn_blocking because the underlying
         // `Command::output()` can sit on slow disks.
         let worktree_mismatch = {
             let project_root = cg.project_root().to_path_buf();
@@ -808,8 +809,9 @@ impl McpServer {
         };
 
         // `TraceDecay` materializes this from one resolved configuration
-        // snapshot when it opens. Copy it once so D1/D4/D7 and telemetry
-        // never re-read legacy input, a database, or IPC per call.
+        // snapshot when it opens. Copy it once so catch-up, sync-on-read,
+        // the staleness banner, and telemetry never re-read legacy input,
+        // a database, or IPC per call.
         let sync_config = cg.get_config().sync.clone();
         let telemetry_config = cg.get_config().telemetry.clone();
         let diagnostics_lsp = match diagnostics_lsp {
@@ -952,8 +954,8 @@ impl McpServer {
             diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
             diagnostics_lsp,
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
-            tokens_saved: AtomicU64::new(persisted),
-            last_flushed_tokens: AtomicU64::new(persisted),
+            tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
+            last_flushed_tokens: persisted_tokens_saved.map(AtomicU64::new),
             last_flush_at: AtomicI64::new(0),
             global_db,
             accounting_db,
@@ -1066,7 +1068,7 @@ impl McpServer {
             *server.project_host_admission_replay.lock().await = Some(worker);
         }
 
-        // D1: startup catch-up sync. Reconciles changes made while the server
+        // Startup catch-up sync. Reconciles changes made while the server
         // was down (terminal `git pull`, IDE edits before launch, another
         // tool's writes) so read-only sessions start fresh instead of serving
         // a stale index forever. `run_startup_catch_up_sync` advances its
@@ -1121,7 +1123,6 @@ impl McpServer {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Returns whether timing reporting is currently enabled.
     pub fn timings_enabled(&self) -> bool {
         self.timings_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1245,7 +1246,6 @@ impl McpServer {
         self.cg.read().await.clone()
     }
 
-    /// Returns the current server runtime statistics as a JSON value.
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
         let total_requests = self.stats.total_requests.load(Ordering::Relaxed);
@@ -1307,18 +1307,22 @@ impl McpServer {
                 "tool_calls_per_jsonrpc_message": ratio(tool_calls),
                 "errors_per_jsonrpc_message": ratio(errors),
             },
-            "approx_tokens_saved": self.tokens_saved.load(Ordering::Relaxed),
+            "approx_tokens_saved": self.tokens_saved.as_ref().map(|tokens| tokens.load(Ordering::Relaxed)),
         });
 
-        if let Some(ref gdb) = self.accounting_db
+        let local_tokens_saved = self
+            .tokens_saved
+            .as_ref()
+            .map(|tokens| tokens.load(Ordering::Relaxed));
+        if let Some(local) = local_tokens_saved
+            && let Some(ref gdb) = self.accounting_db
             && let Some(global_total) = gdb.global_tokens_saved().await
         {
-            let local = self.tokens_saved.load(Ordering::Relaxed);
             stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
-        } else if let Some(ref gdb) = self.global_db
+        } else if let Some(local) = local_tokens_saved
+            && let Some(ref gdb) = self.global_db
             && let Some(global_total) = gdb.global_tokens_saved().await
         {
-            let local = self.tokens_saved.load(Ordering::Relaxed);
             stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
         }
 
@@ -1327,7 +1331,7 @@ impl McpServer {
 
         // Surface the verbose worktree-mismatch warning when present, so
         // `tracedecay_status` is the one tool whose output is loud about
-        // serving a borrowed index (#312).
+        // serving a borrowed index.
         if let Some(ref m) = self.worktree_mismatch {
             stats["worktree_mismatch"] = json!({
                 "worktree_root": m.worktree_root.display().to_string(),
@@ -1338,11 +1342,6 @@ impl McpServer {
 
         stats
     }
-}
-
-#[cfg(any(test, feature = "test-transport"))]
-fn canonical_or_original(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
@@ -1388,8 +1387,8 @@ mod lcm_claude_recall_tests;
 
 mod project_host_admission_replay;
 
-/// D7 (staleness UX) + D1/D4 (startup catch-up + sync-on-read) behavioural
-/// tests. The pure-logic banner tests need no server; the server tests build
+/// Staleness-banner, startup catch-up, and sync-on-read behavioural tests.
+/// The pure-logic banner tests need no server; the server tests build
 /// a real indexed `TraceDecay` over a temp git repo, mirroring the
 /// `indexing.rs` test idiom.
 #[cfg(test)]

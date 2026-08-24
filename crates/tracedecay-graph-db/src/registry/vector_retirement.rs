@@ -104,6 +104,10 @@ pub enum SemanticVectorRetentionStep {
 
 impl GraphDbRegistry {
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(
+        label = "graph_db.vector.retire.reserve",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn reserve_one_semantic_vector_generation(
         &self,
         registration: GraphDbRegistration,
@@ -198,6 +202,10 @@ impl GraphDbRegistry {
         reservation.release()
     }
 
+    #[hotpath::measure(
+        label = "graph_db.vector.retire.finalize",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn finalize_semantic_vector_retirement(
         &self,
         registration: GraphDbRegistration,
@@ -384,9 +392,7 @@ fn reserve_published(
     )
     .map_err(|error| GraphDbError::invalid(error.to_string()))?;
     {
-        let mut state = database.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = database.wait_verified_generations_write()?;
         let retained_by_head = state.heads.values().any(|head| {
             let mut retained = BTreeSet::new();
             retain_lease_closure(head, &mut retained);
@@ -495,9 +501,7 @@ fn finish_reserved_published(
     let replay = (**replay).clone();
     let locator = reservation.locator.clone();
     {
-        let state = database.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let state = database.wait_verified_generations_write()?;
         if !state.retiring.contains(&locator) {
             return Err(GraphDbError::Conflict);
         }

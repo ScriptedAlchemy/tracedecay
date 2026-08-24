@@ -3,9 +3,6 @@
 //! These are the durable spool's per-record and per-pass ceilings. Provider
 //! discovery walks charge their byte budget against the same numbers so a
 //! transcript sweep can never queue more than one admission pass will accept.
-//!
-//! Root wiring: `src/application/host_admission/spool/bounds.rs` must re-export
-//! these instead of redefining them.
 
 /// Maximum bytes retained for a single durable host-admission record (1 MiB).
 pub const DEFAULT_MAX_RECORD_BYTES: usize = 1024 * 1024;

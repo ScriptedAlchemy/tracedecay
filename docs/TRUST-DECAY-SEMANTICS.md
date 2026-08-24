@@ -3,6 +3,25 @@
 Status: factual audit of the `master` branch as of this writing. Every claim is
 backed by a `file:line` reference so it can be re-verified.
 
+> **Update: code layer superseded.** Every `src/memory/{retrieval,store,trust}.rs`,
+> `src/db/migrations.rs`, `src/mcp/tools/handlers/memory.rs`, `src/tracedecay.rs`,
+> and `src/dashboard/{memory_api,mod}.rs` reference below is from a single-crate
+> layout that predates the current workspace split; those exact paths and line
+> numbers no longer resolve. Verified directly against the current source: the
+> policy conclusion still holds — `crates/tracedecay-runtime-core/src/memory/trust.rs`
+> still has no time-based aging function (only `clamp_trust`/feedback deltas:
+> `HELPFUL_DELTA = 0.05`, `UNHELPFUL_DELTA = -0.10`, `DEFAULT_TRUST = 0.5`,
+> `DEFAULT_MIN_TRUST = 0.3`), and the dynamic 365-day half-life / 0.10 floor
+> ranking decay now lives in `project_memory_temporal_decay` in
+> `crates/tracedecay-runtime-core/src/store/memory/scoring.rs` with the same
+> formula. The persisted store moved to `memory_v2_current_facts` /
+> `memory_v2_facts` tables (not `memory_facts`), and the retrieval/store logic
+> that used to live in `retrieval.rs`/`store.rs` is now split across
+> `crates/tracedecay-runtime-core/src/store/memory/{search.rs,candidates.rs,scoring.rs,crud/}`.
+> The specific `file:line` citations throughout §1–§8 have not been
+> individually re-verified against this new layout and should be treated as
+> historical, not authoritative.
+
 ## TL;DR
 
 - The stored `memory_facts.trust_score` **never decays**. It changes only via

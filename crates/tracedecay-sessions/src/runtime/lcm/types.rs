@@ -366,8 +366,8 @@ pub const LCM_DEFAULT_SUMMARY_FAN_IN: usize = 4;
 pub const LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 
 /// Raw-store size diagnostics mirroring the hermes-lcm `lcm_status` `store`
-/// block. `estimated_tokens` uses the engine's deterministic whitespace
-/// token estimate over stored message content.
+/// block. `estimated_tokens` uses the LCM whitespace budget heuristic
+/// (`lcm_budget_tokens`) over stored message content.
 ///
 /// `messages` is the exact row count. The token estimate has to read every
 /// message body, which on a multi-gigabyte profile store cannot finish inside

@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { ReadFailure } from '../../ui/LegacyStates.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
@@ -6,7 +5,9 @@ import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import {
   AnalyticsAgentsPayloadV1Schema,
+  AnalyticsDiagnosticsPayloadV1Schema,
   AnalyticsSubagentTreePayloadV1Schema,
+  AnalyticsUnderusedPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
 } from '../../contracts/generated.ts';
@@ -37,86 +38,6 @@ import { readHandoffFrontier } from './handoff.ts';
 
 const BASE = '/api/plugins/analytics';
 
-const UnderusedPayload = z
-  .object({
-    available: z.boolean().optional(),
-    families: z
-      .array(
-        z
-          .object({
-            family: z.string(),
-            usage_events: z.number().optional(),
-            relevant_events: z.number().optional(),
-            missed_events: z.number().optional(),
-            underused: z.boolean().optional(),
-          })
-          .passthrough(),
-      )
-      .optional(),
-  })
-  .passthrough();
-
-/** `{ <label field>: string, count: number }` — the shape every `by_*` array on
- * the diagnostics payload uses, differing only in the name of the label field.
- * Kept loose (`passthrough`, unknown values) so a new label field on the wire
- * never fails the whole page's parse. */
-const CountRows = z.array(z.record(z.string(), z.unknown()));
-
-/**
- * `/api/plugins/analytics/diagnostics`. The only endpoint on this plugin that
- * carries a clock: `events_per_hour` over the counted window, and the twenty
- * most recent events with their own timestamps. It is also the slowest — it
- * folds the full hook-analytics JSONL (over a million rows here) — so it lives
- * behind its own boundary and the fast plates render without waiting for it.
- */
-const DiagnosticsPayload = z
-  .object({
-    available: z.boolean().optional(),
-    event_count: z.number().optional(),
-    events_per_hour: z.number().optional(),
-    hook_call_count: z.number().optional(),
-    mcp_tool_call_count: z.number().optional(),
-    by_event_kind: CountRows.optional(),
-    by_outcome: CountRows.optional(),
-    by_mcp_tool: CountRows.optional(),
-    // Tool activity (plan 11). Every one of these is a member of
-    // `AnalyticsDiagnosticsPayloadV1` this page decoded and then dropped: the
-    // tool totals it needs a denominator from, the categories the calls divide
-    // into, the fold's own per-message rate, and the only rows on the payload
-    // that name an AGENT beside a tool. Declared here rather than fetched
-    // separately because the diagnostics fold is a ~14s read against a real
-    // store and this page already pays for it once.
-    by_tool: CountRows.optional(),
-    by_tool_category: CountRows.optional(),
-    tool_call_count: z.number().optional(),
-    tracedecay_call_count: z.number().optional(),
-    ratios: z.unknown().optional(),
-    recent_hooks: CountRows.optional(),
-    recent_events: z
-      .array(
-        z
-          .object({
-            timestamp: z.number().nullable(),
-            event_kind: z.string().optional(),
-            tool_name: z.string().optional(),
-            outcome: z.string().optional(),
-          })
-          .passthrough(),
-      )
-      .optional(),
-    hook_window: z
-      .object({
-        window_rows: z.number(),
-        rows_scanned: z.number(),
-        rows_included: z.number(),
-        truncated: z.boolean(),
-        total_rows_known: z.boolean().optional(),
-      })
-      .passthrough()
-      .optional(),
-  })
-  .passthrough();
-
 /**
  * Agents: what connected agents actually did, over the window the analytics
  * store will admit to.
@@ -130,9 +51,8 @@ const DiagnosticsPayload = z
  * covers is stated in hours beside it.
  */
 export function AgentsPage() {
-  // The analytics family is envelope-only. The local schemas for underused and
-  // diagnostics bridge the generated-contract update, which follows the
-  // backend schema floor; they still reject a bare response today.
+  // The analytics family is envelope-only; every payload decodes with its
+  // generated contract schema.
   const usage = useEnvelope(
     ['analytics', 'usage'],
     `${BASE}/usage`,
@@ -145,12 +65,17 @@ export function AgentsPage() {
   const underused = useEnvelope(
     ['analytics', 'underused'],
     `${BASE}/underused`,
-    UnderusedPayload,
+    AnalyticsUnderusedPayloadV1Schema,
   );
+  // `/diagnostics` is the only endpoint on this plugin that carries a clock —
+  // `events_per_hour` over the counted window, and the most recent events with
+  // their own timestamps. It is also the slowest (it folds the full
+  // hook-analytics JSONL), so it lives behind its own boundary and the fast
+  // plates render without waiting for it.
   const diagnostics = useEnvelope(
     ['analytics', 'diagnostics'],
     `${BASE}/diagnostics`,
-    DiagnosticsPayload,
+    AnalyticsDiagnosticsPayloadV1Schema,
     { staleTime: 5 * 60_000 },
   );
   // Cheap session-store query, separate from the hook-analytics fold: which
@@ -215,13 +140,11 @@ export function AgentsPage() {
           data.available ? data.event_count : diagnosticsRead?.event_count,
           diagnosticsRead?.events_per_hour,
         );
-        const hookNote = diagnosticsRead?.hook_window?.truncated
-          ? `recent suffix · ${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} rows scanned`
-          : diagnosticsRead?.hook_window
-            ? `${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} hook rows scanned`
-            : diagnosticsRead
-              ? 'hook window unreported'
-              : (diagnosticsAbsence ?? 'analytics diagnostics unavailable');
+        const hookNote = diagnosticsRead
+          ? diagnosticsRead.hook_window.truncated
+            ? `recent suffix · ${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} rows scanned`
+            : `${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} hook rows scanned`
+          : (diagnosticsAbsence ?? 'analytics diagnostics unavailable');
         return (
           <div
             className="flex h-full flex-col overflow-auto"
@@ -312,7 +235,7 @@ export function AgentsPage() {
                     payload.available === false ? (
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
-                      <ToolRanking rows={payload.by_mcp_tool ?? []} />
+                      <ToolRanking rows={payload.by_mcp_tool} />
                     )
                     );
                   }}
@@ -334,7 +257,7 @@ export function AgentsPage() {
                     payload.available === false ? (
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
-                      <RecentTape rows={payload.recent_events ?? []} />
+                      <RecentTape rows={payload.recent_events} />
                     )
                     );
                   }}
@@ -357,9 +280,9 @@ export function AgentsPage() {
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <WindowComposition
-                        kinds={payload.by_event_kind ?? []}
-                        outcomes={payload.by_outcome ?? []}
-                        counted={payload.event_count ?? window.events}
+                        kinds={payload.by_event_kind}
+                        outcomes={payload.by_outcome}
+                        counted={payload.event_count}
                       />
                     )
                     );
@@ -385,7 +308,7 @@ export function AgentsPage() {
                         detail={envelope.coverage.omission_reasons[0]}
                       />
                     ) : (
-                      <FamilyList rows={hintData.families ?? []} />
+                      <FamilyList rows={hintData.families} />
                     )
                     );
                   }}
@@ -438,10 +361,9 @@ export function AgentsPage() {
                 </ReadSection>
               </OverviewCard>
 
-              {/* Plan 11's three remaining Agents measures. Handoffs and
-                * attempt failures come off the work-product graph read;
-                * tool activity comes off the diagnostics fold this page
-                * already pays for. */}
+              {/* Handoffs and attempt failures come off the work-product
+                * graph read; tool activity comes off the diagnostics fold
+                * this page already pays for. */}
               <OverviewCard title="Handoff tokens">
                 <AgentHandoffTokens reading={tokenReading} />
               </OverviewCard>
@@ -485,8 +407,8 @@ export function AgentsPage() {
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <AgentFailureContext
-                        outcomes={payload.by_outcome ?? []}
-                        recentEvents={payload.recent_events ?? []}
+                        outcomes={payload.by_outcome}
+                        recentEvents={payload.recent_events}
                         attempts={attemptFailures}
                       />
                     );

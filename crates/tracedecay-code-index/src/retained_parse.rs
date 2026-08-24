@@ -171,6 +171,7 @@ impl SharedRetainedParsePool {
             .map(|(report, _)| report)
     }
 
+    #[hotpath::measure]
     pub fn parse_and_extract(
         &self,
         identity: ParseDocumentIdentity,
@@ -194,6 +195,7 @@ impl SharedRetainedParsePool {
     /// The retained artifact, including import bindings, is the previous-state
     /// authority for incremental merging; this path never acquires a second
     /// parser.
+    #[hotpath::measure]
     pub fn parse_and_extract_artifact(
         &self,
         identity: ParseDocumentIdentity,
@@ -217,6 +219,7 @@ impl SharedRetainedParsePool {
         }
     }
 
+    #[hotpath::measure]
     fn parse_internal(
         &self,
         identity: ParseDocumentIdentity,
@@ -573,5 +576,9 @@ fn record_success(
         stats.extracted_bytes = stats
             .extracted_bytes
             .saturating_add(extraction.metrics.visited_bytes as u64);
+    }
+    crate::hotpath_observe::add_parse_bytes(report.metrics.source_bytes as u64);
+    if matches!(report.reuse, ParseReuse::Noop | ParseReuse::Incremental) {
+        crate::hotpath_observe::add_reused_parses(1);
     }
 }

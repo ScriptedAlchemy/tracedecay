@@ -80,22 +80,18 @@ fn test_bash_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!call_refs.is_empty(), "should have call refs");
-    // The log function calls echo and date
     assert!(
         call_refs.iter().any(|r| r.reference_name == "echo"),
         "should find echo call"
     );
-    // validate_config calls log
     assert!(
         call_refs.iter().any(|r| r.reference_name == "log"),
         "should find log call"
     );
-    // connect calls curl
     assert!(
         call_refs.iter().any(|r| r.reference_name == "curl"),
         "should find curl call"
     );
-    // main calls validate_config
     assert!(
         call_refs
             .iter()
@@ -181,7 +177,6 @@ fn test_bash_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 5 functions + 2 consts + 1 Use = 8 Contains edges
     assert!(
         contains.len() >= 8,
         "should have >= 8 Contains edges, got {}",

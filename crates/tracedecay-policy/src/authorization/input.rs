@@ -16,13 +16,7 @@ pub struct PolicyIdentifierV1(String);
 impl PolicyIdentifierV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
         let value = value.into();
-        if value.is_empty()
-            || value.trim() != value
-            || value.len() > 512
-            || value.chars().any(char::is_control)
-        {
-            return Err("policy identifier must be non-empty, trimmed, bounded, and printable");
-        }
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 
@@ -31,7 +25,18 @@ impl PolicyIdentifierV1 {
     }
 
     pub fn is_valid(&self) -> bool {
-        Self::new(self.0.clone()).is_ok()
+        Self::validate(&self.0).is_ok()
+    }
+
+    fn validate(value: &str) -> Result<(), &'static str> {
+        if value.is_empty()
+            || value.trim() != value
+            || value.len() > 512
+            || value.chars().any(char::is_control)
+        {
+            return Err("policy identifier must be non-empty, trimmed, bounded, and printable");
+        }
+        Ok(())
     }
 }
 

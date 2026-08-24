@@ -1,9 +1,29 @@
 //! Deterministic FHRR encodings for memory facts, entities, and queries.
 
+use std::sync::LazyLock;
+
 use amari_holographic::{BindingAlgebra, FHRRAlgebra};
 use sha2::{Digest, Sha256};
 
 type Fhrr2048 = FHRRAlgebra<2048>;
+
+/// The role atoms are compile-time constants, but deriving each one costs 256
+/// SHA-256 blocks plus normalize+FHRR conversion. Both FHRR vectors are
+/// computed once and reused across every fact encoding.
+static ROLE_CONTENT_FHRR: LazyLock<Result<Fhrr2048, HolographicEncodingError>> =
+    LazyLock::new(|| {
+        to_fhrr(&HolographicEncoder::new().encode_atom(HolographicEncoder::ROLE_CONTENT))
+    });
+static ROLE_ENTITY_FHRR: LazyLock<Result<Fhrr2048, HolographicEncodingError>> =
+    LazyLock::new(|| {
+        to_fhrr(&HolographicEncoder::new().encode_atom(HolographicEncoder::ROLE_ENTITY))
+    });
+
+fn role_fhrr(
+    role: &'static LazyLock<Result<Fhrr2048, HolographicEncodingError>>,
+) -> Result<&'static Fhrr2048, HolographicEncodingError> {
+    role.as_ref().map_err(Clone::clone)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HolographicEncodingError {
@@ -44,7 +64,7 @@ impl HolographicEncoder {
         content: &str,
         entities: &[String],
     ) -> Result<Vec<f64>, HolographicEncodingError> {
-        let content_role = to_fhrr(&self.encode_atom(Self::ROLE_CONTENT))?;
+        let content_role = role_fhrr(&ROLE_CONTENT_FHRR)?;
         let content_value = to_fhrr(&self.encode_text(content)?)?;
         let content_component = content_role.bind(&content_value).to_coefficients();
         let mut entity_components = Vec::new();
@@ -57,10 +77,10 @@ impl HolographicEncoder {
         normalized_entities.sort();
         normalized_entities.dedup();
 
+        let entity_role = role_fhrr(&ROLE_ENTITY_FHRR)?;
         for entity in normalized_entities {
-            let role = to_fhrr(&self.encode_atom(Self::ROLE_ENTITY))?;
             let value = to_fhrr(&self.encode_text(&entity)?)?;
-            let bound = role.bind(&value);
+            let bound = entity_role.bind(&value);
             entity_components.push(bound.to_coefficients());
         }
 

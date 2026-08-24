@@ -10,8 +10,6 @@ use tracedecay_store::{
     EvidenceSourceOccurrenceRecordV1, RetrieverContributionRecordV1,
 };
 
-use std::collections::BTreeSet;
-
 use super::super::support::{canonical_digest, decode, invalid, u64_to_i64, usize_to_i64};
 use super::anchor_state::{self, evidence_anchor_is_current};
 
@@ -186,7 +184,7 @@ pub(super) fn contribution_page(
         return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
     }
     let end = start_ordinal.saturating_add(page_size);
-    let mut statement = snapshot.prepare(
+    let mut statement = snapshot.prepare_cached(
         "SELECT member.occurrence_id, occurrence.owner_digest,
                 occurrence.timeline_digest, occurrence.source_anchor_id,
                 occurrence.source_order, occurrence.record_digest,
@@ -233,12 +231,15 @@ pub(super) fn contribution_page(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let consumed =
         start_ordinal.saturating_add(u64::try_from(occurrences.len()).unwrap_or(u64::MAX));
-    let mut anchor_ids = BTreeSet::new();
-    for occurrence in &occurrences {
-        anchor_ids.insert(occurrence.occurrence_anchor.anchor_id().as_str().to_owned());
-        anchor_ids.insert(occurrence.exact_source_anchor.as_str().to_owned());
-    }
-    let liveness = anchor_state::load_anchor_liveness(snapshot, &anchor_ids)?;
+    let liveness = anchor_state::load_anchor_liveness(
+        snapshot,
+        occurrences.iter().flat_map(|occurrence| {
+            [
+                occurrence.occurrence_anchor.anchor_id().as_str(),
+                occurrence.exact_source_anchor.as_str(),
+            ]
+        }),
+    )?;
     for occurrence in &occurrences {
         if !liveness.evidence_anchor_is_current(&occurrence.occurrence_anchor)? {
             return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
@@ -283,7 +284,7 @@ fn validate_occurrence_set(
     {
         return Err(invalid("evidence occurrence set persistence mismatch"));
     }
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT canonical_ordinal, occurrence_id
          FROM evidence_occurrence_set_members
          WHERE occurrence_set_id = ?1
@@ -313,7 +314,7 @@ fn validate_span_members(
     connection: &rusqlite::Connection,
     span: &tracedecay_store::EvidenceSpanRecordV1,
 ) -> rusqlite::Result<()> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT assembly_ordinal, run_ordinal, run_member_ordinal, occurrence_id
          FROM evidence_span_members
          WHERE span_id = ?1

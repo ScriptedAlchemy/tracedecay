@@ -12,6 +12,10 @@ use super::HostAdmissionOutcome;
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(25);
 
+/// Shared shift cap for profile and project host-admission replay workers.
+/// Combined with [`INITIAL_BACKOFF`] this saturates at [`MAX_BACKOFF`] (2s).
+pub const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
+
 /// The bounded backoff schedule: attempt 1 => 25ms, then doubles until the
 /// per-worker `shift_cap` or the absolute [`MAX_BACKOFF`] ceiling.
 pub fn replay_backoff(attempt: u32, shift_cap: u32) -> Duration {

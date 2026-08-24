@@ -1,6 +1,5 @@
-//! Moved/renamed checkout journeys for the project registry (Plan 16:
-//! project moves preserve identity). Ported from the salvaged
-//! identity-across-moves work and adapted to the current registry contract.
+//! Moved/renamed checkout journeys for the project registry. A moved project
+//! keeps its identity and stays resolvable from its former root.
 
 use std::path::{Path, PathBuf};
 

@@ -1,15 +1,8 @@
 //! Injection points for subsystems that stay above the kernel.
 //!
-//! The one-shot crate split moved the runtime kernel down but left some
-//! collaborators above it: the registered global database and the daemon
-//! session registry. Each is expressed here as a port the
-//! root crate registers into, so the kernel never names an upward module path.
-//!
-//! The store-runtime registry is no longer one of them. `StoreRuntimeSource`
-//! existed only because `daemon::store_runtime` had stayed in the root; that
-//! tree now lives in `crate::store_runtime`, so `db::connection` retains the
-//! concrete `store_runtime::registry::StoreRuntimeClientLease` directly and the port
-//! was deleted.
+//! The registered global database and the daemon session registry live above
+//! this crate. Each is expressed here as a port the root crate registers into,
+//! so the kernel never names an upward module path.
 //!
 //! Every port fails closed (or degrades to a documented no-op) when the root
 //! never registers, which keeps unit tests of the kernel alone runnable.

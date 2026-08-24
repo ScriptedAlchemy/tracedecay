@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use fs2::FileExt;
-use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
 
 use crate::config;
 use crate::errors::{Result, TraceDecayError};
@@ -205,7 +205,7 @@ impl PrivateStoreIo {
         reject_symlink_components(path, "private store file")?;
         Self::open_private(path, fs::OpenOptions::new().write(true).truncate(true))?
             .write_all(contents)?;
-        set_private_file_permissions(path)
+        set_owner_private_file_mode(path)
     }
 
     /// Appends one line to the private store `path` while holding the shared
@@ -230,13 +230,13 @@ impl PrivateStoreIo {
         file.write_all(format!("{line}\n").as_bytes())?;
         file.flush()?;
         drop(file);
-        set_private_file_permissions(path)
+        set_owner_private_file_mode(path)
     }
 
     /// Opens `path` for writing, creating it if missing with owner-only
     /// permissions applied at create time (Unix), so a fresh file never
     /// exists with umask-default permissions before the trailing
-    /// `set_private_file_permissions` call. Pre-existing files keep their
+    /// `set_owner_private_file_mode` call. Pre-existing files keep their
     /// mode here and are tightened by that trailing call.
     fn open_private(path: &Path, options: &mut fs::OpenOptions) -> io::Result<fs::File> {
         options.create(true);
@@ -261,14 +261,14 @@ impl PrivateStoreIo {
         reject_symlink_components(path, "private store file")?;
         reject_symlink_components(temp_path, "private store temp file")?;
         fs::write(temp_path, contents)?;
-        set_private_file_permissions(temp_path)?;
+        set_owner_private_file_mode(temp_path)?;
         crate::db::DatabaseAuthority::replace_file_atomically(
             temp_path,
             path,
             "private store file",
         )
         .map_err(io::Error::other)?;
-        set_private_file_permissions(path)
+        set_owner_private_file_mode(path)
     }
 
     /// Atomically replaces a private-store file and establishes the durability
@@ -300,7 +300,7 @@ impl PrivateStoreIo {
             temp.write_all(contents)?;
             temp.sync_all()?;
         }
-        set_private_file_permissions(temp_path)?;
+        set_owner_private_file_mode(temp_path)?;
         inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
         crate::db::DatabaseAuthority::replace_file_atomically(
             temp_path,
@@ -350,7 +350,7 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         let bytes = fs::copy(source, target)?;
-        set_private_file_permissions(target)?;
+        set_owner_private_file_mode(target)?;
         Ok(bytes)
     }
 
@@ -716,7 +716,7 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
         options.create(true).open(lock_path)?
     };
     if private {
-        set_private_file_permissions(lock_path)?;
+        set_owner_private_file_mode(lock_path)?;
     }
     Ok(file)
 }
@@ -768,7 +768,7 @@ pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::
     write_result?;
     unlock_result?;
     if private {
-        set_private_file_permissions(&lock_path)?;
+        set_owner_private_file_mode(&lock_path)?;
     }
     Ok(())
 }
@@ -901,7 +901,7 @@ pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static
 }
 
 fn validate_no_nul(path: &Path) -> Result<()> {
-    if path.to_string_lossy().contains('\0') {
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(TraceDecayError::Config {
             message: format!("path '{}' contains a NUL byte", path.display()),
         });
@@ -957,13 +957,6 @@ pub fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(unix)]
 fn apply_private_create_mode(options: &mut fs::OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -972,9 +965,3 @@ fn apply_private_create_mode(options: &mut fs::OpenOptions) {
 
 #[cfg(not(unix))]
 fn apply_private_create_mode(_options: &mut fs::OpenOptions) {}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}

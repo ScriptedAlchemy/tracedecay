@@ -199,6 +199,7 @@ impl TreeSitterExtractor {
         })
     }
 
+    #[hotpath::measure]
     pub(crate) fn extract_preparsed(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -440,10 +441,12 @@ fn rows_digest(
         .map(CanonicalUnresolvedRefRow::from)
         .collect::<Vec<_>>();
     let mut imports = artifact.imports.clone();
-    sort_canonical_rows(&mut nodes);
-    sort_canonical_rows(&mut edges);
-    sort_canonical_rows(&mut unresolved);
-    imports.sort();
+    hotpath::measure_block!("code_index_rows_digest_sort", {
+        sort_canonical_rows(&mut nodes);
+        sort_canonical_rows(&mut edges);
+        sort_canonical_rows(&mut unresolved);
+        imports.sort();
+    });
 
     #[derive(Serialize)]
     struct RowsPayload<'a> {
@@ -459,18 +462,21 @@ fn rows_digest(
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
     }
 
-    canonical_sha256(&RowsPayload {
-        separator: EXTRACTION_ROWS_SEPARATOR,
-        logical_path: &file.file.logical_path,
-        language: descriptor.language.as_str(),
-        descriptor_revision: descriptor.descriptor_revision.as_str(),
-        grammar_revision: descriptor.grammar_revision.as_str(),
-        extractor_revision: descriptor.extractor_revision.as_str(),
-        imports,
-        nodes,
-        edges,
-        unresolved_refs: unresolved,
-    })
+    hotpath::measure_block!(
+        "code_index_rows_digest_hash",
+        canonical_sha256(&RowsPayload {
+            separator: EXTRACTION_ROWS_SEPARATOR,
+            logical_path: &file.file.logical_path,
+            language: descriptor.language.as_str(),
+            descriptor_revision: descriptor.descriptor_revision.as_str(),
+            grammar_revision: descriptor.grammar_revision.as_str(),
+            extractor_revision: descriptor.extractor_revision.as_str(),
+            imports,
+            nodes,
+            edges,
+            unresolved_refs: unresolved,
+        })
+    )
     .map_err(|error| ExtractionFailureV1::ParseFailed {
         detail: format!("canonical rows digest failed: {error}"),
     })
@@ -479,16 +485,19 @@ fn rows_digest(
 pub(crate) fn parser_import_rows_digest(
     imports: &[ExtractedImportEvidenceV1],
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
-    let mut imports = imports.to_vec();
-    imports.sort();
-    canonical_sha256(&(PARSER_IMPORT_ROWS_DIGEST_SEPARATOR, imports.as_slice())).map_err(|error| {
-        ExtractionFailureV1::ParseFailed {
-            detail: format!("canonical parser import rows digest failed: {error}"),
-        }
+    hotpath::measure_block!("code_index_parser_import_rows_digest", {
+        let mut imports = imports.to_vec();
+        imports.sort();
+        canonical_sha256(&(PARSER_IMPORT_ROWS_DIGEST_SEPARATOR, imports.as_slice())).map_err(
+            |error| ExtractionFailureV1::ParseFailed {
+                detail: format!("canonical parser import rows digest failed: {error}"),
+            },
+        )
     })
 }
 
 impl LanguageExtractor for TreeSitterExtractor {
+    #[hotpath::measure]
     fn extract(
         &self,
         file: &ReceiptBoundCodeFileV1,

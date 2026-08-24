@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGenerationV2, CommitId, CoverageReportV1,
     DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
@@ -860,7 +861,8 @@ fn privacy_bound_digest(
     for frame in frames {
         hash_frame(&mut hasher, frame);
     }
-    PrivacyDomainBoundLocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize()))).ok()
+    PrivacyDomainBoundLocatorDigest::new(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
+        .ok()
 }
 
 fn derive_project_privacy_domain_salt(project_id: &ProjectId) -> [u8; 32] {
@@ -881,7 +883,7 @@ fn opaque_admission_identifier(
     for frame in frames {
         hash_frame(&mut hasher, frame);
     }
-    hex::encode(hasher.finalize())
+    encode_lowercase_hex(&hasher.finalize())
 }
 
 fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {

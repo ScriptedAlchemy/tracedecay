@@ -75,7 +75,11 @@ pub struct TraversalResult {
 
 impl GraphSnapshot {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
-        self.database.traverse(request)
+        let result = self.database.traverse(request)?;
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
+        Ok(result)
     }
 
     /// Reads bounded outgoing relations while retaining this snapshot's
@@ -274,6 +278,7 @@ fn directed_relations(
     let projected = relation_projection(Arc::clone(&store), relation_kinds);
     let mut admitted = 0_usize;
     let mut results = Vec::with_capacity(starts.len());
+    let mut entity_ids = HashMap::new();
     for start in starts {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -292,6 +297,7 @@ fn directed_relations(
                 edge,
                 namespace,
                 ensure_projection_readable,
+                &mut entity_ids,
             )?);
         }
         relations.sort_by(|left, right| left.identity.cmp(&right.identity));
@@ -405,6 +411,8 @@ fn native_outgoing_traversal(
 ) -> Result<TraversalResult, GraphDbError> {
     let mut depths = HashMap::from([(start, 0_usize)]);
     let mut entities = HashMap::new();
+    let mut entity_ids = HashMap::new();
+    let mut relation_ids = HashMap::new();
     let mut via_relations = HashMap::<NodeId, GraphRelationId>::new();
     let mut unfinished_by_depth = HashMap::<usize, usize>::new();
     let mut cutoff_depth = None;
@@ -432,7 +440,7 @@ fn native_outgoing_traversal(
                         message: "native BFS discovered a node without a depth".to_owned(),
                     }));
                 };
-                match entity_identity(store, node, &request.namespace) {
+                match cached_entity_identity(store, node, &request.namespace, &mut entity_ids) {
                     Ok(identity) => {
                         entities.insert(node, identity);
                         let unfinished = unfinished_by_depth.entry(depth).or_default();
@@ -471,11 +479,12 @@ fn native_outgoing_traversal(
                         request.max_depth,
                     )));
                 };
-                let relation = match relation_identity(
+                let relation = match cached_relation_identity(
                     store,
                     edge,
                     &request.namespace,
                     ensure_projection_readable,
+                    &mut relation_ids,
                 ) {
                     Ok(relation) => relation,
                     Err(error) => {
@@ -506,11 +515,12 @@ fn native_outgoing_traversal(
                     }));
                 };
                 if source_depth.checked_add(1) == Some(target_depth) {
-                    let relation = match relation_identity(
+                    let relation = match cached_relation_identity(
                         store,
                         edge,
                         &request.namespace,
                         ensure_projection_readable,
+                        &mut relation_ids,
                     ) {
                         Ok(relation) => relation,
                         Err(error) => {
@@ -606,6 +616,11 @@ fn directional_traversal(
     let mut discovered = HashSet::from([start]);
     let mut visits = Vec::new();
     let mut admitted = 0_usize;
+    // Identity decoding costs a property fetch plus a validated allocation,
+    // and a BFS touches each node once per incident edge (and each edge once
+    // per endpoint under `Both`), so memoize decoded identities per run.
+    let mut entity_ids: HashMap<NodeId, GraphEntityId> = HashMap::new();
+    let mut relation_ids: HashMap<EdgeId, GraphRelationId> = HashMap::new();
 
     while let Some((node, depth, via_relation)) = queue.pop_front() {
         if request.cancellation.is_cancelled() {
@@ -618,7 +633,7 @@ fn directional_traversal(
             return Err(read_budget(request.max_visits));
         }
         visits.push(TraversalVisit {
-            entity: entity_identity(store, node, &request.namespace)?,
+            entity: cached_entity_identity(store, node, &request.namespace, &mut entity_ids)?,
             depth,
             via_relation,
         });
@@ -640,9 +655,15 @@ fn directional_traversal(
                 if request.cancellation.is_cancelled() {
                     return Err(GraphDbError::Cancelled);
                 }
-                let relation =
-                    relation_identity(store, edge, &request.namespace, ensure_projection_readable)?;
-                let entity = entity_identity(store, neighbor, &request.namespace)?;
+                let relation = cached_relation_identity(
+                    store,
+                    edge,
+                    &request.namespace,
+                    ensure_projection_readable,
+                    &mut relation_ids,
+                )?;
+                let entity =
+                    cached_entity_identity(store, neighbor, &request.namespace, &mut entity_ids)?;
                 adjacent.push((relation, entity, neighbor));
             }
         }
@@ -681,6 +702,7 @@ fn projected_reachable(
 ) -> Result<BTreeSet<GraphEntityId>, GraphDbError> {
     let mut queue = VecDeque::from([start.clone()]);
     let mut visited = BTreeSet::new();
+    let mut entity_ids = HashMap::new();
     while let Some(entity) = queue.pop_front() {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -713,7 +735,12 @@ fn projected_reachable(
             )? {
                 continue;
             }
-            neighbors.push(entity_identity(projected, neighbor, namespace)?);
+            neighbors.push(cached_entity_identity(
+                projected,
+                neighbor,
+                namespace,
+                &mut entity_ids,
+            )?);
         }
         neighbors.sort();
         neighbors.dedup();
@@ -801,6 +828,42 @@ fn optional_node_for_entity(
     }
 }
 
+/// [`entity_identity`] memoized over one traversal: the first decode verifies
+/// the stored node, repeat visits within the same read snapshot reuse it.
+fn cached_entity_identity(
+    store: &dyn GraphStore,
+    node: NodeId,
+    namespace: &GraphNamespace,
+    cache: &mut HashMap<NodeId, GraphEntityId>,
+) -> Result<GraphEntityId, GraphDbError> {
+    if let Some(identity) = cache.get(&node) {
+        return Ok(identity.clone());
+    }
+    let identity = entity_identity(store, node, namespace)?;
+    cache.insert(node, identity.clone());
+    Ok(identity)
+}
+
+/// [`relation_identity`] memoized over one traversal, mirroring
+/// [`cached_entity_identity`].
+fn cached_relation_identity(
+    store: &dyn GraphStore,
+    edge: EdgeId,
+    namespace: &GraphNamespace,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+    cache: &mut HashMap<EdgeId, GraphRelationId>,
+) -> Result<GraphRelationId, GraphDbError> {
+    if let Some(identity) = cache.get(&edge) {
+        return Ok(identity.clone());
+    }
+    let identity = relation_identity(store, edge, namespace, ensure_projection_readable)?;
+    cache.insert(edge, identity.clone());
+    Ok(identity)
+}
+
 fn entity_identity(
     store: &dyn GraphStore,
     node: NodeId,
@@ -881,6 +944,7 @@ fn relation_for_edge(
         &GraphNamespace,
         &GraphProjectionId,
     ) -> Result<(), GraphDbError>,
+    entity_ids: &mut HashMap<NodeId, GraphEntityId>,
 ) -> Result<GraphRelation, GraphDbError> {
     let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
         message: "outgoing relation references a missing native edge".to_owned(),
@@ -898,7 +962,30 @@ fn relation_for_edge(
         message: format!("outgoing relation has an invalid projection: {error}"),
     })?;
     ensure_projection_readable(namespace, &projection)?;
-    let identity = relation_identity(store, edge, namespace, ensure_projection_readable)?;
+    // Extract the identity from the edge record already loaded above; the
+    // namespace and projection readability were just verified, so refetching
+    // through `relation_identity` would redo the same work per edge.
+    let kind = relation_kind_from_type(stored.edge_type.as_str())?;
+    let scalar_kind = stored
+        .get_property(RELATION_KIND_PROPERTY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| GraphDbError::Corrupt {
+            message: "traversal relation has no native kind".to_owned(),
+        })?;
+    if kind.as_str() != scalar_kind {
+        return Err(GraphDbError::Corrupt {
+            message: "traversal relation native type and kind disagree".to_owned(),
+        });
+    }
+    let identity = stored
+        .get_property(RELATION_ID_PROPERTY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| GraphDbError::Corrupt {
+            message: "traversal relation has no native identity".to_owned(),
+        })?;
+    let identity = GraphRelationId::new(identity).map_err(|error| GraphDbError::Corrupt {
+        message: format!("traversal relation has an invalid native identity: {error}"),
+    })?;
     let from = required_entity_property(
         stored.get_property(RELATION_FROM_PROPERTY),
         "outgoing relation source",
@@ -907,14 +994,13 @@ fn relation_for_edge(
         stored.get_property(RELATION_TO_PROPERTY),
         "outgoing relation target",
     )?;
-    if entity_identity(store, stored.src, namespace)? != from
-        || entity_identity(store, stored.dst, namespace)? != to
+    if cached_entity_identity(store, stored.src, namespace, entity_ids)? != from
+        || cached_entity_identity(store, stored.dst, namespace, entity_ids)? != to
     {
         return Err(GraphDbError::Corrupt {
             message: "outgoing relation endpoints disagree with native adjacency".to_owned(),
         });
     }
-    let kind = relation_kind_from_type(stored.edge_type.as_str())?;
     let properties = decode_graph_properties(
         stored
             .properties

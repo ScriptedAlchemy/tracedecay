@@ -111,6 +111,25 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::IgnoredDependency(error) => {
             CodeIndexSchedulerErrorV1::IgnoredDependency(error.clone())
         }
+        CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(error) => {
+            CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(*error)
+        }
+        CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission(error) => {
+            CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission(*error)
+        }
+        CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable => {
+            CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable
+        }
+        CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment(error) => {
+            CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment(*error)
+        }
+        CodeIndexSchedulerErrorV1::WorkerPlan(error) => {
+            CodeIndexSchedulerErrorV1::WorkerPlan(error.clone())
+        }
+        #[cfg(not(test))]
+        CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled => {
+            CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled
+        }
     }
 }
 
@@ -152,6 +171,9 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
         }
         CodeIndexProductionErrorV1::Contract(error) => {
             CodeIndexProductionErrorV1::Contract(error.clone())
+        }
+        CodeIndexProductionErrorV1::Parallelism(error) => {
+            CodeIndexProductionErrorV1::Parallelism(error.clone())
         }
     }
 }

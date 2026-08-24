@@ -52,12 +52,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -74,10 +79,7 @@ impl ExtractionState {
 }
 
 impl QBasicExtractor {
-    /// Extract code graph nodes and edges from a `QBasic` source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the `QBasic` source code to parse.
     pub fn extract_qbasic(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -106,7 +108,6 @@ impl QBasicExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -239,7 +240,6 @@ impl QBasicExtractor {
         const_stmt: TsNode<'_>,
         pending_comment: Option<&str>,
     ) {
-        // Find the identifier child of const_statement.
         let Some(id_node) = find_direct_child_by_kind(const_stmt, "identifier") else {
             return;
         };
@@ -303,7 +303,6 @@ impl QBasicExtractor {
             return; // Only extract DIM SHARED at top level
         }
 
-        // Find the dim_variable child, then get its identifier.
         let Some(dim_var) = find_direct_child_by_kind(dim_stmt, "dim_variable") else {
             return;
         };
@@ -548,7 +547,6 @@ impl QBasicExtractor {
             });
         }
 
-        // Extract call sites from within the SUB body.
         state.node_stack.push((name, fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
@@ -617,7 +615,6 @@ impl QBasicExtractor {
             });
         }
 
-        // Extract call sites from within the FUNCTION body.
         state.node_stack.push((name, fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
@@ -646,14 +643,13 @@ impl QBasicExtractor {
         });
     }
 
-    /// Recursively walk AST nodes looking for `call_statement` and `function_call` nodes.
+    /// Recursively walk AST nodes looking for `call_statement` nodes.
+    ///
+    /// `function_call` nodes (built-ins like `STR$()`) are deliberately not
+    /// extracted — they aren't user-defined.
     fn walk_for_calls(state: &mut ExtractionState, node: TsNode<'_>) {
-        let kind = node.kind();
-        if kind == "call_statement" {
+        if node.kind() == "call_statement" {
             Self::extract_call_from_call_statement(state, node);
-        } else if kind == "function_call" {
-            // Built-in function calls like STR$() — extract if they have an identifier.
-            // We skip built-in functions as they aren't user-defined.
         }
 
         // Recurse into children.

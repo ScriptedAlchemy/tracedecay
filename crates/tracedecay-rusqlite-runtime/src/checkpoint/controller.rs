@@ -169,11 +169,24 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         snapshot_blockers: CheckpointBlockers,
     ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
         let started = Instant::now();
-        let report = self
-            .driver
-            .checkpoint(mode)
-            .map_err(CheckpointError::Driver)?;
+        let report = match self.driver.checkpoint(mode) {
+            Ok(report) => report,
+            Err(error) => {
+                crate::hotpath_observe::record_checkpoint_error(
+                    checkpoint_attribution(mode),
+                    started.elapsed(),
+                );
+                return Err(CheckpointError::Driver(error));
+            }
+        };
         let elapsed = started.elapsed();
+        crate::hotpath_observe::record_checkpoint(
+            checkpoint_attribution(mode),
+            elapsed,
+            report.complete(),
+            wal_bytes,
+            report.checkpointed_frames,
+        );
 
         if report.complete() {
             self.hard_drain_required = false;
@@ -208,6 +221,14 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         } else {
             WalPressure::BelowSoft
         }
+    }
+}
+
+fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::CheckpointAttribution {
+    match mode {
+        CheckpointMode::Passive => crate::hotpath_observe::CheckpointAttribution::Passive,
+        CheckpointMode::Restart => crate::hotpath_observe::CheckpointAttribution::Restart,
+        CheckpointMode::Truncate => crate::hotpath_observe::CheckpointAttribution::Truncate,
     }
 }
 

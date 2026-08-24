@@ -65,6 +65,7 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
             *state.limbo_mut(self.lane) += 1;
         }
         drop(state);
+        self.inner.admission.released();
         self.inner.capacity_changed.notify_all();
 
         if let Some(mut record) = retired {

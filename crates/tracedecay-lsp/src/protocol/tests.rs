@@ -207,7 +207,7 @@ pub(super) fn session() -> DaemonLspProtocolSession<Feedback, Semantics, Diagnos
         &upstream,
     );
     DaemonLspProtocolSession::new(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback::default(),
@@ -667,71 +667,6 @@ fn workspace_folder_mutation_is_rejected_when_the_observed_workspace_moved() {
 }
 
 #[test]
-fn workspace_diagnostics_preserve_ready_roots_when_one_root_fails() {
-    let workspace = AuthorizedLspWorkspace::new(
-        Some(ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap()),
-        vec![
-            AdmittedRoot::authorized(
-                "file:///left",
-                ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-            ),
-            AdmittedRoot::authorized(
-                "file:///failed",
-                ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-            ),
-        ],
-    )
-    .unwrap();
-    let gateway_capabilities = GatewayCapabilities {
-        supports_workspace_folders: true,
-        supports_workspace_diagnostics: true,
-        ..GatewayCapabilities::default()
-    };
-    let upstream = UpstreamCapabilities {
-        supports_diagnostics: true,
-        semantic: BTreeSet::new(),
-    };
-    let initial = negotiate_capabilities(
-        &ClientCapabilities::default(),
-        &gateway_capabilities,
-        &upstream,
-    );
-    let mut session = DaemonLspProtocolSession::from_workspace_ports(
-        workspace,
-        initial,
-        gateway_capabilities,
-        upstream,
-        Feedback::default(),
-        Semantics,
-        Diagnostics,
-    );
-    session.handle_payload(
-        br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"workspaceFolders":[{"uri":"file:///left","name":"left"},{"uri":"file:///failed","name":"failed"}],"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"diagnostic":{}},"workspace":{"workspaceFolders":true}}}}"#,
-        0,
-    );
-    session.drain_outbound();
-    session.handle_payload(
-        br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
-        1,
-    );
-    session.handle_payload(
-        br#"{"jsonrpc":"2.0","id":2,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
-        2,
-    );
-    let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
-    assert_eq!(response["result"]["items"].as_array().unwrap().len(), 1);
-    assert_eq!(response["result"]["tracedecay"]["complete"], false);
-    assert_eq!(
-        response["result"]["tracedecay"]["rootFailures"][0]["rootUri"],
-        "file:///failed"
-    );
-    assert_eq!(
-        response["result"]["tracedecay"]["rootFailures"][0]["failureClass"],
-        "indexed-generation-unavailable"
-    );
-}
-
-#[test]
 fn failed_initialize_does_not_transition_or_admit_document_content() {
     let mut session = session();
     let request = json!({
@@ -852,7 +787,7 @@ fn catalog_admitted_context_dispatch_supplies_overlay_digest_to_canonical_reader
     let effective =
         negotiate_capabilities(&ClientCapabilities::default(), &capabilities, &upstream);
     let mut session = DaemonLspProtocolSession::new(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback::default(),

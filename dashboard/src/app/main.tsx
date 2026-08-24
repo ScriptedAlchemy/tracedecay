@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router';
 import '../theme/tailwind.css';
 import { router } from './routes';
+import { EventsProvider } from '../data/sse/useEvents.tsx';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,8 +24,6 @@ const storedTheme = localStorage.getItem('td-theme');
 if (storedTheme === 'light' || storedTheme === 'dark') {
   document.documentElement.dataset['theme'] = storedTheme;
 }
-
-import { EventsProvider } from '../data/sse/useEvents.tsx';
 
 createRoot(rootEl).render(
   <React.StrictMode>

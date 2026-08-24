@@ -147,6 +147,7 @@ pub(crate) fn vector_search(
     if request.cancellation.is_cancelled() {
         return Err(GraphDbError::Cancelled);
     }
+    hotpath::gauge!("graph_db.search.vector.candidates").set(candidates.len());
 
     let mut matches = Vec::new();
     for (node_id, distance) in candidates {
@@ -177,6 +178,7 @@ pub(crate) fn vector_search(
             .then_with(|| left.entity.cmp(&right.entity))
     });
     matches.truncate(request.limit);
+    hotpath::gauge!("graph_db.search.vector.results").set(matches.len());
     Ok(VectorSearchResult { matches })
 }
 

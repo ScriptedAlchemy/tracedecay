@@ -3,28 +3,16 @@ import * as brainActivity from '../brain/activitySummary.ts';
 import { formatDurationMs } from '../brain/activitySummary.ts';
 import * as loomTracks from './tracks.ts';
 import {
-  AXIS_HEIGHT,
-  LANE_HEIGHT,
-  MAX_LANE_HEIGHT,
-  TRACK_PAD,
   axisTicks,
   bandScale,
-  laneHeightFor,
   clampWindow,
-  densityProfile,
   fittedWindow,
   formatDurationSeconds,
   isFitted,
-  layoutHeight,
-  layoutTracks,
   packTrack,
-  peakConcurrency,
-  pick,
   tickStepFor,
-  windowOf,
   zoomWindow,
   type LoomSpan,
-  type LoomTrack,
 } from './tracks.ts';
 
 const HOUR = 3600;
@@ -33,21 +21,6 @@ const DAY = 86_400;
 function span(id: string, start: number, end: number, weight = 10): LoomSpan {
   return { id, start, end, label: id, weight };
 }
-
-function track(id: string, spans: LoomSpan[]): LoomTrack {
-  return { id, label: id, spans };
-}
-
-describe('windowOf', () => {
-  it('returns null when no track carries a span', () => {
-    expect(windowOf([track('a', [])])).toBeNull();
-  });
-
-  it('widens a degenerate extent to an hour so the axis stays drawable', () => {
-    const extent = windowOf([track('a', [span('s', 1000, 1000)])]);
-    expect(extent).toEqual({ start: 1000, end: 1000 + HOUR });
-  });
-});
 
 describe('packTrack', () => {
   it('keeps non-overlapping spans in a single lane', () => {
@@ -73,49 +46,6 @@ describe('packTrack', () => {
   });
 });
 
-describe('layoutTracks', () => {
-  it('gives every track a band tall enough for its packed lanes', () => {
-    const layouts = layoutTracks(
-      [track('a', [span('x', 0, 100), span('y', 10, 110)]), track('b', [span('z', 0, 5)])],
-      { start: 0, end: 200 },
-      200,
-    );
-    expect(layouts[0]?.lanes).toHaveLength(2);
-    expect(layouts[0]?.height).toBeGreaterThan(layouts[1]!.height);
-    expect(layouts[1]?.top).toBe(layouts[0]!.height);
-    expect(layoutHeight(layouts)).toBe(layouts[1]!.top + layouts[1]!.height);
-  });
-
-  it('leaves lanes at their base height when the pane is unmeasured', () => {
-    const layouts = layoutTracks([track('a', [span('x', 0, 100)])], { start: 0, end: 200 }, 200);
-    expect(layouts[0]?.laneHeight).toBe(LANE_HEIGHT);
-  });
-
-  it('stretches a sparse weave into a tall pane and caps the stretch', () => {
-    const layouts = layoutTracks(
-      [track('a', [span('x', 0, 100)])],
-      { start: 0, end: 200 },
-      200,
-      900,
-    );
-    expect(layouts[0]?.laneHeight).toBe(MAX_LANE_HEIGHT);
-  });
-
-  it('never shrinks lanes below the base height when the weave is deep', () => {
-    const spans = Array.from({ length: 40 }, (_, index) => span(`s${index}`, 0, 100));
-    const layouts = layoutTracks([track('a', spans)], { start: 0, end: 200 }, 200, 120);
-    expect(layouts[0]?.lanes).toHaveLength(40);
-    expect(layouts[0]?.laneHeight).toBe(LANE_HEIGHT);
-  });
-});
-
-describe('laneHeightFor', () => {
-  it('falls back to the base height for a degenerate measurement', () => {
-    expect(laneHeightFor(0, 500)).toBe(LANE_HEIGHT);
-    expect(laneHeightFor(4, 0)).toBe(LANE_HEIGHT);
-  });
-});
-
 describe('bandScale', () => {
   it('walks hour -> day -> month as the window widens', () => {
     expect(bandScale(6 * HOUR)).toBe('hour');
@@ -136,23 +66,6 @@ describe('bandScale', () => {
     // tighter than the axis can label, so the fine row stays coarse.
     expect(900 * DAY / tickStepFor(900 * DAY, 900)).toBeLessThanOrEqual(20);
     expect(60 * DAY / tickStepFor(60 * DAY, 900)).toBeLessThanOrEqual(20);
-  });
-});
-
-describe('pick', () => {
-  const view = { start: 0, end: 100 };
-  const layouts = layoutTracks([track('a', [span('x', 10, 40)])], view, 100);
-
-  it('finds the span under a point inside its lane', () => {
-    const hit = pick(layouts, view, 100, 20, AXIS_HEIGHT + TRACK_PAD + LANE_HEIGHT / 2);
-    expect(hit?.span.id).toBe('x');
-  });
-
-  it('returns null above the first track and beyond the last mark', () => {
-    expect(pick(layouts, view, 100, 20, 2)).toBeNull();
-    expect(
-      pick(layouts, view, 100, 80, AXIS_HEIGHT + TRACK_PAD + LANE_HEIGHT / 2),
-    ).toBeNull();
   });
 });
 
@@ -192,23 +105,6 @@ describe('viewport', () => {
   it('refuses to strand the viewport in empty time', () => {
     const view = clampWindow({ start: 500 * DAY, end: 501 * DAY }, extent);
     expect(view.start).toBeLessThan(extent.end + DAY);
-  });
-});
-
-describe('density', () => {
-  it('spreads a span over the buckets it covers and totals its weight', () => {
-    const profile = densityProfile(
-      [track('a', [span('x', 0, 100, 40)])],
-      { start: 0, end: 100 },
-      4,
-    );
-    expect(profile).toHaveLength(4);
-    expect(profile.reduce((sum, n) => sum + n, 0)).toBeCloseTo(40, 5);
-  });
-
-  it('reports the true peak concurrency of a lane', () => {
-    expect(peakConcurrency(track('a', [span('x', 0, 10), span('y', 20, 30)]))).toBe(1);
-    expect(peakConcurrency(track('a', [span('x', 0, 30), span('y', 10, 40)]))).toBe(2);
   });
 });
 

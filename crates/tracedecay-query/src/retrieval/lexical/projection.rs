@@ -138,7 +138,45 @@ impl ProjectedChunkV1 {
         chunk: CodeSearchChunkV1,
         logical_path: String,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
+        let fields = Self::projected_fields(&chunk, &logical_path);
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
+        Self::from_parts(
+            chunk.id,
+            chunk.anchor,
+            chunk.language_descriptor_revision,
+            chunk.exact_terms,
+            chunk.sanitized_text,
+            logical_path,
+            normalized_text,
+            fields,
+        )
+    }
+
+    /// Clone only the fields the projection retains. Sealed pages lend chunks,
+    /// so this avoids `admitted.clone().into_chunk()` copying subtokens and
+    /// other dropped payloads on the artifact append path.
+    fn from_ref(
+        chunk: &CodeSearchChunkV1,
+        logical_path: String,
+    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
+        let fields = Self::projected_fields(chunk, &logical_path);
+        let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
+        Self::from_parts(
+            chunk.id.clone(),
+            chunk.anchor.clone(),
+            chunk.language_descriptor_revision.clone(),
+            chunk.exact_terms.clone(),
+            chunk.sanitized_text.clone(),
+            logical_path,
+            normalized_text,
+            fields,
+        )
+    }
+
+    fn projected_fields(
+        chunk: &CodeSearchChunkV1,
+        logical_path: &str,
+    ) -> BTreeMap<LexicalFieldV1, Vec<String>> {
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
             LexicalFieldV1::PreambleText
@@ -146,7 +184,7 @@ impl ProjectedChunkV1 {
             LexicalFieldV1::BodyText
         };
         fields.insert(text_field, lexical_tokens(chunk.sanitized_text.as_str()));
-        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(&logical_path)]);
+        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(logical_path)]);
         fields.insert(
             LexicalFieldV1::Subtoken,
             chunk
@@ -192,23 +230,45 @@ impl ProjectedChunkV1 {
                 _ => {}
             }
         }
+        fields
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        id: CodeSearchChunkId,
+        anchor: CodeSearchChunkAnchorV1,
+        language_descriptor_revision: LanguageDescriptorRevision,
+        exact_terms: Vec<ExactTechnicalTermV1>,
+        sanitized_text: BoundedSanitizedText,
+        logical_path: String,
+        normalized_text: String,
+        fields: BTreeMap<LexicalFieldV1, Vec<String>>,
+    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
         let field_lengths = fields
             .iter()
             .map(|(field, terms)| (*field, terms.len()))
             .collect();
         (
             Self {
-                id: chunk.id,
-                anchor: chunk.anchor,
-                language_descriptor_revision: chunk.language_descriptor_revision,
-                exact_terms: chunk.exact_terms,
-                sanitized_text: chunk.sanitized_text,
+                id,
+                anchor,
+                language_descriptor_revision,
+                exact_terms,
+                sanitized_text,
                 logical_path,
                 field_lengths,
                 normalized_text,
             },
             fields,
         )
+    }
+
+    fn exact_match_view(&self) -> ExactMatchRowViewV1<'_> {
+        ExactMatchRowViewV1 {
+            sanitized_text: self.sanitized_text.as_str(),
+            logical_path: &self.logical_path,
+            exact_terms: &self.exact_terms,
+        }
     }
 }
 
@@ -457,6 +517,7 @@ impl CodeLexicalProjectionBuildV1 {
         })
     }
 
+    #[hotpath::measure(label = "query.artifact.projection_advance")]
     pub fn advance(
         &mut self,
         maximum_documents: usize,
@@ -580,6 +641,8 @@ impl CodeLexicalProjectionBuildV1 {
             self.phase = CodeLexicalProjectionBuildPhaseV1::Complete;
         }
         if self.phase != CodeLexicalProjectionBuildPhaseV1::Complete {
+            crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
+            hotpath::gauge!("query.artifact.rows").set(self.next_document);
             return Ok(CodeLexicalProjectionBuildStepV1::Pending {
                 completed_documents: self.next_document,
                 total_documents: self.chunks.len(),
@@ -592,6 +655,8 @@ impl CodeLexicalProjectionBuildV1 {
                 RetrievalPortError::Contract("lexical projection build state is missing".to_owned())
             })?
             .finish(self.rows.len(), self.raw_matches_normalized, deadline)?;
+        crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
+        hotpath::gauge!("query.artifact.rows").set(self.rows.len());
         Ok(CodeLexicalProjectionBuildStepV1::Ready(Box::new(
             CodeLexicalProjectionAdapterV1 {
                 metadata: self.metadata.clone(),
@@ -895,10 +960,13 @@ impl CodeLexicalProjectionAdapterV1 {
     }
 
     fn stale_outcome<T>(&self) -> Option<RetrieverOutcome<T>> {
-        (self.metadata.freshness.compatibility != FreshnessCompatibilityV1::Current)
-            .then(|| RetrieverOutcome::Stale(self.metadata.freshness.clone()))
+        (self.metadata.freshness.compatibility != FreshnessCompatibilityV1::Current).then(|| {
+            crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.lexical.residency");
+            RetrieverOutcome::Stale(self.metadata.freshness.clone())
+        })
     }
 
+    #[hotpath::measure(label = "query.lane.lexical.generate")]
     fn lexical_batch(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -969,6 +1037,8 @@ impl CodeLexicalProjectionAdapterV1 {
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        hotpath::gauge!("query.lane.lexical.candidates").set(candidates.len());
+        hotpath::gauge!("query.lane.lexical.examined").set(self.rows.len());
         Ok(RetrieverBatch {
             coverage: RetrieverCoverage {
                 examined: self.rows.len() as u64,
@@ -983,6 +1053,7 @@ impl CodeLexicalProjectionAdapterV1 {
         })
     }
 
+    #[hotpath::measure(label = "query.lane.fuzzy.expand")]
     fn fuzzy_expansions(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -1040,6 +1111,7 @@ impl CodeLexicalProjectionAdapterV1 {
             }
         }
         let mut by_query: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let expansion_count = selected.len();
         for (group_index, term) in selected {
             for query in &groups[group_index].queries {
                 by_query
@@ -1048,10 +1120,24 @@ impl CodeLexicalProjectionAdapterV1 {
                     .insert(term.clone());
             }
         }
+        hotpath::gauge!("query.lane.fuzzy.expansions").set(expansion_count);
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
     fn score_row(
+        &self,
+        document: u32,
+        row: &ProjectedChunkV1,
+        request: &LexicalLaneRequest<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+        phrase_document_frequencies: &BTreeMap<String, usize>,
+    ) -> LexicalRowScoreV1 {
+        crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
+            self.score_row_inner(document, row, request, fuzzy, phrase_document_frequencies)
+        })
+    }
+
+    fn score_row_inner(
         &self,
         document: u32,
         row: &ProjectedChunkV1,
@@ -1079,7 +1165,7 @@ impl CodeLexicalProjectionAdapterV1 {
                             self.term_score(*field, &normalized_query, exact_tf, row),
                         );
                         matched_whole_terms.insert(query_term.clone());
-                        collect_term_kinds(row, &normalized_query, &mut matched_kinds);
+                        collect_term_kinds(&row.exact_terms, &normalized_query, &mut matched_kinds);
                     }
                     if let Some(expansions) = fuzzy.by_query.get(query_term) {
                         for expansion in expansions {
@@ -1095,7 +1181,7 @@ impl CodeLexicalProjectionAdapterV1 {
                             add_score(&mut field_scores, *field, score);
                             matched_whole_terms.insert(query_term.clone());
                             typo_recovery_applied = true;
-                            collect_term_kinds(row, expansion, &mut matched_kinds);
+                            collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
                     }
                 }
@@ -1299,7 +1385,7 @@ where
         let mut excluded = self.projection.rows.len() as u64 - documents.len();
         for document in documents {
             let row = &self.projection.rows[document as usize];
-            let (matched_literals, matched_kinds) = exact_matches(row, request);
+            let (matched_literals, matched_kinds) = exact_matches(row.exact_match_view(), request);
             if matched_literals.is_empty() {
                 excluded += 1;
                 continue;
@@ -1384,8 +1470,16 @@ struct LexicalRowScoreV1 {
     echo_penalty_applied: bool,
 }
 
+/// The borrowed subset of a projected chunk that exact-literal matching
+/// reads, so artifact rows never deep-clone chunk text per visited document.
+struct ExactMatchRowViewV1<'a> {
+    sanitized_text: &'a str,
+    logical_path: &'a str,
+    exact_terms: &'a [ExactTechnicalTermV1],
+}
+
 fn exact_matches(
-    row: &ProjectedChunkV1,
+    row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
 ) -> (
     Vec<crate::retrieval::exact::ExactLiteralV1>,
@@ -1401,10 +1495,7 @@ fn exact_matches(
                 | ExactFieldV1::DiagnosticText
                 | ExactFieldV1::CompilerOrRuntimeError
         ) {
-            matched = contains_bytes(
-                row.sanitized_text.as_str().as_bytes(),
-                &literal.original_bytes,
-            );
+            matched = contains_bytes(row.sanitized_text.as_bytes(), &literal.original_bytes);
         }
         if literal.field == ExactFieldV1::Path
             && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
@@ -1412,7 +1503,7 @@ fn exact_matches(
             matched = true;
             matched_kinds.insert(ExactTechnicalTermKindV1::Path);
         }
-        for term in &row.exact_terms {
+        for term in row.exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field
                 && canonical_projected_exact_term(term).as_ref()
                     == literal.canonical_bytes.as_slice()
@@ -1469,11 +1560,11 @@ fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> 
 }
 
 fn collect_term_kinds(
-    row: &ProjectedChunkV1,
+    exact_terms: &[ExactTechnicalTermV1],
     normalized_term: &str,
     kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
 ) {
-    for term in &row.exact_terms {
+    for term in exact_terms {
         if std::str::from_utf8(term.canonical_bytes())
             .is_ok_and(|value| normalize_lexical(value) == normalized_term)
         {

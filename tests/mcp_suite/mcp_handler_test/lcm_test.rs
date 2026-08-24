@@ -1214,7 +1214,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     // retryable state out is the client protocol for this bridge.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let output = loop {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+        let mut command = std::process::Command::new(crate::common::tracedecay_bin());
         common::apply_tracedecay_home_env(&mut command, &home);
         let output = command
             .current_dir(outside_cwd.path())
@@ -2386,12 +2386,8 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     server.shutdown().await;
 }
 
-// ---------------------------------------------------------------------------
-// Scope validation (fail-closed, not fail-open)
-// ---------------------------------------------------------------------------
-
-/// Regression test: an invalid `scope` must be a hard error naming the valid
-/// values — never silently broadened to `all`.
+/// An invalid `scope` must be a hard error naming the valid values — never
+/// silently broadened to `all`.
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope() {
     let dir = test_temp_dir();
@@ -2425,10 +2421,6 @@ async fn lcm_grep_rejects_invalid_scope() {
         "unexpected error: {err}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Regression: ghost-create — pure-read LCM tools must not create sessions.db
-// ---------------------------------------------------------------------------
 
 /// Calling a `readOnlyHint` LCM tool on a freshly initialized project (config
 /// authority already opened sessions.db, but no transcript ingest) must stay
@@ -2558,16 +2550,12 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
     );
 }
 
-// ---------------------------------------------------------------------------
-// Regression: max_tokens must not suppress context budget
-// ---------------------------------------------------------------------------
-
-/// Before the fix, `default_context_limit = max_tokens.clamp(32_000, 65_536)`
-/// always evaluated to 32_000 because max_tokens ≤ 8_192 < 32_000, making
-/// `max_tokens` dead. After the fix, `context_max_tokens` defaults to the
-/// constant 32_000 and both params are independent. We verify that the handler
-/// accepts an explicit `context_max_tokens` override and that the returned
-/// payload reflects it.
+/// `default_context_limit = max_tokens.clamp(32_000, 65_536)` always
+/// evaluated to 32_000 because max_tokens ≤ 8_192 < 32_000, making
+/// `max_tokens` dead. `context_max_tokens` must default to the constant
+/// 32_000 so both params stay independent. The handler must accept an
+/// explicit `context_max_tokens` override and the returned payload must
+/// reflect it.
 #[tokio::test]
 async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
     let dir = test_temp_dir();

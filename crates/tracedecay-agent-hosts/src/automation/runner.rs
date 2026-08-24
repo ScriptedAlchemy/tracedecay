@@ -7,6 +7,7 @@ use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ActorId, FactOwnerV1};
 
 use super::ExternalSkillDeploymentDisposition;
+#[cfg(test)]
 use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
@@ -181,6 +182,7 @@ struct CombinedReviewPublication<'a> {
     skill_guard: Option<&'a AutomationRunSettlementGuard>,
 }
 
+#[hotpath::measure(label = "automation_run_user_session")]
 pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
@@ -190,6 +192,8 @@ pub async fn run_user_session_automation_with_backend(
     options: UserSessionAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> AutomationRunResult<UserSessionAutomationRun> {
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_automation_with_backend_and_retrieval(
         profile_root,
@@ -412,6 +416,7 @@ impl RetainedCombinedReviewRun {
 /// dashboard scheduler status stay coherent — sharing the combined request's
 /// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
 /// `prompt_version` set to the combined contract's version.
+#[hotpath::measure(label = "automation_run_combined_review")]
 pub async fn run_combined_review_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -551,6 +556,7 @@ async fn acquire_combined_task_lock(
     })
 }
 
+#[hotpath::measure(label = "automation_run_combined_review_inner")]
 async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -560,6 +566,8 @@ async fn run_combined_review_for_retrieval(
     run_control: &AutomationRunControl,
     publication: CombinedReviewPublication<'_>,
 ) -> Result<CombinedReviewDispatch> {
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     let AutomationTaskIo { backend, retrieval } = io;
     let CombinedReviewPublication {
         ledger: ledger_publication,
@@ -669,7 +677,7 @@ async fn run_combined_review_for_retrieval(
     let combined_evidence_hash = Some(canonical_evidence_hash(&json!({
         "session_reflection_evidence": reflector_bundle.evidence,
         "skill_writer_evidence": skill_bundle.evidence,
-    })));
+    }))?);
     let request = AgentTaskRequest::new(
         run_id.clone(),
         AgentTaskKind::CombinedReview,
@@ -817,7 +825,7 @@ async fn run_combined_review_for_retrieval(
             Some(canonical_evidence_hash(&json!({
                 "session_reflection_evidence": reflector_bundle.evidence,
                 "skill_writer_evidence": skill_bundle.evidence,
-            }))),
+            }))?),
             json!({
                 "previous_output": output.clone(),
                 "validation_errors": validation_repairs.last(),
@@ -1235,7 +1243,7 @@ fn combined_reflector_failure_projection(output: &Value) -> Value {
         "schema_version": 1,
         "proposed": {
             "count": facts.len(),
-            "sha256": sha256_json(&json!(facts)),
+            "sha256": sha256_json(&json!(facts)).expect("hash reflector facts"),
         },
     })
 }

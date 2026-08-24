@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
@@ -147,7 +146,6 @@ async fn drive_messages(
     responses
 }
 
-/// Helper to build a JSON-RPC request string.
 pub(crate) fn jsonrpc_request(id: Value, method: &str, params: Value) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -163,7 +161,6 @@ pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
         .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
 }
 
-/// Helper to build a JSON-RPC notification string (no id).
 pub(crate) fn jsonrpc_notification(method: &str) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -181,7 +178,6 @@ pub(crate) fn jsonrpc_notification_with_params(method: &str, params: Value) -> S
     .unwrap()
 }
 
-/// Parses a JSON-RPC response and returns it.
 pub(crate) fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
@@ -453,14 +449,6 @@ pub(crate) async fn mcp_runtime_event_count(
     mcp_runtime_events(global_db_path, session_id).await.len() as u64
 }
 
-pub(crate) fn response_for_id(responses: &[String], id: i64) -> Value {
-    let response = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == id)
-        .unwrap_or_else(|| panic!("should have a response for id={id}"));
-    parse_response(response)
-}
-
 pub(crate) async fn call_tool(
     server: Arc<McpServer>,
     id: i64,
@@ -476,7 +464,7 @@ pub(crate) async fn call_tool(
         )],
     )
     .await;
-    response_for_id(&responses, id)
+    response_with_id(&responses, json!(id))
 }
 
 pub(crate) fn analytics_metadata(event: &tracedecay::global_db::AnalyticsEventRecord) -> Value {
@@ -493,14 +481,5 @@ pub(crate) fn analytics_metadata(event: &tracedecay::global_db::AnalyticsEventRe
 // Repository setup used by routed hook journeys.
 // ---------------------------------------------------------------------------
 pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(project)
-        .output()
-        .expect("git failed to spawn");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    crate::common::fixture::git_run(project, args);
 }

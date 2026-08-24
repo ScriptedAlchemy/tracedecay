@@ -18,7 +18,6 @@ struct PortOrderSymbol<'a> {
     start_line: u32,
 }
 
-/// Handles `tracedecay_port_order` tool calls.
 pub(crate) async fn handle_port_order(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -118,7 +117,6 @@ pub(crate) async fn handle_port_order(
     let mut dep_graph: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
 
-    // Initialize all nodes
     for id in &node_ids {
         dep_graph.entry(*id).or_default();
         in_degree.entry(*id).or_insert(0);

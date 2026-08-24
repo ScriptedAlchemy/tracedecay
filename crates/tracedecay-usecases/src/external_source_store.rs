@@ -22,9 +22,9 @@ use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryOperationEnvelopeV1,
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionCommitV1,
-    SourceStoreStateV1, build_source_projection,
+    SourceCommitApplyOutcomeV1, SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1,
+    SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
+    SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
 };
 
 use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
@@ -82,6 +82,278 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) request_digest: ManifestDigest,
 }
 
+fn prepare_sanitized_commit(
+    capture: &SourceCaptureApplicationV1,
+    request: RuntimeSourceCaptureRequestV1<'_>,
+) -> Result<
+    (tracedecay_domain::SourceBindingIdentityV1, SourceCommitV1),
+    RuntimeExternalSourceErrorV1,
+> {
+    let observations = request
+        .mutations
+        .iter()
+        .map(|mutation| mutation.observation().clone())
+        .collect();
+    let admission = capture.capture_sanitized(
+        request.definition,
+        request.binding,
+        request.refresh,
+        request.provider_envelope,
+        request.authority.canonical_refetch(),
+        request.expected_frontier,
+        request.next_partition,
+        request.previous_whole_root_stage,
+        observations,
+        request.idempotency_key,
+        request.request_digest,
+    )?;
+    let (
+        definition,
+        binding,
+        _refresh,
+        envelope,
+        expected_frontier,
+        next_frontier,
+        admitted_observations,
+        _whole_root_stage,
+        snapshot_completion,
+        idempotency_key,
+        request_digest,
+    ) = admission.into_parts();
+    if admitted_observations.len() != request.mutations.len()
+        || admitted_observations
+            .iter()
+            .zip(&request.mutations)
+            .any(|(observation, mutation)| observation != mutation.observation())
+    {
+        return Err(RuntimeExternalSourceErrorV1::Invalid(
+            "external source mutations do not match the admitted sanitized observations".to_owned(),
+        ));
+    }
+    let binding_identity = binding.immutable_identity().map_err(invalid)?;
+    let commit = SourceCommitV1::new(
+        definition,
+        binding,
+        envelope.partition().clone(),
+        idempotency_key,
+        request_digest,
+        expected_frontier,
+        next_frontier,
+        request.mutations,
+        snapshot_completion,
+    )
+    .map_err(invalid)?;
+    Ok((binding_identity, commit))
+}
+
+fn host_source_authority(
+    receipt: &tracedecay_store::ObservationCommitReceipt,
+    runtime: &tracedecay_store::StoreRuntimeBindingV1,
+) -> Result<
+    (
+        SourceDefinitionV1,
+        SourceBindingV1,
+        tracedecay_domain::SourceBindingIdentityV1,
+    ),
+    RuntimeExternalSourceErrorV1,
+> {
+    let observation = receipt.observation();
+    let definition = host_source_definition(observation.source().provider().clone())?;
+    let authorization = receipt.retrieval_anchor().authorization();
+    let binding = host_source_binding(
+        &definition,
+        observation,
+        authorization.privacy_domain_id.clone(),
+        runtime,
+    )?;
+    let identity = binding.immutable_identity().map_err(invalid)?;
+    Ok((definition, binding, identity))
+}
+
+fn prepare_host_source_commit(
+    receipt: &tracedecay_store::ObservationCommitReceipt,
+    current: Option<&SourceStoreStateV1>,
+    runtime: &tracedecay_store::StoreRuntimeBindingV1,
+) -> Result<
+    (tracedecay_domain::SourceBindingIdentityV1, SourceCommitV1),
+    RuntimeExternalSourceErrorV1,
+> {
+    let observation = receipt.observation();
+    let provider = observation.source().provider().clone();
+    let (definition, binding, binding_identity) = host_source_authority(receipt, runtime)?;
+    if let Some(state) = current
+        && (state.definition() != &definition || state.binding() != &binding)
+    {
+        return Err(RuntimeExternalSourceErrorV1::Invalid(
+            "host source replay authority differs from durable definition or binding".to_owned(),
+        ));
+    }
+    let authorization = receipt.retrieval_anchor().authorization().clone();
+    let partition = SourcePartitionIdV1::new(
+        canonical_sha256(&(
+            "tracedecay.host-observation.partition.v1",
+            observation.source(),
+            observation.scope(),
+        ))
+        .map_err(invalid)?,
+    );
+    let idempotency_key = derive_logical_effect_idempotency(
+        LogicalEffectIdempotencyDomain::HostObservation,
+        observation.observation_id(),
+    )
+    .map_err(invalid)?;
+    let native_object = SourceNativeObjectIdV1::new(
+        canonical_sha256(&(
+            "tracedecay.host-observation.native-object.v1",
+            observation.observation_id(),
+        ))
+        .map_err(invalid)?,
+    );
+    let sanitized_digest =
+        ManifestDigest::new(observation.payload_reference().digest().as_str()).map_err(invalid)?;
+    let source_observation = SourceObjectObservationV1::new(
+        native_object,
+        SourceObjectRevisionV1::new(
+            canonical_sha256(&(
+                "tracedecay.host-observation.revision.v1",
+                observation.observation_id(),
+                observation.payload_reference(),
+            ))
+            .map_err(invalid)?,
+        ),
+        sanitized_digest.clone(),
+        SourceContentStateV1::Live,
+    )
+    .map_err(invalid)?;
+    let request_digest = canonical_sha256(&(
+        "tracedecay.host-observation.request.v1",
+        observation.observation_id(),
+        observation.payload_reference(),
+        receipt.sanitization_receipt().receipt(),
+        receipt.committed_cursor(),
+        receipt.retrieval_anchor(),
+        receipt.retrieval_anchor_id(),
+        receipt.projection_generation(),
+        &authorization,
+    ))
+    .map_err(invalid)?;
+    let expected_frontier = current.map(|state| state.source_frontier().clone());
+    let previous_partition = expected_frontier
+        .as_ref()
+        .and_then(|frontier| frontier.partition(&partition));
+    let sequence = previous_partition.map_or(1, |frontier| frontier.sequence() + 1);
+    let refresh_id = canonical_sha256(&(
+        "tracedecay.host-observation.refresh.v1",
+        observation.observation_id(),
+    ))
+    .map_err(invalid)?;
+    let snapshot = SourceSnapshotIdV1::new(
+        canonical_sha256(&(
+            "tracedecay.host-observation.snapshot.v1",
+            observation.observation_id(),
+            observation.payload_reference(),
+        ))
+        .map_err(invalid)?,
+    );
+    let continuation = SourceCursorV1::new(
+        canonical_sha256(&(
+            "tracedecay.host-observation.continuation.v1",
+            receipt.committed_cursor(),
+        ))
+        .map_err(invalid)?,
+    );
+    let refresh = SourceRefreshReceiptV1::new(
+        binding_identity.clone(),
+        provider.clone(),
+        refresh_id.clone(),
+        SourceRefreshCauseV1::Poll,
+        SourceCaptureModeV1::Poll,
+        SourceRefetchStrategyV1::WholeRoot,
+    )
+    .map_err(invalid)?;
+    let envelope = SourceProviderEnvelopeV1::new(
+        binding_identity.clone(),
+        provider,
+        refresh_id,
+        SourceRefreshCauseV1::Poll,
+        SourceCaptureModeV1::Poll,
+        SourceRefetchStrategyV1::WholeRoot,
+        SourceEnvelopeKindV1::WholeRoot,
+        partition.clone(),
+        1,
+        None,
+        Some(continuation.clone()),
+        Some(snapshot.clone()),
+        SourceCoverageV1::Partial,
+        sanitized_digest,
+    )
+    .map_err(invalid)?;
+    let next_partition = SourcePartitionFrontierV1::new(
+        binding_identity.clone(),
+        partition.clone(),
+        None,
+        Some(snapshot),
+        Some(continuation),
+        SourceCoverageV1::Partial,
+        sequence,
+        previous_partition.and_then(SourcePartitionFrontierV1::last_complete_snapshot),
+        envelope.envelope_digest().clone(),
+    )
+    .map_err(invalid)?;
+    let evidence = SourceObservationEvidenceV1::new(
+        binding_identity.clone(),
+        partition,
+        &source_observation,
+        observation.receipt().receipt().clone(),
+        receipt.retrieval_anchor_id().clone(),
+        authorization.clone(),
+        canonical_sha256(&(
+            "tracedecay.host-observation.source-authorization.v1",
+            &definition,
+            &binding,
+            &refresh,
+            &envelope,
+            &authorization,
+        ))
+        .map_err(invalid)?,
+    )
+    .map_err(invalid)?;
+    let mutation = SourceObjectMutationV1::new(
+        source_observation,
+        None,
+        SourceObjectTransitionV1::Initial,
+        evidence,
+    )
+    .map_err(invalid)?;
+    let capture = SourceCaptureApplicationV1::authorize(
+        &definition,
+        &binding,
+        binding.binding_revision,
+        ManifestDigest::new(authorization.access_policy_digest.as_str()).map_err(invalid)?,
+        runtime.authority_epoch.get(),
+        canonical_sha256(&("tracedecay.host-observation.sink-authority.v1", runtime))
+            .map_err(invalid)?,
+        &refresh,
+        &envelope,
+    )?;
+    prepare_sanitized_commit(
+        &capture,
+        RuntimeSourceCaptureRequestV1 {
+            definition,
+            binding,
+            refresh,
+            provider_envelope: envelope,
+            authority: RuntimeSourceCaptureAuthorityV1::Poll,
+            expected_frontier,
+            next_partition,
+            previous_whole_root_stage: None,
+            mutations: vec![mutation],
+            idempotency_key,
+            request_digest,
+        },
+    )
+}
+
 #[derive(Clone)]
 pub struct RuntimeExternalSourceStore {
     runtime: DatabaseRuntimeClientV1,
@@ -92,341 +364,141 @@ impl RuntimeExternalSourceStore {
         Self { runtime }
     }
 
-    /// The production consumer of `SourceCaptureApplicationV1::capture_sanitized`.
-    ///
-    /// Admission and the store reducer remain separate owners, but this method
-    /// makes the handoff atomic at the daemon's canonical writer boundary.
-    pub(crate) async fn capture_and_commit_sanitized(
+    pub(crate) async fn capture_host_observations(
         &self,
-        capture: &SourceCaptureApplicationV1,
-        request: RuntimeSourceCaptureRequestV1<'_>,
-    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
-        let requested_binding = request.binding.immutable_identity().map_err(invalid)?;
-        if let Some(state) = self.read_state(requested_binding.clone()).await? {
-            if state.definition() != &request.definition || state.binding() != &request.binding {
-                return Err(RuntimeExternalSourceErrorV1::Invalid(
-                    "external source replay authority differs from durable definition or binding"
-                        .to_owned(),
-                ));
+        receipts: &[tracedecay_store::ObservationCommitReceipt],
+    ) -> Result<Vec<RuntimeSourceCaptureOutcomeV1>, RuntimeExternalSourceErrorV1> {
+        if receipts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut states = std::collections::BTreeMap::new();
+        let mut settled = vec![None; receipts.len()];
+        let mut pending_commits = Vec::new();
+        for (slot, receipt) in receipts.iter().enumerate() {
+            let (_, _, binding_identity) = host_source_authority(receipt, self.runtime.binding())?;
+            if !states.contains_key(&binding_identity) {
+                let state = self.read_state(binding_identity.clone()).await?;
+                states.insert(binding_identity.clone(), state);
             }
-            if let Some(receipt) = self
-                .read_receipt(requested_binding.clone(), request.idempotency_key.clone())
+            let current = states.get(&binding_identity).and_then(Option::as_ref);
+            let (_, commit) = prepare_host_source_commit(receipt, current, self.runtime.binding())?;
+            if let Some(existing) = self
+                .read_receipt(binding_identity.clone(), commit.idempotency_key().clone())
                 .await?
             {
-                if receipt.request_digest() != &request.request_digest {
+                let source_observation = commit
+                    .mutations()
+                    .first()
+                    .map(SourceObjectMutationV1::observation)
+                    .ok_or_else(|| {
+                        RuntimeExternalSourceErrorV1::Invalid(
+                            "host source commit contains no observation mutation".to_owned(),
+                        )
+                    })?;
+                if existing.request_digest() != commit.request_digest()
+                    || current.is_none_or(|state| {
+                        state
+                            .observed_objects()
+                            .get(source_observation.native_object())
+                            != Some(source_observation)
+                    })
+                {
                     return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
                 }
-                return self.finish_capture(requested_binding, receipt).await;
+                settled[slot] = Some((binding_identity, existing));
+                continue;
+            }
+            match apply_source_commit(current, commit.clone()).map_err(invalid)? {
+                SourceCommitApplyOutcomeV1::Committed(state) => {
+                    settled[slot] = Some((binding_identity.clone(), state.receipt().clone()));
+                    states.insert(binding_identity.clone(), Some(*state));
+                }
+                SourceCommitApplyOutcomeV1::ExactDuplicate(receipt) => {
+                    settled[slot] = Some((binding_identity, *receipt));
+                    continue;
+                }
+            }
+            pending_commits.push(commit);
+        }
+        if !pending_commits.is_empty() {
+            let request = if let [commit] = pending_commits.as_slice() {
+                runtime_submit_request(
+                    self.runtime.binding(),
+                    RepositoryWritePayloadV1::ExternalSource(Box::new(commit.clone())),
+                    commit,
+                    commit.idempotency_key(),
+                    tracedecay_store::OperationPriorityV1::Foreground,
+                )?
+            } else {
+                let batch_identity = canonical_sha256(&(
+                    "tracedecay.host-observation.external-source-batch.v1",
+                    pending_commits
+                        .iter()
+                        .map(|commit| (commit.idempotency_key(), commit.request_digest()))
+                        .collect::<Vec<_>>(),
+                ))
+                .map_err(invalid)?;
+                runtime_submit_request(
+                    self.runtime.binding(),
+                    RepositoryWritePayloadV1::ExternalSourceBatch(
+                        pending_commits.clone().into_boxed_slice(),
+                    ),
+                    &pending_commits,
+                    &batch_identity,
+                    tracedecay_store::OperationPriorityV1::Background,
+                )?
+            };
+            let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
+            match self
+                .runtime
+                .dispatch_submit(request, probe)
+                .await
+                .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
+            {
+                RuntimeSubmitOutcomeV1::Committed { .. }
+                | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+                | RuntimeSubmitOutcomeV1::ExactReplay { .. } => {}
+                RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
+                }
+                _ => return Err(RuntimeExternalSourceErrorV1::Unavailable),
             }
         }
-        let observations = request
-            .mutations
-            .iter()
-            .map(|mutation| mutation.observation().clone())
-            .collect();
-        let admission = capture.capture_sanitized(
-            request.definition,
-            request.binding,
-            request.refresh,
-            request.provider_envelope,
-            request.authority.canonical_refetch(),
-            request.expected_frontier,
-            request.next_partition,
-            request.previous_whole_root_stage,
-            observations,
-            request.idempotency_key,
-            request.request_digest,
-        )?;
-        let (
-            definition,
-            binding,
-            _refresh,
-            envelope,
-            expected_frontier,
-            next_frontier,
-            admitted_observations,
-            _whole_root_stage,
-            snapshot_completion,
-            idempotency_key,
-            request_digest,
-        ) = admission.into_parts();
-        if admitted_observations.len() != request.mutations.len()
-            || admitted_observations
-                .iter()
-                .zip(&request.mutations)
-                .any(|(observation, mutation)| observation != mutation.observation())
-        {
-            return Err(RuntimeExternalSourceErrorV1::Invalid(
-                "external source mutations do not match the admitted sanitized observations"
-                    .to_owned(),
-            ));
-        }
-        let binding_identity = binding.immutable_identity().map_err(invalid)?;
-        let commit = SourceCommitV1::new(
-            definition,
-            binding,
-            envelope.partition().clone(),
-            idempotency_key,
-            request_digest,
-            expected_frontier,
-            next_frontier,
-            request.mutations,
-            snapshot_completion,
-        )
-        .map_err(invalid)?;
-        let payload = RepositoryWritePayloadV1::ExternalSource(Box::new(commit.clone()));
-        let request = runtime_submit_request(
-            self.runtime.binding(),
-            payload,
-            &commit,
-            commit.idempotency_key(),
-        )?;
-        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
-        match self
-            .runtime
-            .dispatch_submit(request, probe)
-            .await
-            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
-        {
-            RuntimeSubmitOutcomeV1::Committed { .. }
-            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-            | RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
-                let receipt = self
-                    .read_receipt(binding_identity.clone(), commit.idempotency_key().clone())
+        let mut projection_pending = std::collections::BTreeMap::new();
+        for settled in settled.iter().flatten() {
+            if !projection_pending.contains_key(&settled.0) {
+                let pending = self
+                    .read_pending_projection(Some(settled.0.clone()))
                     .await?
-                    .ok_or(RuntimeExternalSourceErrorV1::Unavailable)?;
-                self.finish_capture(binding_identity, receipt).await
+                    .is_some();
+                projection_pending.insert(settled.0.clone(), pending);
             }
-            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
-            }
-            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
         }
+        settled
+            .into_iter()
+            .map(|settled| {
+                let (binding, receipt) =
+                    settled.ok_or(RuntimeExternalSourceErrorV1::Unavailable)?;
+                Ok(
+                    if projection_pending.get(&binding).copied().unwrap_or(false) {
+                        RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt)
+                    } else {
+                        RuntimeSourceCaptureOutcomeV1::Projected(receipt)
+                    },
+                )
+            })
+            .collect()
     }
 
     pub(crate) async fn capture_host_observation(
         &self,
         receipt: &tracedecay_store::ObservationCommitReceipt,
     ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
-        let observation = receipt.observation();
-        let provider = observation.source().provider().clone();
-        let definition = host_source_definition(provider.clone())?;
-        let authorization = receipt.retrieval_anchor().authorization().clone();
-        let binding = host_source_binding(
-            &definition,
-            observation,
-            authorization.privacy_domain_id.clone(),
-            self.runtime.binding(),
-        )?;
-        let binding_identity = binding.immutable_identity().map_err(invalid)?;
-        let partition = SourcePartitionIdV1::new(
-            canonical_sha256(&(
-                "tracedecay.host-observation.partition.v1",
-                observation.source(),
-                observation.scope(),
-            ))
-            .map_err(invalid)?,
-        );
-        let idempotency_key = derive_logical_effect_idempotency(
-            LogicalEffectIdempotencyDomain::HostObservation,
-            observation.observation_id(),
-        )
-        .map_err(invalid)?;
-        let native_object = SourceNativeObjectIdV1::new(
-            canonical_sha256(&(
-                "tracedecay.host-observation.native-object.v1",
-                observation.observation_id(),
-            ))
-            .map_err(invalid)?,
-        );
-        let sanitized_digest =
-            ManifestDigest::new(observation.payload_reference().digest().as_str())
-                .map_err(invalid)?;
-        let source_observation = SourceObjectObservationV1::new(
-            native_object.clone(),
-            SourceObjectRevisionV1::new(
-                canonical_sha256(&(
-                    "tracedecay.host-observation.revision.v1",
-                    observation.observation_id(),
-                    observation.payload_reference(),
-                ))
-                .map_err(invalid)?,
-            ),
-            sanitized_digest.clone(),
-            SourceContentStateV1::Live,
-        )
-        .map_err(invalid)?;
-        let request_digest = canonical_sha256(&(
-            "tracedecay.host-observation.request.v1",
-            observation.observation_id(),
-            observation.payload_reference(),
-            receipt.sanitization_receipt().receipt(),
-            receipt.committed_cursor(),
-            receipt.retrieval_anchor(),
-            receipt.retrieval_anchor_id(),
-            receipt.projection_generation(),
-            &authorization,
-        ))
-        .map_err(invalid)?;
-        let current = self.read_state(binding_identity.clone()).await?;
-        if let Some(state) = current.as_ref() {
-            if state.definition() != &definition || state.binding() != &binding {
-                return Err(RuntimeExternalSourceErrorV1::Invalid(
-                    "host source replay authority differs from durable definition or binding"
-                        .to_owned(),
-                ));
-            }
-            if let Some(existing) = self
-                .read_receipt(binding_identity.clone(), idempotency_key.clone())
-                .await?
-            {
-                if existing.request_digest() != &request_digest {
-                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
-                }
-                if state.observed_objects().get(&native_object) != Some(&source_observation) {
-                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
-                }
-                return self.finish_capture(binding_identity, existing).await;
-            }
-        }
-
-        let expected_frontier = current
-            .as_ref()
-            .map(|state| state.source_frontier().clone());
-        let previous_partition = expected_frontier
-            .as_ref()
-            .and_then(|frontier| frontier.partition(&partition));
-        let sequence = previous_partition.map_or(1, |frontier| frontier.sequence() + 1);
-        let refresh_id = canonical_sha256(&(
-            "tracedecay.host-observation.refresh.v1",
-            observation.observation_id(),
-        ))
-        .map_err(invalid)?;
-        let snapshot = SourceSnapshotIdV1::new(
-            canonical_sha256(&(
-                "tracedecay.host-observation.snapshot.v1",
-                observation.observation_id(),
-                observation.payload_reference(),
-            ))
-            .map_err(invalid)?,
-        );
-        let continuation = SourceCursorV1::new(
-            canonical_sha256(&(
-                "tracedecay.host-observation.continuation.v1",
-                receipt.committed_cursor(),
-            ))
-            .map_err(invalid)?,
-        );
-        let refresh = SourceRefreshReceiptV1::new(
-            binding_identity.clone(),
-            provider.clone(),
-            refresh_id.clone(),
-            SourceRefreshCauseV1::Poll,
-            SourceCaptureModeV1::Poll,
-            SourceRefetchStrategyV1::WholeRoot,
-        )
-        .map_err(invalid)?;
-        let envelope = SourceProviderEnvelopeV1::new(
-            binding_identity.clone(),
-            provider,
-            refresh_id,
-            SourceRefreshCauseV1::Poll,
-            SourceCaptureModeV1::Poll,
-            SourceRefetchStrategyV1::WholeRoot,
-            SourceEnvelopeKindV1::WholeRoot,
-            partition.clone(),
-            1,
-            None,
-            Some(continuation.clone()),
-            Some(snapshot.clone()),
-            SourceCoverageV1::Partial,
-            sanitized_digest.clone(),
-        )
-        .map_err(invalid)?;
-        let next_partition = SourcePartitionFrontierV1::new(
-            binding_identity.clone(),
-            partition.clone(),
-            None,
-            Some(snapshot),
-            Some(continuation),
-            SourceCoverageV1::Partial,
-            sequence,
-            previous_partition.and_then(SourcePartitionFrontierV1::last_complete_snapshot),
-            envelope.envelope_digest().clone(),
-        )
-        .map_err(invalid)?;
-        let evidence = SourceObservationEvidenceV1::new(
-            binding_identity,
-            partition,
-            &source_observation,
-            observation.receipt().receipt().clone(),
-            receipt.retrieval_anchor_id().clone(),
-            authorization.clone(),
-            canonical_sha256(&(
-                "tracedecay.host-observation.source-authorization.v1",
-                &definition,
-                &binding,
-                &refresh,
-                &envelope,
-                &authorization,
-            ))
-            .map_err(invalid)?,
-        )
-        .map_err(invalid)?;
-        let mutation = SourceObjectMutationV1::new(
-            source_observation,
-            None,
-            SourceObjectTransitionV1::Initial,
-            evidence,
-        )
-        .map_err(invalid)?;
-        let capture = SourceCaptureApplicationV1::authorize(
-            &definition,
-            &binding,
-            binding.binding_revision,
-            ManifestDigest::new(authorization.access_policy_digest.as_str()).map_err(invalid)?,
-            self.runtime.binding().authority_epoch.get(),
-            canonical_sha256(&(
-                "tracedecay.host-observation.sink-authority.v1",
-                self.runtime.binding(),
-            ))
-            .map_err(invalid)?,
-            &refresh,
-            &envelope,
-        )?;
-        self.capture_and_commit_sanitized(
-            &capture,
-            RuntimeSourceCaptureRequestV1 {
-                definition,
-                binding,
-                refresh,
-                provider_envelope: envelope,
-                authority: RuntimeSourceCaptureAuthorityV1::Poll,
-                expected_frontier,
-                next_partition,
-                previous_whole_root_stage: None,
-                mutations: vec![mutation],
-                idempotency_key,
-                request_digest,
-            },
-        )
-        .await
-    }
-
-    async fn finish_capture(
-        &self,
-        binding: tracedecay_domain::SourceBindingIdentityV1,
-        receipt: SourceCommitReceiptV1,
-    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
-        if self
-            .read_pending_projection(Some(binding.clone()))
+        self.capture_host_observations(std::slice::from_ref(receipt))
             .await?
-            .is_some()
-        {
-            Ok(RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt))
-        } else {
-            Ok(RuntimeSourceCaptureOutcomeV1::Projected(receipt))
-        }
+            .into_iter()
+            .next()
+            .ok_or(RuntimeExternalSourceErrorV1::Unavailable)
     }
 
     /// The daemon-owned host-admission drain invokes this bounded operation;
@@ -548,6 +620,7 @@ impl RuntimeExternalSourceStore {
             payload,
             &projection,
             projection.receipt_digest(),
+            tracedecay_store::OperationPriorityV1::Foreground,
         )?;
         let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         match self
@@ -703,6 +776,7 @@ fn runtime_submit_request<T: serde::Serialize>(
     payload: RepositoryWritePayloadV1,
     command: &T,
     idempotency_key: &ManifestDigest,
+    priority: tracedecay_store::OperationPriorityV1,
 ) -> Result<tracedecay_store::RuntimeSubmitRequestV1, RuntimeExternalSourceErrorV1> {
     let command_digest = canonical_sha256(command).map_err(invalid)?;
     let command_suffix = digest_suffix(command_digest.as_str())?;
@@ -727,7 +801,7 @@ fn runtime_submit_request<T: serde::Serialize>(
                 .map_err(invalid)?,
         },
         durability: tracedecay_store::DurabilityClassV1::Full,
-        priority: tracedecay_store::OperationPriorityV1::Foreground,
+        priority,
         admission_bytes: serialized_len(command)?,
         admitted_at,
     };

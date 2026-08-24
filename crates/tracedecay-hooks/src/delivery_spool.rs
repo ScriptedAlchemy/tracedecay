@@ -38,17 +38,7 @@ impl HookDeliverySourceReceiptV1 {
         // timestamps remain in the retained payload for truthful evidence,
         // but are deliberately absent from the durable file key so an exact
         // retry replays the first receipt instead of creating a second one.
-        let digest = canonical_sha256(&(
-            "tracedecay.hook-delivery-source-receipt.v1",
-            StableReceiptIdentity::from_settlement(&settlement),
-        ))
-        .map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
-        let hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(HookDeliverySpoolError::InvalidReceipt)?;
-        let mut receipt_id = [0_u8; 16];
-        decode_hex_prefix(hex, &mut receipt_id)?;
+        let receipt_id = receipt_id_for_settlement(&settlement)?;
         Ok(Self {
             receipt_id,
             settlement,
@@ -60,8 +50,8 @@ impl HookDeliverySourceReceiptV1 {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
         validate_settlement(&self.settlement)?;
-        let expected = Self::new(self.settlement.clone())?;
-        if expected.receipt_id != self.receipt_id {
+        let expected = receipt_id_for_settlement(&self.settlement)?;
+        if expected != self.receipt_id {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
         Ok(())
@@ -126,6 +116,7 @@ pub struct HookDeliveryReceiptSpoolV1 {
 }
 
 impl HookDeliveryReceiptSpoolV1 {
+    #[hotpath::measure]
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
         let root = root.into();
         ensure_root(&root)?;
@@ -155,6 +146,7 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(spool)
     }
 
+    #[hotpath::measure]
     pub fn append(
         &self,
         receipt: &HookDeliverySourceReceiptV1,
@@ -177,8 +169,11 @@ impl HookDeliveryReceiptSpoolV1 {
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
-        atomic_write(&path, "delivery", &bytes, DIRECTORY_POLICY)
-            .map_err(|_| HookDeliverySpoolError::Io)?;
+        hotpath::gauge!("hooks.delivery.append.bytes").set(bytes.len());
+        hotpath::measure_block!("hooks.delivery.fsync.append", {
+            atomic_write(&path, "delivery", &bytes, DIRECTORY_POLICY)
+                .map_err(|_| HookDeliverySpoolError::Io)
+        })?;
         Ok(true)
     }
 
@@ -186,6 +181,7 @@ impl HookDeliveryReceiptSpoolV1 {
     /// retained for its stable identity.  Callers must forward the returned
     /// settlement to the daemon so a retry replays the original timestamps
     /// rather than reconstructing a conflicting delivery attempt.
+    #[hotpath::measure]
     pub fn append_or_replay(
         &self,
         receipt: &HookDeliverySourceReceiptV1,
@@ -207,11 +203,15 @@ impl HookDeliveryReceiptSpoolV1 {
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
-        atomic_write(&path, "delivery", &bytes, DIRECTORY_POLICY)
-            .map_err(|_| HookDeliverySpoolError::Io)?;
+        hotpath::gauge!("hooks.delivery.append.bytes").set(bytes.len());
+        hotpath::measure_block!("hooks.delivery.fsync.append", {
+            atomic_write(&path, "delivery", &bytes, DIRECTORY_POLICY)
+                .map_err(|_| HookDeliverySpoolError::Io)
+        })?;
         Ok(receipt.clone())
     }
 
+    #[hotpath::measure]
     pub fn pending(
         &self,
         limit: usize,
@@ -231,19 +231,24 @@ impl HookDeliveryReceiptSpoolV1 {
             }
             receipts.push(receipt);
         }
+        hotpath::gauge!("hooks.delivery.pending.count").set(receipts.len());
         Ok(receipts)
     }
 
+    #[hotpath::measure]
     pub fn acknowledge(&self, receipt_id: [u8; 16]) -> Result<bool, HookDeliverySpoolError> {
         let path = self.receipt_path(receipt_id);
         if !validate_regular_or_missing(&path).map_err(map_read_error)? {
             return Ok(false);
         }
         fs::remove_file(path).map_err(|_| HookDeliverySpoolError::Io)?;
-        sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)?;
+        hotpath::measure_block!("hooks.delivery.fsync.ack", {
+            sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+        })?;
         Ok(true)
     }
 
+    #[hotpath::measure]
     fn receipt_paths(&self) -> Result<Vec<PathBuf>, HookDeliverySpoolError> {
         let mut paths = Vec::new();
         for entry in fs::read_dir(&self.root).map_err(|_| HookDeliverySpoolError::Io)? {
@@ -282,6 +287,23 @@ pub fn hook_delivery_receipt_spool_root(data_root: &Path, host: crate::HookHostV
     data_root.join("hook-delivery-spool").join(host.hook_key())
 }
 
+fn receipt_id_for_settlement(
+    settlement: &DeliverySettlementV1,
+) -> Result<[u8; 16], HookDeliverySpoolError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.hook-delivery-source-receipt.v1",
+        StableReceiptIdentity::from_settlement(settlement),
+    ))
+    .map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(HookDeliverySpoolError::InvalidReceipt)?;
+    let mut receipt_id = [0_u8; 16];
+    decode_hex_prefix(hex, &mut receipt_id)?;
+    Ok(receipt_id)
+}
+
 fn validate_settlement(settlement: &DeliverySettlementV1) -> Result<(), HookDeliverySpoolError> {
     settlement
         .validate()
@@ -312,7 +334,9 @@ fn ensure_root(root: &Path) -> Result<(), HookDeliverySpoolError> {
         fs::set_permissions(root, fs::Permissions::from_mode(0o700))
             .map_err(|_| HookDeliverySpoolError::Io)?;
     }
-    sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+    hotpath::measure_block!("hooks.delivery.fsync.directory", {
+        sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+    })
 }
 
 fn decode_receipt(bytes: &[u8]) -> Result<HookDeliverySourceReceiptV1, HookDeliverySpoolError> {

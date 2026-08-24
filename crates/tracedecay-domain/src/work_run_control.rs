@@ -1,19 +1,10 @@
 //! The durable run-control aggregate for admitted Work runs.
 //!
-//! Plan 32 (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,
-//! "One runtime, run control, and effect budget") requires that "every run has
-//! one durable control aggregate containing immutable admitted limits and
-//! snapshots plus monotonically versioned authority, cancellation, deadline
-//! checkpoint, and shared budget ledger", and that "pause and cancellation
-//! fence new reservations and reconcile active effects before publishing a
-//! stable state".
+//! This module owns the aggregate's shape and its legal transitions.
+//! Three invariants are structural:
 //!
-//! This module owns exactly that aggregate's shape and its legal transitions.
-//! Three invariants are structural rather than documented:
-//!
-//! 1. **Remaining time never increases.** The plan states it flatly:
-//!    "remaining time never increases after pause, human wait, retry,
-//!    reconnect, failover, clock rollback, or daemon restart". Pause snapshots
+//! 1. **Remaining time never increases** after pause, human wait, retry,
+//!    reconnect, failover, clock rollback, or daemon restart. Pause snapshots
 //!    the remaining micros left against the admitted deadline; resume republishes
 //!    a deadline exactly `remaining` micros out from the resume instant. A clock
 //!    that runs backwards therefore cannot buy a run more budget, because the
@@ -66,8 +57,8 @@ pub enum WorkRunControlContractError {
 /// The published control state of one run.
 ///
 /// There is no `Cancelled` here: cancellation is an attempt-level authority
-/// that Plan 32 already owns through the lease fence, and duplicating it as a
-/// run state would create a second place a run could be "over".
+/// owned through the lease fence, and duplicating it as a run state would
+/// create a second place a run could be "over".
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "WorkRunControlStateV1")]

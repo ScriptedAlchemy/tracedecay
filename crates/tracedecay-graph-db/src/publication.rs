@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphIdempotencyKey, GraphNamespace,
@@ -108,8 +108,16 @@ impl fmt::Debug for GraphPublication {
     }
 }
 
+/// Both canonical digests from one validation pass: the publication digest
+/// commits to the batch digest, so callers reuse the inner digest instead of
+/// re-canonicalizing the full mutation batch a second time.
+pub(crate) struct GraphPublicationDigests {
+    pub(crate) publication: String,
+    pub(crate) batch: String,
+}
+
 impl GraphPublication {
-    pub(crate) fn validate_and_digest(&mut self) -> Result<String, GraphDbError> {
+    pub(crate) fn validate_and_digest(&mut self) -> Result<GraphPublicationDigests, GraphDbError> {
         if self.cancellation.is_cancelled() || self.batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -129,11 +137,14 @@ impl GraphPublication {
             &self.source_generation,
             &self.expected_watermark,
             &self.next_watermark,
-            batch_digest,
+            &batch_digest,
         ))
         .map_err(|error| {
             GraphDbError::invalid(format!("failed to canonicalize publication: {error}"))
         })?;
-        Ok(hex::encode(Sha256::digest(canonical)))
+        Ok(GraphPublicationDigests {
+            publication: sha256_hex(&canonical),
+            batch: batch_digest,
+        })
     }
 }

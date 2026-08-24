@@ -80,7 +80,7 @@ struct Group {
     identity_reason: Option<&'static str>,
 }
 
-/// Projects provider/model latency from the canonical Plan 26 event family.
+/// Projects provider/model latency from the canonical observability event family.
 pub async fn provider_latency_read_model(
     db: Option<&RegisteredGlobalDb>,
     scope_ref: Option<&str>,

@@ -293,6 +293,10 @@ impl ProjectContextScoutDurableStoreV1 {
 
     /// Daemon startup convenience: construct the owned store, atomically
     /// requeue expired claims, and return a bounded ready page.
+    #[hotpath::measure(
+        label = "context_scout_store_startup",
+        impl_type = "ProjectContextScoutDurableStoreV1"
+    )]
     pub async fn startup_from_project_database(
         database: Database,
         project_id: [u8; 16],
@@ -445,6 +449,10 @@ impl ProjectContextScoutDurableStoreV1 {
         .await
     }
 
+    #[hotpath::measure(
+        label = "context_scout_persist",
+        impl_type = "ProjectContextScoutDurableStoreV1"
+    )]
     async fn update_state<T: Send>(
         &self,
         operation: &str,

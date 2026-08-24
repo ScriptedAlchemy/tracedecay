@@ -76,15 +76,11 @@ pub use crate::git::worktree::{
     NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION, NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,
 };
 
-// ---------------------------------------------------------------------------
-// stack_snapshot
-// ---------------------------------------------------------------------------
-
 /// Application service for `stack_snapshot`.
 ///
 /// It reauthorizes and freezes the visible node/edge set and inventory epoch
 /// before preflight, and never discovers roots, edges, or topology itself: the
-/// injected Plan 16 authority answers, and a hidden or denied node reveals no
+/// injected topology authority answers, and a hidden or denied node reveals no
 /// identity, count, or topology through this result.
 pub struct NativeIntegrationStackSnapshotService<P> {
     port: P,
@@ -111,10 +107,6 @@ impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotServ
         Ok(outcome)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Remaining surface requests
-// ---------------------------------------------------------------------------
 
 /// Exact semantic evidence revisions joined to native conflict evidence.
 ///
@@ -196,10 +188,6 @@ pub struct NativeIntegrationStatusSurfaceRequest {
 pub struct NativeIntegrationCancelSurfaceRequest {
     pub transaction_id: NativeIntegrationTransactionId,
 }
-
-// ---------------------------------------------------------------------------
-// Bounded surface result
-// ---------------------------------------------------------------------------
 
 /// Why a native-integration operation produced no advancing state.
 ///
@@ -538,10 +526,6 @@ impl NativeIntegrationSurfaceResultV1 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Catalog contribution
-// ---------------------------------------------------------------------------
 
 struct NativeIntegrationSurfaceSpec {
     operation: &'static str,
@@ -1080,6 +1064,7 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use NativeIntegrationSurfaceUnavailableV1 as Reason;
 
     #[test]
     fn stack_snapshot_schema_requires_exact_registered_scope_set_identity() {
@@ -1158,7 +1143,6 @@ mod tests {
     #[test]
     fn every_capability_is_schema_backed_and_separately_authorized() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
-        assert_eq!(contribution.capabilities().len(), 11);
         for manifest in contribution.capabilities() {
             assert!(
                 contribution
@@ -1205,7 +1189,6 @@ mod tests {
 
     #[test]
     fn every_port_failure_maps_to_a_truthful_unavailable_reason() {
-        use NativeIntegrationSurfaceUnavailableV1 as Reason;
         for (error, expected) in [
             (
                 NativeIntegrationPortError::Unavailable,

@@ -3,13 +3,11 @@
 //! authority, authority isolation, and restart durability over the registered
 //! exact-SQL channel.
 //!
-//! Plan 32 (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,
-//! "One runtime, run control, and effect budget") requires one durable control
-//! aggregate per run with "monotonically versioned authority" and a deadline
-//! checkpoint whose remaining time "never increases". Both are storage
-//! behaviours here: the version is the compare-and-swap key, and the deadline
-//! the aggregate is first admitted under is read out of the attempt's own
-//! pinned execution snapshot rather than supplied by a caller.
+//! One durable control aggregate per run carries monotonically versioned
+//! authority and a deadline checkpoint whose remaining time never increases.
+//! The version is the compare-and-swap key, and the deadline the aggregate is
+//! first admitted under is read from the attempt's own pinned execution
+//! snapshot rather than supplied by a caller.
 
 mod common;
 mod work_registered_store;

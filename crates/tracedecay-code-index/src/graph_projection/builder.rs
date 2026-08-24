@@ -39,6 +39,7 @@ struct ChunkRecordV1 {
     sensitivity: SensitivityDecision,
 }
 
+#[hotpath::measure]
 pub fn build_published_code_graph_manifest_checked(
     projection: GraphProjectionIdentity,
     generation: &CodeIndexPublishedGenerationV1,

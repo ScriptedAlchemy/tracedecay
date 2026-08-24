@@ -582,8 +582,6 @@ mod tests {
         finding.finding().evidence()[0].reference().as_str()
     }
 
-    // --- TableGrowth ---------------------------------------------------------
-
     #[test]
     fn significant_table_growth_is_informational() {
         let finding = table_growth_finding(&TableGrowthDoctorEvidenceV1::SignificantGrowth {
@@ -620,8 +618,6 @@ mod tests {
         assert_eq!(unknown.finding().state(), DoctorEvidenceStateV1::Unknown);
         assert!(!only_evidence(&unknown).contains("0b"));
     }
-
-    // --- OverBudgetStore -----------------------------------------------------
 
     #[test]
     fn over_budget_store_produces_degraded_finding() {
@@ -706,8 +702,6 @@ mod tests {
         }
     }
 
-    // --- OrphanStore ---------------------------------------------------------
-
     #[test]
     fn orphan_store_produces_degraded_finding() {
         let record = OrphanStoreRecordV1 {
@@ -737,8 +731,6 @@ mod tests {
             orphan_store_finding(&record, DoctorCoverageCompletenessV1::Complete).expect("finding");
         assert!(finding.finding().state().is_healthy_complete());
     }
-
-    // --- IncidentDebrisPresent ----------------------------------------------
 
     fn debris_artifact(bytes: u64) -> IncidentDebrisArtifactV1 {
         let path = RelativeArtifactPathV1::new("sessions.db.corrupt-1721692800").expect("valid");
@@ -789,8 +781,6 @@ mod tests {
         let finding = incident_debris_finding(&scan).expect("finding");
         assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Partial);
     }
-
-    // --- RetentionBacklog ----------------------------------------------------
 
     #[test]
     fn retention_backlog_produces_stale_finding() {
@@ -926,8 +916,6 @@ mod tests {
         assert!(finding.finding().state().is_healthy_complete());
         assert!(only_evidence(&finding).contains("stranded-scopes-0"));
     }
-
-    // --- Cross-cutting -------------------------------------------------------
 
     #[test]
     fn all_five_finding_kinds_are_producible_and_family_storage() {

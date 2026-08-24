@@ -5,7 +5,6 @@ use super::{
 };
 
 impl Database {
-    /// Releases this database handle.
     pub fn close(self) {
         drop(self);
     }

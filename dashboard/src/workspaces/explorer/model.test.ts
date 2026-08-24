@@ -1,16 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { compactRelativeAge } from '../../ui/time.ts';
 import {
   LANES,
   codeHits,
   facetCounts,
   knowledgeHits,
-  relativeTime,
   sessionHits,
 } from './model.ts';
-
-afterEach(() => {
-  vi.useRealTimers();
-});
 
 function canonicalFactId(seed: number): string {
   return `fact.${'a'.repeat(64)}.${seed.toString(16).padStart(64, '0')}`;
@@ -189,13 +185,11 @@ describe('facetCounts', () => {
 // `plannerLaneState` became `laneFromSourceProgress`; both invariants they
 // protected are asserted there against the same two shapes.
 
-describe('relativeTime', () => {
+describe('compactRelativeAge', () => {
   it('uses unix seconds and handles future observations explicitly', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-25T18:00:00Z'));
-    const now = Date.now() / 1000;
-    expect(relativeTime(now + 10)).toBe('now');
-    expect(relativeTime(now - 120)).toBe('2m');
-    expect(relativeTime(undefined)).toBeUndefined();
+    const now = Date.parse('2026-07-25T18:00:00Z') / 1000;
+    expect(compactRelativeAge(now + 10, now)).toBe('now');
+    expect(compactRelativeAge(now - 120, now)).toBe('2m');
+    expect(compactRelativeAge(undefined, now)).toBeNull();
   });
 });

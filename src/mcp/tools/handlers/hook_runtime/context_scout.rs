@@ -49,8 +49,8 @@ pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
 pub(super) fn hook_v2_native_context_scout_lifecycle(
     args: &Value,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<crate::hooks::NativeContextScoutLifecycleV1> {
-    let lifecycle: crate::hooks::NativeContextScoutLifecycleV1 =
+) -> Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1> {
+    let lifecycle: tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1 =
         serde_json::from_value(args.get("native_lifecycle")?.clone()).ok()?;
     lifecycle.matches_envelope(envelope).then_some(lifecycle)
 }
@@ -58,7 +58,7 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
     provider: ProviderId,
-    lifecycle: &crate::hooks::NativeContextScoutLifecycleV1,
+    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
     range: ObservationSourceRangeV1,
 ) -> bool {
     let StoreShardScopeV1::ProjectSessions { project_id } = &sessions.binding().shard_id.scope
@@ -303,7 +303,8 @@ pub(super) async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> R
         >(claim)
         .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?,
         None => {
-            let Some(project_id) = crate::hooks::hook_project_id_for_layout(cg.hook_store_layout())
+            let Some(project_id) =
+                tracedecay_agent_hosts::hooks::hook_project_id_for_layout(cg.hook_store_layout())
             else {
                 return Ok(json!({ "status": "unavailable" }));
             };

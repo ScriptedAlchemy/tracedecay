@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod candidate_output;
+mod controlled_workloads;
 mod native_qualification;
 mod packaged_assets;
 mod report;
@@ -40,6 +41,13 @@ pub use candidate_output::{
     generate_candidate_outputs_with_native, load_candidate_workload,
     load_direct_evaluated_profile_material, no_admitted_corpus_scope,
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
+};
+pub use controlled_workloads::{
+    CURSOR_PARSE_REPORT_FILE, CURSOR_PARSE_WORKLOAD, ControlledOperationDeltaV1,
+    ControlledOperationV1, ControlledWorkloadComparisonV1, ControlledWorkloadErrorV1,
+    ControlledWorkloadReportV1, FRAMED_LOG_REPORT_FILE, FRAMED_LOG_WORKLOAD,
+    compare_controlled_workloads, run_cursor_parse_batch_workload,
+    run_framed_log_durability_workload, write_controlled_workload_reports,
 };
 pub use native_qualification::{
     NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
@@ -336,11 +344,11 @@ fn validate_activation_native_matrix(
         .outputs
         .iter()
         .map(|output| output.profile_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let expected_profiles = required_profiles
         .iter()
         .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     if observed_profiles != expected_profiles {
         return Err(SearchEvalError::Contract(
             "activation evaluation did not execute the required profile matrix".to_owned(),
@@ -728,13 +736,13 @@ fn validate_output_matrix(
             "generated output matrix must not be empty".to_owned(),
         ));
     }
-    let known_profiles: std::collections::BTreeSet<_> = workload
+    let known_profiles: BTreeSet<_> = workload
         .profile_matrix
         .iter()
         .map(|profile| profile.profile_id.as_str())
         .collect();
-    let mut selected_profiles = std::collections::BTreeSet::new();
-    let mut pairs = std::collections::BTreeSet::new();
+    let mut selected_profiles = BTreeSet::new();
+    let mut pairs = BTreeSet::new();
     for output in &generated.outputs {
         if !known_profiles.contains(output.profile_id.as_str()) {
             return Err(SearchEvalError::Contract(format!(

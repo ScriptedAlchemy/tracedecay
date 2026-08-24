@@ -33,8 +33,8 @@ use crate::runtime::claude::{
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptSource,
+    HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
+    TranscriptIngestError, TranscriptSource, persist_host_provider_coverage,
 };
 use tracedecay_runtime_core::privacy::PrivacySanitizerError;
 
@@ -760,6 +760,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
@@ -867,6 +868,7 @@ async fn advance_source_frontier<A: HostAdmission + ?Sized>(
 }
 
 /// Ingest one Claude source through caller-prepared project admission authority.
+#[hotpath::measure]
 pub async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,
@@ -965,7 +967,20 @@ where
             },
         ));
     }
-    Ok(stats.merge(projection_stats))
+    let merged = stats.merge(projection_stats);
+    persist_host_provider_coverage(
+        admission,
+        &scope,
+        "claude",
+        if merged.deferred_sources == 0 {
+            HostProviderCoverage::Complete
+        } else {
+            HostProviderCoverage::Partial
+        },
+        merged.deferred_sources,
+    )
+    .await?;
+    Ok(merged)
 }
 
 pub async fn ingest_user_sessions_with_admission<A>(

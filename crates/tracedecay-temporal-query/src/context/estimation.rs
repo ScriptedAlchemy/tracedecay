@@ -56,6 +56,7 @@ impl TokenSummary {
         }
     }
 
+    #[hotpath::measure]
     pub fn scan(
         policy: TokenPolicy,
         fragment: &str,

@@ -18,6 +18,7 @@ use super::CodeIndexSchedulerRegistryV1;
 use super::query_runtime::{
     ExecutedQuerySearchV1, QuerySearchExecutionErrorV1, QuerySearchExecutionRequestV1,
 };
+use super::registry::unique_mounted_for_scope;
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
@@ -328,27 +329,17 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &ResolvedScope,
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
         let mounted = self.mounted.try_lock().ok()?;
-        let mut matched = None;
-        for (project_root, worktree) in mounted.iter() {
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                continue;
-            }
-            let activation =
-                tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(
-                    project_root,
-                );
-            let _activation = activation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
-            if scope_digest != &scope.scope_digest || matched.is_some() {
-                return None;
-            }
-            matched = Some(Arc::clone(authority));
+        let (project_root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+        let activation =
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
+        if scope_digest != &scope.scope_digest {
+            return None;
         }
-        matched
+        Some(Arc::clone(authority))
     }
 
     /// Run canonical query first, then attempt semantic influence against the
@@ -681,7 +672,7 @@ fn paginate_semantic_composition(
     let semantic_end = semantic_start
         .saturating_add(semantic_page_size)
         .min(composition.ranked_candidates.len());
-    let page = composition.ranked_candidates[semantic_start..semantic_end].to_vec();
+    let page_len = semantic_end.saturating_sub(semantic_start);
 
     let query_start = authorized_query
         .request_cursor
@@ -691,7 +682,7 @@ fn paginate_semantic_composition(
         return Err(SemanticQueryServiceError::InvalidCursor);
     }
     let query_end = query_start
-        .saturating_add(page.len())
+        .saturating_add(page_len)
         .min(authorized_query.composition.ranked_candidates.len());
     let has_more = semantic_end < composition.ranked_candidates.len();
     let cursor = if has_more {
@@ -732,7 +723,13 @@ fn paginate_semantic_composition(
     } else {
         None
     };
-    composition.ranked_candidates = page;
+    let mut ranked = std::mem::take(&mut composition.ranked_candidates);
+    composition.ranked_candidates = if semantic_start == 0 {
+        ranked.truncate(semantic_end);
+        ranked
+    } else {
+        ranked.drain(semantic_start..semantic_end).collect()
+    };
     Ok(cursor)
 }
 

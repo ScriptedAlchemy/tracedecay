@@ -7,8 +7,6 @@
 > attestations, PR packets, and gate matrices below are not rebuild
 > instructions; validate current parser, runtime, and product behavior directly.
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Port CodeGraph from TypeScript to Rust as a single-binary code intelligence tool for Rust codebases.
 
 **Architecture:** Single crate with module-based structure. SQLite for storage (rusqlite), tree-sitter-rust for AST parsing, ort for ONNX embeddings, clap for CLI, tokio for async MCP server. All data flows through a central `CodeGraph` orchestrator.

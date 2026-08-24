@@ -566,6 +566,7 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     /// Apply a settings selection. `None` disables semantics without download.
+    #[hotpath::measure]
     pub fn select_model(
         &self,
         model_id: Option<&str>,
@@ -573,10 +574,13 @@ impl SemanticModelLifecycleOwnerV1 {
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
         let selected = match model_id {
             Some(model_id) => {
-                let model = self
-                    .catalog
-                    .get(model_id)
-                    .ok_or(CatalogErrorV1::UnknownModel)?;
+                let model = match self.catalog.get(model_id) {
+                    Some(model) => model,
+                    None => {
+                        crate::hotpath_observe::record_model_failure("catalog_unknown");
+                        return Err(CatalogErrorV1::UnknownModel.into());
+                    }
+                };
                 Some((model, self.re_admit_durable_selection(model)?))
             }
             None => None,
@@ -614,6 +618,12 @@ impl SemanticModelLifecycleOwnerV1 {
             }
         }
         persist_durable(&self.root, &guard.durable)?;
+        match guard.durable.state.as_ref() {
+            Some(state) => {
+                crate::hotpath_observe::record_lifecycle_state(state);
+            }
+            None => crate::hotpath_observe::record_model_state("disabled"),
+        }
         publish_verified_ready_event(&self.verified_ready, &guard);
         drop(guard);
         drop(worker);

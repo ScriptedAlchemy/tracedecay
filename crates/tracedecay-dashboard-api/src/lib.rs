@@ -109,6 +109,7 @@ mod memory_api;
 mod memory_service;
 mod multi_root_api;
 mod native_integration_api;
+mod observe;
 pub mod project_graph;
 pub mod project_registry;
 mod projects;
@@ -119,13 +120,14 @@ use tracedecay_usecases::provider_pricing as savings_pricing;
 pub mod scope;
 mod settings_api;
 pub use settings_api::{
-    DashboardPrAutoTrackEntryV1, DashboardPrAutoTrackReadPort,
+    DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
+    DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
+    DashboardCodeIndexWorkerSettingsFuture, DashboardPrAutoTrackEntryV1,
+    DashboardPrAutoTrackReadPort, DashboardProfileCodeIndexWorkerSettingsPort,
     install_dashboard_pr_autotrack_read_port,
 };
 mod storage_findings_api;
 mod storage_telemetry_api;
-#[cfg(test)]
-mod test_support;
 mod token_count;
 mod util;
 mod version;
@@ -264,6 +266,11 @@ pub struct DashboardStateCompositionV1 {
     /// structure routes report typed unavailable.
     pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     pub registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    /// Exact ProfileSessions read/mutation capability for the daemon-wide
+    /// code-index worker preference. This never aliases the project settings
+    /// control plane: it has its own profile revision and CAS boundary.
+    pub profile_code_index_worker_settings:
+        Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection. Loom's git sources report unavailable without it.
@@ -411,6 +418,11 @@ pub struct DashboardState {
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
     pub user_settings: Arc<dyn crate::application::configuration::UserSettingsDaemonClient>,
+    /// Root-injected ProfileSessions worker preference authority. It remains
+    /// separate from `user_settings`, whose revision belongs to the ordinary
+    /// profile settings resource.
+    pub profile_code_index_worker_settings:
+        Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub token_counts: Arc<token_count::TokenCountCache>,
     /// Admitted daemon/application diagnostics authority. `None` keeps all
@@ -453,6 +465,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    profile_code_index_worker_settings:
+        Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
@@ -477,6 +491,7 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_graph_projection_read_port: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
+            profile_code_index_worker_settings: None,
             application_invocation_executor: None,
         }
     }
@@ -548,6 +563,18 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         delivery_read_authority: Arc<dyn DashboardDeliveryReadPortV1>,
     ) -> Self {
         self.delivery_read_authority = Some(delivery_read_authority);
+        self
+    }
+
+    /// Attaches the exact ProfileSessions worker settings port used by the
+    /// production dashboard composition. Tests keep the same separate CAS
+    /// resource instead of routing this preference through project settings.
+    #[must_use]
+    pub fn with_profile_code_index_worker_settings(
+        mut self,
+        profile_code_index_worker_settings: Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>,
+    ) -> Self {
+        self.profile_code_index_worker_settings = Some(profile_code_index_worker_settings);
         self
     }
 }
@@ -682,6 +709,7 @@ async fn build_state_inner(
         code_graph_read_admission,
         code_graph_projection_read_port,
         registered_project_session_db,
+        profile_code_index_worker_settings,
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
@@ -771,6 +799,7 @@ async fn build_state_inner(
         dashboard_root,
         retention_config: cg.retention_config(),
         user_settings: cg.user_settings_client(),
+        profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority,
@@ -821,6 +850,10 @@ pub async fn build_selected_project_state(
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
             registered_project_session_db: None,
+            // This capability is profile-global and its route is deliberately
+            // unscoped, so selected projects reuse the active dashboard's
+            // exact ProfileSessions authority. It is not a project write.
+            profile_code_index_worker_settings: active.profile_code_index_worker_settings.clone(),
             lcm_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
@@ -952,6 +985,8 @@ where
                 .and_then(|authority| authority.code_graph_projection_read_port.clone()),
             registered_project_session_db: test_authority
                 .map(|authority| authority.project_sessions.clone()),
+            profile_code_index_worker_settings: test_authority
+                .and_then(|authority| authority.profile_code_index_worker_settings.clone()),
             lcm_read_authority: test_authority
                 .and_then(|authority| authority.lcm_read_authority.clone()),
             git_correlation_read_authority: test_authority
@@ -1084,23 +1119,43 @@ pub fn with_dashboard_http_admission(app: Router, addr: std::net::SocketAddr) ->
 async fn admit_dashboard_http_request(
     State(admission): State<DashboardHttpAdmission>,
     headers: HeaderMap,
-    mut request: Request<Body>,
+    request: Request<Body>,
     next: Next,
 ) -> Response {
+    let admitted = hotpath::measure_block!("dashboard.http.admission", {
+        admit_dashboard_http_control(admission, headers, request)
+    });
+    let (request, mut cancellation_guard) = match admitted {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
+    };
+    let response = hotpath::measure_block!("dashboard.http.handler", next.run(request).await);
+    cancellation_guard.completed = true;
+    crate::observe::observe_response(&response);
+    response
+}
+
+fn admit_dashboard_http_control(
+    admission: DashboardHttpAdmission,
+    headers: HeaderMap,
+    mut request: Request<Body>,
+) -> std::result::Result<(Request<Body>, DashboardHttpCancellationGuard), Box<Response>> {
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
     else {
-        return dashboard_request_forbidden("missing Host header");
+        return Err(Box::new(dashboard_request_forbidden("missing Host header")));
     };
     let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
-        return dashboard_request_forbidden("invalid Host header");
+        return Err(Box::new(dashboard_request_forbidden("invalid Host header")));
     };
     let authority_host = authority.host().trim_matches(['[', ']']);
     let loopback_host = authority_host.eq_ignore_ascii_case("localhost")
         || matches!(authority_host, "127.0.0.1" | "::1");
     if !loopback_host || authority.port_u16() != Some(admission.port) {
-        return dashboard_request_forbidden("Host must name the bound loopback dashboard");
+        return Err(Box::new(dashboard_request_forbidden(
+            "Host must name the bound loopback dashboard",
+        )));
     }
 
     if let Some(origin) = headers
@@ -1108,7 +1163,9 @@ async fn admit_dashboard_http_request(
         .and_then(|value| value.to_str().ok())
     {
         let Ok(origin_uri) = origin.parse::<Uri>() else {
-            return dashboard_request_forbidden("invalid Origin header");
+            return Err(Box::new(dashboard_request_forbidden(
+                "invalid Origin header",
+            )));
         };
         let same_origin = origin_uri.scheme_str() == Some("http")
             && origin_uri.authority().is_some_and(|origin_authority| {
@@ -1117,7 +1174,9 @@ async fn admit_dashboard_http_request(
                     .eq_ignore_ascii_case(authority.as_str())
             });
         if !same_origin {
-            return dashboard_request_forbidden("Origin must match the dashboard");
+            return Err(Box::new(dashboard_request_forbidden(
+                "Origin must match the dashboard",
+            )));
         }
     }
 
@@ -1126,19 +1185,19 @@ async fn admit_dashboard_http_request(
     let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
     let request_id = match tracedecay_application::RequestId::new(format!("request.{identity}")) {
         Ok(request_id) => request_id,
-        Err(error) => return internal_error_response(error),
+        Err(error) => return Err(Box::new(internal_error_response(error))),
     };
     let cancellation =
         match tracedecay_application::CancellationSignal::active(format!("cancel.{identity}")) {
             Ok(cancellation) => cancellation,
-            Err(error) => return internal_error_response(error),
+            Err(error) => return Err(Box::new(internal_error_response(error))),
         };
     let request_deadline_micros = dashboard_http_request_deadline_micros(request.uri().path());
     let deadline_at =
         tracedecay_domain::UtcMicros(observed_at.0.saturating_add(request_deadline_micros));
     let deadline = match tracedecay_application::Deadline::new(deadline_at) {
         Ok(deadline) => deadline,
-        Err(error) => return internal_error_response(error),
+        Err(error) => return Err(Box::new(internal_error_response(error))),
     };
     request
         .extensions_mut()
@@ -1148,16 +1207,17 @@ async fn admit_dashboard_http_request(
             cancellation: cancellation.clone(),
             observed_at,
         });
-    let mut cancellation_guard = DashboardHttpCancellationGuard {
-        cancellation,
-        completed: false,
-    };
-    let response = next.run(request).await;
-    cancellation_guard.completed = true;
-    response
+    Ok((
+        request,
+        DashboardHttpCancellationGuard {
+            cancellation,
+            completed: false,
+        },
+    ))
 }
 
 fn internal_error_response(error: impl std::fmt::Display) -> Response {
+    crate::observe::record_error_class("admission_failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({
@@ -1169,6 +1229,7 @@ fn internal_error_response(error: impl std::fmt::Display) -> Response {
 }
 
 fn dashboard_request_forbidden(detail: &'static str) -> Response {
+    crate::observe::record_error_class("forbidden");
     (
         StatusCode::FORBIDDEN,
         Json(json!({
@@ -1492,6 +1553,10 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/settings/user",
             patch(settings_api::patch_user_settings),
         )
+        .route(
+            "/api/settings/user/code-index-workers",
+            patch(settings_api::patch_code_index_worker_settings),
+        )
         .route("/api/explorer/queries", post(explorer_api::create_query))
         .route(
             "/api/explorer/queries/{run_id}",
@@ -1507,7 +1572,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/loom/temporal", get(loom_api::temporal))
         // V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
-        // family, plan-38 storage telemetry/findings, code-index freshness, and
+        // family, storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
         // Read-only Doctor/health paths come from the API-owned descriptors in
         // `tracedecay_api::doctor` so the mount cannot drift from them.
@@ -1778,27 +1843,29 @@ async fn forward_project_request(
     state: DashboardState,
     req: Request<Body>,
 ) -> Response {
-    let (mut parts, body) = req.into_parts();
-    let request_control = parts
-        .extensions
-        .get::<DashboardHttpRequestControlV1>()
-        .cloned();
-    parts.extensions.clear();
-    if let Some(request_control) = request_control {
-        parts.extensions.insert(request_control);
-    }
-    let req = Request::from_parts(parts, body);
-    match project_api.with_state(state).oneshot(req).await {
-        Ok(response) => response,
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "error",
-                "detail": format!("dashboard project route failed: {err}"),
-            })),
-        )
-            .into_response(),
-    }
+    hotpath::measure_block!("dashboard.http.forward_project", {
+        let (mut parts, body) = req.into_parts();
+        let request_control = parts
+            .extensions
+            .get::<DashboardHttpRequestControlV1>()
+            .cloned();
+        parts.extensions.clear();
+        if let Some(request_control) = request_control {
+            parts.extensions.insert(request_control);
+        }
+        let req = Request::from_parts(parts, body);
+        match project_api.with_state(state).oneshot(req).await {
+            Ok(response) => response,
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "detail": format!("dashboard project route failed: {err}"),
+                })),
+            )
+                .into_response(),
+        }
+    })
 }
 
 /// Capability discovery for hosts and future delegated-host extensions. The UI
@@ -2211,6 +2278,7 @@ mod authority_tests {
                     crate::application::configuration::ProductionUserSettingsDaemonClient::default(
                     ),
                 ),
+                profile_code_index_worker_settings: None,
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
                 code_diagnostics_authority: None,
                 automation_authority: None,
@@ -2895,7 +2963,7 @@ mod authority_tests {
         assert_eq!(selected.status(), StatusCode::NOT_FOUND);
     }
 
-    /// Deliverable 4: the V2 read-model routes must be reachable through both
+    /// The V2 read-model routes must be reachable through both
     /// router construction paths — the active-project gateway (`/api/…`) and the
     /// project-scoped gateway (`/api/projects/{id}/…`) — mirroring how the
     /// existing families are exposed.

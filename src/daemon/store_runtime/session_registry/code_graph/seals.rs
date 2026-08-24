@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
@@ -273,7 +274,7 @@ fn verify_seal_file_digest(
         digest.update(&buffer[..read]);
     }
     check()?;
-    if hex::encode(digest.finalize()) != expected {
+    if encode_lowercase_hex(&digest.finalize()) != expected {
         return Ok(SealDigestOutcome::Mismatch);
     }
     Ok(SealDigestOutcome::Verified)

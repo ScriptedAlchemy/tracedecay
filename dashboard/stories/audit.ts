@@ -1,5 +1,5 @@
 /**
- * Visual-audit + accessibility harness (plan 11a R56-R59, plan 11 R64).
+ * Visual-audit + accessibility harness.
  *
  * `npm run visual:audit`
  *   Starts the dashboard (rsbuild dev) with every `/api` call served from the

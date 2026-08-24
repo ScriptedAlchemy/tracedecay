@@ -57,6 +57,7 @@ pub(crate) fn lookup(
     Ok(Some(receipt))
 }
 
+#[hotpath::measure]
 pub(crate) fn insert(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,

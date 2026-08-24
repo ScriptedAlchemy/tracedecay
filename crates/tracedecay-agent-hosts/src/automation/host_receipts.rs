@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 use crate::storage::PrivateStoreIo;
 use crate::tracedecay::current_timestamp;
 use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
@@ -46,12 +47,6 @@ struct HostReceiptState {
     readiness: BTreeMap<String, HostReceiptReadiness>,
     #[serde(default)]
     recent_dedupe_keys: Vec<String>,
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {
@@ -133,6 +128,11 @@ fn with_locked_state<T>(
     Ok(output)
 }
 
+/// Every hook terminal receipt a host reports lands here: a locked
+/// read-modify-write of the dashboard state file. This is the per-tool-call
+/// disk boundary, so it is measured as one unit rather than its internal
+/// dedupe/serialize steps.
+#[hotpath::measure]
 pub async fn record(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
@@ -171,6 +171,9 @@ pub async fn record(
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
+/// Per-turn boundary write: the same locked state file as [`record`], but
+/// gated on transcript ingestion rather than the raw tool-call receipt.
+#[hotpath::measure]
 pub async fn mark_turn_ingested(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,

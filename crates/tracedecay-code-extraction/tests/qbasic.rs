@@ -129,7 +129,6 @@ fn test_qbasic_call_sites() {
         .collect();
     assert!(!calls.is_empty(), "expected call site refs");
 
-    // Top-level CALL statements: ValidateConfig, ConnectServer, DisconnectServer
     assert!(
         calls.iter().any(|r| r.reference_name == "ValidateConfig"),
         "expected CALL ValidateConfig, got: {:?}",
@@ -144,7 +143,6 @@ fn test_qbasic_call_sites() {
         "expected CALL DisconnectServer"
     );
 
-    // Inside SUBs: CALL LogMessage
     assert!(
         calls.iter().any(|r| r.reference_name == "LogMessage"),
         "expected CALL LogMessage from within SUBs"
@@ -223,9 +221,6 @@ fn test_qbasic_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: CONST nodes + DIM SHARED fields + Endpoint struct + 5 functions
-    // Endpoint struct contains 3 fields
-    // So at least: 1+ consts + 3 dim shared + 1 struct + 5 functions + 3 struct fields = 13+
     assert!(
         contains.len() >= 10,
         "should have >= 10 Contains edges, got {}",
@@ -237,7 +232,6 @@ fn test_qbasic_contains_edges() {
 fn test_qbasic_complexity() {
     let result = extract_fixture();
 
-    // ValidateConfig has IF branches
     let validate_fn = result
         .nodes
         .iter()
@@ -249,7 +243,6 @@ fn test_qbasic_complexity() {
         validate_fn.branches
     );
 
-    // ConnectServer has a FOR loop
     let connect_fn = result
         .nodes
         .iter()
@@ -319,7 +312,6 @@ fn test_qbasic_dim_shared_fields() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field && !n.qualified_name.contains("Endpoint"))
         .collect();
-    // DIM SHARED conn, logLevel, logMsg
     assert!(
         dim_fields.len() >= 3,
         "expected >= 3 DIM SHARED fields (conn, logLevel, logMsg), got {}: {:?}",

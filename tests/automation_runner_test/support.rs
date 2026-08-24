@@ -679,32 +679,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
     }
 }
 
-pub(crate) struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    pub(crate) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+pub(crate) use crate::common::EnvVarGuard;
 
 /// Pins the profile database override at the test project's isolated session
 /// store. Callers must hold [`ENV_LOCK`] while the guard is alive.
@@ -1252,6 +1227,7 @@ pub(crate) fn scheduler_record_for(
         task,
         task_key: Some(test_task_key(task).to_string()),
         backend: "codex_app_server".to_string(),
+        backend_identity: None,
         host_mode: Some("standalone".to_string()),
         prompt_version: Some(test_prompt_version(task).to_string()),
         response_schema: None,

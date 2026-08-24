@@ -14,6 +14,7 @@ fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
         task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
         task_key: Some("session_reflector".to_owned()),
         backend: "codex_app_server".to_owned(),
+        backend_identity: None,
         host_mode: Some("standalone".to_owned()),
         prompt_version: Some("session_reflector:v1".to_owned()),
         response_schema: None,

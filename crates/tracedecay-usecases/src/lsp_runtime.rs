@@ -28,9 +28,9 @@ use tracedecay_application::{
     ResultProjection, RetrievalOrder, RetrievalRequestMeta, now_micros,
 };
 use tracedecay_domain::feedback::{
-    FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackDiagnosticProducerV1,
-    FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1,
-    ProviderEvaluationStateV1,
+    FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
+    FeedbackDiagnosticProducerV1, FeedbackFindingLifecycleV1, FeedbackFindingV1,
+    FeedbackImpactStateV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, FileOccurrenceId,
@@ -49,10 +49,11 @@ use tracedecay_lsp::{
     FeedbackCycleRequest, FeedbackCycleRuntimePort, GatewayCapabilities, GatewayDiagnostic,
     GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
     GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspAnalyzerCancellationAuthority,
-    LspRange, LspRequestId, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
-    MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES, ManagedDiagnosticSnapshot,
-    ManagedDiagnosticSnapshotPort, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
-    UpstreamCapabilities, byte_offset_to_utf16_position, strict_file_uri_path, strict_file_url,
+    LspPosition, LspRange, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
+    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort, SemanticProviderPort,
+    TRACEDECAY_CONTEXT_REVISION, UpstreamCapabilities, byte_offset_to_utf16_position,
+    strict_file_uri_path, strict_file_url,
 };
 
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
@@ -74,10 +75,76 @@ use crate::operation_stream::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::response_handles::{
-    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
+    ResponseHandleLookup, micros_to_seconds, retrieve_response_handle, store_response_handle,
 };
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
+
+fn byte_offsets_to_utf16_range(
+    text: &str,
+    start: usize,
+    end: usize,
+) -> Result<(LspPosition, LspPosition), LspRuntimeFailure> {
+    let start_pos = byte_offset_to_utf16_position(text, start)
+        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+    if start == end {
+        return Ok((start_pos, start_pos));
+    }
+    if start > end {
+        return Err(LspRuntimeFailure::new("diagnostic-span-invalid"));
+    }
+    let between = text
+        .get(start..end)
+        .ok_or_else(|| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+    if !between.contains('\n') && !between.contains('\r') {
+        let extra = between
+            .chars()
+            .map(|value| value.len_utf16() as u32)
+            .fold(0u32, u32::saturating_add);
+        return Ok((
+            start_pos,
+            LspPosition {
+                line: start_pos.line,
+                character: start_pos.character.saturating_add(extra),
+            },
+        ));
+    }
+    let mut line = start_pos.line;
+    let mut character = start_pos.character;
+    let bytes = text.as_bytes();
+    let mut index = start;
+    while index < end {
+        match bytes.get(index) {
+            Some(b'\n') => {
+                line = line.saturating_add(1);
+                character = 0;
+                index += 1;
+            }
+            Some(b'\r') => {
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    if index + 1 == end {
+                        return Err(LspRuntimeFailure::new("diagnostic-span-invalid"));
+                    }
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                line = line.saturating_add(1);
+                character = 0;
+            }
+            Some(_) => {
+                let ch = text[index..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                character = character.saturating_add(ch.len_utf16() as u32);
+                index += ch.len_utf8();
+            }
+            None => return Err(LspRuntimeFailure::new("diagnostic-span-invalid")),
+        }
+    }
+    Ok((start_pos, LspPosition { line, character }))
+}
 const LSP_TEST_RUN_EXPANSION_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
 
 mod projection_identity;
@@ -684,7 +751,6 @@ const fn gateway_severity(severity: DiagnosticSeverityV1) -> DiagnosticSeverity 
 const fn advisory_diagnostic_source(
     producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1,
 ) -> DiagnosticSource {
-    use tracedecay_domain::feedback::FeedbackDiagnosticProducerV1;
     match producer {
         FeedbackDiagnosticProducerV1::GitHubReview => DiagnosticSource::TraceDecayGitHub,
         FeedbackDiagnosticProducerV1::CiLocalization => DiagnosticSource::TraceDecayCi,
@@ -775,10 +841,7 @@ where
                         .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
                     let end = usize::try_from(projection.span.end_byte)
                         .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                    let start = byte_offset_to_utf16_position(&document.text, start)
-                        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                    let end = byte_offset_to_utf16_position(&document.text, end)
-                        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                    let (start, end) = byte_offsets_to_utf16_range(&document.text, start, end)?;
                     diagnostics.push(GatewayDiagnostic {
                         uri: document_uri.clone(),
                         range: LspRange { start, end },
@@ -819,10 +882,7 @@ where
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
                 let end = usize::try_from(record.span.end_byte)
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                let start = byte_offset_to_utf16_position(&document.text, start)
-                    .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                let end = byte_offset_to_utf16_position(&document.text, end)
-                    .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                let (start, end) = byte_offsets_to_utf16_range(&document.text, start, end)?;
                 let data =
                     gateway_diagnostic_data(finding, anchor, &scope, coverage, &expansion_handles);
                 diagnostics.push(GatewayDiagnostic {
@@ -1440,24 +1500,24 @@ impl ConcreteFeedbackLspSource {
         }
     }
 
-    /// The exact store clone supplied to the Plan 09 cycle dedupe/publication
+    /// The exact store clone supplied to the feedback cycle dedupe/publication
     /// boundary. Exposing it lets the daemon composition root prove both
     /// surfaces use one authority.
     pub fn publication_store(&self) -> ProjectFeedbackStore {
         self.publications.clone()
     }
 
-    async fn queue_feedback_changes(&self, request: &FeedbackCycleRequest) {
-        let Ok(current) = self
+    async fn queue_feedback_changes(
+        &self,
+        request: &FeedbackCycleRequest,
+    ) -> Result<CurrentFeedbackCycle, LspRuntimeFailure> {
+        let current = self
             .current_cycle(
                 AdmittedRoot::new(request.root_uri.clone()),
                 Some(request.document_uri.clone()),
                 None,
             )
-            .await
-        else {
-            return;
-        };
+            .await?;
         let identity = current.scope.projection_identity();
         let generation = current.scope.generation;
         let (source_revision, changes) = match current.result.as_ref() {
@@ -1535,6 +1595,7 @@ impl ConcreteFeedbackLspSource {
                 },
             );
         }
+        Ok(current)
     }
 
     async fn current_cycle(
@@ -1839,7 +1900,9 @@ impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
         let source = self.clone();
         Box::pin(async move {
             source.cycle.execute(request.clone()).await?;
-            source.queue_feedback_changes(&request).await;
+            // Queueing is best-effort: the cycle above already succeeded, and
+            // that is what `execute` reports.
+            let _ = source.queue_feedback_changes(&request).await;
             Ok(())
         })
     }
@@ -1852,20 +1915,13 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
     ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
         let source = self.clone();
         Box::pin(async move {
-            source
-                .execute(FeedbackCycleRequest {
-                    root_uri: request.root.uri().to_owned(),
-                    document_uri: request.document_uri.clone(),
-                    trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
-                })
-                .await?;
-            let current = source
-                .current_cycle(
-                    request.root.clone(),
-                    Some(request.document_uri.clone()),
-                    None,
-                )
-                .await?;
+            let cycle_request = FeedbackCycleRequest {
+                root_uri: request.root.uri().to_owned(),
+                document_uri: request.document_uri.clone(),
+                trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
+            };
+            source.cycle.execute(cycle_request.clone()).await?;
+            let current = source.queue_feedback_changes(&cycle_request).await?;
             let scope = current.scope;
             crate::lsp_support::validate_managed_diagnostic_scope(&request, &scope)?;
             let Some(result) = current.result else {
@@ -2796,8 +2852,6 @@ fn advisory_provider_status(
 }
 
 fn producer_state_for_cycle(cycle: &FeedbackCycleResultV1) -> ContextProducerState {
-    use tracedecay_domain::feedback::FeedbackCycleTerminationV1;
-
     match cycle.termination {
         FeedbackCycleTerminationV1::Clean => {
             if cycle_coverage(cycle) == ContextCoverage::Complete {
@@ -2991,10 +3045,6 @@ fn open_project_file(
     Ok((canonical, file))
 }
 
-fn micros_to_seconds(value: UtcMicros) -> i64 {
-    value.0.div_euclid(1_000_000)
-}
-
 #[cfg(test)]
 mod path_tests {
     use std::path::{Component, Path};
@@ -3008,6 +3058,8 @@ mod path_tests {
     #[cfg(unix)]
     use super::open_project_file;
     use super::validated_document_path;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn admitted_root() -> (TempDir, std::path::PathBuf, Url, Dir) {
         let temp = TempDir::new().expect("temporary directory");
@@ -3085,8 +3137,6 @@ mod path_tests {
     #[cfg(unix)]
     #[test]
     fn disk_document_open_rejects_symlink_escape() {
-        use std::os::unix::fs::symlink;
-
         let (temp, _root, _root_url, root_dir) = admitted_root();
         let outside = temp.path().join("outside.rs");
         std::fs::write(&outside, "fn outside() {}\n").expect("write outside document");

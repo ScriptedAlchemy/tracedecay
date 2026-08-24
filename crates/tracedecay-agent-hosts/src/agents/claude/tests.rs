@@ -235,18 +235,6 @@ fn project_only_legacy_residue_does_not_claim_plugin_registration() {
     assert_eq!(state, HostBundleRegistrationStateV1::Missing);
 }
 
-fn plugin_subdir_names(rel: &str) -> Vec<String> {
-    let root = plugin_source_root().join(rel);
-    let mut names: Vec<String> = std::fs::read_dir(&root)
-        .expect("plugin source dir should be readable")
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
-}
-
 /// Every file under a skills root, relative to it, forward-slashed.
 fn plugin_skill_tree_files(root: &Path) -> Vec<String> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
@@ -275,7 +263,7 @@ fn plugin_skill_tree_files(root: &Path) -> Vec<String> {
 
 /// The composed Claude deploy set (sourced from the shared `plugin/` tree
 /// via `claude_files`) must cover every shared model-invocable skill, the
-/// 13 canonical `tracedecay-*` dispatchers, all 8 subagents, all 13 slash
+/// canonical `tracedecay-*` dispatchers, all subagents, all slash
 /// commands, and Claude's manifest/marketplace/mcp/hooks/README. The single
 /// shared tree removes the old cross-bundle parity checks; this guards that
 /// nothing on disk is left unwired for Claude.
@@ -286,8 +274,6 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
         .map(|(relative, _)| relative.to_string())
         .collect();
 
-    let skills = plugin_subdir_names("skills");
-    assert_eq!(skills.len(), 17, "expected 17 shared skill dirs");
     // Every file under plugin/skills/ (SKILL.md *and* any support files) is
     // deployed — the recursive embed leaves nothing on disk unwired.
     let skills_root = plugin_source_root().join("skills");

@@ -39,7 +39,7 @@ impl DaemonSemanticActivationReconcilerV1 {
     ) -> Self {
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
+        let reconciler_loop = async move {
             let mut handled_epoch = None;
             loop {
                 let event = lifecycle_events.borrow_and_update().clone();
@@ -87,7 +87,11 @@ impl DaemonSemanticActivationReconcilerV1 {
                     return;
                 }
             }
-        });
+        };
+        let task = tokio::spawn(hotpath::future!(
+            reconciler_loop,
+            label = "daemon.semantic.activation_reconciler"
+        ));
         Self {
             cancellation,
             task: Mutex::new(Some(task)),

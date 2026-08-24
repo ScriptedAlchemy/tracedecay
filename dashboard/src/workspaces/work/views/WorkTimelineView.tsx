@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -13,6 +14,7 @@ import {
   type WorkWeaveThread,
   workWeaveReading,
 } from '../workViewsModel.ts';
+import { TaskChip } from './TaskChip.tsx';
 import { WorkExecutionRecord } from './WorkExecutionRecord.tsx';
 import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
@@ -72,7 +74,10 @@ export function WorkTimelineView({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workWeaveReading(snapshot.projections, attempts, graph);
+  const reading = useMemo(
+    () => workWeaveReading(snapshot.projections, attempts, graph),
+    [snapshot.projections, attempts, graph],
+  );
   const coverage = coverageReading(snapshot.coverage);
 
   const landings = reading.threads.reduce((total, thread) => total + thread.landings.length, 0);
@@ -305,38 +310,21 @@ function Landing({
   const word = landing.terminal ? 'terminal' : 'open';
   const crossings = `${landing.crossings} ${landing.crossings === 1 ? 'crossing' : 'crossings'}`;
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(landing.taskId)}
-      aria-pressed={selected}
-      // The visible face of a landing is a tally and two words, which names no
-      // task on its own, so the button carries the whole reading as its name.
+    <TaskChip
+      taskId={landing.taskId}
+      selected={selected}
+      onSelect={onSelect}
+      variant="hollow"
+      lamp
       aria-label={`${landing.title} — task ${landing.taskId}, position ${ordinal} of ${total} in task-id order on run ${runId}, ${crossings}, ${landing.terminal ? 'terminal evidence' : 'no terminal evidence'}`}
-      // 44px explicitly rather than a spacing utility: this app's root font
-      // size is 14px, so `min-h-11` computes to 38.5px and lands under the
-      // target size the accessibility gate measures.
       className={cn(
-        'relative flex min-h-[44px] min-w-0 max-w-[14rem] flex-col justify-center gap-0.5',
-        'border bg-transparent px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected
-          ? 'border-accent'
-          : landing.terminal
-            ? 'border-state-ready'
-            : 'border-edge-subtle',
-        'hover:border-edge-strong',
+        'max-w-[14rem] hover:border-edge-strong',
+        selected ? undefined : landing.terminal ? 'border-state-ready' : 'border-edge-subtle',
       )}
-      // `data-work-task` is the hook every projection puts on a control that
-      // moves the canonical selection, so selection synchronization is
-      // assertable across all of them by one query.
-      data-work-task={landing.taskId}
       data-work-landing={landing.taskId}
       data-work-crossings={landing.crossings}
       data-work-terminal={landing.terminal ? 'true' : undefined}
     >
-      {selected ? (
-        <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" />
-      ) : null}
       <span className="flex min-w-0 items-center gap-1.5">
         <Tally count={landing.crossings} runId={runId} />
         <span className="min-w-0 truncate text-2xs text-text-primary">{landing.title}</span>
@@ -344,7 +332,7 @@ function Landing({
       <span className="truncate text-3xs text-text-muted">
         {word} · {crossings}
       </span>
-    </button>
+    </TaskChip>
   );
 }
 
@@ -516,29 +504,24 @@ function UnwovenBand({
           >
             {reading.unwoven.map((task) => (
               <li key={task.taskId} className="min-w-0">
-                <button
-                  type="button"
-                  onClick={() => onSelect(task.taskId)}
-                  aria-pressed={selected === task.taskId}
+                <TaskChip
+                  taskId={task.taskId}
+                  selected={selected === task.taskId}
+                  onSelect={onSelect}
+                  variant="hollow"
+                  lamp
                   aria-label={`${task.title} — task ${task.taskId}, unwoven: no run has landed on it`}
                   className={cn(
-                    'relative flex min-h-[44px] min-w-0 max-w-[14rem] flex-col justify-center gap-0.5',
-                    'border border-dashed bg-transparent px-2 py-1 text-left',
-                    'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-                    selected === task.taskId ? 'border-accent' : 'border-edge-subtle',
-                    'hover:border-edge-strong',
+                    'max-w-[14rem] border-dashed hover:border-edge-strong',
+                    selected === task.taskId ? undefined : 'border-edge-subtle',
                   )}
-                  data-work-task={task.taskId}
                   data-work-unwoven-task={task.taskId}
                 >
-                  {selected === task.taskId ? (
-                    <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" />
-                  ) : null}
                   <span className="min-w-0 truncate text-2xs text-text-primary">
                     {task.title}
                   </span>
                   <span className="truncate text-3xs text-text-muted">no crossings</span>
-                </button>
+                </TaskChip>
               </li>
             ))}
           </ul>

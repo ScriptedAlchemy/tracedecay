@@ -107,7 +107,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+        let mut command = Command::new(crate::common::tracedecay_bin());
         command
             .current_dir(&self.project_path)
             .env("HOME", &self.home_path)
@@ -130,7 +130,7 @@ impl Fixture {
 
 fn scenario_path(id: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("eval/scenarios")
+        .join("evals/memory/scenarios")
         .join(format!("{id}.json"))
 }
 
@@ -866,9 +866,9 @@ fn every_scenario_file_is_wired() {
     ]
     .into_iter()
     .collect();
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/scenarios");
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/memory/scenarios");
     let found = std::fs::read_dir(&directory)
-        .expect("read eval/scenarios")
+        .expect("read evals/memory/scenarios")
         .map(|entry| entry.expect("scenario entry").path())
         .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
         .map(|path| {
@@ -884,6 +884,6 @@ fn every_scenario_file_is_wired() {
     assert_eq!(
         found.iter().map(String::as_str).collect::<HashSet<_>>(),
         wired,
-        "eval/scenarios/*.json and the test list must stay in sync"
+        "evals/memory/scenarios/*.json and the test list must stay in sync"
     );
 }

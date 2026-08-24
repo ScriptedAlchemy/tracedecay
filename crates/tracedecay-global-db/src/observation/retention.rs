@@ -1,5 +1,4 @@
-//! Generation-scoped retention for the append-only observation evidence stores
-//! (plan 38 §3, final clause).
+//! Generation-scoped retention for the append-only observation evidence stores.
 //!
 //! The observation store keeps three append-only, forever-growing evidence
 //! tables that dominated one observed `sessions.db`:
@@ -11,9 +10,8 @@
 //! * `observation_repository_provenance` — the repository-provenance payload
 //!   (`availability_json` + `capture_json`, 1.4 GB measured).
 //!
-//! Plan 38 §3 makes these gain "generation-scoped retention tied to anchor
-//! dispositions — superseded and deleted dispositions release their storage."
-//! This module is the retention pass that does exactly that, mirroring the
+//! Superseded and deleted dispositions release their storage. This module
+//! is the retention pass that does that, mirroring the
 //! sibling LCM slice ([`tracedecay_sessions::runtime::lcm::retention`]): a bounded,
 //! DryRun/Apply, before/after-measured engine.
 //!
@@ -31,10 +29,9 @@
 //! * `deleted` — the evidence was retired (user request, retention, redaction,
 //!   …).
 //!
-//! Only `superseded` and `deleted` current states release storage. This is the
-//! plan's non-goal ("no lossy deletion of live, referenced evidence") expressed
-//! directly in SQL: the `active`/`unavailable` predicate branch is simply never
-//! selected.
+//! Only `superseded` and `deleted` current states release storage. Live and
+//! source-unavailable evidence is never released: the `active`/`unavailable`
+//! predicate branch is never selected.
 //!
 //! # Ledger-vs-payload design decision
 //!
@@ -82,7 +79,7 @@ use tracedecay_store::observation::ObservationCoverageV1;
 
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
-    engine::{Executor, Params, QueryExecutor, Value, params},
+    engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -159,10 +156,6 @@ fn require_apply_transaction<T>(transaction: Option<T>, message: &'static str) -
         operation: OPERATION.to_string(),
         message: message.to_string(),
     })
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |text| Value::Text(text.to_string()))
 }
 
 /// Per-table retention windows for the observation evidence stores. Released
@@ -327,25 +320,34 @@ fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
 }
 
-async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> u64 {
-    let sql = format!("PRAGMA {pragma}");
-    let Ok(mut rows) = conn.query(&sql, ()).await else {
-        return 0;
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
-        _ => 0,
-    }
+async fn query_u64(
+    conn: &(impl QueryExecutor + ?Sized),
+    sql: &str,
+    query_params: impl IntoParams,
+) -> Result<u64> {
+    let mut rows = conn.query(sql, query_params).await.map_err(db_error)?;
+    let count = rows
+        .next()
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| TraceDecayError::Database {
+            operation: OPERATION.to_string(),
+            message: "aggregate query returned no row".to_string(),
+        })?
+        .get::<i64>(0)
+        .map_err(db_error)?;
+    u64::try_from(count).map_err(|_| TraceDecayError::Database {
+        operation: OPERATION.to_string(),
+        message: format!("aggregate count cannot be negative: {count}"),
+    })
 }
 
-async fn row_count(conn: &(impl QueryExecutor + ?Sized), sql: &str) -> u64 {
-    let Ok(mut rows) = conn.query(sql, ()).await else {
-        return 0;
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
-        _ => 0,
-    }
+async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> Result<u64> {
+    query_u64(conn, &format!("PRAGMA {pragma}"), ()).await
+}
+
+async fn row_count(conn: &(impl QueryExecutor + ?Sized), sql: &str) -> Result<u64> {
+    query_u64(conn, sql, ()).await
 }
 
 /// Count of rows in `table` whose `column` still carries a live payload (i.e.
@@ -355,34 +357,40 @@ async fn live_payload_count(
     conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
     generation: Option<&str>,
-) -> u64 {
-    let Ok(mut rows) = conn.query(sql, params![opt_text(generation)]).await else {
-        return 0;
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
-        _ => 0,
-    }
+) -> Result<u64> {
+    query_u64(conn, sql, params![opt_text(generation)]).await
 }
 
-const ANCHOR_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM retrieval_anchors a
-     WHERE (?1 IS NULL OR a.projection_generation = ?1)
-       AND json_extract(a.anchor_json, '$.__retention_released') IS NULL";
+// The release passes write the marker consts verbatim (and the restore scan
+// matches them exactly), so a direct string comparison is the released test —
+// no JSON parse of every multi-KB live payload.
+fn anchor_payload_count_sql() -> String {
+    format!(
+        "SELECT COUNT(*) FROM retrieval_anchors a
+         WHERE (?1 IS NULL OR a.projection_generation = ?1)
+           AND a.anchor_json <> '{ANCHOR_RELEASED_MARKER}'"
+    )
+}
 
-const OBSERVATION_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM observations o
-     WHERE (?1 IS NULL OR EXISTS (
-         SELECT 1 FROM observation_retrieval_anchors b
-         JOIN retrieval_anchors a ON a.anchor_id = b.anchor_id
-         WHERE b.observation_id = o.observation_id
-           AND a.projection_generation = ?1
-     ))
-       AND json_extract(o.observation_json, '$.__retention_released') IS NULL";
+fn observation_payload_count_sql() -> String {
+    format!(
+        "SELECT COUNT(*) FROM observations o
+         WHERE (?1 IS NULL OR EXISTS (
+             SELECT 1 FROM observation_retrieval_anchors b
+             JOIN retrieval_anchors a ON a.anchor_id = b.anchor_id
+             WHERE b.observation_id = o.observation_id
+               AND a.projection_generation = ?1
+         ))
+           AND o.observation_json <> '{OBSERVATION_RELEASED_MARKER}'"
+    )
+}
 
 const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advances";
 
 /// `generation` scopes every pass to a single `projection_generation` (`None`
 /// spans all generations). In [`RetentionMode::DryRun`] nothing is mutated and
 /// each phase reports the candidate count and bytes that *would* be reclaimed.
+#[hotpath::measure]
 pub async fn run_observation_retention(
     database: &Database,
     generation: Option<&str>,
@@ -390,14 +398,15 @@ pub async fn run_observation_retention(
     mode: RetentionMode,
     now: i64,
 ) -> Result<ObservationRetentionReport> {
+    crate::hotpath_observe::record_snapshot_admissions(1);
     let reader = database.read_connection();
     let anchor_payloads_before =
-        live_payload_count(&reader, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, &anchor_payload_count_sql(), generation).await?;
     let observation_payloads_before =
-        live_payload_count(&reader, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
-    let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await;
-    let freelist_before = pragma_u64(&reader, "freelist_count").await;
-    let page_count_before = pragma_u64(&reader, "page_count").await;
+        live_payload_count(&reader, &observation_payload_count_sql(), generation).await?;
+    let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await?;
+    let freelist_before = pragma_u64(&reader, "freelist_count").await?;
+    let page_count_before = pragma_u64(&reader, "page_count").await?;
 
     let mut report = ObservationRetentionReport {
         generation: generation.map(str::to_string),
@@ -440,12 +449,12 @@ pub async fn run_observation_retention(
     report.ended_at = now;
     let reader = database.read_connection();
     report.anchor_payloads_after =
-        live_payload_count(&reader, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, &anchor_payload_count_sql(), generation).await?;
     report.observation_payloads_after =
-        live_payload_count(&reader, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
-    report.cursor_advances_after = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await;
-    report.freelist_after = pragma_u64(&reader, "freelist_count").await;
-    report.page_count_after = pragma_u64(&reader, "page_count").await;
+        live_payload_count(&reader, &observation_payload_count_sql(), generation).await?;
+    report.cursor_advances_after = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await?;
+    report.freelist_after = pragma_u64(&reader, "freelist_count").await?;
+    report.page_count_after = pragma_u64(&reader, "page_count").await?;
     Ok(report)
 }
 
@@ -520,7 +529,7 @@ async fn run_anchor_pass(
                 ) AS effective_at
          FROM retrieval_anchors a
          WHERE (?1 IS NULL OR a.projection_generation = ?1)
-           AND json_extract(a.anchor_json, '$.__retention_released') IS NULL
+           AND a.anchor_json <> '{ANCHOR_RELEASED_MARKER}'
            AND {RELEASED_DISPOSITION}
          ORDER BY a.anchor_id ASC
          LIMIT ?3"
@@ -636,7 +645,8 @@ async fn run_observation_pass(
     // maintenance transaction temporarily suspends only its UPDATE guard,
     // rewrites the payload, and restores the exact canonical trigger before
     // commit.
-    let sql = "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
+    let sql = format!(
+        "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
                 released.effective_at
          FROM observations o
          JOIN (
@@ -677,10 +687,10 @@ async fn run_observation_pass(
                )
              GROUP BY b.observation_id
          ) released ON released.observation_id = o.observation_id
-         WHERE json_extract(o.observation_json, '$.__retention_released') IS NULL
+         WHERE o.observation_json <> '{OBSERVATION_RELEASED_MARKER}'
          ORDER BY o.sequence ASC
          LIMIT ?3"
-        .to_string();
+    );
     let transaction = if mode.is_apply() {
         Some(
             database
@@ -800,7 +810,7 @@ async fn run_provenance_pass(
          JOIN retrieval_anchors a ON a.anchor_id = p.retrieval_anchor_id
          WHERE (?1 IS NULL OR a.projection_generation = ?1)
            AND p.retrieval_anchor_id IS NOT NULL
-           AND json_extract(p.availability_json, '$.__retention_released') IS NULL
+           AND p.availability_json <> '{PROVENANCE_RELEASED_MARKER}'
            AND {RELEASED_DISPOSITION}
          ORDER BY p.observation_id ASC
          LIMIT ?3"

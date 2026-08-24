@@ -19,6 +19,7 @@ use tracedecay_application::storage::{
     StorageByteSizeV1, StoreKeyV1,
 };
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 use super::orphan_stores::StoreCensusEntry;
 
@@ -555,7 +556,7 @@ fn quarantine_record(
     identity.update(metadata.len().to_le_bytes());
     identity.update(modified_nanos.to_le_bytes());
     identity.update(content_sha256.as_bytes());
-    let record_id = hex::encode(identity.finalize());
+    let record_id = encode_lowercase_hex(&identity.finalize());
     Ok(IncidentDebrisMetadataV1 {
         schema: METADATA_SCHEMA_V1.to_string(),
         record_id,
@@ -708,7 +709,7 @@ fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(encode_lowercase_hex(&hasher.finalize()))
 }
 
 fn application_artifact(

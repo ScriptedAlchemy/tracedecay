@@ -1,14 +1,17 @@
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Fact, Legend, Meter, Panel } from '../../ui/instrument.tsx';
 import { formatCount } from '../../ui/format.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
+import { tokenCountLabel } from '../sessions/tokenLabel.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import { ThreadPlayback } from './ThreadPlayback.tsx';
 import {
   LcmSessionPayloadV1Schema,
+  type LcmMessageV1,
+  type LcmSummaryNodeV1,
   type LoomBranchSpanV1,
   type LoomCommitV1,
   type LoomEditedFileV1,
@@ -121,30 +124,62 @@ export function ThreadChain({
                 />
               );
             }
-            const summary = summarizeChain(
-              data.messages ?? [],
-              { message_count: data.counts.message_count },
-              data.next_cursor != null,
-            );
-            if (summary.steps.length === 0) {
-              return (
-                <StateChip kind="complete_zero_findings" detail="session holds no turns" />
-              );
-            }
-            const toolCeiling = summary.tools.reduce(
-              (max, tool) => Math.max(max, tool.count),
-              0,
-            );
             return (
-              <div className="flex flex-col gap-3">
-                <ThreadPlayback
-                  key={thread.id}
-                  messages={data.messages}
-                  summaryNodes={data.summary_nodes}
-                  totalMessages={data.counts.message_count}
-                  hasMoreMessages={data.has_more_messages || data.next_cursor != null}
-                  hasMoreSummaryNodes={data.has_more_summary_nodes}
-                />
+              <IsolatedChain
+                messages={data.messages}
+                messageCount={data.counts.message_count}
+                truncated={data.next_cursor != null}
+                hasMoreMessages={data.has_more_messages || data.next_cursor != null}
+                hasMoreSummaryNodes={data.has_more_summary_nodes}
+                summaryNodes={data.summary_nodes}
+                thread={thread}
+              />
+            );
+          }}
+        </ReadSection>
+      </div>
+    </Panel>
+  );
+}
+
+function IsolatedChain({
+  messages,
+  messageCount,
+  truncated,
+  hasMoreMessages,
+  hasMoreSummaryNodes,
+  summaryNodes,
+  thread,
+}: {
+  messages: readonly LcmMessageV1[];
+  messageCount: number;
+  truncated: boolean;
+  hasMoreMessages: boolean;
+  hasMoreSummaryNodes: boolean;
+  summaryNodes: readonly LcmSummaryNodeV1[];
+  thread: PlacedThread;
+}) {
+  const summary = useMemo(
+    () => summarizeChain(messages, { message_count: messageCount }, truncated),
+    [messageCount, messages, truncated],
+  );
+  if (summary.steps.length === 0) {
+    return <StateChip kind="complete_zero_findings" detail="session holds no turns" />;
+  }
+  const toolCeiling = summary.tools.reduce(
+    (max, tool) => Math.max(max, tool.count),
+    0,
+  );
+  return (
+    <div className="flex flex-col gap-3">
+      <ThreadPlayback
+        key={thread.id}
+        messages={messages}
+        summaryNodes={summaryNodes}
+        totalMessages={messageCount}
+        hasMoreMessages={hasMoreMessages}
+        hasMoreSummaryNodes={hasMoreSummaryNodes}
+      />
                 <div className="flex flex-col gap-1">
                   <Legend
                     trailing={
@@ -261,21 +296,15 @@ export function ThreadChain({
                   ) : null}
                 </div>
               </div>
-            );
-          }}
-        </ReadSection>
-      </div>
-    </Panel>
   );
 }
 
 function chainStepTokenLabel(
   step: ReturnType<typeof summarizeChain>['steps'][number],
 ): string {
-  if (step.tokenCount == null || step.tokenCountProvenance == null) {
-    return 'tokens unknown';
-  }
-  return `~${step.tokenCount.toLocaleString()} tokens · o200k approximate`;
+  // Unlike the transcript inspector, which omits the line, this rail keeps a
+  // cell per step — so absence is worded rather than left blank.
+  return tokenCountLabel(step.tokenCount, step.tokenCountProvenance) ?? 'tokens unknown';
 }
 
 /** Durable causal rows attached to the selected provider-qualified session.

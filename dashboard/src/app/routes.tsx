@@ -7,10 +7,9 @@ function page<T extends string>(path: T, label: string, load: RouteChunkLoader) 
 }
 
 // The fourteen workspaces, each its own lazy code-split chunk: the shell stays
-// light and a surface loads on first navigation. All fourteen read real routes.
-// What has not changed is the rule the original Work gate enforced: a surface
-// renders what its contract answered, and never substitutes fixture or
-// browser-owned state for a read that did not land.
+// light and a surface loads on first navigation. A surface renders what its
+// contract answered, and never substitutes fixture or browser-owned state for
+// a read that did not land.
 export const WORKSPACES = [
   page('brain', 'Brain', () =>
     import('../workspaces/brain/BrainPage.tsx').then((m) => ({ default: m.BrainPage }))),

@@ -307,16 +307,18 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: 
 
 function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: string } {
   const variants = (schema.oneOf ?? [])
-    .map((v) => ({ disc: discriminantOf(v) as { key: string; value: string }, schema: v }))
+    .flatMap((variant) => {
+      const disc = discriminantOf(variant);
+      return disc === null ? [] : [{ disc, resolved: resolveObject(variant, ctx) }];
+    })
     .sort((a, b) => a.disc.value.localeCompare(b.disc.value));
 
   const discKey = variants[0]?.disc.key ?? "kind";
-
-  const tsVariants = variants.map((v) => resolveObject(v.schema, ctx).ts);
-  const ts = tsVariants.map((t) => `\n  | ${t.replace(/\n/g, "\n  ")}`).join("");
-
+  const ts = variants
+    .map((variant) => `\n  | ${variant.resolved.ts.replace(/\n/g, "\n  ")}`)
+    .join("");
   const zod = `z.discriminatedUnion(${literal(discKey)}, [${variants
-    .map((variant) => resolveObject(variant.schema, ctx).zod)
+    .map((variant) => variant.resolved.zod)
     .join(", ")}])`;
 
   return { ts, zod };

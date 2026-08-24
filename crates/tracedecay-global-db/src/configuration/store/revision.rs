@@ -7,23 +7,33 @@ use super::codec::insert_configuration_projections;
 use super::mutation::{commit_configuration_transaction, validate_commit_bindings};
 use super::read::{
     current_revision_id_from_executor, read_change_plan_from_executor, read_revision_from_executor,
-    validate_snapshot_registry_completeness,
+    validate_snapshot_registry_completeness_with_registry,
 };
 use super::write::{insert_change_plan, insert_snapshot_entries};
 use super::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCommitV1,
-    ConfigurationMutationReceiptV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
-    ConfigurationRevisionRecordV1, ConfigurationRevisionStore, ConfigurationStoreError,
-    ConfigurationStoreResult, Executor, GlobalDbConfigurationControlStore, invalid_store_data,
-    params, unavailable_store,
+    ConfigurationMutationReceiptV1, ConfigurationProtectedPlanRecordV1, ConfigurationRegistry,
+    ConfigurationRevisionId, ConfigurationRevisionRecordV1, ConfigurationRevisionStore,
+    ConfigurationStoreError, ConfigurationStoreResult, Executor, GlobalDbConfigurationControlStore,
+    invalid_store_data, params, unavailable_store,
 };
 
 pub(super) async fn insert_revision(
     transaction: &impl Executor,
     revision: &ConfigurationRevisionRecordV1,
 ) -> ConfigurationStoreResult<()> {
+    let registry = ConfigurationRegistry::core()
+        .map_err(|error| invalid_store_data(format!("load configuration registry: {error}")))?;
+    insert_revision_with_registry(transaction, revision, &registry).await
+}
+
+pub(super) async fn insert_revision_with_registry(
+    transaction: &impl Executor,
+    revision: &ConfigurationRevisionRecordV1,
+    registry: &ConfigurationRegistry,
+) -> ConfigurationStoreResult<()> {
     revision.validate().map_err(ConfigurationStoreError::from)?;
-    validate_snapshot_registry_completeness(&revision.snapshot)?;
+    validate_snapshot_registry_completeness_with_registry(&revision.snapshot, registry)?;
     let parent_revision_id = revision
         .parent_revision_id
         .as_ref()

@@ -118,7 +118,6 @@ pub(super) fn cancelled_claude_provider_outcome(
         .then(ProviderRunOutcome::skipped)
 }
 
-/// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IngestPassBounds {
     /// Maximum work units discovered before discovery itself is truncated.
@@ -193,7 +192,6 @@ impl IngestPassOutcome {
     }
 }
 
-/// Pure round-robin admission over a discovered unit count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RoundRobinAdmission {
     pub admitted_indices: Vec<usize>,
@@ -349,6 +347,14 @@ pub fn classify_transcript_ingest_disposition(
         }
         source::TranscriptIngestError::BlockingScanTaskFailed { .. } => {
             ("transcript_blocking_scan_failed", true, Unavailable)
+        }
+        source::TranscriptIngestError::BackgroundResourceUnavailable { .. } => (
+            "transcript_background_resource_unavailable",
+            true,
+            Backpressured,
+        ),
+        source::TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. } => {
+            ("codex_discovery_frontier_invalid", false, Degraded)
         }
         source::TranscriptIngestError::Privacy(_) => {
             ("transcript_privacy_rejected", false, Degraded)
@@ -526,6 +532,15 @@ pub fn classify_claude_observation_failure(
             }
             crate::observation::ObservationApplicationError::Privacy(_) => {
                 permanent("observation_privacy_rejected")
+            }
+            // A batch reached the durable persist path carrying a rejected or
+            // quarantined outcome. That is an admission invariant break, not a
+            // transient source or authority fault, so re-running cannot fix it.
+            crate::observation::ObservationApplicationError::BatchContainsNonDurable => {
+                permanent("observation_batch_non_durable")
+            }
+            crate::observation::ObservationApplicationError::BatchWorkerStopped => {
+                unavailable("observation_batch_worker_stopped")
             }
         },
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),

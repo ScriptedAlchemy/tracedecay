@@ -1,5 +1,5 @@
 //! Dashboard CRUD + run endpoints for user-defined scheduled jobs
-//! (Hermes cron parity, audit R9). Routes live beside the automation config
+//! (Hermes cron parity). Routes live beside the automation config
 //! endpoints:
 //!
 //! - `GET/POST /api/automation/jobs`
@@ -25,6 +25,7 @@ use tracedecay_agent_hosts::automation::jobs::{
     AutomationJob, JobDelivery, find_job, job_task_key, load_jobs, save_jobs, validate_job,
     validate_job_id,
 };
+use tracedecay_domain::canonical_text::default_true;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -83,10 +84,6 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer).map(Some)
-}
-
-fn default_true() -> bool {
-    true
 }
 
 pub async fn list(State(state): State<DashboardState>) -> ApiResult {

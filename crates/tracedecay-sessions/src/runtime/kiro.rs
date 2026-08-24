@@ -26,6 +26,7 @@ use crate::decode_kiro_workspace_path;
 use tracedecay_capture::kiro::{
     KiroSnapshotMessage, snapshot_native_payload, stable_message_id as stable_kiro_message_id,
 };
+use tracedecay_capture::normalize_timestamp_secs;
 
 use crate::admission::HostAdmission;
 #[cfg(test)]
@@ -73,7 +74,6 @@ const MAX_TRANSCRIPTS_PER_PASS: usize = 512;
 const MAX_TRANSCRIPTS_PER_WORKSPACE: usize = 128;
 const MAX_MESSAGES_PER_SNAPSHOT: usize = 4_096;
 
-/// Kiro IDE transcript locator + parser.
 pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
@@ -868,11 +868,7 @@ fn normalized_role(entry: &Value) -> Option<&'static str> {
 
 fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     if let Some(ts) = value.as_i64() {
-        return Some(if ts >= 1_000_000_000_000 {
-            ts / 1000
-        } else {
-            ts
-        });
+        return Some(normalize_timestamp_secs(ts));
     }
     value
         .as_str()
@@ -1336,6 +1332,7 @@ mod observation_tests {
                 status: HostAdmissionStatus::Unavailable,
                 retryable: true,
                 reason_code: Some("authority_unavailable"),
+                recovery: None,
             },
         );
         assert!(matches!(

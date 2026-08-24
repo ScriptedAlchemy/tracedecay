@@ -270,6 +270,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// Plan and seal one immutable generation while binding every inferred and
     /// explicitly declared rebuild cause into its identity and publication
     /// fence.
+    #[hotpath::measure]
     pub fn plan_generation_with_invalidation(
         &self,
         snapshot: &ValidatedCodeSnapshotV1,
@@ -363,6 +364,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// quarantined corruption are not inferable from a sanitized snapshot,
     /// so callers must declare them explicitly. Declared reasons are merged
     /// with descriptor, sanitizer, chunker, and privacy incompatibilities.
+    #[hotpath::measure]
     pub fn plan_increment_with_invalidation(
         &self,
         prior_manifest: &CodeGenerationManifestV1,
@@ -452,6 +454,11 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             }
         }
         plans.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        crate::hotpath_observe::record_rebuild_state(if full_rebuild {
+            "rebuild"
+        } else {
+            "increment"
+        });
 
         Ok(GenerationIncrementPlanV1 {
             prior_generation,
@@ -674,6 +681,7 @@ pub enum GenerationJoinErrorV1 {
 /// every eligible chunk names exactly one code generation and file
 /// occurrence). Cross-generation documents or chunks, undeclared chunks, and
 /// duplicates are typed rejections — never silently joined.
+#[hotpath::measure]
 pub fn join_chunks_to_generation(
     generation: &CodeGenerationManifestV1,
     document: &CodeSearchDocumentV1,

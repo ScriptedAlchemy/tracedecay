@@ -9,10 +9,7 @@ import { assertNever } from '../../contracts/generated.ts';
 import type {
   CoverageStateV1,
   RejectedArgumentAnalyticsV1,
-  RejectedArgumentErrorClassV1,
   RejectedArgumentGroupV1,
-  RejectedArgumentNameV1,
-  RejectedArgumentSurfaceV1,
 } from '../../contracts/generated.ts';
 import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
 import { EnvelopeSection } from '../../ui/ReadSection.tsx';
@@ -126,11 +123,11 @@ function RejectedArgumentTable({ groups }: { groups: readonly RejectedArgumentGr
             className="border-b border-edge-subtle last:border-b-0"
           >
             <th scope="row" className="py-1 pr-2 text-left font-normal text-text-primary">
-              {surfaceLabel(group.surface)}
+              {group.surface}
             </th>
             <td className="py-1 pr-2">{group.operation}</td>
-            <td className="py-1 pr-2">{argumentLabel(group.argument)}</td>
-            <td className="py-1 pr-2">{errorClassLabel(group.error_class)}</td>
+            <td className="py-1 pr-2">{group.argument}</td>
+            <td className="py-1 pr-2">{group.error_class}</td>
             <td className="tabular py-1 pr-2 text-right" data-cell="numeric">
               {group.count.toLocaleString()}
             </td>
@@ -158,67 +155,6 @@ function coverageKind(state: CoverageStateV1): DomainStateKind {
       return 'unknown';
     default: {
       const exhaustive: never = state;
-      return assertNever(exhaustive);
-    }
-  }
-}
-
-function surfaceLabel(surface: RejectedArgumentSurfaceV1): string {
-  switch (surface) {
-    case 'cli':
-      return 'cli';
-    case 'mcp':
-      return 'mcp';
-    case 'http':
-      return 'http';
-    case 'unknown':
-      return 'unknown';
-    default: {
-      const exhaustive: never = surface;
-      return assertNever(exhaustive);
-    }
-  }
-}
-
-function argumentLabel(argument: RejectedArgumentNameV1): string {
-  switch (argument) {
-    case 'request_body':
-      return 'request_body';
-    case 'pagination':
-      return 'pagination';
-    case 'request_handle':
-      return 'request_handle';
-    case 'operation':
-      return 'operation';
-    case 'lifecycle':
-      return 'lifecycle';
-    case 'unknown':
-      return 'unknown';
-    default: {
-      const exhaustive: never = argument;
-      return assertNever(exhaustive);
-    }
-  }
-}
-
-function errorClassLabel(errorClass: RejectedArgumentErrorClassV1): string {
-  switch (errorClass) {
-    case 'missing':
-      return 'missing';
-    case 'invalid_shape':
-      return 'invalid_shape';
-    case 'out_of_bounds':
-      return 'out_of_bounds';
-    case 'unsupported':
-      return 'unsupported';
-    case 'unauthorized':
-      return 'unauthorized';
-    case 'stale':
-      return 'stale';
-    case 'unknown':
-      return 'unknown';
-    default: {
-      const exhaustive: never = errorClass;
       return assertNever(exhaustive);
     }
   }

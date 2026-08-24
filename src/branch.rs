@@ -567,7 +567,6 @@ pub fn is_branch_ref_present(project_root: &Path, branch: &str) -> bool {
     local_branch_exists(project_root, branch)
 }
 
-/// Result of a dead/orphan branch-store GC pass.
 /// Parses a `last_synced_at` / `created_at` unix-seconds string defensively.
 /// Returns 0 (epoch, i.e. maximally stale) when unparseable so a corrupt
 /// timestamp never protects a dead store from collection.

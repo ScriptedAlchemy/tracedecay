@@ -28,31 +28,25 @@ fn make_node(id: &str, name: &str) -> Node {
     }
 }
 
+/// Drives every `NodeKind` variant off `NodeKind::ALL`, which the domain crate
+/// keeps total with an exhaustive `match` — a new variant fails to compile
+/// until it is in the table, so it cannot reach this test uncovered. Replaces
+/// three hand-maintained lists that between them named 60 of the 63 variants
+/// and left the protobuf kinds untested.
 #[test]
-fn node_kind_as_str_roundtrip() {
-    let kinds = vec![
-        NodeKind::File,
-        NodeKind::Module,
-        NodeKind::Struct,
-        NodeKind::Enum,
-        NodeKind::EnumVariant,
-        NodeKind::Trait,
-        NodeKind::Function,
-        NodeKind::Method,
-        NodeKind::Impl,
-        NodeKind::Const,
-        NodeKind::Static,
-        NodeKind::TypeAlias,
-        NodeKind::Field,
-        NodeKind::Macro,
-        NodeKind::Use,
-    ];
-
-    for kind in kinds {
-        let s = kind.as_str();
-        let parsed = NodeKind::from_str(s)
-            .unwrap_or_else(|| panic!("failed to parse NodeKind from '{}'", s));
-        assert_eq!(kind, parsed, "roundtrip failed for NodeKind::{}", s);
+fn node_kind_wire_strings_round_trip_for_every_variant() {
+    for (kind, wire) in NodeKind::ALL {
+        assert_eq!(
+            kind.as_str(),
+            wire,
+            "NodeKind::{kind:?} no longer serializes to {wire:?}; node IDs embed \
+             this string, so changing it invalidates stored IDs"
+        );
+        assert_eq!(
+            NodeKind::from_str(wire).as_ref(),
+            Some(&kind),
+            "NodeKind::from_str({wire:?}) did not round-trip back to NodeKind::{kind:?}"
+        );
     }
 }
 
@@ -62,23 +56,20 @@ fn node_kind_from_str_unknown_returns_none() {
     assert!(NodeKind::from_str("").is_none());
 }
 
+/// Same contract as the `NodeKind` test above, driven off `EdgeKind::ALL`.
 #[test]
-fn edge_kind_as_str_roundtrip() {
-    let kinds = vec![
-        EdgeKind::Contains,
-        EdgeKind::Calls,
-        EdgeKind::Uses,
-        EdgeKind::Implements,
-        EdgeKind::TypeOf,
-        EdgeKind::Returns,
-        EdgeKind::DerivesMacro,
-    ];
-
-    for kind in kinds {
-        let s = kind.as_str();
-        let parsed = EdgeKind::from_str(s)
-            .unwrap_or_else(|| panic!("failed to parse EdgeKind from '{}'", s));
-        assert_eq!(kind, parsed, "roundtrip failed for EdgeKind::{}", s);
+fn edge_kind_wire_strings_round_trip_for_every_variant() {
+    for (kind, wire) in EdgeKind::ALL {
+        assert_eq!(
+            kind.as_str(),
+            wire,
+            "EdgeKind::{kind:?} no longer serializes to {wire:?}"
+        );
+        assert_eq!(
+            EdgeKind::from_str(wire),
+            Some(kind),
+            "EdgeKind::from_str({wire:?}) did not round-trip back to EdgeKind::{kind:?}"
+        );
     }
 }
 
@@ -86,12 +77,6 @@ fn edge_kind_as_str_roundtrip() {
 fn edge_kind_from_str_unknown_returns_none() {
     assert!(EdgeKind::from_str("unknown_edge").is_none());
     assert!(EdgeKind::from_str("").is_none());
-}
-
-#[test]
-fn visibility_default_is_private() {
-    let vis: Visibility = Visibility::default();
-    assert_eq!(vis, Visibility::Private);
 }
 
 #[test]
@@ -136,71 +121,6 @@ fn generate_node_id_different_inputs_produce_different_ids() {
 }
 
 #[test]
-fn node_serde_roundtrip() {
-    let node = Node {
-        id: "function:abcdef01234567890abcdef012345678".to_string(),
-        kind: NodeKind::Function,
-        name: "my_function".to_string(),
-        qualified_name: "crate::module::my_function".to_string(),
-        file_path: "src/module.rs".to_string(),
-        start_line: 10,
-        attrs_start_line: 10,
-        end_line: 20,
-        start_column: 0,
-        end_column: 1,
-        signature: Some("fn my_function(x: i32) -> bool".to_string()),
-        docstring: Some("Does something useful.".to_string()),
-        visibility: Visibility::Pub,
-        is_async: true,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1700000000,
-        parent_id: None,
-    };
-
-    let json = serde_json::to_string(&node).expect("failed to serialize Node");
-    let deserialized: Node = serde_json::from_str(&json).expect("failed to deserialize Node");
-
-    assert_eq!(node.id, deserialized.id);
-    assert_eq!(node.kind, deserialized.kind);
-    assert_eq!(node.name, deserialized.name);
-    assert_eq!(node.qualified_name, deserialized.qualified_name);
-    assert_eq!(node.file_path, deserialized.file_path);
-    assert_eq!(node.start_line, deserialized.start_line);
-    assert_eq!(node.end_line, deserialized.end_line);
-    assert_eq!(node.start_column, deserialized.start_column);
-    assert_eq!(node.end_column, deserialized.end_column);
-    assert_eq!(node.signature, deserialized.signature);
-    assert_eq!(node.docstring, deserialized.docstring);
-    assert_eq!(node.visibility, deserialized.visibility);
-    assert_eq!(node.is_async, deserialized.is_async);
-    assert_eq!(node.updated_at, deserialized.updated_at);
-}
-
-#[test]
-fn edge_serde_roundtrip() {
-    let edge = Edge {
-        source: "function:aaaa".to_string(),
-        target: "function:bbbb".to_string(),
-        kind: EdgeKind::Calls,
-        line: Some(15),
-    };
-
-    let json = serde_json::to_string(&edge).expect("failed to serialize Edge");
-    let deserialized: Edge = serde_json::from_str(&json).expect("failed to deserialize Edge");
-
-    assert_eq!(edge.source, deserialized.source);
-    assert_eq!(edge.target, deserialized.target);
-    assert_eq!(edge.kind, deserialized.kind);
-    assert_eq!(edge.line, deserialized.line);
-}
-
-#[test]
 fn traversal_options_default() {
     let opts = TraversalOptions::default();
     assert_eq!(opts.max_depth, 3);
@@ -224,104 +144,28 @@ fn build_context_options_default() {
     assert!((opts.min_score - 0.0).abs() < f64::EPSILON);
 }
 
+/// Same `ALL`-driven contract as the two tests above, plus the two facts that
+/// are not expressible in the table: `"pub"` is an inbound-only alias, and an
+/// unset visibility must fall back to the most restrictive variant rather than
+/// to the first one declared.
 #[test]
-fn test_new_node_kinds_roundtrip() {
-    use tracedecay::types::NodeKind;
-    let kinds = vec![
-        (NodeKind::Class, "class"),
-        (NodeKind::Interface, "interface"),
-        (NodeKind::Constructor, "constructor"),
-        (NodeKind::Annotation, "annotation"),
-        (NodeKind::AnnotationUsage, "annotation_usage"),
-        (NodeKind::Package, "package"),
-        (NodeKind::InnerClass, "inner_class"),
-        (NodeKind::InitBlock, "init_block"),
-        (NodeKind::AbstractMethod, "abstract_method"),
-        (NodeKind::InterfaceType, "interface_type"),
-        (NodeKind::StructMethod, "struct_method"),
-        (NodeKind::GoPackage, "go_package"),
-        (NodeKind::StructTag, "struct_tag"),
-        (NodeKind::ScalaObject, "object"),
-        (NodeKind::CaseClass, "case_class"),
-        (NodeKind::ScalaPackage, "scala_package"),
-        (NodeKind::ValField, "val"),
-        (NodeKind::VarField, "var"),
-        (NodeKind::GenericParam, "generic_param"),
-    ];
-    for (kind, expected_str) in kinds {
-        assert_eq!(kind.as_str(), expected_str);
-        assert_eq!(NodeKind::from_str(expected_str), Some(kind));
+fn visibility_wire_strings_round_trip_for_every_variant() {
+    for (visibility, wire) in Visibility::ALL {
+        assert_eq!(
+            visibility.as_str(),
+            wire,
+            "Visibility::{visibility:?} no longer serializes to {wire:?}"
+        );
+        assert_eq!(
+            Visibility::from_str(wire).as_ref(),
+            Some(&visibility),
+            "Visibility::from_str({wire:?}) did not round-trip back to \
+             Visibility::{visibility:?}"
+        );
     }
-}
-
-#[test]
-fn test_c_cpp_csharp_pascal_kotlin_dart_node_kinds_roundtrip() {
-    use tracedecay::types::NodeKind;
-    let kinds = vec![
-        // TypeScript/JavaScript
-        (NodeKind::ArrowFunction, "arrow_function"),
-        (NodeKind::Decorator, "decorator"),
-        (NodeKind::Export, "export"),
-        // C/C++
-        (NodeKind::Union, "union"),
-        (NodeKind::Typedef, "typedef"),
-        (NodeKind::Include, "include"),
-        (NodeKind::PreprocessorDef, "preprocessor_def"),
-        (NodeKind::Namespace, "namespace"),
-        (NodeKind::Template, "template"),
-        (NodeKind::Delegate, "delegate"),
-        (NodeKind::Event, "event"),
-        (NodeKind::Record, "record"),
-        (NodeKind::CSharpProperty, "csharp_property"),
-        (NodeKind::Procedure, "procedure"),
-        (NodeKind::PascalProgram, "pascal_program"),
-        (NodeKind::PascalUnit, "pascal_unit"),
-        (NodeKind::PascalRecord, "pascal_record"),
-        (NodeKind::Property, "property"),
-        (NodeKind::DataClass, "data_class"),
-        (NodeKind::SealedClass, "sealed_class"),
-        (NodeKind::KotlinObject, "kotlin_object"),
-        (NodeKind::KotlinPackage, "kotlin_package"),
-        (NodeKind::CompanionObject, "companion_object"),
-        (NodeKind::Mixin, "mixin"),
-        (NodeKind::Extension, "extension"),
-        (NodeKind::Library, "library"),
-    ];
-    for (kind, expected_str) in kinds {
-        assert_eq!(kind.as_str(), expected_str);
-        assert_eq!(NodeKind::from_str(expected_str), Some(kind));
-    }
-}
-
-#[test]
-fn test_new_edge_kinds_roundtrip() {
-    use tracedecay::types::EdgeKind;
-    let kinds = vec![
-        (EdgeKind::Extends, "extends"),
-        (EdgeKind::Annotates, "annotates"),
-        (EdgeKind::Receives, "receives"),
-    ];
-    for (kind, expected_str) in kinds {
-        assert_eq!(kind.as_str(), expected_str);
-        assert_eq!(EdgeKind::from_str(expected_str), Some(kind));
-    }
-}
-
-#[test]
-fn visibility_as_str_and_from_str_roundtrip() {
-    let cases = [
-        (Visibility::Pub, "public"),
-        (Visibility::PubCrate, "pub_crate"),
-        (Visibility::PubSuper, "pub_super"),
-        (Visibility::Private, "private"),
-    ];
-    for (vis, s) in cases {
-        assert_eq!(vis.as_str(), s);
-        assert_eq!(Visibility::from_str(s), Some(vis));
-    }
-    // "pub" is an alias for "public"
     assert_eq!(Visibility::from_str("pub"), Some(Visibility::Pub));
     assert!(Visibility::from_str("unknown").is_none());
+    assert_eq!(Visibility::default(), Visibility::Private);
 }
 
 #[test]

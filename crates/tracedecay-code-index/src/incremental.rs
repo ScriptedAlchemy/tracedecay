@@ -132,6 +132,7 @@ impl GenerationChunkManifestV1 {
 ///
 /// Carry-forward always rematerializes generation-local file and symbol
 /// occurrences before constructing the next chunk and lineage manifests.
+#[hotpath::measure]
 pub fn materialize_generation_increment(
     plan: &GenerationIncrementPlanV1,
     generation_id: CodeGenerationId,
@@ -173,7 +174,7 @@ pub fn materialize_generation_increment(
         }
     }
     let mut reextracted_files = reextracted_files_by_occurrence;
-    let prior_symbols = prior_symbols
+    let prior_symbols_by_occurrence = prior_symbols
         .symbols
         .iter()
         .map(|symbol| (symbol.occurrence.clone(), symbol))
@@ -226,9 +227,11 @@ pub fn materialize_generation_increment(
                     .map(|(prior, current)| (prior.clone(), current.clone()))
                     .collect::<BTreeMap<_, _>>();
                 for (prior_occurrence, current_occurrence) in occurrence_map {
-                    let prior_symbol = prior_symbols.get(&prior_occurrence).ok_or_else(|| {
-                        ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
-                    })?;
+                    let prior_symbol = prior_symbols_by_occurrence
+                        .get(&prior_occurrence)
+                        .ok_or_else(|| {
+                            ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
+                        })?;
                     let mut current_symbol = (*prior_symbol).clone();
                     current_symbol.occurrence = current_occurrence;
                     symbols.push(current_symbol);
@@ -274,17 +277,7 @@ pub fn materialize_generation_increment(
     let symbols =
         GenerationSymbolIndexV1::new(generation_id, symbols).map_err(map_lineage_error)?;
     let lineage = SymbolLineageResolver::new()
-        .resolve(
-            &GenerationSymbolIndexV1::new(
-                plan.prior_generation.clone(),
-                prior_symbols
-                    .values()
-                    .map(|symbol| (*symbol).clone())
-                    .collect(),
-            )
-            .map_err(map_lineage_error)?,
-            &symbols,
-        )
+        .resolve(prior_symbols, &symbols)
         .map_err(map_lineage_error)?;
     Ok(GenerationIncrementMaterializationV1 {
         chunks,
@@ -300,6 +293,7 @@ pub fn materialize_generation_increment(
 /// different digests are updated, current-only IDs are added, and prior-only
 /// IDs are deleted. The returned domain manifest is fully validated and its
 /// digest is sealed before return.
+#[hotpath::measure]
 pub fn plan_chunk_increment(
     prior: Option<&GenerationChunkManifestV1>,
     current: &GenerationChunkManifestV1,

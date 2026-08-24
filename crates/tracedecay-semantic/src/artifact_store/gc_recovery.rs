@@ -1,6 +1,4 @@
 //! Garbage collection and crash-recovery flows for ModelArtifactStore.
-//! Split out of artifact_store.rs to keep the facade under the 1000-line
-//! hygiene ceiling; pure structural move, no behavior change.
 
 use super::*;
 
@@ -27,6 +25,7 @@ impl ModelArtifactStore {
         self.gc_locked_by_policy(now_unix, true)
     }
 
+    #[hotpath::measure]
     pub(super) fn gc_locked_by_policy(
         &self,
         now_unix: u64,
@@ -61,6 +60,7 @@ impl ModelArtifactStore {
             .cloned()
             .collect();
         if records.is_empty() {
+            hotpath::gauge!("semantic_artifact_gc_removed").set(0_usize);
             return Ok(Vec::new());
         }
         self.write_recovery_locked(&RecoveryJournalV1 {
@@ -88,6 +88,7 @@ impl ModelArtifactStore {
             .collect();
         self.append_receipts_locked(&receipts)?;
         self.clear_recovery_locked()?;
+        hotpath::gauge!("semantic_artifact_gc_removed").set(receipts.len());
         Ok(receipts)
     }
 

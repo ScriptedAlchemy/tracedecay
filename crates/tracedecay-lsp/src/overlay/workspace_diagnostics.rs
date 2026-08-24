@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
 use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
@@ -52,6 +52,10 @@ impl WorkspaceDiagnosticAdapter {
         self.authority.supports_workspace_diagnostics()
     }
 
+    #[hotpath::measure(
+        label = "lsp_workspace_diagnostics_snapshot",
+        impl_type = "WorkspaceDiagnosticAdapter"
+    )]
     pub(super) fn snapshot(
         &self,
         workspace: &AuthorizedLspWorkspace,
@@ -195,7 +199,7 @@ fn workspace_key(
             (
                 overlay.uri.as_str(),
                 overlay.version,
-                ContentDigest::of_bytes(overlay.text.as_bytes()),
+                overlay.content_digest.clone(),
             )
         })
         .collect::<Vec<_>>();

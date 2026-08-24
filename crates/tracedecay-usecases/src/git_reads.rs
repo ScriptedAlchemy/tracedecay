@@ -25,18 +25,12 @@ use tracedecay_graph_db::{GraphCancellation, GraphDbError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_store::FactReadControl;
 
-use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
-// The native `git` spawn adapter lives beside its consumer in this crate's
-// own `git_intelligence` module (moved down from the root's
-// `src/git_intelligence.rs`, which is now a compatibility shim).
 use crate::git_intelligence::NativeGitIntelligence;
 use crate::git_query::{
     GenerationBoundGitQueryV1, GenerationGitJoinV1, GitQueryBounds, GitQueryEngine,
     GitQueryEnvelopeV1, GitQueryError,
 };
-// The historical outcome projection moved down beside the adapter that
-// produces it; both this owner and the extracted search evaluator mount the
-// same values.
+use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalQueryRequestV1, HistoricalSourceAuthorizationV1,
 };

@@ -240,6 +240,7 @@ pub(crate) struct DaemonSemanticEvaluationWorkerOwnerV1 {
 }
 
 impl DaemonSemanticEvaluationWorkerOwnerV1 {
+    #[hotpath::measure]
     pub(crate) async fn execute<Output, Work, WorkFuture>(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
@@ -1111,22 +1112,9 @@ struct LinuxProcessResourceWindowV1 {
 impl LinuxProcessResourceWindowV1 {
     #[cfg(target_os = "linux")]
     fn begin() -> Option<Self> {
-        let output = std::process::Command::new("getconf")
-            .arg("CLK_TCK")
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let ticks_per_second = std::str::from_utf8(&output.stdout)
-            .ok()?
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|ticks| *ticks != 0)?;
         Some(Self {
-            cpu_ticks: read_linux_process_cpu_ticks()?,
-            ticks_per_second,
+            cpu_ticks: crate::runtime_telemetry::read_linux_process_cpu_ticks()?,
+            ticks_per_second: crate::runtime_telemetry::linux_clock_ticks_per_second()?,
         })
     }
 
@@ -1136,7 +1124,8 @@ impl LinuxProcessResourceWindowV1 {
     }
 
     fn finish(self) -> Option<(u64, u64)> {
-        let elapsed_ticks = read_linux_process_cpu_ticks()?.saturating_sub(self.cpu_ticks);
+        let elapsed_ticks = crate::runtime_telemetry::read_linux_process_cpu_ticks()?
+            .saturating_sub(self.cpu_ticks);
         let cpu_time_us = u64::try_from(
             u128::from(elapsed_ticks)
                 .checked_mul(1_000_000)?
@@ -1145,21 +1134,6 @@ impl LinuxProcessResourceWindowV1 {
         .ok()?;
         Some((cpu_time_us, read_linux_process_lifetime_peak_rss_bytes()?))
     }
-}
-
-#[cfg(target_os = "linux")]
-fn read_linux_process_cpu_ticks() -> Option<u64> {
-    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
-    let fields = stat.get(stat.rfind(')')? + 1..)?.split_whitespace();
-    let fields = fields.collect::<Vec<_>>();
-    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
-    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
-    user_ticks.checked_add(system_ticks)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_linux_process_cpu_ticks() -> Option<u64> {
-    None
 }
 
 #[cfg(not(target_os = "linux"))]

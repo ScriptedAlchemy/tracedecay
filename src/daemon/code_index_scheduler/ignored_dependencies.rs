@@ -183,6 +183,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         previous_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
+        self.ensure_worker_plan()?;
+        let _worker_memory = match self.reserve_worker_memory() {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.ignored_source_admissions = previous_roster;
+                return Err(error);
+            }
+        };
         let resolved = match super::identity::IndexingIdentityV1::resolve(&self.project_root) {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -214,6 +222,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
+            mut retained_reservations,
         } = captured;
         let reextracted_files = changed_paths.len();
         let roster = self.ignored_source_admissions.clone();
@@ -244,7 +253,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         };
         let generation_id = generation.manifest().generation_id.clone();
+        Self::finish_snapshot_build_memory(&mut retained_reservations)?;
         self.retained_snapshot_bytes = retained_bytes;
+        self._retained_snapshot_memory = retained_reservations;
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         let sampled_signature = self.worktree_stat_signature().ok();
         self.mark_reconciled(sampled_metadata, sampled_signature);

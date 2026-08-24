@@ -385,16 +385,10 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     fixture.harness.shutdown().await;
 }
 
-// ---------------------------------------------------------------------------
-// Extra: missing required params for other handlers
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_context_missing_task() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_context", json!({}), None, None).await;
-    assert!(result.is_err(), "context without task should error");
-}
+// The `tracedecay_context` missing-required-argument case lives in
+// `schema_test::schema_required_arguments_match_representative_handler_parsers`,
+// which pairs it with the schema `required` array the handler parser is
+// supposed to mirror instead of only asserting that *some* error came back.
 
 #[tokio::test]
 async fn test_context_scope_prefix_filters() {

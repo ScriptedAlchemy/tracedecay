@@ -1194,7 +1194,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
 }
 
 // ---------------------------------------------------------------------------
-// 3b. Wall exhaustion (Plan 26 no-progress terminal)
+// 3b. Wall exhaustion (no-progress terminal)
 // ---------------------------------------------------------------------------
 
 /// A provider that outlives its envelope deadline is killed and sealed as
@@ -1340,10 +1340,10 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
 }
 
 // ---------------------------------------------------------------------------
-// 4. The Codex app-server preference gate (Plan 32)
+// 4. The Codex app-server preference gate
 // ---------------------------------------------------------------------------
 
-/// Plan 32: "Codex-designated work prefers the configured app-server."
+/// Codex-designated work prefers the configured app-server.
 ///
 /// The decisive part of this fixture is that the Codex CLI fallback is *also*
 /// configured and *also* resolvable. Preference therefore has to be a real
@@ -1406,10 +1406,9 @@ fn a_resolvable_app_server_is_preferred_over_an_equally_resolvable_codex_cli() {
     assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
 }
 
-/// Plan 32: the Codex CLI is eligible "only when app-server is unsupported or
-/// absent before session start and the pinned Plan 20 snapshot explicitly
-/// allows that fallback", and the plan index requires the fallback to be
-/// "reported rather than hidden".
+/// The Codex CLI is eligible only when app-server is unsupported or absent
+/// before session start and the pinned snapshot explicitly allows that
+/// fallback. The fallback must be reported rather than hidden.
 ///
 /// Here the app-server executable exists on disk but its bytes no longer match
 /// the pinned digest — the probe is a real file read, so this is a

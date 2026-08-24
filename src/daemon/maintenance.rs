@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(any(feature = "hotpath", test))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +38,8 @@ const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
 const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
 const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry.read";
+#[cfg(any(feature = "hotpath", test))]
+static MAINTENANCE_FUTURES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 struct TableWatermark {
@@ -647,6 +652,64 @@ fn storage_telemetry_request_context(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon) enum MaintenanceContinuation {
+    /// Resume the bounded semantic-vector phase over the normal graph window.
+    ///
+    /// This is deliberately phase-scoped rather than project-scoped: no
+    /// project identifier is retained in maintenance state, so mounted graphs
+    /// continue to receive the same bounded, round-robin service.
+    SemanticVectorRetention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon) enum MaintenanceTickOutcome {
+    Complete,
+    Continue(MaintenanceContinuation),
+    Retry,
+}
+
+impl MaintenanceTickOutcome {
+    pub(in crate::daemon) fn is_complete(self) -> bool {
+        self == Self::Complete
+    }
+
+    fn continuation(self) -> Option<MaintenanceContinuation> {
+        match self {
+            Self::Continue(continuation) => Some(continuation),
+            Self::Complete | Self::Retry => None,
+        }
+    }
+
+    fn succeeded(self) -> bool {
+        !matches!(self, Self::Retry)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
+                "semantic_vector_progress"
+            }
+            Self::Retry => "retry",
+        }
+    }
+
+    /// A failure wins over ordinary bounded progress so the next short tick
+    /// retries the complete maintenance journey. The semantic census cursor is
+    /// durable in the graph registry, so that retry still resumes its progress
+    /// rather than losing the bounded semantic-vector work.
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Retry, _) | (_, Self::Retry) => Self::Retry,
+            (Self::Continue(continuation), _) | (_, Self::Continue(continuation)) => {
+                Self::Continue(continuation)
+            }
+            (Self::Complete, Self::Complete) => Self::Complete,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct MaintenanceCadence {
     interval: Duration,
@@ -673,15 +736,132 @@ impl MaintenanceCadence {
         true
     }
 
-    pub(super) fn finish(&mut self, now: Instant, succeeded: bool) -> Duration {
+    fn finish(&mut self, now: Instant, outcome: MaintenanceTickOutcome) -> Instant {
         self.in_flight = false;
-        let delay = if succeeded {
-            self.interval
-        } else {
-            self.retry_delay
+        let delay = match outcome {
+            MaintenanceTickOutcome::Complete => self.interval,
+            MaintenanceTickOutcome::Continue(_) | MaintenanceTickOutcome::Retry => self.retry_delay,
         };
-        self.not_before = Some(now + delay);
-        delay
+        let deadline = now + delay;
+        self.not_before = Some(deadline);
+        deadline
+    }
+}
+
+struct MaintenanceLifecycleInstrumentation;
+
+impl MaintenanceLifecycleInstrumentation {
+    fn new() -> Self {
+        #[cfg(any(feature = "hotpath", test))]
+        {
+            let active = MAINTENANCE_FUTURES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+            hotpath::gauge!("daemon_maintenance_futures_active").set(active);
+        }
+        Self
+    }
+
+    fn record_outcome(&self, outcome: MaintenanceTickOutcome) {
+        match outcome {
+            MaintenanceTickOutcome::Complete => {
+                hotpath::gauge!("daemon_maintenance_outcome_complete").inc(1.0);
+            }
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
+                hotpath::gauge!("daemon_maintenance_outcome_semantic_vector_progress").inc(1.0);
+            }
+            MaintenanceTickOutcome::Retry => {
+                hotpath::gauge!("daemon_maintenance_outcome_retry").inc(1.0);
+            }
+        }
+    }
+
+    fn record_cancellation(&self) {
+        hotpath::gauge!("daemon_maintenance_outcome_cancelled").inc(1.0);
+    }
+}
+
+impl Drop for MaintenanceLifecycleInstrumentation {
+    fn drop(&mut self) {
+        #[cfg(any(feature = "hotpath", test))]
+        {
+            let active = MAINTENANCE_FUTURES_ACTIVE
+                .fetch_sub(1, Ordering::SeqCst)
+                .saturating_sub(1);
+            hotpath::gauge!("daemon_maintenance_futures_active").set(active);
+        }
+    }
+}
+
+struct MaintenancePhaseInstrumentation {
+    continuation: Option<MaintenanceContinuation>,
+}
+
+impl MaintenancePhaseInstrumentation {
+    fn new(continuation: Option<MaintenanceContinuation>) -> Self {
+        match continuation {
+            Some(MaintenanceContinuation::SemanticVectorRetention) => {
+                hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(1.0);
+            }
+            None => {
+                hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(1.0);
+            }
+        }
+        Self { continuation }
+    }
+}
+
+impl Drop for MaintenancePhaseInstrumentation {
+    fn drop(&mut self) {
+        match self.continuation {
+            Some(MaintenanceContinuation::SemanticVectorRetention) => {
+                hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(-1.0);
+            }
+            None => {
+                hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(-1.0);
+            }
+        }
+    }
+}
+
+async fn run_maintenance_loop<F, Fut>(
+    cancellation: &tracedecay_usecases::context::CancellationToken,
+    wake: &Notify,
+    interval: Duration,
+    mut run_tick: F,
+) where
+    F: FnMut(Option<MaintenanceContinuation>) -> Fut,
+    Fut: Future<Output = MaintenanceTickOutcome>,
+{
+    let _lifecycle = MaintenanceLifecycleInstrumentation::new();
+    let mut cadence = MaintenanceCadence::new(interval);
+    let mut deadline = Instant::now() + cadence.retry_delay;
+    let mut continuation = None;
+    loop {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                _lifecycle.record_cancellation();
+                break;
+            }
+            () = wake.notified() => {}
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+        }
+        if cancellation.is_cancelled() {
+            _lifecycle.record_cancellation();
+            break;
+        }
+        let now = Instant::now();
+        if now < deadline || !cadence.reserve(now) {
+            continue;
+        }
+        let _phase = MaintenancePhaseInstrumentation::new(continuation);
+        let outcome = run_tick(continuation).await;
+        if cancellation.is_cancelled() {
+            _lifecycle.record_cancellation();
+            break;
+        }
+        _lifecycle.record_outcome(outcome);
+        continuation = outcome.continuation();
+        deadline = cadence.finish(Instant::now(), outcome);
     }
 }
 
@@ -845,19 +1025,22 @@ impl MaintenanceCoordinator {
         }
         let task_owner = coordinator.clone();
         let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
-        let handle = tokio::spawn(async move {
-            task_owner
-                .run(
-                    profile_root,
-                    profile_database,
-                    administration,
-                    code_index_schedulers,
-                    retention,
-                    branch_gc,
-                    interval,
-                )
-                .await;
-        });
+        let handle = tokio::spawn(hotpath::future!(
+            async move {
+                task_owner
+                    .run(
+                        profile_root,
+                        profile_database,
+                        administration,
+                        code_index_schedulers,
+                        retention,
+                        branch_gc,
+                        interval,
+                    )
+                    .await;
+            },
+            label = "daemon.maintenance.retention_loop"
+        ));
         *coordinator.task.lock().await = Some(handle);
         coordinator
     }
@@ -885,34 +1068,18 @@ impl MaintenanceCoordinator {
         branch_gc: BranchStoreGcCadenceV1,
         interval: Duration,
     ) {
-        let mut cadence = MaintenanceCadence::new(interval);
-        let mut next_delay = cadence.retry_delay;
-        loop {
-            tokio::select! {
-                biased;
-                () = self.cancellation.cancelled() => break,
-                () = self.wake.notified() => {}
-                () = tokio::time::sleep(next_delay) => {}
-            }
-            if self.cancellation.is_cancelled() {
-                break;
-            }
-            let now = Instant::now();
-            if !cadence.reserve(now) {
-                continue;
-            }
-            let succeeded = self
-                .run_tick(
-                    &profile_root,
-                    profile_database.as_ref(),
-                    &administration,
-                    &code_index_schedulers,
-                    &retention,
-                    branch_gc,
-                )
-                .await;
-            next_delay = cadence.finish(Instant::now(), succeeded);
-        }
+        run_maintenance_loop(&self.cancellation, &self.wake, interval, |continuation| {
+            self.run_tick(
+                &profile_root,
+                profile_database.as_ref(),
+                &administration,
+                &code_index_schedulers,
+                &retention,
+                branch_gc,
+                continuation,
+            )
+        })
+        .await;
     }
 
     async fn run_tick(
@@ -923,8 +1090,13 @@ impl MaintenanceCoordinator {
         code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: &crate::config::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
-    ) -> bool {
-        let session_databases = administration.mounted_registered_session_databases().await;
+        continuation: Option<MaintenanceContinuation>,
+    ) -> MaintenanceTickOutcome {
+        let session_databases = if continuation.is_none() {
+            administration.mounted_registered_session_databases().await
+        } else {
+            Vec::new()
+        };
         let project_graphs = administration.mounted_project_graphs().await;
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
         active_telemetry_paths.extend(
@@ -978,27 +1150,38 @@ impl MaintenanceCoordinator {
             .map(|graph| graph.project_root().to_path_buf())
             .collect::<BTreeSet<_>>();
         maintenance_observations.retain_semantic_vector_projects(&active_semantic_vector_projects);
-        let telemetry_sampling = maintenance_observations
-            .advance_registered(&active_telemetry_paths, &sampled_telemetry_paths)
-            .await;
+        let telemetry_sampling = if continuation.is_none() {
+            maintenance_observations
+                .advance_registered(&active_telemetry_paths, &sampled_telemetry_paths)
+                .await
+        } else {
+            StoreTelemetrySamplingOutcome::default()
+        };
 
         // Bounded, round-robin slice of mounted stores. Writer admission is
         // per unit so one busy store defers only itself, and the cursor
-        // advances past attempted units even on cancellation.
+        // advances past attempted units even on cancellation. A semantic
+        // continuation omits session stores, but remains phase-scoped over the
+        // same bounded graph window rather than pinning one project.
         let mut attempted = 0usize;
         let mut deferred = 0u64;
-        let mut succeeded = true;
+        let mut outcome = MaintenanceTickOutcome::Complete;
         for &index in &window {
             if self.cancellation.is_cancelled() {
-                succeeded = false;
+                outcome = MaintenanceTickOutcome::Retry;
                 break;
             }
             let admitted = administration
                 .try_with_writer(|| async {
                     match &work[index].1 {
                         MaintenanceStoreWork::Session(database) => {
-                            super::store_maintenance::run_session_retention(database, retention)
+                            if super::store_maintenance::run_session_retention(database, retention)
                                 .await
+                            {
+                                MaintenanceTickOutcome::Complete
+                            } else {
+                                MaintenanceTickOutcome::Retry
+                            }
                         }
                         MaintenanceStoreWork::Graph(graph) => {
                             generation::run_project_generation_maintenance(
@@ -1007,6 +1190,7 @@ impl MaintenanceCoordinator {
                                 &maintenance_observations,
                                 &self.cancellation,
                                 retention,
+                                continuation,
                             )
                             .await
                         }
@@ -1015,23 +1199,24 @@ impl MaintenanceCoordinator {
                 .await;
             attempted = attempted.saturating_add(1);
             match admitted {
-                Some(unit_succeeded) => succeeded &= unit_succeeded,
+                Some(unit_outcome) => outcome = outcome.combine(unit_outcome),
                 None => {
                     deferred = deferred.saturating_add(1);
-                    succeeded = false;
+                    outcome = MaintenanceTickOutcome::Retry;
                 }
             }
             if self.cancellation.is_cancelled() {
-                succeeded = false;
+                outcome = MaintenanceTickOutcome::Retry;
                 break;
             }
         }
         *self.store_cursor.lock().await =
             cursor_after_attempted_units(&keys, &window, attempted, after.as_deref());
 
-        // Profile-wide observability retention is a single bounded op, not a
-        // per-store loop, so it runs every tick outside the round-robin.
-        if !self.cancellation.is_cancelled() {
+        // Profile-wide maintenance is intentionally excluded from a bounded
+        // semantic-vector continuation: only the owning phase is eligible
+        // for the short cadence.
+        if continuation.is_none() && !self.cancellation.is_cancelled() {
             match administration
                 .try_with_writer(|| async {
                     super::store_maintenance::run_observability_analytics_retention(
@@ -1042,15 +1227,17 @@ impl MaintenanceCoordinator {
                 })
                 .await
             {
-                Some(unit_succeeded) => succeeded &= unit_succeeded,
+                Some(true) => {}
+                Some(false) => outcome = MaintenanceTickOutcome::Retry,
                 None => {
                     deferred = deferred.saturating_add(1);
-                    succeeded = false;
+                    outcome = MaintenanceTickOutcome::Retry;
                 }
             }
         }
 
-        if !self.cancellation.is_cancelled()
+        if continuation.is_none()
+            && !self.cancellation.is_cancelled()
             && let Some(compaction) = &retention.compaction
         {
             match administration
@@ -1060,14 +1247,15 @@ impl MaintenanceCoordinator {
                 })
                 .await
             {
-                Some(unit_succeeded) => succeeded &= unit_succeeded,
+                Some(true) => {}
+                Some(false) => outcome = MaintenanceTickOutcome::Retry,
                 None => {
                     deferred = deferred.saturating_add(1);
-                    succeeded = false;
+                    outcome = MaintenanceTickOutcome::Retry;
                 }
             }
         }
-        if !self.cancellation.is_cancelled() {
+        if continuation.is_none() && !self.cancellation.is_cancelled() {
             match administration
                 .try_with_writer(|| {
                     run_cold_store_page(
@@ -1088,23 +1276,23 @@ impl MaintenanceCoordinator {
                     metrics.reclaimed_bytes =
                         metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
                     metrics.last_outcome = Some(page.outcome);
-                    succeeded &= page.outcome.was_processed();
+                    if !page.outcome.was_processed() {
+                        outcome = MaintenanceTickOutcome::Retry;
+                    }
                 }
-                Some(Err(_)) => succeeded = false,
+                Some(Err(_)) => outcome = MaintenanceTickOutcome::Retry,
                 None => {
                     deferred = deferred.saturating_add(1);
-                    succeeded = false;
+                    outcome = MaintenanceTickOutcome::Retry;
                 }
             }
-        } else {
-            succeeded = false;
         }
 
-        // Branch-store GC, relocated here from the watcher backstop: the
-        // watcher owns no store authorities, while this owner already holds
-        // the administration coordinator. Daily cadence, retry-eligible — the
-        // stamp advances only when every mounted project's pass succeeded.
-        if !self.cancellation.is_cancelled() {
+        // Branch-store GC: the watcher owns no store authorities, while this
+        // owner already holds the administration coordinator. Daily cadence,
+        // retry-eligible — the stamp advances only when every mounted project's
+        // pass succeeded.
+        if continuation.is_none() && !self.cancellation.is_cancelled() {
             let gc_due = self
                 .last_branch_gc
                 .lock()
@@ -1129,7 +1317,7 @@ impl MaintenanceCoordinator {
                 if gc_succeeded {
                     *self.last_branch_gc.lock().await = Some(Instant::now());
                 } else {
-                    succeeded = false;
+                    outcome = MaintenanceTickOutcome::Retry;
                 }
             }
         }
@@ -1145,7 +1333,8 @@ impl MaintenanceCoordinator {
         super::log_daemon_event(
             "retention_maintenance_tick",
             &[
-                ("succeeded", succeeded.to_string()),
+                ("succeeded", outcome.succeeded().to_string()),
+                ("outcome", outcome.label().to_owned()),
                 ("processed_stores", metrics.processed_stores.to_string()),
                 ("deferred_stores", metrics.deferred_stores.to_string()),
                 ("unavailable_stores", metrics.unavailable_stores.to_string()),
@@ -1157,7 +1346,7 @@ impl MaintenanceCoordinator {
                 ),
             ],
         );
-        succeeded
+        outcome
     }
 }
 
@@ -1353,29 +1542,33 @@ pub(super) fn retention_window_secs(days: u64) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn now_secs_i64() -> Result<i64, &'static str> {
+pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system clock is before the unix epoch")?
+        .map_err(|_| "system_clock_before_unix_epoch")?
         .as_secs();
-    i64::try_from(seconds).map_err(|_| "system clock exceeds retention timestamp range")
+    i64::try_from(seconds).map_err(|_| "system_clock_out_of_range")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    use tokio::sync::Notify;
     use tracedecay_application::storage::{
         StorageByteSizeV1, StoreKeyV1, TableGrowthTelemetryReadV1, TableNameV1,
     };
     use tracedecay_domain::UtcMicros;
 
     use super::{
-        ColdStoreCursorV1, MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence,
-        MaintenanceStoreOutcomeV1, SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry,
+        ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE, MAINTENANCE_STORE_PAGE_LIMIT,
+        MaintenanceCadence, MaintenanceContinuation, MaintenanceStoreOutcomeV1,
+        MaintenanceTickOutcome, SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry,
         TableGrowthObservation, checkpoint_path, classify_cold_store_state, compare_table_growth,
         cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
-        select_store_window,
+        run_maintenance_loop, select_store_window,
     };
 
     #[test]
@@ -1436,13 +1629,144 @@ mod tests {
 
         assert!(cadence.reserve(started));
         assert!(!cadence.reserve(started));
-        assert_eq!(cadence.finish(started, false), Duration::from_mins(1));
+        assert_eq!(
+            cadence.finish(started, MaintenanceTickOutcome::Retry),
+            started + Duration::from_mins(1)
+        );
         assert!(!cadence.reserve(started + Duration::from_secs(59)));
         let retried = started + Duration::from_mins(1);
         assert!(cadence.reserve(retried));
-        assert_eq!(cadence.finish(retried, true), Duration::from_mins(1));
+        assert_eq!(
+            cadence.finish(retried, MaintenanceTickOutcome::Complete),
+            retried + Duration::from_mins(1)
+        );
         assert!(!cadence.reserve(retried + Duration::from_secs(59)));
         assert!(cadence.reserve(retried + Duration::from_mins(1)));
+    }
+
+    #[test]
+    fn retry_outcome_takes_precedence_over_bounded_progress() {
+        let progress =
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention);
+
+        assert_eq!(
+            progress.combine(MaintenanceTickOutcome::Retry),
+            MaintenanceTickOutcome::Retry
+        );
+        assert_eq!(
+            MaintenanceTickOutcome::Retry.combine(progress),
+            MaintenanceTickOutcome::Retry
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
+        let cancellation = tracedecay_usecases::context::CancellationToken::new();
+        let wake = Arc::new(Notify::new());
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let baseline = MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst);
+        let task_cancellation = cancellation.clone();
+        let task_wake = Arc::clone(&wake);
+        let task_ticks = Arc::clone(&ticks);
+        let task = tokio::spawn(async move {
+            run_maintenance_loop(
+                &task_cancellation,
+                &task_wake,
+                Duration::from_mins(10),
+                move |_| {
+                    let ticks = Arc::clone(&task_ticks);
+                    async move {
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                        MaintenanceTickOutcome::Complete
+                    }
+                },
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst),
+            baseline + 1,
+            "the loop lifecycle must become observable while the task is live"
+        );
+
+        for _ in 0..3 {
+            wake.notify_one();
+            tokio::task::yield_now().await;
+            assert_eq!(ticks.load(Ordering::SeqCst), 0);
+        }
+        tokio::time::advance(Duration::from_secs(59)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(ticks.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            1,
+            "the original absolute deadline must run exactly once despite early wakes"
+        );
+
+        cancellation.cancel();
+        task.await
+            .expect("maintenance loop joins after cancellation");
+        assert_eq!(
+            MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst),
+            baseline,
+            "cancellation must drop the lifecycle guard and clear the active gauge"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_continuation_reenters_only_the_owning_phase() {
+        let cancellation = tracedecay_usecases::context::CancellationToken::new();
+        let wake = Arc::new(Notify::new());
+        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let task_cancellation = cancellation.clone();
+        let task_wake = Arc::clone(&wake);
+        let task_phases = Arc::clone(&phases);
+        let task = tokio::spawn(async move {
+            run_maintenance_loop(
+                &task_cancellation,
+                &task_wake,
+                Duration::from_mins(10),
+                move |continuation| {
+                    let phases = Arc::clone(&task_phases);
+                    async move {
+                        let mut phases = phases
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        phases.push(continuation);
+                        if phases.len() == 1 {
+                            MaintenanceTickOutcome::Continue(
+                                MaintenanceContinuation::SemanticVectorRetention,
+                            )
+                        } else {
+                            MaintenanceTickOutcome::Complete
+                        }
+                    }
+                },
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_mins(1)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_mins(1)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            *phases
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![None, Some(MaintenanceContinuation::SemanticVectorRetention)],
+            "bounded progress must resume its semantic-vector phase instead of a full tick"
+        );
+
+        cancellation.cancel();
+        task.await
+            .expect("maintenance loop joins after cancellation");
     }
 
     fn store_keys(count: usize) -> Vec<String> {

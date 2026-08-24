@@ -37,6 +37,9 @@ pub use runtime::{
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
     StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult, open_primitive_project_runtime,
 };
+pub use support::{
+    AffectedTestTraversal, RankedAffectedTest, affected_test_proximity, rank_affected_tests,
+};
 pub use symbol_graph::{
     CanonicalSymbolGraphAdapter, SymbolGraphCursorFuture, SymbolGraphCursorPort,
     SymbolGraphPageClaim,

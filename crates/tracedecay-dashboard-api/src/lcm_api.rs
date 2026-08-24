@@ -391,15 +391,17 @@ pub async fn overview(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
-    lcm_read(
-        &state,
-        control.map(|Extension(control)| control),
-        DashboardLcmReadRequestV1::Overview {
-            query: params.q,
-            limit: params.limit.unwrap_or(25).clamp(1, 200),
-        },
-    )
-    .await
+    hotpath::measure_block!("dashboard.lcm.overview", {
+        lcm_read(
+            &state,
+            control.map(|Extension(control)| control),
+            DashboardLcmReadRequestV1::Overview {
+                query: params.q,
+                limit: params.limit.unwrap_or(25).clamp(1, 200),
+            },
+        )
+        .await
+    })
 }
 
 #[derive(Deserialize)]
@@ -426,29 +428,31 @@ pub async fn search(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>> {
-    let since = match parse_optional_i64(&params.since) {
-        Ok(since) => since,
-        Err(()) => return invalid_lcm_request(&state),
-    };
-    let until = match parse_optional_i64(&params.until) {
-        Ok(until) => until,
-        Err(()) => return invalid_lcm_request(&state),
-    };
-    lcm_read(
-        &state,
-        control.map(|Extension(control)| control),
-        DashboardLcmReadRequestV1::Search {
-            query: params.q,
-            limit: params.limit.unwrap_or(50).clamp(1, 500),
-            cursor: params.cursor,
-            role: trimmed_nonempty(params.role),
-            source: trimmed_nonempty(params.source),
-            session_id: trimmed_nonempty(params.session_id),
-            since,
-            until,
-        },
-    )
-    .await
+    hotpath::measure_block!("dashboard.lcm.search", {
+        let since = match parse_optional_i64(&params.since) {
+            Ok(since) => since,
+            Err(()) => return invalid_lcm_request(&state),
+        };
+        let until = match parse_optional_i64(&params.until) {
+            Ok(until) => until,
+            Err(()) => return invalid_lcm_request(&state),
+        };
+        lcm_read(
+            &state,
+            control.map(|Extension(control)| control),
+            DashboardLcmReadRequestV1::Search {
+                query: params.q,
+                limit: params.limit.unwrap_or(50).clamp(1, 500),
+                cursor: params.cursor,
+                role: trimmed_nonempty(params.role),
+                source: trimmed_nonempty(params.source),
+                session_id: trimmed_nonempty(params.session_id),
+                since,
+                until,
+            },
+        )
+        .await
+    })
 }
 
 #[derive(Deserialize)]
@@ -464,16 +468,18 @@ pub async fn session(
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
-    lcm_read(
-        &state,
-        control.map(|Extension(control)| control),
-        DashboardLcmReadRequestV1::Session {
-            session_id,
-            limit: params.limit.unwrap_or(100).clamp(1, 500),
-            cursor: params.cursor,
-        },
-    )
-    .await
+    hotpath::measure_block!("dashboard.lcm.session", {
+        lcm_read(
+            &state,
+            control.map(|Extension(control)| control),
+            DashboardLcmReadRequestV1::Session {
+                session_id,
+                limit: params.limit.unwrap_or(100).clamp(1, 500),
+                cursor: params.cursor,
+            },
+        )
+        .await
+    })
 }
 #[derive(Deserialize)]
 pub struct TimelineParams {
@@ -490,21 +496,23 @@ pub async fn timeline(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
-    let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
-        "" | "day" => DashboardLcmTimelineBucketV1::Day,
-        "hour" => DashboardLcmTimelineBucketV1::Hour,
-        _ => return invalid_lcm_request(&state),
-    };
-    lcm_read(
-        &state,
-        control.map(|Extension(control)| control),
-        DashboardLcmReadRequestV1::Timeline {
-            bucket,
-            session_id: trimmed_nonempty(params.session_id),
-            limit: params.limit.unwrap_or(400).clamp(1, 2_000),
-        },
-    )
-    .await
+    hotpath::measure_block!("dashboard.lcm.timeline", {
+        let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
+            "" | "day" => DashboardLcmTimelineBucketV1::Day,
+            "hour" => DashboardLcmTimelineBucketV1::Hour,
+            _ => return invalid_lcm_request(&state),
+        };
+        lcm_read(
+            &state,
+            control.map(|Extension(control)| control),
+            DashboardLcmReadRequestV1::Timeline {
+                bucket,
+                session_id: trimmed_nonempty(params.session_id),
+                limit: params.limit.unwrap_or(400).clamp(1, 2_000),
+            },
+        )
+        .await
+    })
 }
 
 async fn lcm_read<T>(

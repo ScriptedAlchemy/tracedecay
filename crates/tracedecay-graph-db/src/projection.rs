@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 use crate::limits::{
     MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,
@@ -404,7 +405,7 @@ impl GraphWriteBatch {
         encoded.map_err(|error| {
             GraphDbError::invalid(format!("failed to canonicalize graph batch: {error}"))
         })?;
-        Ok(hex::encode(digest.finalize()))
+        Ok(encode_lowercase_hex(&digest.finalize()))
     }
 }
 

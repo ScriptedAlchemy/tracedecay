@@ -398,9 +398,18 @@ fn run_codex_protocol(
         &mut stdin,
         &json!({"method": "turn/start", "id": 2, "params": turn_params}),
     )?;
-    drop(stdin);
 
-    let mut summary = wait_for_turn_summary(line_rx, deadline, thread_id)?;
+    // `stdin` stays open for the whole turn. `codex app-server` treats stdin
+    // EOF as a client disconnect and shuts the session down immediately —
+    // measured at 70ms after close, exit status 0, with the in-flight turn
+    // cancelled and no `turn/completed` ever emitted. Closing it here to mean
+    // "no further requests" therefore killed every automation run before the
+    // model answered, and the caller only ever observed the resulting stdout
+    // EOF as "closed stdout before completing". The handle is dropped when
+    // this function returns, which is after the turn has been read.
+    let summary = wait_for_turn_summary(line_rx, deadline, thread_id);
+    drop(stdin);
+    let mut summary = summary?;
     if summary.model.is_none() {
         summary.model = thread_model;
     }

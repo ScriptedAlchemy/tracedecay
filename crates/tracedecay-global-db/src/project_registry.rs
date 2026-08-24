@@ -21,10 +21,8 @@ mod tests;
 // ---------------------------------------------------------------------------
 //
 // `plan_registry_reap` below is the only producer of these values, so the
-// contract lives beside its producer rather than in the composition root that
-// merely prints it. Moving it down is what keeps this crate from needing an
-// upward `crate::project_registry::…` edge; the root re-exports these names
-// through its `tracedecay_global_db::*` shim.
+// contract lives beside its producer. The root re-exports these names through
+// its `tracedecay_global_db::*` shim.
 
 /// Prefix marking a `project_aliases` row that keys a repository's git common
 /// directory rather than a checkout path.
@@ -39,7 +37,7 @@ pub enum ReapEntryKind {
     SavingsLedgerPath,
     /// A `project_aliases` row keyed by a filesystem path.
     ProjectAlias,
-    /// A `code_projects` row: the V2 canonical identity authority.
+    /// A `code_projects` row: the canonical identity authority.
     CodeProject,
 }
 
@@ -201,7 +199,7 @@ impl ProjectIdentityAliasKind {
 /// the alias row the registry retained under the old path's canonical form.
 /// Resolving the deepest existing ancestor keeps old-path lookups aligned with
 /// the keys written while the path existed, so a moved project stays
-/// resolvable by its former root (Plan 16: moves preserve identity).
+/// resolvable by its former root.
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
     tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(project_path)
 }

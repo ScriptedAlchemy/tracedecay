@@ -263,7 +263,7 @@ struct FileGenerationArtifactsV1 {
 enum IncrementFileMaterializationV1 {
     CarryForward(FileGenerationArtifactsV1),
     ReExtracted {
-        file: SanitizedCodeFileV1,
+        reuse_key: ManifestDigest,
         artifact: FileGenerationArtifactsV1,
         fallback: bool,
     },
@@ -288,26 +288,53 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 /// tradeoff for having no barrier. Cancellation still short-circuits, because
 /// every per-file closure checkpoints the execution control first and
 /// returns immediately once the reconcile is cancelled.
+///
+/// Per-unit work parses arbitrary user source, so a panic in one unit is
+/// contained here and converted into that unit's typed
+/// [`crate::parallelism::CodeIndexParallelismErrorV1::WorkerPanic`]. Letting
+/// it unwind out of the pool instead aborted the whole fan-out and surfaced in
+/// the daemon only as an opaque `JoinError`, so a single malformed file took
+/// down every other file's work in the same generation.
+#[hotpath::measure]
 fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
 where
     T: Sync,
     R: Send,
-    E: Send,
-    F: Fn(&T) -> Result<R, E> + Sync,
+    E: From<crate::parallelism::CodeIndexParallelismErrorV1> + Send,
+    F: Fn(&T, &crate::hotpath_observe::WorkerBusyGuard) -> Result<R, E> + Sync,
 {
+    let queue = crate::hotpath_observe::PendingWorkQueue::new(items.len());
+    crate::hotpath_observe::record_files(items.len());
     // Always enter the indexing pool, even when the width is 1: the pool is
     // what keeps the nested chunk-level fan-out inside the reservation
     // instead of spilling onto rayon's global (all-cores) pool.
     crate::parallelism::install(|| {
+        let run = |(index, item): (usize, &T)| -> Result<R, E> {
+            crate::parallelism::with_background_cpu_permit(|| {
+                let worker = queue.start_worker();
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(item, &worker)))
+                    .unwrap_or_else(|payload| {
+                        Err(E::from(
+                            crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+                                index, &*payload,
+                            ),
+                        ))
+                    })
+            })
+        };
         if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
-            return items.iter().map(&operation).collect();
+            return items.iter().enumerate().map(&run).collect();
         }
+        // Collecting every unit's result before short-circuiting keeps the
+        // reported failure the lowest-index one, panic or not.
         let results: Vec<Result<R, E>> = items
             .par_iter()
-            .map(&operation)
+            .enumerate()
+            .map(&run)
             .collect::<Vec<Result<R, E>>>();
         results.into_iter().collect()
     })
+    .map_err(E::from)?
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -332,23 +359,46 @@ pub struct SharedPhysicalCodeArtifactPoolV1 {
     state: Arc<Mutex<PhysicalCodeArtifactPoolStateV1>>,
 }
 
+#[hotpath::measure]
+fn clone_arc_under_lock<S, T>(
+    state: &Mutex<S>,
+    select: impl FnOnce(&S) -> Option<Arc<T>>,
+) -> Option<Arc<T>> {
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    select(&state)
+}
+
 impl SharedPhysicalCodeArtifactPoolV1 {
+    #[hotpath::measure]
     fn reuse(
         &self,
         key: &ManifestDigest,
         file: &ReceiptBoundCodeFileV1,
+        worker: &crate::hotpath_observe::WorkerBusyGuard,
     ) -> Option<FileGenerationArtifactsV1> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let artifact = state.artifacts.get(key)?.clone();
+        let artifact = {
+            let _coordination = worker.pool_coordination();
+            clone_arc_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
+        }?;
         let rebound = artifact.rematerialize_for_file(file).ok()?;
-        state.reused = state.reused.saturating_add(1);
+        {
+            let _coordination = worker.pool_coordination();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.reused = state.reused.saturating_add(1);
+        }
         Some(rebound)
     }
 
-    fn insert(&self, key: ManifestDigest, artifact: FileGenerationArtifactsV1) {
+    /// Record one artifact under its physical reuse key. The artifact is
+    /// cloned only when the key is actually admitted, so re-recording an
+    /// already-pooled key (every warm rebuild) costs a lock, not a deep copy.
+    #[hotpath::measure]
+    fn insert(&self, key: ManifestDigest, artifact: &FileGenerationArtifactsV1) {
         let mut state = self
             .state
             .lock()
@@ -363,7 +413,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
             state.artifacts.remove(&evicted);
         }
         state.insertion_order.push_back(key.clone());
-        state.artifacts.insert(key, Arc::new(artifact));
+        state.artifacts.insert(key, Arc::new(artifact.clone()));
         state.inserted = state.inserted.saturating_add(1);
     }
 
@@ -380,6 +430,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
 }
 
 impl FileGenerationArtifactsV1 {
+    #[hotpath::measure]
     fn rematerialize_for_file(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -444,6 +495,11 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// evidence digest are a pure function of the immutable generation. Only
     /// success is cached.
     attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
+    /// Amortized chunk policy-revision census. Owner-compatibility dispatch
+    /// needs the one policy revision the chunks were sealed under; scanning
+    /// every chunk on each `active_generation` call re-derived a value that is
+    /// a pure function of the immutable generation.
+    chunk_policy: OnceLock<ChunkPolicyRevisionSummaryV1>,
     /// Reclaimable code-graph publication manifest. Concurrent seat retries
     /// share a complete build while a publication caller owns it, but the
     /// generation does not pin the full entity/relation projection after the
@@ -460,6 +516,16 @@ struct CodeGraphManifestMemoV1 {
     projection: GraphProjectionIdentity,
     projector_revision: GraphProjectorRevision,
     manifest: Weak<GraphGenerationManifest>,
+}
+
+/// The chunk policy-revision census of one immutable generation: no chunks at
+/// all, one uniform revision, or disagreeing revisions (which no owner
+/// configuration can ever be compatible with).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChunkPolicyRevisionSummaryV1 {
+    Empty,
+    Uniform(PolicyRevisionId),
+    Mixed,
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -545,6 +611,26 @@ impl CodeIndexPublishedGenerationV1 {
                 Err(poisoned) => poisoned.into_inner(),
             };
             admitted.strong_count() > 0
+        })
+    }
+
+    /// The chunk policy-revision census, computed once per in-memory
+    /// generation. Chunks are immutable after construction, so the census is
+    /// a pure function of the generation and owner-compatibility checks
+    /// reduce to one comparison instead of an O(chunks) scan per call.
+    fn chunk_policy_summary(&self) -> &ChunkPolicyRevisionSummaryV1 {
+        self.chunk_policy.get_or_init(|| {
+            let mut chunks = self.chunks.chunks().iter();
+            let Some(first) = chunks.next() else {
+                return ChunkPolicyRevisionSummaryV1::Empty;
+            };
+            if chunks
+                .any(|chunk| chunk.sensitivity.policy_revision != first.sensitivity.policy_revision)
+            {
+                ChunkPolicyRevisionSummaryV1::Mixed
+            } else {
+                ChunkPolicyRevisionSummaryV1::Uniform(first.sensitivity.policy_revision.clone())
+            }
         })
     }
 
@@ -901,7 +987,7 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|candidate| (&candidate.file_occurrence_id, candidate))
             .collect::<HashMap<_, _>>();
-        collect_bounded_ordered(&files, |file| {
+        collect_bounded_ordered(&files, |file, _worker| {
             file.artifacts
                 .validate()
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
@@ -1045,6 +1131,8 @@ pub enum CodeIndexProductionErrorV1 {
     Publication(#[from] CodeIndexPublicationStoreErrorV1),
     #[error("code-index contract failed: {0}")]
     Contract(String),
+    #[error("code-index parallel worker runtime failed: {0}")]
+    Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
 }
 
 /// Production owner for one repository and one atomic publication authority.
@@ -1106,6 +1194,7 @@ where
     /// the foreign generation is never adopted, never config-checked, and the
     /// refusal is a reset journey, not a transient error to retry on a
     /// cadence.
+    #[hotpath::measure]
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -1134,11 +1223,13 @@ where
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
                 || active.manifest.privacy_key_epoch != self.config.privacy_key_epoch
-                || active
-                    .chunks
-                    .chunks()
-                    .iter()
-                    .any(|chunk| chunk.sensitivity.policy_revision != self.config.policy_revision)
+                || match active.chunk_policy_summary() {
+                    ChunkPolicyRevisionSummaryV1::Empty => false,
+                    ChunkPolicyRevisionSummaryV1::Uniform(revision) => {
+                        *revision != self.config.policy_revision
+                    }
+                    ChunkPolicyRevisionSummaryV1::Mixed => true,
+                }
             {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "active generation is incompatible with the production owner configuration"
@@ -1152,11 +1243,15 @@ where
     /// Build one complete generation and atomically publish it only after
     /// intake, parser evidence, lineage, exact admission, projection receipt,
     /// and capability validation have all succeeded.
+    #[hotpath::measure]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
+        let started = crate::hotpath_observe::start_ttfq();
+        crate::hotpath_observe::record_generation_state("building");
+        crate::hotpath_observe::record_rebuild_state("unknown");
         Self::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
@@ -1173,6 +1268,16 @@ where
             .map_err(CodeIndexProductionErrorV1::Intake)?;
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
+        #[cfg(feature = "hotpath")]
+        {
+            crate::hotpath_observe::record_files(captured_files.len());
+            crate::hotpath_observe::record_source_bytes(
+                captured_files
+                    .values()
+                    .map(|file| file.sanitized_bytes.len() as u64)
+                    .fold(0_u64, u64::saturating_add),
+            );
+        }
         Self::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
@@ -1238,6 +1343,16 @@ where
             self.config.chunker_revision.clone(),
             parser_registry,
         );
+        crate::hotpath_observe::record_rebuild_state(match increment.as_ref() {
+            Some(plan) if plan.is_full_rebuild() => "rebuild",
+            Some(_) => "increment",
+            None => "full",
+        });
+        crate::hotpath_observe::record_generation_state(if active.is_some() {
+            "resume"
+        } else {
+            "initial"
+        });
         let staged = match (active.as_ref(), increment.as_ref()) {
             (Some(active), Some(increment)) => self.materialize_increment(
                 &intake,
@@ -1312,9 +1427,17 @@ where
             validated: OnceLock::new(),
             admitted: OnceLock::new(),
             attribution: OnceLock::new(),
+            chunk_policy: OnceLock::new(),
             graph_manifest: OnceLock::new(),
         };
         candidate.validate()?;
+        #[cfg(feature = "hotpath")]
+        if let Ok(statistics) = candidate.generation_statistics() {
+            crate::hotpath_observe::record_source_bytes(statistics.source_total_bytes);
+            crate::hotpath_observe::record_symbols(statistics.symbol_count);
+            crate::hotpath_observe::record_relations(statistics.edge_count);
+            crate::hotpath_observe::record_files(candidate.files.len());
+        }
 
         let expected = active
             .as_ref()
@@ -1324,6 +1447,8 @@ where
         let candidate = Arc::new(candidate);
         self.publication
             .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))?;
+        crate::hotpath_observe::record_generation_state("queryable");
+        crate::hotpath_observe::record_ttfq(started);
         Ok(candidate)
     }
 
@@ -1367,7 +1492,12 @@ where
         }
     }
 
+    /// Extract one file's generation artifacts, returning the physical reuse
+    /// key alongside them: callers record artifacts into the pool in canonical
+    /// snapshot order after the parallel sweep, and the key binds the same
+    /// inputs either way, so recomputing it per recording was pure waste.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     fn extract_file(
         config: &CodeIndexProductionConfigV1,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
@@ -1381,8 +1511,8 @@ where
         file: &SanitizedCodeFileV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
-        record_physical_artifact: bool,
-    ) -> Result<FileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
+        worker: &crate::hotpath_observe::WorkerBusyGuard,
+    ) -> Result<(ManifestDigest, FileGenerationArtifactsV1), CodeIndexProductionErrorV1> {
         Self::checkpoint(control)?;
         let captured = captured_files
             .get(&file.file_occurrence_id)
@@ -1411,9 +1541,11 @@ where
         })?;
         let physical_reuse_key =
             Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-        if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound) {
+        if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound, worker)
+        {
+            crate::hotpath_observe::add_reused_parses(1);
             Self::checkpoint(control)?;
-            return Ok(reused);
+            return Ok((physical_reuse_key, reused));
         }
         let snapshot = &capability.snapshot().snapshot;
         let parser = extractor
@@ -1497,12 +1629,10 @@ where
             artifacts,
             exact_authority,
         };
-        if record_physical_artifact {
-            physical_artifacts.insert(physical_reuse_key, artifact.clone());
-        }
-        Ok(artifact)
+        Ok((physical_reuse_key, artifact))
     }
 
+    #[hotpath::measure]
     fn physical_reuse_key(
         config: &CodeIndexProductionConfigV1,
         file: &SanitizedCodeFileV1,
@@ -1526,34 +1656,8 @@ where
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
     }
 
-    fn record_physical_artifact(
-        config: &CodeIndexProductionConfigV1,
-        physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
-        intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
-        file: &SanitizedCodeFileV1,
-        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
-        artifact: &FileGenerationArtifactsV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        let captured = captured_files
-            .get(&file.file_occurrence_id)
-            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
-        let language = file.language.as_ref().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "present snapshot file has no declared language".to_owned(),
-            )
-        })?;
-        let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "validated snapshot language has no descriptor".to_owned(),
-            )
-        })?;
-        let physical_reuse_key =
-            Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-        physical_artifacts.insert(physical_reuse_key, artifact.clone());
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     fn materialize_full(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -1574,7 +1678,7 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let files = collect_bounded_ordered(&present_files, |file| {
+        let extracted = collect_bounded_ordered(&present_files, |file, worker| {
             Self::extract_file(
                 config,
                 physical_artifacts,
@@ -1588,28 +1692,24 @@ where
                 file,
                 captured_files,
                 control,
-                false,
+                worker,
             )
         })?;
         // Parallel completion order is intentionally not cache authority.
         // Record artifacts in canonical snapshot order so bounded eviction and
         // subsequent physical reuse remain deterministic.
-        for (file, artifact) in present_files.into_iter().zip(&files) {
+        let mut files = Vec::with_capacity(extracted.len());
+        for (reuse_key, artifact) in extracted {
             Self::checkpoint(control)?;
-            Self::record_physical_artifact(
-                config,
-                physical_artifacts,
-                intake,
-                file,
-                captured_files,
-                artifact,
-            )?;
+            physical_artifacts.insert(reuse_key, &artifact);
+            files.push(artifact);
         }
         Self::checkpoint(control)?;
         staged_generation(manifest.generation_id.clone(), files, Vec::new())
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure]
     fn materialize_increment(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -1645,7 +1745,9 @@ where
         let retained_parses = &self.retained_parses;
         let file_materializations = collect_bounded_ordered(
             &increment.files,
-            |file_plan| -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
+            |file_plan,
+             worker|
+             -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
                 Self::checkpoint(control)?;
                 match &file_plan.action {
                     FileExtractionActionV1::CarryForward {
@@ -1683,13 +1785,14 @@ where
                             )
                             .map_err(CodeIndexProductionErrorV1::Intake)?;
                         if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
+                            crate::hotpath_observe::add_reused_parses(1);
                             Ok(IncrementFileMaterializationV1::CarryForward(artifact))
                         } else {
                             // Opaque exact evidence may refuse generation-local
                             // occurrence rebinding. Re-extract through the parser
                             // authority instead of rewriting that evidence.
                             let file = current_file;
-                            let artifact = Self::extract_file(
+                            let (reuse_key, artifact) = Self::extract_file(
                                 config,
                                 physical_artifacts,
                                 retained_parses,
@@ -1702,17 +1805,17 @@ where
                                 file,
                                 captured_files,
                                 control,
-                                false,
+                                worker,
                             )?;
                             Ok(IncrementFileMaterializationV1::ReExtracted {
-                                file: (**file).clone(),
+                                reuse_key,
                                 artifact,
                                 fallback: true,
                             })
                         }
                     }
                     FileExtractionActionV1::ReExtract { file } => {
-                        let artifact = Self::extract_file(
+                        let (reuse_key, artifact) = Self::extract_file(
                             config,
                             physical_artifacts,
                             retained_parses,
@@ -1725,10 +1828,10 @@ where
                             file,
                             captured_files,
                             control,
-                            false,
+                            worker,
                         )?;
                         Ok(IncrementFileMaterializationV1::ReExtracted {
-                            file: file.clone(),
+                            reuse_key,
                             artifact,
                             fallback: false,
                         })
@@ -1750,18 +1853,11 @@ where
             match materialization {
                 IncrementFileMaterializationV1::CarryForward(artifact) => files.push(artifact),
                 IncrementFileMaterializationV1::ReExtracted {
-                    file,
+                    reuse_key,
                     artifact,
                     fallback,
                 } => {
-                    Self::record_physical_artifact(
-                        config,
-                        physical_artifacts,
-                        intake,
-                        &file,
-                        captured_files,
-                        &artifact,
-                    )?;
+                    physical_artifacts.insert(reuse_key, &artifact);
                     used_reextraction_fallback |= fallback;
                     if !fallback {
                         reextracted_files.push(artifact.artifacts.chunks.clone());

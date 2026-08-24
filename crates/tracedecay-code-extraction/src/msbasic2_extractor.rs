@@ -53,12 +53,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -75,10 +80,7 @@ impl ExtractionState {
 }
 
 impl MsBasic2Extractor {
-    /// Extract code graph nodes and edges from an MS BASIC 2.0 source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the BASIC source code to parse.
     pub fn extract_msbasic2(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -107,7 +109,6 @@ impl MsBasic2Extractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -137,7 +138,6 @@ impl MsBasic2Extractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Collect the selected program lines before synthesizing declarations.
         let mut selected_lines = Vec::new();
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             if child.kind() == "line" {
@@ -176,7 +176,6 @@ impl MsBasic2Extractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Collect the program lines selected by the parsed extraction scope.
     fn collect_selected_lines<'tree>(
         state: &ExtractionState,
         tree: &'tree Tree,
@@ -319,7 +318,6 @@ impl MsBasic2Extractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -454,7 +452,6 @@ impl MsBasic2Extractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -464,7 +461,6 @@ impl MsBasic2Extractor {
                         });
                     }
 
-                    // Extract GOSUB/GOTO call sites from the body.
                     for line in &lines[body_start..body_end] {
                         Self::extract_calls_from_line(state, line, &fn_id);
                     }
@@ -506,7 +502,6 @@ impl MsBasic2Extractor {
         let kind = node.kind();
         match kind {
             "gosub_statement" | "goto_statement" => {
-                // Extract the target line number.
                 if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
@@ -521,7 +516,6 @@ impl MsBasic2Extractor {
             }
             _ => {}
         }
-        // Recurse into children.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {

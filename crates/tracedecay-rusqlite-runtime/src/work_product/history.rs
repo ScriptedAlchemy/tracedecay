@@ -15,8 +15,8 @@
 //!    covered prefix (see [`covered_prefix`](super::covered_prefix) for why the
 //!    covered slice is always a prefix) and carries a
 //!    [`WorkGraphSelectionCoverageV1`](tracedecay_application::WorkGraphSelectionCoverageV1)
-//!    naming what lies beyond it. Filtering silently is what the old refusal
-//!    rightly rejected; disclosing the boundary is what makes serving the slice
+//!    naming what lies beyond it. Filtering silently would falsify the
+//!    authorized slice; disclosing the boundary is what makes serving it
 //!    honest. Within that prefix the admitted scopes must still match the
 //!    selection exactly, so an event a narrower selection would have to
 //!    reinterpret is refused rather than reshaped.

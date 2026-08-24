@@ -24,6 +24,7 @@ pub mod git_join;
 pub mod git_projection;
 pub mod graph_projection;
 pub mod grep_search;
+mod hotpath_observe;
 pub mod impact_join;
 pub mod incremental;
 pub mod intake;

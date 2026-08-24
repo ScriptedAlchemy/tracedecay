@@ -24,15 +24,21 @@ entry). Kimi Code also uses `tracedecay`, embedded inline in
 `.kimi-plugin/plugin.json`. The individual tool names keep their
 `tracedecay_` prefix (they are stable identifiers referenced by skills, docs,
 and analytics), and non-plugin/direct installs still register the server under
-the `tracedecay`
-key (the `mcp__tracedecay__*` namespace). Skills announce themselves as
-`Using tracedecay:<skill-slug>` — the host prefix plus the skill slug, never a
-doubled `tracedecay` — and that single convention is applied to every
-`Announce:` line.
+the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills announce
+themselves as `Using tracedecay:<skill-slug>` — the host prefix plus the
+skill slug, never a doubled `tracedecay` — and that single convention is
+applied to every `Announce:` line.
 
 ## Source Layout
 
 - `skills/`: shared `SKILL.md` workflow instructions.
+- `commands/`: Claude/shared slash-command sources (numbered tool steps).
+- `overlays/cursor/commands/`: independently authored Cursor slash commands
+  (`tracedecay-*`). Install maps them into Cursor's command directory. They are
+  skill-handoff wrappers with Cursor approval notes, not generated copies of
+  `commands/`, and they may differ on purpose (for example Claude
+  `review-diff.md` hands off to `/tracedecay:test-changes` while the Cursor
+  twin hands off to `tracedecay:assessing-impact` and omits the metrics line).
 - `hooks/hooks-claude.json`: Claude Code lifecycle hooks for session, stop,
   and saved-edit admission. They do not route tools or run local follow-up
   work.

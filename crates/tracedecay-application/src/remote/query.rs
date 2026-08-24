@@ -6,8 +6,7 @@
 //! contracts.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, LazyLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,6 +28,7 @@ use super::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_protocol_problem,
 };
+use crate::clock::try_now_micros;
 use crate::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, AuthorityReceipt, Deadline,
     RequestId, ResolvedScope, ResultContractRef,
@@ -38,13 +38,18 @@ pub const REMOTE_QUERY_SCHEMA_REVISION_V1: u16 = 1;
 pub const REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1: &str =
     "use-case.remote.query.exact-observation";
 
+static REMOTE_EXACT_OBSERVATION_QUERY_RESULT_CONTRACT_V1: LazyLock<ResultContractRef> =
+    LazyLock::new(|| {
+        ResultContractRef::new(
+            SchemaId::new("remote.query.exact-observation.result")
+                .expect("static exact observation query schema is canonical"),
+            1,
+        )
+        .expect("static exact observation query result contract is canonical")
+    });
+
 pub fn remote_exact_observation_query_result_contract_v1() -> ResultContractRef {
-    ResultContractRef::new(
-        SchemaId::new("remote.query.exact-observation.result")
-            .expect("static exact observation query schema is canonical"),
-        1,
-    )
-    .expect("static exact observation query result contract is canonical")
+    REMOTE_EXACT_OBSERVATION_QUERY_RESULT_CONTRACT_V1.clone()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -401,13 +406,11 @@ pub struct SystemRemoteQueryClockV1;
 
 impl RemoteQueryClockPortV1 for SystemRemoteQueryClockV1 {
     fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?
-            .as_micros();
-        i64::try_from(micros)
-            .map(UtcMicros)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
+        // Deadlines, authorization stamps, and receipt ordering all read this
+        // port. Saturating a clock that reads before the Unix epoch or past
+        // `i64::MAX` microseconds would report clock failure as deadline or
+        // receipt behaviour, so the failure stays typed.
+        try_now_micros().map_err(|_| RemoteExactObservationQueryErrorV1::ClockUnavailable)
     }
 }
 
@@ -446,6 +449,7 @@ impl RemoteExactObservationQueryServiceV1 {
         }
     }
 
+    #[hotpath::measure]
     pub fn query(
         &self,
         request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
@@ -574,7 +578,7 @@ impl RemoteExactObservationQueryServiceV1 {
         )?;
         validate_query_evidence(&outcome.result)?;
         let ApplicationOutcome::Evidence(packet) = &outcome.result.outcome else {
-            unreachable!("query evidence validation rejects non-evidence outcomes");
+            return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
         };
         if packet.execution.started_at < command.observed_at
             || packet.execution.ended_at > command.effective_deadline.expires_at
@@ -672,7 +676,7 @@ pub(super) fn validate_result_identity(
     expected_request_id: &RequestId,
     expected_scope: &RemoteRepositoryScopeV1,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
-    if contract != &remote_exact_observation_query_result_contract_v1()
+    if contract != &*REMOTE_EXACT_OBSERVATION_QUERY_RESULT_CONTRACT_V1
         || actual_request_id != expected_request_id
         || !resolved_scope_matches(actual_scope, expected_scope)
     {
@@ -888,6 +892,8 @@ pub enum RemoteExactObservationQueryErrorV1 {
     PolicyUnavailable,
     #[error("remote exact observation query authority is unavailable")]
     AuthorityUnavailable,
+    #[error("remote exact observation query authoritative clock is unavailable")]
+    ClockUnavailable,
     #[error("remote exact observation query budget was exceeded")]
     BudgetExceeded,
     #[error("remote exact observation query deadline elapsed")]
@@ -930,6 +936,7 @@ pub(super) fn query_protocol_failure(
         RemoteExactObservationQueryErrorV1::Credential(_)
         | RemoteExactObservationQueryErrorV1::PolicyUnavailable
         | RemoteExactObservationQueryErrorV1::AuthorityUnavailable
+        | RemoteExactObservationQueryErrorV1::ClockUnavailable
         | RemoteExactObservationQueryErrorV1::ReceiptMismatch
         | RemoteExactObservationQueryErrorV1::BudgetExceeded
         | RemoteExactObservationQueryErrorV1::DeadlineElapsed => {

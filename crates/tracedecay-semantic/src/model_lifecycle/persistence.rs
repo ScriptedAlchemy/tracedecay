@@ -181,5 +181,5 @@ fn verify_member_file(path: &Path, length: u64, sha256: &str) -> bool {
         }
         hasher.update(&buffer[..read]);
     }
-    hex::encode(hasher.finalize()) == sha256
+    encode_lowercase_hex(&hasher.finalize()) == sha256
 }

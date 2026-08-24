@@ -152,6 +152,7 @@ impl GraphVectorGenerationStoreV1 {
         .map_err(storage_error)
     }
 
+    #[hotpath::measure]
     pub(super) fn begin_generation_records(
         &self,
         plan: VectorGenerationPlanV1,
@@ -163,6 +164,7 @@ impl GraphVectorGenerationStoreV1 {
             Instant::now() + GRAPH_OPERATION_DEADLINE,
         );
         validate_plan(&plan)?;
+        crate::hotpath_observe::vector_candidates(plan.expected_chunk_ids.len());
         let build_id = VectorGenerationBuildIdV1(
             canonical_sha256(&(VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, &plan))
                 .map_err(storage_error)?,
@@ -420,6 +422,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(publication)
     }
 
+    #[hotpath::measure]
     pub(super) fn cancel_generation_records(
         &self,
         build_id: &VectorGenerationBuildIdV1,
@@ -570,6 +573,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(checkpoint)
     }
 
+    #[hotpath::measure]
     pub(super) fn publish_generation_records(
         &self,
         build_id: &VectorGenerationBuildIdV1,

@@ -52,13 +52,15 @@ pub async fn overview(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphOverviewPayloadV1>>> {
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    graph_response(
-        &state,
-        graph_service::overview_payload(&state, &control).await,
-    )
+    hotpath::measure_block!("dashboard.graph.overview", {
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        graph_response(
+            &state,
+            graph_service::overview_payload(&state, &control).await,
+        )
+    })
 }
 
 /// `GET /api/plugins/graph/search?q=...&limit=50&offset=0`
@@ -67,15 +69,17 @@ pub async fn search(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
-    let limit = coerce_limit(params.limit, 50, 200);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    graph_response(
-        &state,
-        graph_service::search_payload(&state, &control, params.q.trim(), limit, offset).await,
-    )
+    hotpath::measure_block!("dashboard.graph.search", {
+        let limit = coerce_limit(params.limit, 50, 200);
+        let offset = params.offset.unwrap_or(0).max(0);
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        graph_response(
+            &state,
+            graph_service::search_payload(&state, &control, params.q.trim(), limit, offset).await,
+        )
+    })
 }
 
 /// `GET /api/plugins/graph/node/{node_id}`
@@ -84,21 +88,25 @@ pub async fn node(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNodePayloadV1>>> {
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    match graph_service::node_payload(&state, &control, &node_id).await {
-        Ok(read) if read.payload.is_some() => graph_ready(&state, read.payload, read.generation),
-        Ok(read) => Json(
-            DashboardEnvelopeV1::complete_zero_findings(
-                scope_from_state(&state),
-                DashboardCoverageV1::complete(1, "nodes"),
-                None,
-            )
-            .with_version(graph_version(read.generation)),
-        ),
-        Err(error) => graph_read_failed(&state, error),
-    }
+    hotpath::measure_block!("dashboard.graph.node", {
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        match graph_service::node_payload(&state, &control, &node_id).await {
+            Ok(read) if read.payload.is_some() => {
+                graph_ready(&state, read.payload, read.generation)
+            }
+            Ok(read) => Json(
+                DashboardEnvelopeV1::complete_zero_findings(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(1, "nodes"),
+                    None,
+                )
+                .with_version(graph_version(read.generation)),
+            ),
+            Err(error) => graph_read_failed(&state, error),
+        }
+    })
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/neighbors`
@@ -108,22 +116,26 @@ pub async fn neighbors(
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNeighborsPayloadV1>>> {
-    let limit = coerce_limit(params.limit, 50, 200);
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    match graph_service::neighbors_payload(&state, &control, &node_id, limit).await {
-        Ok(read) if read.payload.is_some() => graph_ready(&state, read.payload, read.generation),
-        Ok(read) => Json(
-            DashboardEnvelopeV1::complete_zero_findings(
-                scope_from_state(&state),
-                DashboardCoverageV1::complete(1, "nodes"),
-                None,
-            )
-            .with_version(graph_version(read.generation)),
-        ),
-        Err(error) => graph_read_failed(&state, error),
-    }
+    hotpath::measure_block!("dashboard.graph.neighbors", {
+        let limit = coerce_limit(params.limit, 50, 200);
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        match graph_service::neighbors_payload(&state, &control, &node_id, limit).await {
+            Ok(read) if read.payload.is_some() => {
+                graph_ready(&state, read.payload, read.generation)
+            }
+            Ok(read) => Json(
+                DashboardEnvelopeV1::complete_zero_findings(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(1, "nodes"),
+                    None,
+                )
+                .with_version(graph_version(read.generation)),
+            ),
+            Err(error) => graph_read_failed(&state, error),
+        }
+    })
 }
 
 /// `GET /api/plugins/graph/subgraph?node_id=...&limit_nodes=80&limit_edges=120`
@@ -137,23 +149,25 @@ pub async fn subgraph(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SubgraphParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSubgraphPayloadV1>>> {
-    let node_limit = coerce_limit(params.limit_nodes, 80, 250);
-    let edge_limit = coerce_limit(params.limit_edges, 120, 500);
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    graph_response(
-        &state,
-        graph_service::subgraph_payload(
+    hotpath::measure_block!("dashboard.graph.subgraph", {
+        let node_limit = coerce_limit(params.limit_nodes, 80, 250);
+        let edge_limit = coerce_limit(params.limit_edges, 120, 500);
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        graph_response(
             &state,
-            &control,
-            params.node_id,
-            params.q.trim(),
-            node_limit,
-            edge_limit,
+            graph_service::subgraph_payload(
+                &state,
+                &control,
+                params.node_id,
+                params.q.trim(),
+                node_limit,
+                edge_limit,
+            )
+            .await,
         )
-        .await,
-    )
+    })
 }
 
 /// `GET /api/plugins/graph/path?from=<id>&to=<id>&max_depth=6`
@@ -162,21 +176,23 @@ pub async fn path(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<PathParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphPathPayloadV1>>> {
-    let max_depth = coerce_limit(params.max_depth, 6, 10);
-    let Some(Extension(control)) = control else {
-        return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-    };
-    graph_response(
-        &state,
-        graph_service::path_payload(
+    hotpath::measure_block!("dashboard.graph.path", {
+        let max_depth = coerce_limit(params.max_depth, 6, 10);
+        let Some(Extension(control)) = control else {
+            return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+        };
+        graph_response(
             &state,
-            &control,
-            params.from.trim(),
-            params.to.trim(),
-            max_depth,
+            graph_service::path_payload(
+                &state,
+                &control,
+                params.from.trim(),
+                params.to.trim(),
+                max_depth,
+            )
+            .await,
         )
-        .await,
-    )
+    })
 }
 
 fn graph_response<T>(

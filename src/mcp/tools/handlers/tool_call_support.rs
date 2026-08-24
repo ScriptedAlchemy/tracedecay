@@ -89,7 +89,7 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
     .map(Some)
 }
 
-pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let object = args.as_object().ok_or_else(|| TraceDecayError::Config {
         message: "tracedecay_retrieve arguments must be an object".to_string(),
     })?;
@@ -109,9 +109,22 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
                     "missing required parameter: handle (copy the exact `handle` value from a truncated MCP response envelope)"
                         .to_string(),
             })?;
-    let payload = match retrieve_response_handle(cg.project_root(), handle, current_timestamp())
+    // The stored payload is by definition larger than the response cap, so
+    // loading it back is real disk I/O that must not run inline on the async
+    // dispatch worker.
+    let lookup = {
+        let project_root = cg.project_root().to_path_buf();
+        let handle = handle.to_string();
+        tokio::task::spawn_blocking(move || {
+            retrieve_response_handle(&project_root, &handle, current_timestamp())
+        })
+        .await
+        .map_err(|join_error| TraceDecayError::Config {
+            message: format!("response handle retrieval task failed: {join_error}"),
+        })?
         .map_err(public_retrieve_error)?
-    {
+    };
+    let payload = match lookup {
         ResponseHandleLookup::Found(record) => {
             // Retrieval never truncates: the stored content is by definition
             // larger than the response cap, so neither output path may route

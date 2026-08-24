@@ -544,14 +544,16 @@ fn hash_staging(
 
 #[cfg(unix)]
 fn sync_parent(destination: &Path) -> Result<(), WriterOnlineBackupError> {
-    File::open(
-        destination
-            .parent()
-            .ok_or(WriterOnlineBackupError::DestinationParentUnavailable)?,
-    )
-    .and_then(|parent| parent.sync_all())
-    .map_err(|error| WriterOnlineBackupError::Io(error.to_string()))?;
-    Ok(())
+    hotpath::measure_block!("rusqlite.sync_parent", {
+        File::open(
+            destination
+                .parent()
+                .ok_or(WriterOnlineBackupError::DestinationParentUnavailable)?,
+        )
+        .and_then(|parent| parent.sync_all())
+        .map_err(|error| WriterOnlineBackupError::Io(error.to_string()))?;
+        Ok(())
+    })
 }
 
 #[cfg(not(unix))]

@@ -32,6 +32,7 @@ pub struct QuintExtractor;
 struct ExtractionState {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
+    errors: Vec<String>,
     file_path: String,
     source: Vec<u8>,
     file_node_id: String,
@@ -53,6 +54,7 @@ impl ExtractionState {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            errors: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes().to_vec(),
             file_node_id,
@@ -61,10 +63,12 @@ impl ExtractionState {
         }
     }
 
+    fn node_str(&self, node: TsNode<'_>) -> &str {
+        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    }
+
     fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+        self.node_str(node).to_string()
     }
 }
 
@@ -93,7 +97,7 @@ impl TokenWalker {
         // The `.` operator extends an import path; everything else
         // is a terminator handled below.
         let extends_import =
-            matches!(kind, "identifier") || (kind == "operator" && state.node_text(child) == ".");
+            matches!(kind, "identifier") || (kind == "operator" && state.node_str(child) == ".");
         if !extends_import && let Some((parts, line)) = self.import_collect.take() {
             QuintExtractor::commit_import(state, &parts, line);
         }
@@ -122,7 +126,7 @@ impl TokenWalker {
                 }
             }
             "keyword" => {
-                let text = state.node_text(child);
+                let text = state.node_str(child);
                 if text == "module" {
                     self.pending = Some(PendingKind::Module);
                 } else if text == "import" {
@@ -133,7 +137,7 @@ impl TokenWalker {
             "storage_modifier" => {
                 // `pure` prefixes `def`/`val`; we just keep updating `pending`
                 // until the meaningful storage modifier arrives.
-                if let Some(kind) = quint_storage_kind(&state.node_text(child)) {
+                if let Some(kind) = quint_storage_kind(state.node_str(child)) {
                     self.pending = Some(kind);
                 }
             }
@@ -184,12 +188,13 @@ impl QuintExtractor {
     pub fn extract_quint(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse(source) {
             Ok(tree) => tree,
-            Err(_msg) => {
-                // Parse failed; skip extraction rather than emitting bogus structure.
-                return Self::build_result(
-                    Self::initialize_state(file_path, source),
-                    Instant::now(),
-                );
+            Err(msg) => {
+                // Parse failed; record the error and skip extraction rather
+                // than emitting bogus structure.
+                let start = Instant::now();
+                let mut state = Self::initialize_state(file_path, source);
+                state.errors.push(msg);
+                return Self::build_result(state, start);
             }
         };
         Self::extract_tree(
@@ -273,7 +278,7 @@ impl QuintExtractor {
             nodes: state.nodes,
             edges: state.edges,
             unresolved_refs: Vec::new(),
-            errors: Vec::new(),
+            errors: state.errors,
             duration_ms: start.elapsed().as_millis() as u64,
         }
     }

@@ -288,8 +288,9 @@ pub struct WorkTaskShapeV1 {
     pub band: WorkOrdinalBandV1,
 }
 
-/// Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately
-/// per Plan 06 :84-85; `support_floor` carries the governing floor into the record.
+/// Calibrated sizing. Emitted ONLY when support >= floor. Every field is
+/// named separately (Plan 06); `support_floor` carries the governing floor
+/// into the record.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkCalibratedSizingV1 {

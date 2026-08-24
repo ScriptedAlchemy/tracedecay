@@ -11,8 +11,20 @@ import subprocess
 import sys
 import time
 
+from lib.process_control import terminate
 
-INSPECTOR_VERSION = "0.22.0"
+
+# Default MCP Inspector pin, shared with scripts/mcp-conformance-smoke.sh
+# via scripts/lib/inspector_version — override both through INSPECTOR_VERSION.
+INSPECTOR_VERSION = os.environ.get(
+    "INSPECTOR_VERSION",
+    Path(__file__)
+    .resolve()
+    .with_name("lib")
+    .joinpath("inspector_version")
+    .read_text(encoding="utf-8")
+    .strip(),
+)
 REQUIRED_TOOLS = {
     "tracedecay_search",
     "tracedecay_diagnostics",
@@ -64,19 +76,6 @@ def inspect(
         environment=environment,
         check=check,
     )
-
-
-def terminate(process: subprocess.Popen[bytes] | None) -> None:
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        # SIGKILL cannot be refused; wait without a timeout so a slow reap
-        # here can never mask the real failure being propagated.
-        process.wait()
 
 
 def wait_for_daemon_socket(

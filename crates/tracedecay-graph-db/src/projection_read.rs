@@ -84,6 +84,7 @@ pub struct GraphProjectionLabelPage {
 }
 
 impl GraphDb {
+    #[hotpath::measure(label = "graph_db.projection.read", impl_type = "GraphDb")]
     pub fn read_projection(
         &self,
         request: GraphProjectionReadRequest,
@@ -91,9 +92,15 @@ impl GraphDb {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        read_projection(database, request)
+        let page = read_projection(database, request)?;
+        crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Live,
+        );
+        Ok(page)
     }
 
+    #[hotpath::measure(label = "graph_db.projection.telemetry", impl_type = "GraphDb")]
     pub fn projection_telemetry(
         &self,
         request: GraphProjectionTelemetryRequest,
@@ -101,12 +108,25 @@ impl GraphDb {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        projection_telemetry(database, request)
+        let telemetry = projection_telemetry(database, request)?;
+        if let Some(telemetry) = &telemetry {
+            crate::hotpath_observe::record_counts(
+                usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
+                usize::try_from(telemetry.relation_count).unwrap_or(usize::MAX),
+                0,
+                0,
+            );
+        }
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Live,
+        );
+        Ok(telemetry)
     }
 
     /// Reads one bounded exact-label page from a projection-scoped native
     /// label index. The total counts only entities carrying this exact label;
     /// reference-only nodes in the same projection are excluded.
+    #[hotpath::measure(label = "graph_db.search.label", impl_type = "GraphDb")]
     pub fn projection_entities_by_label(
         &self,
         namespace: &GraphNamespace,
@@ -148,6 +168,10 @@ impl GraphDb {
             entities.push(stored.entity);
         }
         check_cancelled(cancellation.as_ref())?;
+        crate::hotpath_observe::record_counts(entities.len(), 0, 0, 0);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Live,
+        );
         Ok(GraphProjectionLabelPage {
             entities,
             total_entities,
@@ -160,14 +184,22 @@ impl GraphSnapshot {
         &self,
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
-        self.database.read_projection(request)
+        let page = self.database.read_projection(request)?;
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
+        Ok(page)
     }
 
     pub fn projection_telemetry(
         &self,
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
-        self.database.projection_telemetry(request)
+        let telemetry = self.database.projection_telemetry(request)?;
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
+        Ok(telemetry)
     }
 }
 

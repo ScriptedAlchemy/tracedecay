@@ -1,6 +1,4 @@
-//! semantic vector-generation projector.
-//!
-//! This module consumes query fallback's canonical, generation-bound chunks and emits
+//! Consumes query fallback's canonical, generation-bound chunks and emits
 //! Plan 25 projection receipts plus a store-neutral vector-generation handoff.
 //! It owns no scheduler, query path, profile activation, ANN, or quantization.
 
@@ -191,6 +189,7 @@ pub struct PreparedVectorGenerationV1 {
 /// change also embeds content-identical `reused` chunks into the new profile's
 /// generation. Deleted chunks become tombstones; ordinary reused chunks remain
 /// receipt-only so the store can copy their compatible prior vectors.
+#[hotpath::measure]
 pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     admitted_projection: &AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
@@ -432,6 +431,7 @@ pub fn split_projection_request(
     inference_batch_bytes: usize,
 ) -> Result<Vec<ProjectionRequestBatchV1>, SemanticProjectionErrorV1> {
     let unsplit = || {
+        hotpath::gauge!("semantic_projection_batch_count").set(1_usize);
         Ok(vec![ProjectionRequestBatchV1 {
             request: request.clone(),
             canonical_chunks: canonical_chunks.to_vec(),
@@ -570,6 +570,7 @@ pub fn split_projection_request(
             canonical_chunks: batch_chunks,
         });
     }
+    hotpath::gauge!("semantic_projection_batch_count").set(batches.len());
     Ok(batches)
 }
 

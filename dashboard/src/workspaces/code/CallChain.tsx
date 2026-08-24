@@ -1,5 +1,5 @@
 /**
- * PATH — `GET /api/plugins/graph/call-chain` (plan 11b Surface 1).
+ * PATH — `GET /api/plugins/graph/call-chain`.
  *
  * The trace field shows a neighbourhood: everything within two hops of the
  * focus. This answers the different question the field cannot, because the

@@ -242,7 +242,6 @@ fn push_capitalized_sequence(
     }
 
     if words.len() >= 2 {
-        // Capture the remaining phrase.
         results.push((start_index, words.join(" ")));
         // When a verb led the sequence, the substantive entity is the head noun
         // of the remainder ("Avoid Foo Bar" -> "Bar"); expose it so probe can

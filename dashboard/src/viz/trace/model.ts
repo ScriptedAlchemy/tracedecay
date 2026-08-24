@@ -31,6 +31,11 @@
  * depth-2 query, so hop 2 is assembled here — bounded, deduped, and counted.
  */
 import type {
+  GraphEdgeV1,
+  GraphNeighborsPayloadV1,
+  GraphNodeV1,
+} from '../../contracts/generated.ts';
+import type {
   SensoryChannel,
   TraceChannel,
   TraceChannelDirection,
@@ -78,38 +83,14 @@ export const TRACE_BUDGET = Object.freeze({
 
 /* ---- wire shapes -------------------------------------------------------- */
 
-/** One `nodes` row as the neighbors endpoint serves it. */
-export interface NeighborRow {
-  id?: string | null;
-  kind?: string | null;
-  name?: string | null;
-  qualified_name?: string | null;
-  file_path?: string | null;
-  start_line?: number | null;
-  degree?: number | null;
-  edge_line?: number | null;
-  [key: string]: unknown;
-}
+/** Neighbour symbol row as the generated neighbors contract serves it. */
+export type NeighborRow = GraphNodeV1;
 
-/** One `edges` row (`neighborhood_edge_rows`). */
-export interface NeighborEdgeRow {
-  source?: string | null;
-  target?: string | null;
-  kind?: string | null;
-  source_name?: string | null;
-  target_name?: string | null;
-  [key: string]: unknown;
-}
+/** Neighbourhood edge row as the generated neighbors contract serves it. */
+export type NeighborEdgeRow = GraphEdgeV1;
 
-export interface NeighborsPayload {
-  node_id?: string | null;
-  depth?: number | null;
-  limit?: number | null;
-  callers?: NeighborRow[] | null;
-  callees?: NeighborRow[] | null;
-  edges?: NeighborEdgeRow[] | null;
-  edges_by_kind?: Array<{ kind?: string | null; count?: number | null }> | null;
-}
+/** The neighbors payload is the generated contract, not a hand-written mirror. */
+export type NeighborsPayload = GraphNeighborsPayloadV1;
 
 /** The focus symbol, as the Code workspace already holds it. */
 export interface TraceFocus {
@@ -140,8 +121,8 @@ function finite(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function rows(list: NeighborRow[] | null | undefined): NeighborRow[] {
-  return (list ?? []).filter((row): row is NeighborRow => !!row && typeof row.id === 'string');
+function rows(list: readonly NeighborRow[] | null | undefined): NeighborRow[] {
+  return (list ?? []).filter((row) => row.id.length > 0);
 }
 
 /**
@@ -151,7 +132,7 @@ function rows(list: NeighborRow[] | null | undefined): NeighborRow[] {
 function callSites(list: NeighborRow[]): Map<string, { row: NeighborRow; calls: number }> {
   const out = new Map<string, { row: NeighborRow; calls: number }>();
   for (const row of list) {
-    const id = row.id as string;
+    const id = row.id;
     const seen = out.get(id);
     if (seen) seen.calls += 1;
     else out.set(id, { row, calls: 1 });

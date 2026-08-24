@@ -153,14 +153,18 @@ pub async fn dashboard_automation_authority_for_test(
     Ok((authority, writer))
 }
 
-/// Mounts the canonical daemon configuration mutation service for dashboard
-/// integration tests that exercise HTTP writes and pinned-snapshot refresh.
+/// Mounts the canonical daemon configuration mutation service and the same
+/// ProfileSessions worker-settings adapter used by production dashboards.
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
-pub async fn dashboard_configuration_application_runtime_for_test(
+pub async fn dashboard_configuration_authorities_for_test(
     cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
-) -> crate::errors::Result<std::sync::Arc<dyn DashboardApplicationRuntime>> {
-    crate::daemon::dashboard_configuration_runtime_for_test(cg).await
+    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+) -> crate::errors::Result<(
+    std::sync::Arc<dyn DashboardApplicationRuntime>,
+    std::sync::Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>,
+)> {
+    crate::daemon::dashboard_configuration_authorities_for_test(cg, profile_database).await
 }
 
 /// Root-owned graph composition used by dashboard integration tests.
@@ -173,6 +177,7 @@ pub async fn dashboard_configuration_application_runtime_for_test(
 pub struct DashboardGraphTestRuntimeV1 {
     profile_root: std::path::PathBuf,
     profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions_database: crate::global_db::RegisteredGlobalDbLeaseV1,
     registry: std::sync::Arc<
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     >,
@@ -201,9 +206,11 @@ impl DashboardGraphTestRuntimeV1 {
             .await?,
         );
         let profile_database = registry.profile_database().await?;
+        let profile_sessions_database = registry.profile_sessions().await?;
         Ok(Self {
             profile_root,
             profile_database,
+            profile_sessions_database,
             registry,
             _database_scope: database_scope,
         })
@@ -211,6 +218,10 @@ impl DashboardGraphTestRuntimeV1 {
 
     pub fn profile_database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
         self.profile_database.clone()
+    }
+
+    pub fn profile_sessions_database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+        self.profile_sessions_database.clone()
     }
 
     pub async fn project_sessions(

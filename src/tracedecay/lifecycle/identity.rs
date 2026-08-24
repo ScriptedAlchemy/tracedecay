@@ -33,14 +33,16 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
         registry_database: &RegisteredGlobalDb,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_authority(
+        let layout = Self::resolve_store_layout_for_authority(
             project_root,
             open_options,
             Some(registry_database),
             false,
             &MovedStoreAdoption::Never,
         )
-        .await
+        .await?;
+        Self::reject_split_identity_cutover(project_root, open_options, &layout)?;
+        Ok(layout)
     }
 
     /// Resolves the store layout for a project that has never been enrolled,
@@ -360,13 +362,53 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_authority(
+        let layout = Self::resolve_store_layout_for_authority(
             project_root,
             open_options,
             None,
             true,
             &MovedStoreAdoption::Never,
         )
-        .await
+        .await?;
+        Self::reject_split_identity_cutover(project_root, open_options, &layout)?;
+        Ok(layout)
     }
+
+    fn reject_split_identity_cutover(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        selected: &StoreLayout,
+    ) -> Result<()> {
+        let profile_root = open_options.resolved_profile_root()?;
+        let selected_id = selected.identity.project_id.as_deref();
+        let (candidates, _, _) =
+            storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        let Some(legacy) = candidates
+            .into_iter()
+            .find(|layout| layout.graph_db_path.is_file())
+        else {
+            return Ok(());
+        };
+        if !selected.graph_db_path.is_file() {
+            return Ok(());
+        }
+        let selected_id = selected_id.unwrap_or("unknown");
+        let legacy_id = legacy.identity.project_id.as_deref().unwrap_or("unknown");
+        let command = format!(
+            "tracedecay migrate consolidate --project {} --source-project-id {legacy_id} --target-project-id {selected_id}",
+            shell_quote(&project_root.to_string_lossy()),
+        );
+        Err(TraceDecayError::Config {
+            message: format!(
+                "identity cutover conflict for '{}': selected [project_id={selected_id} path='{}']; legacy [project_id={legacy_id} path='{}']; choose one shard and retire the other; run the offline dry-run `{command}` before changing the marker; both shards were preserved and no files changed",
+                project_root.display(),
+                selected.data_root.display(),
+                legacy.data_root.display(),
+            ),
+        })
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

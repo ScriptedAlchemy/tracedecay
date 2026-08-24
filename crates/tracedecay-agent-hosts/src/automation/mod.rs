@@ -8,6 +8,7 @@ mod artifact_refs;
 pub mod artifacts;
 pub mod automatic_facts;
 pub mod backend;
+pub mod backend_identity;
 pub mod config;
 pub mod hermes_skill_bridge;
 pub mod host_receipts;
@@ -22,6 +23,7 @@ pub mod outcomes;
 pub mod run_ledger;
 pub mod runner;
 pub mod scheduler;
+mod scheduler_metrics;
 pub mod session_reflector;
 pub mod skill_frontmatter;
 pub mod skill_materialization;
@@ -39,8 +41,6 @@ pub use lifecycle::{
     NonEmptyAutomaticFactReceipts,
 };
 
-/// Build a [`TraceDecayError::Config`] from any message-like value.
-///
 /// Canonical home for the `config_error` helper duplicated across the
 /// automation module tree; other automation submodules should call this
 /// instead of re-declaring their own copy.

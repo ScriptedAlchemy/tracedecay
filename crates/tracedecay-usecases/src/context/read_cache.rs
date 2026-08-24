@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! Cross-session response cache for `tracedecay_read`.
 //!
 //! Cached entries are keyed by `(project_id, file_path, mode, args_hash)` and
@@ -13,8 +12,10 @@
 //!
 //! The cache lives in the same SQLite database as the code graph.
 
-use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use tracedecay_domain::canonical_json_value;
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
@@ -39,17 +40,13 @@ pub fn args_hash(args: &serde_json::Value) -> Result<String> {
     let canonical = canonical_json_value(args).map_err(|error| TraceDecayError::Config {
         message: format!("cannot canonicalize read cache arguments: {error}"),
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    Ok(hex::encode(hasher.finalize()))
+    Ok(sha256_hex(canonical.as_bytes()))
 }
 
 /// SHA-256 of arbitrary bytes, hex-encoded. Used as the body digest so callers
 /// can detect content changes even when only the cache layer changed.
 pub fn digest_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
+    sha256_hex(bytes)
 }
 
 /// Looks up a cached row. Returns `Some` only when the row exists *and* its
@@ -207,7 +204,6 @@ pub(crate) async fn put_write(db: &Database, write: ReadCacheWrite<'_>) -> Resul
 }
 
 fn unix_seconds() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -216,7 +212,6 @@ fn unix_seconds() -> i64 {
 /// Reads a file's modification time, normalised to nanoseconds since the
 /// UNIX epoch. Used as the freshness key for cache lookups.
 pub fn file_mtime_ns(path: &std::path::Path) -> std::io::Result<i64> {
-    use std::time::UNIX_EPOCH;
     let metadata = std::fs::metadata(path)?;
     let mtime = metadata.modified()?;
     let dur = mtime

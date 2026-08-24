@@ -206,7 +206,7 @@ def validate_reproducible_generation() -> None:
 
 def validate_consumers() -> None:
     repository = ROOT.parents[2]
-    adapter_path = repository / "benchmarks/runtime/storage_workloads.py"
+    adapter_path = repository / "benchmark_data/runtime/storage_workloads.py"
     specification = importlib.util.spec_from_file_location(
         "storage_runtime_workload_kernel",
         adapter_path,

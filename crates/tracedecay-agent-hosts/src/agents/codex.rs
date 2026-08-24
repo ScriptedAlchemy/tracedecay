@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 //! `OpenAI` Codex CLI agent integration.
 //!
 //! Stages the TraceDecay plugin source for Codex, then drives Codex's own
@@ -55,7 +54,6 @@ mod mcp_registry;
 mod plugin_registry;
 mod retired_entrypoints;
 
-/// `OpenAI` Codex CLI agent.
 pub struct CodexIntegration;
 
 impl AgentIntegration for CodexIntegration {
@@ -537,6 +535,7 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
+#[hotpath::measure(label = "codex_plugin_install")]
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = install_codex_personal_bootstrap(home, tracedecay_bin)?;
     eprintln!(
@@ -558,6 +557,7 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
     Ok(install_dir)
 }
 
+#[hotpath::measure(label = "codex_repo_plugin_install")]
 fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
     install_codex_plugin_bundle(
@@ -733,6 +733,7 @@ pub fn export_codex_plugin_artifact(
     )
 }
 
+#[hotpath::measure(label = "codex_plugin_bundle_write")]
 fn write_codex_plugin_bundle_base(
     install_dir: &Path,
     tracedecay_bin: &str,
@@ -885,8 +886,6 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
     },
 ];
 
-/// Subcommands from older bundles that uninstall must also strip even though
-/// the current bundle no longer registers them.
 const CODEX_DEFAULT_MARKETPLACE_NAME: &str = "personal";
 const CODEX_GLOBAL_PLUGIN_SOURCE_PATH: &str = "./.codex/plugins/tracedecay";
 const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
@@ -1035,13 +1034,6 @@ fn codex_command_hook_hash_with(
     })
 }
 
-/// Derive the ordered trust records for a rendered Codex `hooks.json` value.
-///
-/// Iterates events -> groups -> handlers exactly as Codex indexes them, so the
-/// group/handler positions in each `trust_key` match what Codex records. The
-/// per-handler `timeout` is normalized the way Codex does (default 600, clamped
-/// to a minimum of 1) and `async` defaults to false, so the hash matches the
-/// TUI's `/hooks` approval regardless of whether those keys are present on disk.
 fn codex_plugin_hook_trust_prefix(marketplace_name: &str) -> String {
     format!("tracedecay@{marketplace_name}:hooks/hooks.json:")
 }
@@ -1051,6 +1043,13 @@ fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Result<Vec<CodexHookTr
     codex_hook_trust_entries_for_marketplace(hooks, CODEX_DEFAULT_MARKETPLACE_NAME)
 }
 
+/// Derive the ordered trust records for a rendered Codex `hooks.json` value.
+///
+/// Iterates events -> groups -> handlers exactly as Codex indexes them, so the
+/// group/handler positions in each `trust_key` match what Codex records. The
+/// per-handler `timeout` is normalized the way Codex does (default 600, clamped
+/// to a minimum of 1) and `async` defaults to false, so the hash matches the
+/// TUI's `/hooks` approval regardless of whether those keys are present on disk.
 fn codex_hook_trust_entries_for_marketplace(
     hooks: &serde_json::Value,
     marketplace_name: &str,
@@ -2228,8 +2227,6 @@ fn doctor_check_plugin_dir(
     }
 }
 
-/// Check hooks.json registers the tracedecay lifecycle hooks, and report Codex
-/// hook trust state from the user-level config.
 fn doctor_check_hooks(
     dc: &mut DoctorCounters,
     hooks_path: &Path,

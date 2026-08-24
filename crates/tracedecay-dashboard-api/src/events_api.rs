@@ -1,7 +1,7 @@
 //! `GET /api/events` — the dashboard's typed Server-Sent Events stream.
 //!
-//! The dashboard frontend replaces polling with one revision-monotone SSE path (plan
-//! 11 §"Finalized implementation architecture" → SSE module). Every event
+//! The dashboard frontend replaces polling with one revision-monotone SSE path.
+//! Every event
 //! carries stream/run identity, a monotone event revision, an entity revision,
 //! exact scope, observation time, an optional source watermark, and coverage.
 //! The client reducer deduplicates by `(stream, event_revision)`, rejects stale
@@ -71,7 +71,7 @@ use crate::application::event_lane::{
 };
 
 /// Poll cadence for the source pollers and heartbeat. Kept modest so a settled
-/// dashboard coalesces to well under the plan's render budget.
+/// dashboard coalesces to well under the client's render budget.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Transport-level keep-alive comment cadence.
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -486,20 +486,23 @@ impl EventStreamState {
         state: &DashboardState,
         scope: &DashboardScopeV1,
     ) -> Vec<DashboardEventV1> {
-        let mut events = Vec::new();
-        if let Some(snapshot) = registry_snapshot(state).await {
-            self.registry_roots = snapshot.roots;
-            if let Some(event) = self.detect_registry_change(snapshot.digest, snapshot.count, scope)
+        hotpath::measure_block!("dashboard.events.poll", {
+            let mut events = Vec::new();
+            if let Some(snapshot) = registry_snapshot(state).await {
+                self.registry_roots = snapshot.roots;
+                if let Some(event) =
+                    self.detect_registry_change(snapshot.digest, snapshot.count, scope)
+                {
+                    events.push(event);
+                }
+            }
+            if let Some(total) = summed_store_bytes(state).await
+                && let Some(event) = self.detect_storage_change(total, scope)
             {
                 events.push(event);
             }
-        }
-        if let Some(total) = summed_store_bytes(state).await
-            && let Some(event) = self.detect_storage_change(total, scope)
-        {
-            events.push(event);
-        }
-        events
+            events
+        })
     }
 }
 
@@ -690,26 +693,28 @@ async fn send_event(
     connection_ref: Option<&str>,
     mut event: DashboardEventV1,
 ) -> Result<(), ()> {
-    if let Some(connection_ref) = connection_ref
-        && !delivery_settlements
-            .attach_receipt(&mut event, connection_ref)
-            .await
-    {
-        return Ok(());
-    }
-    let receipt = event.delivery_receipt.clone();
-    let frame = match encode_event(&event) {
-        Ok(frame) => frame,
-        Err(_) => {
-            if let Some(receipt) = receipt.as_deref() {
-                delivery_settlements
-                    .drop_receipt(receipt, tracedecay_domain::DeliveryDropReasonV1::Invalid)
-                    .await;
-            }
-            return Err(());
+    hotpath::measure_block!("dashboard.events.delivery", {
+        if let Some(connection_ref) = connection_ref
+            && !delivery_settlements
+                .attach_receipt(&mut event, connection_ref)
+                .await
+        {
+            return Ok(());
         }
-    };
-    tx.send(Ok(frame)).await.map_err(|_| ())
+        let receipt = event.delivery_receipt.clone();
+        let frame = match encode_event(&event) {
+            Ok(frame) => frame,
+            Err(_) => {
+                if let Some(receipt) = receipt.as_deref() {
+                    delivery_settlements
+                        .drop_receipt(receipt, tracedecay_domain::DeliveryDropReasonV1::Invalid)
+                        .await;
+                }
+                return Err(());
+            }
+        };
+        tx.send(Ok(frame)).await.map_err(|_| ())
+    })
 }
 
 #[derive(Clone)]
@@ -791,17 +796,14 @@ fn accumulate_record(
         family: record.pulse.family,
         project_root: record.pulse.project_root.clone(),
     };
-    if let Some(bucket) = pending.get_mut(&key) {
-        bucket.absorb_record(record);
-        return;
-    }
     pending.entry(key).or_default().absorb_record(record);
 }
 
 /// Serialize one typed event into an SSE frame, named by its stream so the
 /// client can route by `event:` without parsing the payload first.
 fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
-    let data = serde_json::to_string(event)?;
+    let data = hotpath::measure_block!("dashboard.http.serialize", serde_json::to_string(event))?;
+    crate::observe::record_response_bytes(data.len());
     let frame = Event::default().event(event.kind.stream()).data(data);
     let resume_sequence = match &event.kind {
         DashboardEventKindV1::ResumeGap {
@@ -832,9 +834,17 @@ async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
     count.hash(&mut hasher);
     let mut roots = HashMap::with_capacity(projects.len());
     for project in &projects {
-        // Hash a stable identity for each project row. `Debug` is deterministic
-        // for the record and avoids depending on a specific public accessor.
-        format!("{project:?}").hash(&mut hasher);
+        // Hash every identity field of the record directly: allocation-free,
+        // and immune to `Debug` formatting changes firing a spurious
+        // `project_registry_changed` at every connected client.
+        project.project_id.hash(&mut hasher);
+        project.canonical_root.hash(&mut hasher);
+        project.display_root.hash(&mut hasher);
+        project.git_common_dir.hash(&mut hasher);
+        project.git_remote_url.hash(&mut hasher);
+        project.default_branch.hash(&mut hasher);
+        project.created_at.hash(&mut hasher);
+        project.last_seen_at.hash(&mut hasher);
         roots.insert(
             PathBuf::from(&project.canonical_root),
             project.project_id.clone(),
@@ -961,6 +971,7 @@ pub(crate) async fn dashboard_state_fixture(
         dashboard_root,
         retention_config: crate::config::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
+        profile_code_index_worker_settings: None,
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
@@ -1420,7 +1431,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
         let registry = registered_database_for_test(&project.path().join("registry.db")).await;
         dash.savings_db_path = registry.db_path().display().to_string();

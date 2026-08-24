@@ -29,6 +29,7 @@ use crate::{
 mod native_contract;
 
 impl GraphDb {
+    #[hotpath::measure(label = "graph_db.generation.stage.batch", impl_type = "GraphDb")]
     pub(crate) fn apply_staged_generation_batch(
         &self,
         plan: &SemanticVectorStagePlan,
@@ -68,7 +69,11 @@ impl GraphDb {
             .to_owned();
         let idempotency_key = batch_idempotency_key(&receipt.key)?;
 
-        let _snapshot_gate = self.inner.snapshot_gate.write();
+        crate::hotpath_observe::record_counts(batch.mutations.len(), 0, 0, 0);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Staged,
+        );
+        let _snapshot_gate = self.wait_snapshot_gate_write();
         self.require_staged_generation_writable(&locator)?;
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -313,10 +318,8 @@ impl GraphDb {
         plan: &SemanticVectorStagePlan,
     ) -> Result<(), GraphDbError> {
         let locator = generation_locator(plan)?;
-        let _snapshot_gate = self.inner.snapshot_gate.write();
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let mut state = self.wait_verified_generations_write()?;
         if state.collected.contains(&locator) || state.retiring.contains(&locator) {
             return Ok(());
         }
@@ -332,9 +335,7 @@ impl GraphDb {
         plan: &SemanticVectorStagePlan,
     ) -> Result<(), GraphDbError> {
         let locator = generation_locator(plan)?;
-        let mut state = self.inner.verified_generations.write().map_err(|_| {
-            GraphDbError::unavailable("verified graph generation state lock is poisoned")
-        })?;
+        let mut state = self.wait_verified_generations_write()?;
         state.retiring.remove(&locator);
         Ok(())
     }

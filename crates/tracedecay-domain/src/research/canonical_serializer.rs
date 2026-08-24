@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::ops::Range;
+
 use serde::Serialize;
 
 use super::canonical::{CanonicalError, CanonicalResult, SERDE_JSON_PRIVATE_TOKEN_PREFIX};
@@ -388,7 +391,10 @@ impl<S: CanonicalSink> serde::ser::SerializeTupleVariant for SeqWriter<'_, S> {
 /// object rather than of the whole document.
 struct ObjectWriter<'sink, S: CanonicalSink> {
     sink: &'sink mut S,
-    entries: Vec<(String, String)>,
+    /// Rendered entry values laid end to end; entries index into this one
+    /// buffer so a field costs no owned `String` of its own.
+    values: String,
+    entries: Vec<(Cow<'static, str>, Range<usize>)>,
     pending_key: Option<String>,
     /// Written before the first entry (empty when the caller already opened
     /// the brace, as struct variants do).
@@ -400,6 +406,7 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
     fn new(sink: &'sink mut S, len: usize, open: &'static str, close: &'static str) -> Self {
         Self {
             sink,
+            values: String::with_capacity(len.saturating_mul(32)),
             entries: Vec::with_capacity(len),
             pending_key: None,
             open,
@@ -407,13 +414,15 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
         }
     }
 
-    fn push_entry<T>(&mut self, key: String, value: &T) -> CanonicalResult
+    fn push_entry<T>(&mut self, key: Cow<'static, str>, value: &T) -> CanonicalResult
     where
         T: ?Sized + Serialize,
     {
-        let mut buffer = String::new();
-        value.serialize(CanonicalSerializer { sink: &mut buffer })?;
-        self.entries.push((key, buffer));
+        let start = self.values.len();
+        value.serialize(CanonicalSerializer {
+            sink: &mut self.values,
+        })?;
+        self.entries.push((key, start..self.values.len()));
         Ok(())
     }
 
@@ -440,10 +449,10 @@ impl<'sink, S: CanonicalSink> ObjectWriter<'sink, S> {
                 self.sink.write(",");
             }
             wrote_entry = true;
-            let (key, value) = &self.entries[index];
+            let (key, range) = &self.entries[index];
             write_json_string(key, self.sink);
             self.sink.write(":");
-            self.sink.write(value);
+            self.sink.write(&self.values[range.clone()]);
         }
         self.sink.write(self.close);
         Ok(())
@@ -469,7 +478,7 @@ impl<S: CanonicalSink> serde::ser::SerializeMap for ObjectWriter<'_, S> {
         let key = self.pending_key.take().ok_or_else(|| {
             serde::ser::Error::custom("serialize_value called before serialize_key")
         })?;
-        self.push_entry(key, value)
+        self.push_entry(Cow::Owned(key), value)
     }
 
     fn end(self) -> CanonicalResult {
@@ -485,7 +494,7 @@ impl<S: CanonicalSink> serde::ser::SerializeStructVariant for ObjectWriter<'_, S
     where
         T: ?Sized + Serialize,
     {
-        self.push_entry(key.to_owned(), value)
+        self.push_entry(Cow::Borrowed(key), value)
     }
 
     fn end(self) -> CanonicalResult {
@@ -511,7 +520,7 @@ impl<S: CanonicalSink> serde::ser::SerializeStruct for StructWriter<'_, S> {
         T: ?Sized + Serialize,
     {
         match self {
-            Self::Object(object) => object.push_entry(key.to_owned(), value),
+            Self::Object(object) => object.push_entry(Cow::Borrowed(key), value),
             Self::Delegated { inner, .. } => {
                 serde::ser::SerializeStruct::serialize_field(inner, key, value)
             }

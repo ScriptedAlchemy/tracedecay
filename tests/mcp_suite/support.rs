@@ -8,6 +8,7 @@ use serde_json::Value;
 #[cfg(feature = "test-transport")]
 use serde_json::json;
 use std::ffi::OsString;
+#[cfg(feature = "test-transport")]
 use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -726,20 +727,7 @@ impl Drop for HomeEnvGuard {
     }
 }
 
-pub(crate) fn canonicalize_test_dir(path: &Path) -> PathBuf {
-    fs::create_dir_all(path).unwrap_or_else(|err| {
-        panic!(
-            "failed to create test directory '{}': {err}",
-            path.display()
-        )
-    });
-    path.canonicalize().unwrap_or_else(|err| {
-        panic!(
-            "failed to canonicalize test directory '{}': {err}",
-            path.display()
-        )
-    })
-}
+pub(crate) use crate::common::canonicalize_test_dir;
 
 pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path
@@ -938,6 +926,23 @@ pub(crate) fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
+/// As [`extract_json`], but taking the whole [`ToolResult`] rather than its
+/// inner value, and reporting the envelope on failure.
+///
+/// Tests that hold a `ToolResult` (rather than a already-unwrapped `Value`)
+/// would otherwise each re-implement this two-step unwrap.
+///
+/// Both current call sites (`workflow_query_test.rs`, `git_correlation_test.rs`)
+/// are file-level `#![cfg(feature = "test-transport")]` modules, so without
+/// this same gate the helper is genuinely dead code outside that feature.
+#[cfg(feature = "test-transport")]
+pub(crate) fn extract_tool_result_json(result: &ToolResult) -> Value {
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("tool result should carry text content: {}", result.value));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result should be JSON: {e}\n{text}"))
+}
+
 /// The first content item that parses as JSON.
 ///
 /// The server prepends advisory text blocks (fallback-branch and staleness
@@ -1044,7 +1049,6 @@ pub(crate) async fn seed_project_registry(
     runtime
 }
 
-// ---------------------------------------------------------------------------
 pub(crate) fn tool_properties<'a>(
     tools: &'a [tracedecay::mcp::ToolDefinition],
     name: &str,
@@ -1080,53 +1084,17 @@ pub(crate) async fn seed_lcm_session_message_for_provider(
     text: impl Into<String>,
     ordinal: i64,
 ) {
-    let runtime = open_active_project_session_db(cg).await;
-    assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &SessionRecord {
-                    provider: provider.to_string(),
-                    session_id: session_id.to_string(),
-                    project_key: cg.project_root().to_string_lossy().to_string(),
-                    project_path: cg.project_root().to_string_lossy().to_string(),
-                    title: Some(format!("LCM session {session_id}")),
-                    started_at: Some(ordinal),
-                    ended_at: None,
-                    transcript_path: Some(format!("{session_id}.jsonl")),
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                }
-            )
-            .await
-            .unwrap()
-    );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &SessionMessageRecord {
-                    provider: provider.to_string(),
-                    message_id: message_id.to_string(),
-                    session_id: session_id.to_string(),
-                    role: "assistant".to_string(),
-                    timestamp: Some(ordinal + 1),
-                    ordinal,
-                    text: text.into(),
-                    kind: Some("message".to_string()),
-                    model: Some("test-model".to_string()),
-                    tool_names: None,
-                    source_path: Some(format!("{session_id}.jsonl")),
-                    source_offset: Some(0),
-                    metadata_json: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
+    seed_lcm_message_with_role(
+        cg,
+        provider,
+        session_id,
+        message_id,
+        text,
+        ordinal,
+        "assistant",
+        "message",
+    )
+    .await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -1137,6 +1105,31 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
     message_id: &str,
     text: impl Into<String>,
     ordinal: i64,
+) {
+    seed_lcm_message_with_role(
+        cg,
+        provider,
+        session_id,
+        message_id,
+        text,
+        ordinal,
+        "tool",
+        "tool_result",
+    )
+    .await;
+}
+
+#[cfg(feature = "test-transport")]
+#[allow(clippy::too_many_arguments)]
+async fn seed_lcm_message_with_role(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    role: &str,
+    kind: &str,
 ) {
     let runtime = open_active_project_session_db(cg).await;
     assert!(
@@ -1170,11 +1163,11 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
                     provider: provider.to_string(),
                     message_id: message_id.to_string(),
                     session_id: session_id.to_string(),
-                    role: "tool".to_string(),
+                    role: role.to_string(),
                     timestamp: Some(ordinal + 1),
                     ordinal,
                     text: text.into(),
-                    kind: Some("tool_result".to_string()),
+                    kind: Some(kind.to_string()),
                     model: Some("test-model".to_string()),
                     tool_names: None,
                     source_path: Some(format!("{session_id}.jsonl")),

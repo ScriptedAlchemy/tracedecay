@@ -8,6 +8,7 @@ mod locator;
 mod pool;
 mod worker;
 
+pub use crate::telemetry::ReaderAdmissionSnapshot;
 pub use locator::{ExistingReaderLocator, ReaderStartError};
 pub use pool::{
     ReaderAcquireError, ReaderLease, ReaderPool, ReaderPoolSnapshot, ReaderPoolState, SnapshotLease,

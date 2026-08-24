@@ -24,6 +24,7 @@ use crate::exact_sql::{
     ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, MemoryReleaseNoOpReason,
     MemoryReleaseOutcome,
 };
+use crate::telemetry::{ReaderAdmissionRecorder, ReaderAdmissionSnapshot};
 
 mod lease;
 mod outcome;
@@ -228,6 +229,10 @@ impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
         }
     }
 
+    const fn was_counted(&self) -> bool {
+        self.counted
+    }
+
     fn arm(&mut self, state: &mut PoolState) {
         if !self.counted {
             self.counted = true;
@@ -263,6 +268,7 @@ pub(super) struct PoolInner<E: ReaderQueryExecutor> {
     checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
     pub(super) state: Mutex<PoolState>,
     pub(super) capacity_changed: Condvar,
+    pub(super) admission: Arc<ReaderAdmissionRecorder>,
 }
 
 impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
@@ -361,6 +367,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 snapshot_admissions: 0,
             }),
             capacity_changed: Condvar::new(),
+            admission: Arc::new(ReaderAdmissionRecorder::default()),
         });
         let pool = Self { inner };
         for _ in 0..pool.inner.budget.min_per_hot_shard {
@@ -533,6 +540,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             waiting_health: state.waiting_health,
             snapshot_admissions: state.snapshot_admissions,
         }
+    }
+
+    pub fn telemetry_snapshot(&self) -> ReaderAdmissionSnapshot {
+        self.inner.admission.snapshot()
     }
 
     fn record_snapshot_admission(&self) {
@@ -708,6 +719,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.acquire(request, probe, ACQUISITION_POLL_QUANTUM)
     }
 
+    #[hotpath::measure]
     fn acquire_lane<F>(
         &self,
         admission: LaneAdmission,
@@ -730,6 +742,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
         loop {
             if let Some(reason) = interrupted() {
+                self.inner.admission.interrupted();
                 return Err(ReaderAcquireError::Interrupted { reason });
             }
             if std::mem::take(&mut retire_pending) {
@@ -743,6 +756,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             if state.lifecycle == ReaderPoolState::Draining
                 && (lane == ReaderLane::General || !state.health_admission_open)
             {
+                self.inner.admission.interrupted();
                 return Err(ReaderAcquireError::Interrupted {
                     reason: UnavailableReasonV1::Draining,
                 });
@@ -758,6 +772,9 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             {
                 let elapsed = started.elapsed();
                 if elapsed >= max_wait {
+                    self.inner
+                        .admission
+                        .saturated(elapsed, waiting.was_counted());
                     return Err(ReaderAcquireError::Saturated {
                         scope: SaturationScopeV1::ReaderPool,
                     });
@@ -788,6 +805,9 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         ReaderLane::ReservedHealth => state.leased_health += 1,
                     }
                     drop(state);
+                    self.inner
+                        .admission
+                        .acquired(started.elapsed(), waiting.was_counted());
                     return Ok(ReaderLease::checkout(Arc::clone(&self.inner), lane, worker));
                 }
                 // The reserved-health lane must be able to grow too. Its single
@@ -807,9 +827,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 {
                     *state.opening_mut(lane) += 1;
                     drop(state);
-                    let spawned =
-                        worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
-                            .and_then(|spawned| self.validate_worker_identity(spawned));
+                    let spawned = worker::spawn(
+                        self.inner.locator.clone(),
+                        self.inner.executor.clone(),
+                        Arc::clone(&self.inner.admission),
+                    )
+                    .and_then(|spawned| self.validate_worker_identity(spawned));
                     let mut state = self
                         .inner
                         .state
@@ -836,12 +859,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         });
                         drop(state);
                         self.inner.capacity_changed.notify_all();
+                        self.inner.admission.interrupted();
                         return Err(ReaderAcquireError::Interrupted {
                             reason: UnavailableReasonV1::Draining,
                         });
                     }
                     *state.leased_mut(lane) += 1;
                     drop(state);
+                    self.inner
+                        .admission
+                        .acquired(started.elapsed(), waiting.was_counted());
                     return Ok(ReaderLease::checkout(
                         Arc::clone(&self.inner),
                         lane,
@@ -855,6 +882,9 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             }
             let elapsed = started.elapsed();
             if elapsed >= max_wait {
+                self.inner
+                    .admission
+                    .saturated(elapsed, waiting.was_counted());
                 return Err(ReaderAcquireError::Saturated {
                     scope: SaturationScopeV1::ReaderPool,
                 });
@@ -911,8 +941,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     }
 
     fn add_idle_worker(&self, lane: ReaderLane) -> Result<(), ReaderStartError> {
-        let spawned = worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
-            .and_then(|spawned| self.validate_worker_identity(spawned))?;
+        let spawned = worker::spawn(
+            self.inner.locator.clone(),
+            self.inner.executor.clone(),
+            Arc::clone(&self.inner.admission),
+        )
+        .and_then(|spawned| self.validate_worker_identity(spawned))?;
         let now = Instant::now();
         let mut state = self
             .inner

@@ -20,9 +20,9 @@ use tracedecay_domain::{
     StackNodeId, UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_usecases::stack_coordinator::*;
 
 use super::{actor, digest};
-use tracedecay_usecases::stack_coordinator::*;
 
 fn oid(seed: char) -> GitOidV1 {
     GitOidV1::new(seed.to_string().repeat(40)).unwrap()

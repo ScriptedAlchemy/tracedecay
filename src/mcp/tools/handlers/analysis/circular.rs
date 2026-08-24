@@ -28,7 +28,6 @@ struct BoundedCycle {
     omitted_member_count: usize,
 }
 
-/// Handles `tracedecay_circular` tool calls.
 pub(crate) async fn handle_circular(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

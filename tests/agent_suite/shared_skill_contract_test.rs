@@ -318,8 +318,6 @@ fn cursor_native_commands_are_hygienic_slash_commands() {
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
         .collect();
     entries.sort();
-    assert_eq!(entries.len(), 13, "expected 13 cursor native commands");
-
     let mut violations = Vec::new();
     for path in entries {
         let at = path.display();

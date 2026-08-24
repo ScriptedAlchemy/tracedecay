@@ -425,6 +425,7 @@ impl StdioLspClient {
     /// Sends one standard semantic request and returns its standard JSON
     /// result after matching the JSON-RPC correlation id. Notifications and
     /// stale responses from a cancelled request are deliberately ignored.
+    #[hotpath::measure(label = "lsp_analyzer_semantic_request", impl_type = "StdioLspClient")]
     pub async fn semantic_request(
         &mut self,
         request: LspSemanticRequest,
@@ -449,10 +450,16 @@ impl StdioLspClient {
             }
             LspSemanticRequest::Hover(params) => self.hover(params, cancellation, timeouts).await,
             LspSemanticRequest::DocumentSymbols(params) => {
-                self.document_symbols(params, cancellation, timeouts).await
+                // Boxed: with profiling enabled this arm's future is the
+                // largest in the dispatch and inflates every sibling arm,
+                // since a match future is as large as its widest branch.
+                Box::pin(self.document_symbols(params, cancellation, timeouts)).await
             }
             LspSemanticRequest::WorkspaceSymbols(params) => {
-                self.workspace_symbols(params, cancellation, timeouts).await
+                // Boxed: with profiling enabled this arm's future is the
+                // largest in the dispatch and inflates every sibling arm,
+                // since a match future is as large as its widest branch.
+                Box::pin(self.workspace_symbols(params, cancellation, timeouts)).await
             }
             LspSemanticRequest::PrepareCallHierarchy(params) => {
                 self.prepare_call_hierarchy(params, cancellation, timeouts)
@@ -545,6 +552,7 @@ impl StdioLspClient {
             .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_document_symbols", impl_type = "StdioLspClient")]
     pub async fn document_symbols(
         &mut self,
         params: DocumentSymbolParams,
@@ -555,6 +563,7 @@ impl StdioLspClient {
             .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_workspace_symbols", impl_type = "StdioLspClient")]
     pub async fn workspace_symbols(
         &mut self,
         params: WorkspaceSymbolParams,
@@ -645,6 +654,7 @@ impl StdioLspClient {
             .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_request_json", impl_type = "StdioLspClient")]
     async fn request_json<R>(
         &mut self,
         params: R::Params,
@@ -660,6 +670,7 @@ impl StdioLspClient {
         })
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_request", impl_type = "StdioLspClient")]
     async fn request<R>(
         &mut self,
         params: R::Params,
@@ -748,6 +759,7 @@ impl StdioLspClient {
         .await
     }
 
+    #[hotpath::measure(label = "lsp_analyzer_client_refresh", impl_type = "StdioLspClient")]
     pub async fn collect_document_diagnostics(
         &mut self,
         project_root: &Path,
@@ -756,11 +768,10 @@ impl StdioLspClient {
     ) -> Result<Vec<CodeDiagnostic>> {
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
-        for document in &documents {
+        for document in documents {
             let uri = file_uri(&project_root.join(&document.relative_path));
-            uri_to_document.insert(uri.clone(), document.clone());
-            let next_version = self.document_versions.get(&uri).copied().unwrap_or(0) + 1;
-            if next_version == 1 {
+            let current_version = self.document_versions.get(&uri).copied().unwrap_or(0);
+            let version = if current_version == 0 {
                 write_message_with_timeout(
                     &mut self.stdin,
                     json!({
@@ -770,7 +781,7 @@ impl StdioLspClient {
                             "textDocument": {
                                 "uri": uri,
                                 "languageId": document.language_id,
-                                "version": next_version,
+                                "version": 1,
                                 "text": document.text,
                             }
                         }
@@ -778,28 +789,32 @@ impl StdioLspClient {
                     timeouts.message_io,
                 )
                 .await?;
-            }
-            let change_version = next_version + 1;
-            write_message_with_timeout(
-                &mut self.stdin,
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/didChange",
-                    "params": {
-                        "textDocument": {
-                            "uri": uri,
-                            "version": change_version
-                        },
-                        "contentChanges": [{
-                            "text": document.text,
-                        }]
-                    }
-                }),
-                timeouts.message_io,
-            )
-            .await?;
-            self.document_versions.insert(uri.clone(), change_version);
-            expected_versions.insert(uri, change_version);
+                1
+            } else {
+                let version = current_version + 1;
+                write_message_with_timeout(
+                    &mut self.stdin,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didChange",
+                        "params": {
+                            "textDocument": {
+                                "uri": uri,
+                                "version": version
+                            },
+                            "contentChanges": [{
+                                "text": document.text,
+                            }]
+                        }
+                    }),
+                    timeouts.message_io,
+                )
+                .await?;
+                version
+            };
+            self.document_versions.insert(uri.clone(), version);
+            expected_versions.insert(uri.clone(), version);
+            uri_to_document.insert(uri, document);
         }
 
         if uri_to_document.is_empty() {

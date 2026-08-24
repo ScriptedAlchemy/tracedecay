@@ -60,8 +60,8 @@ impl ProjectSourceAccessSnapshot {
     }
 }
 
-/// Resolves one exact host-source binding using only the current Plan 20
-/// snapshot and the daemon-authenticated request grant.
+/// Resolves one exact host-source binding using only the current
+/// configuration snapshot and the daemon-authenticated request grant.
 ///
 /// Configuration read failures, malformed snapshots, missing or ambiguous
 /// bindings/rules, expired route grants, and denied capabilities all collapse

@@ -189,7 +189,15 @@ describe('buildTraceModel', () => {
   it('survives an empty neighbourhood without inventing one', () => {
     const built = buildTraceModel({
       focus: { id: 'lonely', kind: 'function', name: 'lonely', degree: 0 },
-      root: { node_id: 'lonely', depth: 1, limit: 50, callers: [], callees: [], edges: [] },
+      root: {
+        node_id: 'lonely',
+        depth: 1,
+        limit: 50,
+        callers: [],
+        callees: [],
+        edges: [],
+        edges_by_kind: [],
+      },
       expanded: new Map(),
     });
     expect(built.nodes.map((n) => n.id)).toEqual(['lonely']);

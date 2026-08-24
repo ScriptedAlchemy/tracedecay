@@ -457,29 +457,33 @@ async fn dispatch<O>(
 where
     O: WorkApplicationOwner,
 {
-    let Some(operation) = WorkOperation::parse(&segment) else {
+    let request = match hotpath::measure_block!("api.http.admission", {
         // An operation this build does not mount is concealed the same way an
         // unauthorised one is, so probing a path cannot reveal what exists.
-        return adapter_problem_response(
-            request_id,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        );
+        match WorkOperation::parse(&segment) {
+            None => Err(adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            )),
+            Some(operation) => match body {
+                Ok(Json(body)) => Ok(WorkHttpRequest {
+                    operation,
+                    request_id,
+                    controls,
+                    body,
+                }),
+                Err(_) => Err(invalid_request_response(
+                    request_id,
+                    "work.invalid_body",
+                    "The Work request body is invalid or exceeds the configured limit",
+                )),
+            },
+        }
+    }) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
-    let Ok(Json(body)) = body else {
-        return invalid_request_response(
-            request_id,
-            "work.invalid_body",
-            "The Work request body is invalid or exceeds the configured limit",
-        );
-    };
-    owner
-        .invoke_work(WorkHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        })
-        .await
+    hotpath::measure_block!("api.http.handler", owner.invoke_work(request).await)
 }
 
 /// Refuse a body that does not satisfy the operation's request contract.
@@ -497,7 +501,6 @@ pub fn work_invalid_request_response(request_id: RequestId) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::str::FromStr;
 
     use super::WorkOperation;
@@ -514,17 +517,6 @@ mod tests {
                 "{path}"
             );
         }
-    }
-
-    #[test]
-    fn the_descriptor_lists_each_operation_once() {
-        assert_eq!(
-            WorkOperation::ALL
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .len(),
-            WorkOperation::ALL.len(),
-        );
     }
 
     #[test]

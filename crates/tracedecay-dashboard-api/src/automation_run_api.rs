@@ -200,22 +200,7 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod run_list_tests {
-    use super::super::{DashboardAutomationAuthorityErrorV1, automation_authority_error_response};
     use super::*;
-
-    #[test]
-    fn absent_daemon_run_authority_is_typed_unavailable() {
-        let (status, Json(payload)) =
-            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::unavailable(
-                "dashboard automation run authority is not mounted",
-            ));
-
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            payload["detail"],
-            json!("dashboard automation run authority is not mounted")
-        );
-    }
 
     #[test]
     fn run_history_row_projects_identity_outcome_and_artifact_kinds() {

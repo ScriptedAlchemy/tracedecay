@@ -144,6 +144,7 @@ fn track_project_server_retirement_after_admission(
         _task: task,
         _fence: None,
     });
+    hotpath::gauge!("retirement_pending").set(retirements.len() as f64);
 }
 
 async fn track_project_server_retirement(

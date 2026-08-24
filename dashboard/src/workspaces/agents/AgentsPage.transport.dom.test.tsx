@@ -11,8 +11,8 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import { AgentsPage } from './AgentsPage.tsx';
 
 /**
- * HTTP fault injection for the Agents workspace (plan 11, "MSW covers HTTP/SSE
- * faults"). Every other DOM test on this page hands the component a `fetch`
+ * HTTP fault injection for the Agents workspace. Every other DOM test on this
+ * page hands the component a `fetch`
  * that always succeeds and varies the body; these vary the transport instead,
  * through the same MSW handlers the visual audit resolves its fixtures from.
  *

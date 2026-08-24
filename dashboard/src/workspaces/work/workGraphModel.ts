@@ -15,7 +15,7 @@ import type { WorkChannel } from './workChannel.ts';
  * The work-product graph read: what `operation.work.views` said, reduced to the
  * one graph version the projections' channels are taken from.
  *
- * `WorkGraphReadV1` is the third read behind the four plan 11c Work
+ * `WorkGraphReadV1` is the third read behind the four Work
  * projections. One immutable graph version and the whole
  * `WorkProductProjectionBundleV1` derived from that same version: declared
  * effort and the effort-weighted critical path, the gating edge set, the

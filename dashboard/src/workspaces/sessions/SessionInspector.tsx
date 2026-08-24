@@ -28,14 +28,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
-  assertNever,
   LcmSessionPayloadV1Schema,
   type LcmMessageV1,
   type LcmSessionPayloadV1,
   type LcmSummaryNodeV1,
 } from '../../contracts/generated.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
-import { useScope } from '../../data/scope/store.ts';
+import { scopeKey, useScope } from '../../data/scope/store.ts';
+import { tokenCountLabel } from './tokenLabel.ts';
 import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
@@ -60,12 +60,14 @@ export function SessionInspector({
   sessionId: string;
   onClose: () => void;
 }) {
-  const scopeKey = useScope((state) =>
-    state.scope.kind === 'all' ? 'all' : `project:${state.scope.projectId}`,
-  );
+  // The cache token comes from the authority, never a second construction of
+  // it here — `scopeKey` in `data/scope/store.ts` is what every scoped read
+  // keys by, and a local rewording of it is exactly the drift this re-key
+  // exists to track.
+  const scopeCacheKey = useScope((state) => scopeKey(state.scope));
   return (
     <SessionInspectorPage
-      key={`${scopeKey}:${sessionId}`}
+      key={`${scopeCacheKey}:${sessionId}`}
       sessionId={sessionId}
       onClose={onClose}
     />
@@ -438,7 +440,7 @@ function RawMessages({
 
 function MessageRow({ message }: { message: LcmMessageV1 }) {
   const compacted = message.summary_node_ids.length;
-  const tokenLabel = messageTokenLabel(message);
+  const tokenLabel = tokenCountLabel(message.token_count, message.token_count_provenance);
   return (
     <li
       className="flex flex-col gap-1 border-b border-edge-subtle px-2 py-1.5 last:border-b-0"
@@ -492,19 +494,4 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
       </span>
     </li>
   );
-}
-
-function messageTokenLabel(message: LcmMessageV1): string | null {
-  if (message.token_count == null) return null;
-  switch (message.token_count_provenance) {
-    case 'o200k_approximate':
-      return `~${message.token_count.toLocaleString()} tokens · o200k approximate`;
-    // A count whose provenance the store disclaims is not a measurement to
-    // print. `null` on the wire means the store recorded no provenance at all.
-    case 'unavailable':
-    case null:
-      return null;
-    default:
-      return assertNever(message.token_count_provenance);
-  }
 }

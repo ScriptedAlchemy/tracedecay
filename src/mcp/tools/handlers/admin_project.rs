@@ -177,7 +177,7 @@ pub(super) async fn handle_admin_project(
             let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
                 message: "daemon global database is unavailable".to_string(),
             })?;
-            let tokens_saved = cg.get_tokens_saved().await.unwrap_or(0);
+            let tokens_saved = cg.get_tokens_saved().await?;
             global_db.upsert(cg.project_root(), tokens_saved).await;
             let global_tokens_saved = global_db
                 .global_tokens_saved()

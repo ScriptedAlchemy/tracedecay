@@ -62,6 +62,39 @@ pub(super) fn accounting_project_root<'a>(
     }
 }
 
+/// Bounded snapshot of tool arguments for analytics and post-dispatch policy.
+///
+/// Full argument bodies (which can carry multi-KB edit payloads) are embedded
+/// in analytics events only for skill-view tools; every other consumer of the
+/// snapshot (`mcp/tool_analytics.rs`, `server/live_transcript_refresh.rs`)
+/// reads only the scalar fields listed here, so copying just those preserves
+/// behavior without deep-copying the whole payload per call.
+fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
+    const ANALYTICS_ARGUMENT_KEYS: &[&str] = &[
+        "action",
+        "transcript_projection",
+        "user_scope",
+        "storage_scope",
+        "include_memory",
+        "memory_limit",
+        "memory_min_trust",
+    ];
+
+    if crate::analytics::is_skill_view_tool(tool_name) {
+        return arguments.clone();
+    }
+    let Some(map) = arguments.as_object() else {
+        return arguments.clone();
+    };
+    let mut snapshot = serde_json::Map::new();
+    for key in ANALYTICS_ARGUMENT_KEYS {
+        if let Some(value) = map.get(*key) {
+            snapshot.insert((*key).to_string(), value.clone());
+        }
+    }
+    Value::Object(snapshot)
+}
+
 /// Locks a server-side `std::sync::Mutex`, recovering from poisoning.
 ///
 /// A panic anywhere in a client task poisons every `Mutex` a guard was alive
@@ -252,9 +285,8 @@ impl McpServer {
             .is_some_and(|cancellation| cancellation.cancel(mcp_now_micros()))
     }
 
-    /// Dispatches a parsed JSON-RPC request to the appropriate handler.
-    ///
     /// Returns `None` for notifications (requests without an `id`).
+    #[hotpath::measure]
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
@@ -309,6 +341,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure]
     pub(crate) async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,
@@ -411,6 +444,7 @@ impl McpServer {
         result
     }
 
+    #[hotpath::measure(label = "mcp.hook_event")]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
@@ -547,17 +581,13 @@ impl McpServer {
                 current_branch.as_deref(),
                 admitted.seq,
             );
-            dispatch_server
-                .record_hook_span_observation(&event, &hook_route)
-                .await;
+            dispatch_server.record_hook_span_observation(&event, &hook_route);
         }
         Self::report_host_admission_outcome(outcome);
         outcome
     }
 
-    /// Handles the `initialize` method, returning server capabilities.
-    ///
-    /// Also records the caller's negotiated `clientInfo.name` (e.g.
+    /// Records the caller's negotiated `clientInfo.name` (e.g.
     /// `"claude-code"`, `"codex"`, `"cursor"`) so subsequent `tools/call`
     /// analytics events can attribute per-host adoption instead of every
     /// call recording the same opaque `provider="mcp"`. Only the short
@@ -580,7 +610,7 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
-    /// Handles the `tools/list` method, returning all available tool definitions.
+    #[hotpath::measure]
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
@@ -605,14 +635,23 @@ impl McpServer {
                 );
             }
         };
-        match crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
-            budget,
-            &profile_id,
-            &authority,
-            &project_catalog_discovery_scope(),
-            ToolRegistryMode::HostAvailable,
+        match hotpath::measure_block!(
+            "mcp.tools_list.compose",
+            crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
+                budget,
+                &profile_id,
+                &authority,
+                &project_catalog_discovery_scope(),
+                ToolRegistryMode::HostAvailable,
+            )
         ) {
-            Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+            Ok(tools) => {
+                let payload = hotpath::measure_block!(
+                    "mcp.tools_list.compose_payload",
+                    json!({ "tools": tools })
+                );
+                JsonRpcResponse::success(id, payload)
+            }
             Err(error) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,
@@ -621,12 +660,12 @@ impl McpServer {
         }
     }
 
-    /// Handles the `resources/list` method, returning available resources.
+    #[hotpath::measure(label = "mcp.resources_list")]
     pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
         JsonRpcResponse::success(id, resources_list_result())
     }
 
-    /// Handles the `resources/read` method, returning resource contents.
+    #[hotpath::measure(label = "mcp.resources_read")]
     pub(crate) async fn handle_resources_read(
         &self,
         id: Value,
@@ -780,7 +819,7 @@ impl McpServer {
 
         Ok(PreparedToolCall {
             tool_name: tool_name.to_string(),
-            analytics_arguments: arguments.clone(),
+            analytics_arguments: analytics_arguments_snapshot(tool_name, &arguments),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
             caller_deadline: crate::mcp::tool_call_deadline::caller_tool_call_deadline(Some(
@@ -791,6 +830,7 @@ impl McpServer {
 
     /// Applies the pre-dispatch freshness policy and records the call in the
     /// server counters and the activity lane.
+    #[hotpath::measure(label = "mcp.tools_call.begin_dispatch")]
     async fn begin_tool_dispatch(
         &self,
         tool_name: &str,
@@ -900,10 +940,8 @@ impl McpServer {
         // before minus what this response actually delivered.
         let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
         let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
-        self.persist_saved_tokens(net_saved_tokens).await;
-        crate::monitor::write_entry(
+        self.spawn_token_accounting_persist(
             cg.project_root(),
-            "tracedecay",
             tool_name,
             net_saved_tokens,
             raw_file_tokens,
@@ -1078,6 +1116,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.tools_call.complete")]
     async fn complete_tool_call(
         &self,
         id: Value,
@@ -1263,7 +1302,7 @@ impl McpServer {
         ))
     }
 
-    /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
+    #[hotpath::measure(label = "mcp.tools_call")]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,
@@ -1375,8 +1414,9 @@ impl McpServer {
         // transport teardown reaches the selected worker, while target
         // shutdown still owns and joins its admitted task.
         if let Some(request_id) = target_request_id.as_ref() {
-            recover_lock(dispatch_server.dispatch_authority.cancellations())
-                .insert(request_id.clone(), control.cancellation());
+            dispatch_server
+                .dispatch_authority
+                .register_cancellation(request_id.clone(), control.cancellation());
         }
         let _target_cancellation_registration = ApplicationCancellationRegistration::new(
             dispatch_server.dispatch_authority.cancellations(),

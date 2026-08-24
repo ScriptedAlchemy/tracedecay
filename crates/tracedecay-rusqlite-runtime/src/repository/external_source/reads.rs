@@ -11,7 +11,7 @@ pub(super) fn load_next_pending_projection(
             .map(|projection| projection.source_frontier()),
     );
     let receipt_digest = connection
-        .prepare(
+        .prepare_cached(
             "SELECT source_receipt_digest
              FROM external_source_pending_projections_v1
              WHERE binding_id = ?1 AND predecessor_frontier_digest = ?2",
@@ -46,7 +46,7 @@ pub(super) fn load_next_pending_projection_any(
     connection: &rusqlite::Connection,
 ) -> rusqlite::Result<Option<SourcePendingProjectionV1>> {
     let binding = connection
-        .prepare(
+        .prepare_cached(
             "SELECT revisions.binding_json
              FROM external_source_pending_projections_v1 AS pending
              JOIN external_source_states_v1 AS states
@@ -143,7 +143,7 @@ fn load_encoded_optional<T: serde::de::DeserializeOwned>(
     key: &str,
 ) -> rusqlite::Result<Option<T>> {
     connection
-        .prepare(sql)?
+        .prepare_cached(sql)?
         .query_row(params![binding_id, key], |row| {
             decode(row.get::<_, String>(0)?)
         })

@@ -234,6 +234,7 @@ pub struct FeedbackCycleRuntime {
 
 /// Opens one cycle owner from already-open graph, test, and feedback authorities.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub fn open_feedback_cycle_runtime(
     database: Database,
     feedback: Arc<FeedbackRuntime>,
@@ -317,6 +318,7 @@ impl FeedbackCycleRuntime {
 
     /// Runs exactly one bounded feedback cycle and returns its terminal,
     /// canonical result. It never schedules retries or follow-up work.
+    #[hotpath::measure]
     pub async fn run_once(
         &self,
         invocation: FeedbackCycleInvocation,
@@ -328,12 +330,14 @@ impl FeedbackCycleRuntime {
         let FeedbackCycleInvocation { context, request } = invocation;
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
+        crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
         Ok(self.compose_canonical_result(execution, requested_durability)?)
     }
 
-    /// Runs one canonical Plan 09 cycle with source-backed advisory findings.
+    /// Runs one canonical feedback cycle with source-backed advisory findings.
     /// It reuses this runtime's authorization, diagnostics, impact, and single
     /// durable publication/dedupe path.
+    #[hotpath::measure]
     pub async fn run_once_with_advisory(
         &self,
         context: &RequestContext,
@@ -350,6 +354,7 @@ impl FeedbackCycleRuntime {
             .service
             .execute_with_advisory(context, request, advisory)
             .await?;
+        crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
         self.compose_canonical_result(execution, requested_durability)
     }
 

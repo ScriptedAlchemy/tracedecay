@@ -1,4 +1,4 @@
-//! Store-level orphan detection and collection (plan 38, §2).
+//! Store-level orphan detection and collection.
 //!
 //! The parent module prunes append-only *rows* inside a live store. This
 //! submodule operates one level up: whole profile-sharded store directories
@@ -1465,7 +1465,7 @@ async fn check_store_durable_memory(
 /// It lives under the *profile* root, never inside the store being examined.
 /// Two reasons, both load-bearing: the store is a deletion candidate, and
 /// writing into it bumps the newest mtime that
-/// [`newest_mtime_secs`] uses as the revival fence — a store that failed one
+/// [`walk_store_stats`] uses as the revival fence — a store that failed one
 /// check would have its age reset by the check itself and could never mature
 /// past the retention window again.
 fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
@@ -1607,14 +1607,15 @@ fn is_memory_table_identifier(table: &str) -> bool {
     })
 }
 
-/// Newest mtime under `dir`, unix seconds, or `0` when nothing is readable.
-///
-/// Symlinks are not followed, and are stat'd as links rather than targets.
-/// This walk is the revival fence for a delete: following a symlink would let
-/// a link planted under a store recurse without bound, or make the fence read
-/// an unrelated directory's mtime instead of the payload's.
-fn newest_mtime_secs(dir: &Path) -> i64 {
-    fn walk(path: &Path, newest: &mut i64) {
+struct StoreWalkStats {
+    newest_mtime_secs: i64,
+    size_bytes: u64,
+}
+
+/// One no-follow walk for age and size. Symlinks contribute mtime but are
+/// never followed or billed, matching the prior separate walk policies.
+fn walk_store_stats(dir: &Path) -> StoreWalkStats {
+    fn walk(path: &Path, newest: &mut i64, size: &mut u64) {
         let Ok(entries) = std::fs::read_dir(path) else {
             return;
         };
@@ -1627,28 +1628,38 @@ fn newest_mtime_secs(dir: &Path) -> i64 {
             {
                 *newest = (*newest).max(elapsed.as_secs() as i64);
             }
+            if meta.is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
-                walk(&entry.path(), newest);
+                walk(&entry.path(), newest, size);
+            } else if meta.is_file() {
+                *size = size.saturating_add(meta.len());
             }
         }
     }
     let mut newest = 0i64;
-    walk(dir, &mut newest);
-    newest
+    let mut size = 0u64;
+    walk(dir, &mut newest, &mut size);
+    StoreWalkStats {
+        newest_mtime_secs: newest,
+        size_bytes: size,
+    }
 }
 
-/// Controlled counterpart of [`newest_mtime_secs`]. Every recursive descent
+/// Controlled counterpart of [`walk_store_stats`]. Every recursive descent
 /// checks the maintenance admission before asking the next directory for
 /// entries, so a cancellation cannot turn age accounting into an unbounded
 /// traversal. Ordinary I/O remains best-effort exactly as in the unbounded
 /// census; only the caller-owned interruption is surfaced distinctly.
-pub(crate) fn newest_mtime_secs_controlled(
+fn walk_store_stats_controlled(
     dir: &Path,
     control: CollectionControl<'_>,
-) -> Result<i64, CollectionFailureKind> {
+) -> Result<StoreWalkStats, CollectionFailureKind> {
     fn walk(
         path: &Path,
         newest: &mut i64,
+        size: &mut u64,
         control: CollectionControl<'_>,
     ) -> Result<(), CollectionFailureKind> {
         if control.completion().is_some() {
@@ -1672,16 +1683,32 @@ pub(crate) fn newest_mtime_secs_controlled(
             {
                 *newest = (*newest).max(elapsed.as_secs() as i64);
             }
+            if meta.is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
-                walk(&entry.path(), newest, control)?;
+                walk(&entry.path(), newest, size, control)?;
+            } else if meta.is_file() {
+                *size = size.saturating_add(meta.len());
             }
         }
         Ok(())
     }
 
     let mut newest = 0i64;
-    walk(dir, &mut newest, control)?;
-    Ok(newest)
+    let mut size = 0u64;
+    walk(dir, &mut newest, &mut size, control)?;
+    Ok(StoreWalkStats {
+        newest_mtime_secs: newest,
+        size_bytes: size,
+    })
+}
+
+pub(crate) fn newest_mtime_secs_controlled(
+    dir: &Path,
+    control: CollectionControl<'_>,
+) -> Result<i64, CollectionFailureKind> {
+    walk_store_stats_controlled(dir, control).map(|stats| stats.newest_mtime_secs)
 }
 
 /// Total size in bytes of every file under `dir`. Best-effort: unreadable
@@ -1694,29 +1721,7 @@ pub(crate) fn newest_mtime_secs_controlled(
 /// this one. `file_type` reports the link itself, so the walk stays inside
 /// the directory it was given.
 pub(crate) fn dir_size_bytes(dir: &Path) -> u64 {
-    fn walk(path: &Path, acc: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                walk(&entry.path(), acc);
-            } else if file_type.is_file()
-                && let Ok(meta) = entry.metadata()
-            {
-                *acc = acc.saturating_add(meta.len());
-            }
-        }
-    }
-    let mut total = 0u64;
-    walk(dir, &mut total);
-    total
+    walk_store_stats(dir).size_bytes
 }
 
 /// Controlled counterpart of [`dir_size_bytes`]. It preserves the original
@@ -1726,44 +1731,7 @@ pub(crate) fn dir_size_bytes_controlled(
     dir: &Path,
     control: CollectionControl<'_>,
 ) -> Result<u64, CollectionFailureKind> {
-    fn walk(
-        path: &Path,
-        total: &mut u64,
-        control: CollectionControl<'_>,
-    ) -> Result<(), CollectionFailureKind> {
-        if control.completion().is_some() {
-            return Err(CollectionFailureKind::Cancelled);
-        }
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return Ok(());
-        };
-        for entry in entries {
-            if control.completion().is_some() {
-                return Err(CollectionFailureKind::Cancelled);
-            }
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                walk(&entry.path(), total, control)?;
-            } else if file_type.is_file()
-                && let Ok(meta) = entry.metadata()
-            {
-                *total = total.saturating_add(meta.len());
-            }
-        }
-        Ok(())
-    }
-
-    let mut total = 0u64;
-    walk(dir, &mut total, control)?;
-    Ok(total)
+    walk_store_stats_controlled(dir, control).map(|stats| stats.size_bytes)
 }
 
 /// Build the on-disk store census from the registry. Reads manifests and sizes
@@ -1874,54 +1842,15 @@ async fn build_store_census_for_projects(
                 continue;
             }
             let data_root = profile_root.join(&store.store_relpath);
-            let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
-            let expected_manifest_bytes = match read_regular_file(&manifest_path) {
-                RegularFileSnapshot::Bytes(bytes) => Some(bytes),
-                RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
-            };
-            // A manifest that is absent or will not parse leaves this store's
-            // own record of its project root unknown. Fail closed: record that
-            // it is unverifiable rather than defaulting to "no manifest root",
-            // which reads downstream as a collectable orphan.
-            let parsed_manifest = expected_manifest_bytes
-                .as_deref()
-                .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
-            let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
-            let manifest_root = parsed_manifest
-                .flatten()
-                .map(|manifest| manifest.project_root);
-            let expected_payload_mtime_secs = match control {
-                Some(control) => match newest_mtime_secs_controlled(&data_root, control) {
-                    Ok(mtime) => mtime,
-                    Err(_) => return Ok(None),
-                },
-                None => newest_mtime_secs(&data_root),
-            };
-            let expected_data_root_fence = capture_store_directory_fence(profile_root, &data_root)
-                .unwrap_or(StoreDirectoryFence::Unverifiable);
-            let expected_content_fence = match control {
-                Some(control) => {
-                    match capture_store_content_fence_controlled(profile_root, &data_root, control)
-                    {
-                        Ok(fence) => fence,
-                        Err(CollectionFailureKind::Cancelled) => return Ok(None),
-                        Err(_) => StoreContentFence::Unverifiable,
-                    }
-                }
-                None => capture_store_content_fence(profile_root, &data_root)
-                    .unwrap_or(StoreContentFence::Unverifiable),
+            let cheap = match inspect_store_leaf_cheap(profile_root, &data_root, control).await {
+                Ok(Some(cheap)) => cheap,
+                Ok(None) => return Ok(None),
+                Err(error) => return Err(error),
             };
             let last_write_secs = store
                 .last_write_at
                 .filter(|value| *value > 0)
-                .unwrap_or(expected_payload_mtime_secs);
-            let size_bytes = match control {
-                Some(control) => match dir_size_bytes_controlled(&data_root, control) {
-                    Ok(size) => size,
-                    Err(_) => return Ok(None),
-                },
-                None => dir_size_bytes(&data_root),
-            };
+                .unwrap_or(cheap.expected_payload_mtime_secs);
             census.push(StoreCensusEntry {
                 project_id: project.project_id.clone(),
                 store_id: store.store_id.clone(),
@@ -1930,23 +1859,142 @@ async fn build_store_census_for_projects(
                     .then(|| PathBuf::from(&project.display_root)),
                 git_common_dir: git_common_dir.clone(),
                 alias_roots: alias_roots.clone(),
-                manifest_readable,
+                manifest_readable: cheap.manifest_readable,
                 data_root,
-                manifest_root,
+                manifest_root: cheap.manifest_root,
                 last_write_secs,
-                size_bytes,
+                size_bytes: cheap.size_bytes,
                 expected_store_relpath: store.store_relpath,
                 expected_created_at: store.created_at,
                 expected_last_write_at: store.last_write_at,
-                expected_payload_mtime_secs,
-                expected_data_root_fence,
-                expected_content_fence,
-                expected_manifest_bytes,
+                expected_payload_mtime_secs: cheap.expected_payload_mtime_secs,
+                expected_data_root_fence: cheap.expected_data_root_fence,
+                expected_content_fence: StoreContentFence::Missing,
+                expected_manifest_bytes: cheap.expected_manifest_bytes,
                 graph_scope_relpaths,
             });
         }
     }
+    if attach_lazy_content_fences(&mut census, profile_root, control)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
     Ok(Some(census))
+}
+
+struct CheapStoreInspect {
+    expected_payload_mtime_secs: i64,
+    size_bytes: u64,
+    expected_data_root_fence: StoreDirectoryFence,
+    expected_manifest_bytes: Option<Vec<u8>>,
+    manifest_readable: bool,
+    manifest_root: Option<PathBuf>,
+}
+
+fn inspect_store_leaf_cheap_sync(profile_root: &Path, data_root: &Path) -> CheapStoreInspect {
+    let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+    let expected_manifest_bytes = match read_regular_file(&manifest_path) {
+        RegularFileSnapshot::Bytes(bytes) => Some(bytes),
+        RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
+    };
+    let parsed_manifest = expected_manifest_bytes
+        .as_deref()
+        .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
+    let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
+    let manifest_root = parsed_manifest
+        .flatten()
+        .map(|manifest| manifest.project_root);
+    let stats = walk_store_stats(data_root);
+    let expected_data_root_fence = capture_store_directory_fence(profile_root, data_root)
+        .unwrap_or(StoreDirectoryFence::Unverifiable);
+    CheapStoreInspect {
+        expected_payload_mtime_secs: stats.newest_mtime_secs,
+        size_bytes: stats.size_bytes,
+        expected_data_root_fence,
+        expected_manifest_bytes,
+        manifest_readable,
+        manifest_root,
+    }
+}
+
+async fn inspect_store_leaf_cheap(
+    profile_root: &Path,
+    data_root: &Path,
+    control: Option<CollectionControl<'_>>,
+) -> crate::errors::Result<Option<CheapStoreInspect>> {
+    if let Some(control) = control {
+        if control.completion().is_some() {
+            return Ok(None);
+        }
+        let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+        let expected_manifest_bytes = match read_regular_file(&manifest_path) {
+            RegularFileSnapshot::Bytes(bytes) => Some(bytes),
+            RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
+        };
+        let parsed_manifest = expected_manifest_bytes
+            .as_deref()
+            .map(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok());
+        let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
+        let manifest_root = parsed_manifest
+            .flatten()
+            .map(|manifest| manifest.project_root);
+        let stats = match walk_store_stats_controlled(data_root, control) {
+            Ok(stats) => stats,
+            Err(_) => return Ok(None),
+        };
+        let expected_data_root_fence = capture_store_directory_fence(profile_root, data_root)
+            .unwrap_or(StoreDirectoryFence::Unverifiable);
+        return Ok(Some(CheapStoreInspect {
+            expected_payload_mtime_secs: stats.newest_mtime_secs,
+            size_bytes: stats.size_bytes,
+            expected_data_root_fence,
+            expected_manifest_bytes,
+            manifest_readable,
+            manifest_root,
+        }));
+    }
+    let profile_root = profile_root.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    tokio::task::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
+        .await
+        .map(Some)
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: format!("store census inspect join failed: {error}"),
+        })
+}
+
+async fn attach_lazy_content_fences(
+    census: &mut [StoreCensusEntry],
+    profile_root: &Path,
+    control: Option<CollectionControl<'_>>,
+) -> crate::errors::Result<Option<()>> {
+    for entry in census.iter_mut() {
+        if matches!(classify_one(entry), StoreDisposition::Live) {
+            continue;
+        }
+        if control.is_some_and(|control| control.completion().is_some()) {
+            return Ok(None);
+        }
+        let profile_root = profile_root.to_path_buf();
+        let data_root = entry.data_root.clone();
+        entry.expected_content_fence = if let Some(control) = control {
+            match capture_store_content_fence_controlled(&profile_root, &data_root, control) {
+                Ok(fence) => fence,
+                Err(CollectionFailureKind::Cancelled) => return Ok(None),
+                Err(_) => StoreContentFence::Unverifiable,
+            }
+        } else {
+            tokio::task::spawn_blocking(move || {
+                capture_store_content_fence(&profile_root, &data_root)
+                    .unwrap_or(StoreContentFence::Unverifiable)
+            })
+            .await
+            .unwrap_or(StoreContentFence::Unverifiable)
+        };
+    }
+    Ok(Some(()))
 }
 
 /// The report returned by a sweep: the full classified plan plus, when
@@ -2035,7 +2083,7 @@ pub(crate) async fn sweep_orphan_stores(
     })
 }
 
-// === Unregistered store directories (plan 38 §2, disjoint audit class) =====
+// Unregistered store directories.
 //
 // `build_store_census` walks *from* the registry: for every registered
 // project, for every one of its registered store instances. A store dir with

@@ -453,6 +453,7 @@ fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
 /// Executes one user job through the automation backend, delivering its
 /// output and recording the run in the shared ledger under
 /// `user_job:<job_id>`.
+#[hotpath::measure(label = "automation_run_user_job")]
 pub async fn run_user_job_with_backend(
     dashboard_root: &Path,
     config: &AutomationConfig,
@@ -502,6 +503,8 @@ async fn run_user_job_with_backend_publication(
     ledger_publication: AutomationRunLedgerPublication,
     settlement_guard: Option<&AutomationRunSettlementGuard>,
 ) -> super::AutomationRunResult<UserJobAutomationRun> {
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     validate_job(job)?;
     let UserJobRunOptions {
         trigger,
@@ -681,7 +684,7 @@ async fn run_user_job_with_backend_publication(
     let mut record = ctx.base_record_at(AutomationRunStatus::Succeeded, None, completed_at_micros);
     record.model = response.model.clone();
     record.input_hash = input_hash;
-    record.output_hash = Some(sha256_json(&json!(response.output_text)));
+    record.output_hash = Some(sha256_json(&json!(response.output_text))?);
     record.backend_attempt_count = retry_report.attempt_count();
     record.backend_attempts = retry_report.attempts().to_vec();
     record.validation_report = Some(json!({
@@ -780,6 +783,7 @@ impl JobRunContext<'_> {
             task: AgentTaskKind::UserJob,
             task_key: Some(job_task_key(&self.job.id)),
             backend: self.config.backend.as_str().to_string(),
+            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(
                 super::backend::prompt_version(AgentTaskKind::UserJob).to_string(),

@@ -513,6 +513,17 @@ fn pr_autotrack_round_trips_and_clamps_poll_floor() {
 }
 
 #[test]
+fn parse_env_bool_shares_canonical_truthy_spellings() {
+    for raw in ["1", "true", "TRUE", "yes", "on", " YES "] {
+        assert_eq!(super::parse_env_bool(raw), Some(true), "{raw}");
+    }
+    for raw in ["0", "false", "FALSE"] {
+        assert_eq!(super::parse_env_bool(raw), Some(false), "{raw}");
+    }
+    assert_eq!(super::parse_env_bool("maybe"), None);
+}
+
+#[test]
 fn pr_autotrack_env_overrides() {
     let _lock = lock_user_data_dir_test_env();
     let _enable = EnvRestore::set("TRACEDECAY_SYNC_AUTO_TRACK_PR_BRANCHES", "true");

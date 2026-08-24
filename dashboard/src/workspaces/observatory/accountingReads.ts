@@ -5,7 +5,7 @@ import type {
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 
 /**
- * The two snapshots the V2 accounting panels are allowed to read.
+ * The two snapshots the accounting panels are allowed to read.
  *
  * `ObservatoryPage` owns these requests once and passes this bound pair to all
  * three panels. Keeping the result, freshness, and refresh action together

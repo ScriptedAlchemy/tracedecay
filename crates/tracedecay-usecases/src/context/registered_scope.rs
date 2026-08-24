@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{ProjectId, RefId, RepositoryId, WorktreeId};
 
 use super::ApplicationScopeError;
@@ -101,7 +101,7 @@ fn resolve_non_git_scope(
 }
 
 fn path_identity(prefix: &str, root: &Path) -> String {
-    let digest = hex::encode(Sha256::digest(root.to_string_lossy().as_bytes()));
+    let digest = sha256_hex(root.to_string_lossy().as_bytes());
     format!("{prefix}.{digest}")
 }
 

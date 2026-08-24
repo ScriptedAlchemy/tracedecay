@@ -185,6 +185,7 @@ pub fn plan_verified_lifecycle_mutation(
 
 /// Verify first, then produce the full immutable lifecycle plan, including
 /// receipt-derived orphan removals for update, repair, and uninstall.
+#[hotpath::measure(label = "host_bundle_plan_complete")]
 pub fn plan_verified_complete_lifecycle_mutation(
     manifest: &HostBundleManifestV1,
     request: &HostBundleLifecycleRequestV1,
@@ -1370,6 +1371,7 @@ pub fn dry_run_host_bundle_lifecycle_at(
     )
 }
 
+#[hotpath::measure(label = "host_bundle_dry_run")]
 pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
     artifact_root: &Path,
     lifecycle_root: &Path,
@@ -1478,6 +1480,7 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
 /// Read-only component-set preview for the official CLI. The registration
 /// adapter contributes the exact native-config revision, while every artifact
 /// plan is derived through the same ownership-aware planner used by apply.
+#[hotpath::measure(label = "host_bundle_component_set_dry_run")]
 pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
     V: HostBundleVerificationAdapterV1,
     R: HostComponentSetRegistrationV1,
@@ -1601,6 +1604,7 @@ fn discovered_competing_extension_claims<R: HostComponentSetRegistrationV1>(
     Ok(claims)
 }
 
+#[hotpath::measure(label = "host_bundle_inspect_installed")]
 pub fn inspect_installed_host_bundle_components_at(
     artifact_root: &Path,
     lifecycle_root: &Path,
@@ -2570,6 +2574,7 @@ impl HostBundleWriterV1 {
 
     /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
     /// mutations, then execute them atomically with a recoverable journal.
+    #[hotpath::measure(label = "host_bundle_execute")]
     pub fn execute(
         &mut self,
         manifest: &HostBundleManifestV1,
@@ -2804,6 +2809,7 @@ impl HostBundleWriterV1 {
         )
     }
 
+    #[hotpath::measure(label = "host_bundle_component_set_execute")]
     fn execute_component_set_with_preview<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,
@@ -5823,7 +5829,6 @@ mod tests {
 
     /// Install the two-component `OpenCode` set, then attempt a repair whose
     /// registration authority rewrites `plugins/core.json` with `second_bytes`.
-    /// Returns the repair outcome plus the writer for further assertions.
     fn wedge_repair_with_second_writer(
         root: &Path,
         second_bytes: &[u8],

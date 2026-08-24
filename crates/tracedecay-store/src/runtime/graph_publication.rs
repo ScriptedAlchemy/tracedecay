@@ -112,17 +112,11 @@ fn validate_sha256_digest(
     value: &str,
     field: &'static str,
 ) -> Result<(), StorageRuntimeContractErrorV1> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        return Err(StorageRuntimeContractErrorV1::NonCanonical { field });
-    };
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(StorageRuntimeContractErrorV1::NonCanonical { field });
+    if tracedecay_domain::canonical_text::is_tagged_lowercase_hex(value, "sha256:", 64) {
+        Ok(())
+    } else {
+        Err(StorageRuntimeContractErrorV1::NonCanonical { field })
     }
-    Ok(())
 }
 
 /// Exact relational scope of one rebuildable graph projection.

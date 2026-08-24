@@ -356,6 +356,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
+    #[hotpath::measure]
     pub(in crate::daemon) async fn execute_controlled_query<C>(
         &self,
         scope: &ResolvedScope,
@@ -558,8 +559,8 @@ where
             input.cursor.as_ref(),
         )
         .await?;
-    // Canonical Plan 26 retrieval-pipeline observation from the composition
-    // this query actually ran; an uninstalled lane records nothing.
+    // Retrieval-pipeline observation from the composition this query actually
+    // ran; an uninstalled lane records nothing.
     if let Some(observability) = schedulers.index_observability_for_scope(scope).await {
         observability.record_retrieval_composition(&authorized, &request.budget);
     }

@@ -14,11 +14,9 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use tracedecay_usecases::host_admission::{
-    HostAdmissionOutcome, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
-    replay_backoff,
+    HostAdmissionOutcome, REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker,
+    classify_replay_pass, replay_backoff,
 };
-
-const REPLAY_BACKOFF_SHIFT_CAP: u32 = 6;
 
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;
@@ -233,8 +231,8 @@ mod tests {
         assert_eq!(project_replay_backoff(1), Duration::from_millis(25));
         assert_eq!(project_replay_backoff(2), Duration::from_millis(50));
         assert_eq!(project_replay_backoff(3), Duration::from_millis(100));
-        // shift caps at 6 → 25ms * 64 = 1.6s (below the 2s absolute ceiling)
-        assert_eq!(project_replay_backoff(20), Duration::from_millis(1_600));
+        // the shared schedule saturates at the 2s absolute ceiling
+        assert_eq!(project_replay_backoff(20), Duration::from_secs(2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -493,8 +493,7 @@ pub(crate) fn decode_durable_hook_event_plan(
 }
 
 pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
-    let mut event =
-        serde_json::from_value::<crate::daemon::DaemonHookEvent>(params?.clone()).ok()?;
+    let mut event = crate::daemon::DaemonHookEvent::deserialize(params?).ok()?;
     if let Some(route) = &mut event.route {
         protect_hook_route_structural_ids(route).ok()?;
     }
@@ -575,7 +574,11 @@ pub(crate) fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
 }
 
 pub(crate) fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
-    crate::hooks::cursor_should_run_sync(now_secs, read_marker_secs(marker), debounce_secs)
+    tracedecay_agent_hosts::hooks::cursor_should_run_sync(
+        now_secs,
+        read_marker_secs(marker),
+        debounce_secs,
+    )
 }
 
 pub(crate) fn write_sync_marker(marker: &Path, now_secs: i64) {

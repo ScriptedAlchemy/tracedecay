@@ -1,4 +1,4 @@
-//! Canonical Plan 26 Observatory panel projections.
+//! Canonical Observatory panel projections.
 //!
 //! Only validated envelopes from the registered observability authority reach
 //! this projector. Every required numeric dimension is emitted even when its

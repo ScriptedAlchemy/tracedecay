@@ -139,6 +139,7 @@ where
         Self { views, executor }
     }
 
+    #[hotpath::measure(label = "query.rerank")]
     pub fn rerank(
         &mut self,
         request: &RetrievalRequest,
@@ -440,6 +441,8 @@ fn complete(
     ordered_candidates: Vec<RankedCandidate>,
     usage: RerankUsageV1,
 ) -> BoundedRerankOutcomeV1 {
+    hotpath::gauge!("query.rerank.candidates").set(ordered_candidates.len());
+    hotpath::gauge!("query.rerank.results").set(ordered_candidates.len());
     BoundedRerankOutcomeV1 {
         ordered_candidates,
         public_status: OptionalStagePublicStatus::Complete,
@@ -452,6 +455,11 @@ fn fallback(
     public_status: OptionalStagePublicStatus,
     usage: RerankUsageV1,
 ) -> BoundedRerankOutcomeV1 {
+    hotpath::gauge!("query.rerank.candidates").set(ordered_candidates.len());
+    hotpath::gauge!("query.rerank.results").set(ordered_candidates.len());
+    if matches!(public_status, OptionalStagePublicStatus::Cancelled) {
+        hotpath::gauge!("query.cancel.count").inc(1u32);
+    }
     BoundedRerankOutcomeV1 {
         ordered_candidates,
         public_status,

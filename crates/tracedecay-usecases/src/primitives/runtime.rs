@@ -20,9 +20,9 @@ use tracedecay_application::retrieval::grep_analysis::{
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, ExactSymbolRequest,
     GraphImpactPrimitiveRequest, GraphRelationRequest, HealthDeltaRequest, HealthDeltaResult,
-    HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, RetrievalPortContext,
-    RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest, SourceLinesRequest,
-    SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
+    HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, PrimitiveFailureKind,
+    RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest,
+    SourceLinesRequest, SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
     SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage, SymbolGraphPortContext,
     SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolSearchPrimitiveRequest,
     TemporalRetrievalPort, TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort,
@@ -33,7 +33,7 @@ use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageRequest,
     PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
@@ -75,6 +75,37 @@ macro_rules! value_or_problem {
             Err(_) => return contract_problem($context, $operation),
         }
     };
+}
+
+macro_rules! dispatch_symbol {
+    ($runtime:expr, $context:expr, $operation:expr, $observed_at:expr, $request:expr, $method:ident, $domain:expr) => {{
+        let outcome = $runtime
+            .project_runtime
+            .symbol_graph
+            .$method(
+                symbol_context($context, $operation, $observed_at),
+                &$request,
+            )
+            .await;
+        symbol_outcome(&$runtime.access, $context, $operation, $domain, outcome)
+    }};
+}
+
+macro_rules! dispatch_extended {
+    ($runtime:expr, $context:expr, $operation:expr, $observed_at:expr, $request:expr, $method:ident) => {{
+        let outcome = $runtime
+            .project_runtime
+            .extended
+            .$method(retrieval_context($context, $operation), &$request)
+            .await;
+        retrieval_outcome(
+            &$runtime.access,
+            $context,
+            $operation,
+            outcome,
+            $observed_at,
+        )
+    }};
 }
 
 pub type PrimitiveDispatchFuture<'a> =
@@ -666,118 +697,78 @@ async fn dispatch_admitted(
         return invalid_request(&context, &operation);
     }
     match invocation.request {
-        PrimitiveRequest::SymbolSearch(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .symbol_search(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Symbol,
-                outcome,
-            )
-        }
-        PrimitiveRequest::ExactSymbol(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .exact_symbol(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Symbol,
-                outcome,
-            )
-        }
-        PrimitiveRequest::SignatureSearch(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .signature_search(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Symbol,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Implementations(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .implementations(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::TypeHierarchy(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .type_hierarchy(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Callers(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .callers(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Callees(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .callees(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Impact(request) => {
-            let outcome = runtime
-                .project_runtime
-                .symbol_graph
-                .impact(symbol_context(&context, &operation, observed_at), &request)
-                .await;
-            symbol_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
-        }
+        PrimitiveRequest::SymbolSearch(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            symbol_search,
+            EvidenceDomain::Symbol
+        ),
+        PrimitiveRequest::ExactSymbol(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            exact_symbol,
+            EvidenceDomain::Symbol
+        ),
+        PrimitiveRequest::SignatureSearch(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            signature_search,
+            EvidenceDomain::Symbol
+        ),
+        PrimitiveRequest::Implementations(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            implementations,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::TypeHierarchy(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            type_hierarchy,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::Callers(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            callers,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::Callees(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            callees,
+            EvidenceDomain::Graph
+        ),
+        PrimitiveRequest::Impact(request) => dispatch_symbol!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            impact,
+            EvidenceDomain::Graph
+        ),
         PrimitiveRequest::SourceRead(request) => {
             let outcome = runtime
                 .project_runtime
@@ -915,30 +906,30 @@ async fn dispatch_admitted(
             };
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::QualifiedName(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .qualified_name(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::CallChain(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .call_chain(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::FileDependents(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .file_dependents(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
+        PrimitiveRequest::QualifiedName(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            qualified_name
+        ),
+        PrimitiveRequest::CallChain(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            call_chain
+        ),
+        PrimitiveRequest::FileDependents(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            file_dependents
+        ),
         PrimitiveRequest::SourceLines(request) => {
             let outcome = runtime
                 .project_runtime
@@ -946,38 +937,38 @@ async fn dispatch_admitted(
                 .source_lines(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::SourceBody(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .source_body(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::SourceOutline(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .source_outline(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::ModuleApi(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .module_api(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::FileMetadata(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .file_metadata(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
+        PrimitiveRequest::SourceBody(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            source_body
+        ),
+        PrimitiveRequest::SourceOutline(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            source_outline
+        ),
+        PrimitiveRequest::ModuleApi(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            module_api
+        ),
+        PrimitiveRequest::FileMetadata(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            file_metadata
+        ),
         PrimitiveRequest::HealthRead(request) => {
             let outcome = runtime
                 .project_runtime
@@ -985,28 +976,43 @@ async fn dispatch_admitted(
                 .health_read(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::HealthDelta(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .health_delta(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
-        PrimitiveRequest::StorageStatus(request) => {
-            let outcome = runtime
-                .project_runtime
-                .extended
-                .storage_status(retrieval_context(&context, &operation), &request)
-                .await;
-            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
-        }
+        PrimitiveRequest::HealthDelta(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            health_delta
+        ),
+        PrimitiveRequest::StorageStatus(request) => dispatch_extended!(
+            runtime,
+            &context,
+            &operation,
+            observed_at,
+            request,
+            storage_status
+        ),
         PrimitiveRequest::DiagnosticsRead(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
                 .diagnostics(retrieval_context(&context, &operation), &request)
                 .await;
+            // A diagnostics read that reached no publishing authority has no
+            // evidence to report. Returning the evidence envelope anyway made
+            // the surface answer `success` with an empty page — indistinguishable
+            // from "this workspace is clean". The authority's own omission reason
+            // is the actionable state, so it is surfaced as a typed problem.
+            if let RetrievalPortOutcome::Unavailable(evidence) = &outcome
+                && evidence.payload.is_none()
+                && evidence.page.returned == 0
+            {
+                return diagnostics_unavailable_problem(
+                    &context,
+                    &operation,
+                    evidence.omissions.first().map(|omission| omission.reason),
+                );
+            }
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
         PrimitiveRequest::RecentTestResults(page) => {
@@ -1438,6 +1444,36 @@ fn grep_page<T: Serialize>(
     )
 }
 
+/// Byte-counting sink that aborts serialization once the operation output cap
+/// is exceeded, so the cap check never materializes a payload copy that the
+/// transport re-serializes anyway.
+struct CountingSink {
+    written: usize,
+    limit: usize,
+}
+
+impl CountingSink {
+    fn exceeded(&self) -> bool {
+        self.written > self.limit
+    }
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len());
+        if self.exceeded() {
+            return Err(std::io::Error::other(
+                "operation output exceeds its byte cap",
+            ));
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evidence_result(
     access: &ProjectSourceAccessSnapshot,
@@ -1451,9 +1487,15 @@ fn evidence_result(
     budget: OperationBudgetUsage,
     partial: bool,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    let payload_bytes = value_or_problem!(serde_json::to_vec(&payload), context, operation);
-    if payload_bytes.len() > MAX_OPERATION_OUTPUT_BYTES {
-        return unavailable(context, operation);
+    let mut output = CountingSink {
+        written: 0,
+        limit: MAX_OPERATION_OUTPUT_BYTES,
+    };
+    if serde_json::to_writer(&mut output, &payload).is_err() {
+        if output.exceeded() {
+            return unavailable(context, operation);
+        }
+        return contract_problem(context, operation);
     }
     let authority = authority_receipt(access, context, finished_at)?;
     let complete = coverage.completeness == CoverageCompleteness::Complete;
@@ -1649,7 +1691,6 @@ fn primitive_failure<T>(
     operation: &ApplicationOperation,
     failure: tracedecay_application::retrieval::PrimitiveFailure,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    use tracedecay_application::retrieval::PrimitiveFailureKind;
     let application_problem = match failure.kind {
         PrimitiveFailureKind::InvalidRequest => ApplicationProblem::InvalidRequest {
             diagnostic: SafeDiagnostic {
@@ -1778,6 +1819,59 @@ fn problem<T>(
     )?))
 }
 
+/// Renders an unavailable diagnostics read as an actionable typed state.
+///
+/// The distinction that matters to a caller is "no diagnostics exist" versus
+/// "no authority answered". Both used to render as an empty success page, so
+/// the reason the authority reported is carried into the problem code here and
+/// the retry directive follows it: a stale or absent producer is worth
+/// retrying, an unsupported scope never is.
+fn diagnostics_unavailable_problem<T>(
+    context: &RequestContext,
+    operation: &ApplicationOperation,
+    reason: Option<OmissionReason>,
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
+    problem(context, operation, diagnostics_absence_problem(reason)?)
+}
+
+/// Maps the diagnostic authority's own omission reason onto the typed state a
+/// caller can act on. An unsupported scope is terminal; every other absence is
+/// worth retrying once a producer publishes.
+fn diagnostics_absence_problem(
+    reason: Option<OmissionReason>,
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let (code, message) = match reason {
+        Some(OmissionReason::Stale) => (
+            "application.diagnostics.stale",
+            "The diagnostic authority has not published a result for the current code generation.",
+        ),
+        Some(OmissionReason::Unsupported) => (
+            "application.diagnostics.unsupported",
+            "No diagnostic producer is configured for this scope.",
+        ),
+        Some(OmissionReason::Redacted) => (
+            "application.diagnostics.redacted",
+            "The diagnostic result for this scope is not disclosable.",
+        ),
+        _ => (
+            "application.diagnostics.unavailable",
+            "The diagnostic authority is unavailable; no diagnostics were read.",
+        ),
+    };
+    let diagnostic = SafeDiagnostic::new(code, message)?;
+    let problem = if matches!(reason, Some(OmissionReason::Unsupported)) {
+        ApplicationProblem::Unsupported {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    } else {
+        ApplicationProblem::unavailable(diagnostic)
+    };
+    problem.validate()?;
+    Ok(problem)
+}
+
 fn contract_problem<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -1795,9 +1889,9 @@ fn contract_problem<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtendedPrimitivePort, PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest,
-        StorageStatusPrimitiveRequest, pre_admission_problem, valid_owned_primitive_request,
-        validate_admitted_root_uri,
+        ExtendedPrimitivePort, OmissionReason, PrimitiveCapacity, PrimitiveDispatch,
+        PrimitiveRequest, StorageStatusPrimitiveRequest, diagnostics_absence_problem,
+        pre_admission_problem, valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
@@ -1811,14 +1905,11 @@ mod tests {
         EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
     };
 
-    fn assert_object_safe(_: &dyn PrimitiveDispatch) {}
-    fn assert_extended_object_safe(_: &dyn ExtendedPrimitivePort) {}
-
-    #[test]
-    fn primitive_dispatch_is_object_safe() {
-        let _ = assert_object_safe;
-        let _ = assert_extended_object_safe;
-    }
+    // These anonymous constants are compile-time object-safety contracts:
+    // rustc rejects either `dyn Trait` parameter if the trait stops being
+    // object safe, without adding runtime tests or unused helper items.
+    const _: fn(&dyn PrimitiveDispatch) = |_| {};
+    const _: fn(&dyn ExtendedPrimitivePort) = |_| {};
 
     #[test]
     fn transport_pre_admission_problems_are_canonical() {
@@ -1852,6 +1943,65 @@ mod tests {
             pre_admission_problem(&request_id, &operation, UtcMicros(100), &deadline, &active)
                 .expect("active problem construction")
                 .is_none()
+        );
+    }
+
+    /// A diagnostics read that reached no publishing authority must not render
+    /// as an empty success page: "no diagnostics exist" and "no authority
+    /// answered" are different answers, and only the second is retryable.
+    #[test]
+    fn absent_diagnostics_authority_is_a_typed_state_not_an_empty_success() {
+        for (reason, kind, code) in [
+            (
+                None,
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.unavailable",
+            ),
+            (
+                Some(OmissionReason::Unavailable),
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.unavailable",
+            ),
+            (
+                Some(OmissionReason::Stale),
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.stale",
+            ),
+            (
+                Some(OmissionReason::Redacted),
+                ApplicationProblemKind::Unavailable,
+                "application.diagnostics.redacted",
+            ),
+            (
+                Some(OmissionReason::Unsupported),
+                ApplicationProblemKind::Unsupported,
+                "application.diagnostics.unsupported",
+            ),
+        ] {
+            let problem = diagnostics_absence_problem(reason).expect("typed diagnostics absence");
+            assert_eq!(problem.kind(), kind, "reason {reason:?}");
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(code),
+                "reason {reason:?}"
+            );
+        }
+
+        // Only an unsupported scope is terminal; the rest invite a retry once a
+        // producer publishes.
+        assert!(
+            diagnostics_absence_problem(Some(OmissionReason::Unsupported))
+                .expect("unsupported")
+                .legal_actions()
+                .is_empty()
+        );
+        assert!(
+            !diagnostics_absence_problem(Some(OmissionReason::Stale))
+                .expect("stale")
+                .legal_actions()
+                .is_empty()
         );
     }
 

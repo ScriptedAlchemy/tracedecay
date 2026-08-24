@@ -569,7 +569,9 @@ fn work_manifest(
                 DeadlineBehavior::ReturnEffectReceipt
             },
         )?,
-        pagination: read_only.then(|| PaginationContract::new(100, 1_000, 60_000).unwrap()),
+        pagination: read_only
+            .then(|| PaginationContract::new(100, 1_000, 60_000))
+            .transpose()?,
         idempotency: if read_only {
             IdempotencyContract::NotRequired
         } else {
@@ -602,7 +604,8 @@ fn work_manifest(
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id],
         profile_eligibility: vec![
-            ProfileId::new("profile.default").expect("static profile ID is valid"),
+            ProfileId::new("profile.default")
+                .map_err(|_| invalid_identity("profile_id", "work profile ID is not canonical"))?,
         ],
         required_features: Vec::new(),
     })

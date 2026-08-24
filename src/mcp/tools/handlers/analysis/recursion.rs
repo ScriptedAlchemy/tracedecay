@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_recursion` tool calls.
-///
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
 pub(crate) async fn handle_recursion(
@@ -57,7 +55,6 @@ pub(crate) async fn handle_recursion(
     cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     cycles.truncate(limit);
 
-    // Resolve node details for each cycle
     let mut cycle_items: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     for cycle in &cycles {

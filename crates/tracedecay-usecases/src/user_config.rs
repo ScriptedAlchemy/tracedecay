@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_sha256;
+use tracedecay_domain::canonical_text::default_true;
 
 use tracedecay_automation::config::AutomationConfig;
 use tracedecay_runtime_core::storage::{append_lock_path, retry_transient_file_op};
@@ -112,10 +113,6 @@ pub struct UserConfig {
     /// Unknown user config keys preserved for forward compatibility.
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, toml::Value>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_watcher_debounce() -> String {
@@ -687,11 +684,15 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
     clippy::duration_suboptimal_units
 )]
 mod tests {
-    use super::*;
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+
     use tempfile::TempDir;
     use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
+
+    use super::*;
 
     struct EnvRestore {
         key: &'static str,
@@ -847,8 +848,6 @@ mod tests {
         toml::from_str::<UserConfig>(&saved).expect("fresh config parses");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-
             assert_eq!(
                 std::fs::metadata(profile_root)
                     .unwrap()

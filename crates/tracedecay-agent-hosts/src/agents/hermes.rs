@@ -19,7 +19,6 @@ use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext
 
 mod templates;
 
-/// Hermes agent.
 pub struct HermesIntegration;
 
 impl AgentIntegration for HermesIntegration {
@@ -232,6 +231,7 @@ fn read_manifest_version(manifest_path: &Path) -> Option<String> {
         .filter(|version| !version.is_empty())
 }
 
+#[hotpath::measure(label = "hermes_plugin_activate")]
 pub(super) fn activate_deployed_plugin_profile(
     deployed_plugin_dir: &Path,
     plugin_dir: &Path,

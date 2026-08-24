@@ -265,8 +265,6 @@ impl AutomationRunControl {
         &self.read_control
     }
 
-    /// Returns admission controls for one independent fact mutation.
-    ///
     /// The caller's live interruption predicate is checked before the local
     /// one-shot gate. Once that gate wins, it remains consumed even if the run
     /// is interrupted later.
@@ -477,6 +475,7 @@ pub(crate) fn task_skip_reason(
     None
 }
 
+#[hotpath::measure(label = "automation_scheduler_gate")]
 async fn scheduler_gate_with_lock_retention(
     config: &AutomationConfig,
     dashboard_root: &Path,
@@ -499,6 +498,7 @@ async fn scheduler_gate_with_lock_retention(
     )
     .await?
     else {
+        super::scheduler_metrics::observe_skip_reason("scheduler_lock_active");
         let summary = if scheduled {
             Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
         } else {
@@ -526,9 +526,11 @@ async fn scheduler_gate_with_lock_retention(
         schedule_decision(config, task, summary.records(), activity, decision_now_secs)
     };
     if let Some(reason) = scheduler_skip_reason(&decision, task) {
+        super::scheduler_metrics::observe_skip_reason(reason);
         return Ok((SchedulerGate::Skip(reason), Some(summary)));
     }
 
+    super::scheduler_metrics::observe_due();
     Ok((SchedulerGate::Proceed(lock), Some(summary)))
 }
 
@@ -875,7 +877,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error: Some(error),
         })?;
         record.input_hash.clone_from(&self.input_hash);
-        record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        record.output_hash = record.proposed_ops.as_ref().map(sha256_json).transpose()?;
         record.fallback_status = Some("backend_failed_noop".to_string());
         apply_retry_report(&mut record, retry_report);
         let exact_failure_class = retry_report
@@ -895,11 +897,13 @@ impl<'a> AgentRunFinalizer<'a> {
         request: &AgentTaskRequest,
         evidence_hash: Option<String>,
     ) -> Result<BackendTaskRun> {
+        let _startup = super::scheduler_metrics::DurationGuard::backend_startup();
         let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
         let mut retry_report = AgentTaskRetryReport::default();
-        match run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
-            .await
-        {
+        match hotpath::measure_block!("automation_backend_startup", {
+            run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
+                .await
+        }) {
             Ok(response) => Ok(BackendTaskRun::Response {
                 response,
                 retry_report,
@@ -930,7 +934,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error: Some(error),
         })?;
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
     }
@@ -965,7 +969,7 @@ impl<'a> AgentRunFinalizer<'a> {
         record.rejected_ops = rejected_ops;
         record.validation_report = validation_report;
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
     }
@@ -1024,7 +1028,7 @@ impl<'a> AgentRunFinalizer<'a> {
         mut record: AutomationRunLedgerRecord,
     ) -> Result<AutomationRunLedgerRecord> {
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         record.artifacts = write_improvement_artifacts(
             self.dashboard_root,
             self.run_id,
@@ -1044,7 +1048,7 @@ impl<'a> AgentRunFinalizer<'a> {
         retry_report: &AgentTaskRetryReport,
     ) -> Result<AutomationRunLedgerRecord> {
         apply_retry_report(&mut record, retry_report);
-        self.finish_record(&mut record);
+        self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
     }
@@ -1101,7 +1105,7 @@ impl<'a> AgentRunFinalizer<'a> {
             .append_failed_record(
                 response.model.clone(),
                 evidence_hash,
-                Some(failed_output_projection(self.task, field, &output)),
+                Some(failed_output_projection(self.task, field, &output)?),
                 err.to_string(),
                 retry_report,
             )
@@ -1112,10 +1116,11 @@ impl<'a> AgentRunFinalizer<'a> {
         })
     }
 
-    fn finish_record(&self, record: &mut AutomationRunLedgerRecord) {
+    fn finish_record(&self, record: &mut AutomationRunLedgerRecord) -> Result<()> {
         record.input_hash.clone_from(&self.input_hash);
-        record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        record.output_hash = record.proposed_ops.as_ref().map(sha256_json).transpose()?;
         self.annotate_combined_run(record);
+        Ok(())
     }
 
     fn record(&self, outcome: RunRecordOutcome) -> Result<AutomationRunLedgerRecord> {
@@ -1153,6 +1158,12 @@ impl<'a> AgentRunFinalizer<'a> {
             task: self.task,
             task_key: Some(task_key(self.task).to_string()),
             backend: self.config.backend.as_str().to_string(),
+            // Stamped on every terminal record so a settled deterministic
+            // failure can be re-admitted the moment the backend or
+            // configuration it failed under changes. A digest that cannot be
+            // computed is left absent rather than guessed: an unidentified
+            // failure must not suppress anything.
+            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(prompt_version(self.task).to_string()),
             response_schema: Some(contract.response_schema),
@@ -1207,17 +1218,17 @@ impl<'a> AgentRunFinalizer<'a> {
     }
 }
 
-fn failed_output_projection(task: AgentTaskKind, field: &str, output: &Value) -> Value {
-    if task == AgentTaskKind::SessionReflector {
+fn failed_output_projection(task: AgentTaskKind, field: &str, output: &Value) -> Result<Value> {
+    Ok(if task == AgentTaskKind::SessionReflector {
         json!({
             "schema_version": 1,
             "expected_field": field,
-            "output_sha256": sha256_json(output),
+            "output_sha256": sha256_json(output)?,
             "output_kind": if output.is_object() { "object" } else { "non_object" },
         })
     } else {
         output.clone()
-    }
+    })
 }
 
 fn apply_retry_report(record: &mut AutomationRunLedgerRecord, retry_report: &AgentTaskRetryReport) {

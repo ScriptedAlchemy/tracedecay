@@ -1,16 +1,20 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1,
-    MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord,
-    SessionAuthorityClassV1, SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1,
-    TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
+    AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, DurableObservationV1,
+    LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord, SessionAuthorityClassV1,
+    SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
+    derive_exact_observation_anchor_id,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_sessions::retrieval_content::projected_content_hash;
 use tracedecay_store::{
-    SessionStoreError, SessionStoreResult, SessionTemporalProjectionBatchReceiptV1,
-    SessionTemporalProjectionBatchV1,
+    SessionMessageProjection, SessionStoreError, SessionStoreResult,
+    SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::observation_projection::derive_projection;
 
@@ -18,9 +22,24 @@ use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, now_micros,
     read_generation, read_observation, storage, storage_message,
 };
+use super::super::rebuild::checkpoint_relation_rebuild_control;
+use super::super::sql::GENERATION_COPY_STATEMENTS;
 use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
+
+pub(in crate::session_temporal) fn observation_envelope_from_payload(
+    payload: &Value,
+) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
+    CanonicalObservationEnvelopeV1::deserialize(payload)
+}
+
+fn observation_envelope(
+    observation: &tracedecay_domain::DurableObservationV1,
+) -> SessionStoreResult<CanonicalObservationEnvelopeV1> {
+    observation_envelope_from_payload(observation.payload())
+        .map_err(|error| storage(PERSIST_OPERATION, error))
+}
 
 pub async fn session_temporal_projection_record_count(
     conn: &impl QueryExecutor,
@@ -59,10 +78,14 @@ pub async fn session_temporal_projection_record_count(
     u64::try_from(count).map_err(|error| storage(MATERIALIZE_REFRESH, error))
 }
 
+#[hotpath::measure]
 pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
+    control: &ExecutionControl,
+    baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
+    checkpoint_relation_rebuild_control(control)?;
     let generation = read_generation(
         conn,
         batch.session_id(),
@@ -94,27 +117,40 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     }
     require_contiguous_checkpoint(conn, batch).await?;
 
-    for occurrence in batch.occurrences() {
-        persist_occurrence(conn, batch, occurrence).await?;
-    }
+    let occurrence_work = persist_occurrences(conn, batch, control).await?;
+    record_occurrence_persistence_work(occurrence_work);
     for copy in batch.copies() {
+        checkpoint_relation_rebuild_control(control)?;
         validate_copy(conn, batch, copy).await?;
     }
     for assertion in batch.assertions() {
+        checkpoint_relation_rebuild_control(control)?;
         persist_assertion(conn, batch, assertion).await?;
     }
     rebuild_current_occurrences(conn, batch).await?;
-    rebuild_assertion_derivatives(conn, batch).await?;
-    super::derived::rebuild_derived_evidence(conn, batch).await?;
+    let terminal = batch.source_through() == batch.watermarks().source_frontier()
+        && batch.projection_through() == batch.watermarks().projection_frontier();
+    if terminal {
+        rebuild_assertion_derivatives(conn, batch, control).await?;
+        super::derived::rebuild_derived_evidence(conn, batch, control).await?;
+    }
 
     let committed_at = now_micros(PERSIST_OPERATION)?;
-    let coverage = projection_coverage(conn, batch).await?;
+    // Intermediate receipts are exact batch journals through `batch_digest`.
+    // Only the terminal receipt claims whole-generation coverage; activation
+    // requires that terminal frontier and re-hashes it before the CAS.
+    let coverage = if terminal {
+        projection_coverage(conn, batch, Some(control)).await?
+    } else {
+        empty_projection_coverage()
+    };
     insert_projection_receipt(
         conn,
         batch,
         batch_digest.as_str(),
         &coverage,
         committed_at.0,
+        baseline,
     )
     .await?;
     SessionTemporalProjectionBatchReceiptV1::applied(
@@ -127,111 +163,53 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     )
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::session_temporal) enum ProjectionProgressBaseline {
+    Empty,
+    SeededFromActive,
+}
+
 pub async fn seed_active_projection_in_transaction(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
-    const COPIES: &[&str] = &[
-        "INSERT INTO session_turns (
-            session_id, generation, turn_id, ordinal, grouping_provenance, created_at
-         )
-         SELECT session_id, ?2, turn_id, ordinal, grouping_provenance, created_at
-         FROM session_turns WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_threads (
-            session_id, generation, thread_id, grouping_provenance, created_at
-         )
-         SELECT session_id, ?2, thread_id, grouping_provenance, created_at
-         FROM session_threads WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_agents (
-            session_id, generation, agent_id, agent_json, created_at
-         )
-         SELECT session_id, ?2, agent_id, agent_json, created_at
-         FROM session_agents WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_occurrences (
-            session_id, generation, occurrence_id, source_observation_id,
-            source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
-            thread_grouping_json, turn_id, turn_grouping_json, message_id,
-            agent_id, role, knowledge_at, valid_time_json, evidence_json,
-            sanitized_content_digest, sanitized_content_bytes,
-            snippet_text, index_text
-         )
-         SELECT session_id, ?2, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
-                thread_grouping_json, turn_id, turn_grouping_json, message_id,
-                agent_id, role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
-         FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_turn_members (
-            session_id, generation, turn_id, occurrence_id, ordinal
-         )
-         SELECT session_id, ?2, turn_id, occurrence_id, ordinal
-         FROM session_turn_members WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_assertions (
-            session_id, generation, assertion_id, assertion_kind,
-            subject_anchor_id, object_anchor_id, knowledge_at,
-            valid_time_json, evidence_json
-         )
-         SELECT session_id, ?2, assertion_id, assertion_kind,
-                subject_anchor_id, object_anchor_id, knowledge_at,
-                valid_time_json, evidence_json
-         FROM session_assertions WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_assertion_supersession (
-            session_id, generation, superseded_assertion_id,
-            superseding_assertion_id, created_at
-         )
-         SELECT session_id, ?2, superseded_assertion_id,
-                superseding_assertion_id, created_at
-         FROM session_assertion_supersession
-         WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_current_entities (
-            session_id, generation, entity_kind, entity_id,
-            current_assertion_id, current_occurrence_id, coverage_json
-         )
-         SELECT session_id, ?2, entity_kind, entity_id,
-                current_assertion_id, current_occurrence_id, coverage_json
-         FROM session_current_entities WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_derived_evidence (
-            session_id, generation, evidence_kind, evidence_id,
-            retrieval_anchor_id, thread_id,
-            first_occurrence_id, last_occurrence_id,
-            algorithm_version, configuration_digest,
-            member_count, member_digest, evidence_json
-         )
-         SELECT session_id, ?2, evidence_kind, evidence_id,
-                retrieval_anchor_id, thread_id,
-                first_occurrence_id, last_occurrence_id,
-                algorithm_version, configuration_digest,
-                member_count, member_digest, evidence_json
-         FROM session_derived_evidence WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_derived_evidence_members (
-            session_id, generation, evidence_kind, evidence_id,
-            ordinal, occurrence_id, member_role
-         )
-         SELECT session_id, ?2, evidence_kind, evidence_id,
-                ordinal, occurrence_id, member_role
-         FROM session_derived_evidence_members
-         WHERE session_id = ?1 AND generation = ?3",
-    ];
+    checkpoint_relation_rebuild_control(control)?;
     if batch.batch_ordinal() != 0 || batch.watermarks().active_generation() == batch.generation() {
         return Ok(());
     }
     let session_id = batch.session_id().as_str();
     let candidate = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     let active = generation_i64(batch.watermarks().active_generation(), PERSIST_OPERATION)?;
-    for sql in COPIES {
+    for sql in GENERATION_COPY_STATEMENTS {
+        checkpoint_relation_rebuild_control(control)?;
         conn.execute(sql, params![session_id, candidate, active])
             .await
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        checkpoint_relation_rebuild_control(control)?;
     }
     Ok(())
 }
 
-pub(super) async fn persist_occurrence(
+struct CanonicalOccurrenceProjection {
+    observation: DurableObservationV1,
+    envelope: CanonicalObservationEnvelopeV1,
+    outputs: Vec<SessionMessageProjection>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct OccurrencePersistenceWork {
+    pub(super) source_projections: u64,
+    pub(super) envelope_parses: u64,
+    pub(super) indexed_outputs: u64,
+    pub(super) output_lookups: u64,
+}
+
+async fn canonical_occurrence_projection(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     occurrence: &MessageOccurrenceRecordV1,
-) -> SessionStoreResult<bool> {
+) -> SessionStoreResult<CanonicalOccurrenceProjection> {
     let (source_sequence, observation) =
         read_observation(conn, &occurrence.source_observation_id).await?;
     if source_sequence > batch.watermarks().source_frontier() {
@@ -239,50 +217,141 @@ pub(super) async fn persist_occurrence(
     }
     let mut authority_rows = conn
         .query(
-            "SELECT 1 FROM session_temporal_observation_effects
+            "SELECT output_count FROM session_temporal_observation_effects
              WHERE observation_id = ?1 AND observation_sequence = ?2
-               AND session_id = ?3 AND output_count > ?4",
+               AND session_id = ?3 AND output_count > 0",
             params![
                 occurrence.source_observation_id.as_str(),
                 frontier_i64(source_sequence, PERSIST_OPERATION)?,
                 batch.session_id().as_str(),
-                i64::from(occurrence.projection_output_ordinal.value()),
             ],
         )
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if authority_rows
+    let output_count = authority_rows
         .next()
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .is_none()
-    {
-        return Err(storage_message(
-            PERSIST_OPERATION,
-            "canonical observation has no atomically recorded temporal effect",
-        ));
-    }
-    let projection =
-        derive_projection(&observation).map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let output = projection
-        .messages()
-        .find(|output| {
-            output.output_ordinal() == occurrence.projection_output_ordinal.value()
-                && output.session().session_id == occurrence.session_id.as_str()
-        })
         .ok_or_else(|| {
             storage_message(
                 PERSIST_OPERATION,
-                format!(
-                    "observation {} has no matching message output {} for session {}",
-                    occurrence.source_observation_id.as_str(),
-                    occurrence.projection_output_ordinal.value(),
-                    occurrence.session_id.as_str()
-                ),
+                "canonical observation has no atomically recorded temporal effect",
+            )
+        })?
+        .get::<i64>(0)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let output_count =
+        usize::try_from(output_count).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let projection =
+        derive_projection(&observation).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let envelope = observation_envelope(&observation)?;
+    let mut outputs = projection.messages().cloned().collect::<Vec<_>>();
+    outputs.sort_unstable_by_key(SessionMessageProjection::output_ordinal);
+    if outputs.len() != output_count
+        || outputs
+            .iter()
+            .enumerate()
+            .any(|(ordinal, output)| usize::try_from(output.output_ordinal()).ok() != Some(ordinal))
+    {
+        return Err(storage_message(
+            PERSIST_OPERATION,
+            "canonical observation effect output authority disagrees with its projection",
+        ));
+    }
+    Ok(CanonicalOccurrenceProjection {
+        observation,
+        envelope,
+        outputs,
+    })
+}
+
+pub(super) async fn persist_occurrences(
+    conn: &impl Executor,
+    batch: &SessionTemporalProjectionBatchV1,
+    control: &ExecutionControl,
+) -> SessionStoreResult<OccurrencePersistenceWork> {
+    let mut work = OccurrencePersistenceWork::default();
+    let mut occurrences_by_source = BTreeMap::<_, Vec<_>>::new();
+    for occurrence in batch.occurrences() {
+        occurrences_by_source
+            .entry(occurrence.source_observation_id.as_str())
+            .or_default()
+            .push(occurrence);
+    }
+    for occurrences in occurrences_by_source.into_values() {
+        checkpoint_relation_rebuild_control(control)?;
+        let first = occurrences.first().ok_or_else(|| {
+            storage_message(
+                PERSIST_OPERATION,
+                "canonical occurrence source group is unexpectedly empty",
             )
         })?;
-    let expected =
-        canonical_occurrence(conn, &observation, &projection, output.output_ordinal()).await?;
+        let canonical = canonical_occurrence_projection(conn, batch, first).await?;
+        work.source_projections = work.source_projections.checked_add(1).ok_or_else(|| {
+            storage_message(PERSIST_OPERATION, "source projection work count overflow")
+        })?;
+        work.envelope_parses = work.envelope_parses.checked_add(1).ok_or_else(|| {
+            storage_message(PERSIST_OPERATION, "source envelope parse count overflow")
+        })?;
+        work.indexed_outputs = work
+            .indexed_outputs
+            .checked_add(
+                u64::try_from(canonical.outputs.len())
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            )
+            .ok_or_else(|| {
+                storage_message(
+                    PERSIST_OPERATION,
+                    "indexed projection output count overflow",
+                )
+            })?;
+        for occurrence in occurrences {
+            checkpoint_relation_rebuild_control(control)?;
+            let ordinal = usize::try_from(occurrence.projection_output_ordinal.value())
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let output = canonical.outputs.get(ordinal).ok_or_else(|| {
+                storage_message(
+                    PERSIST_OPERATION,
+                    "canonical observation has no atomically recorded temporal effect output",
+                )
+            })?;
+            work.output_lookups = work.output_lookups.checked_add(1).ok_or_else(|| {
+                storage_message(PERSIST_OPERATION, "projection output lookup count overflow")
+            })?;
+            persist_occurrence(
+                conn,
+                batch,
+                occurrence,
+                &canonical.observation,
+                &canonical.envelope,
+                output,
+            )
+            .await?;
+        }
+    }
+    Ok(work)
+}
+
+async fn persist_occurrence(
+    conn: &impl Executor,
+    batch: &SessionTemporalProjectionBatchV1,
+    occurrence: &MessageOccurrenceRecordV1,
+    observation: &DurableObservationV1,
+    envelope: &CanonicalObservationEnvelopeV1,
+    output: &SessionMessageProjection,
+) -> SessionStoreResult<bool> {
+    if output.session().session_id != occurrence.session_id.as_str() {
+        return Err(storage_message(
+            PERSIST_OPERATION,
+            format!(
+                "observation {} has no matching message output {} for session {}",
+                occurrence.source_observation_id.as_str(),
+                occurrence.projection_output_ordinal.value(),
+                occurrence.session_id.as_str()
+            ),
+        ));
+    }
+    let expected = canonical_occurrence(conn, observation, envelope, output).await?;
     if occurrence != &expected {
         return Err(storage_message(
             PERSIST_OPERATION,
@@ -326,9 +395,6 @@ pub(super) async fn persist_occurrence(
         )
         .await?;
     }
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
     if let Some(parent_agent_id) = envelope.relations().parent_agent_id() {
         ensure_agent(
             conn,
@@ -441,25 +507,14 @@ pub(super) async fn persist_occurrence(
     Ok(inserted)
 }
 
-/// Derives the canonical occurrence for one already-derived projection output.
-///
-/// The projection is threaded in by the caller rather than re-derived here: a
-/// single observation can produce many outputs, and re-deriving its projection
-/// per ordinal repeated the whole canonical-JSON plus SHA-256 sweep for a value
-/// the caller already holds.
+/// Derives the canonical occurrence for one already-resolved projection output.
 pub(super) async fn canonical_occurrence(
     conn: &impl QueryExecutor,
     observation: &tracedecay_domain::DurableObservationV1,
-    projection: &tracedecay_store::ObservationProjection,
-    output_ordinal: u32,
+    envelope: &CanonicalObservationEnvelopeV1,
+    output: &SessionMessageProjection,
 ) -> SessionStoreResult<MessageOccurrenceRecordV1> {
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let output = projection
-        .messages()
-        .find(|candidate| candidate.output_ordinal() == output_ordinal)
-        .ok_or_else(|| storage_message(PERSIST_OPERATION, "canonical output ordinal is missing"))?;
+    let output_ordinal = output.output_ordinal();
     let expected_anchor =
         derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
@@ -546,6 +601,22 @@ pub(super) async fn canonical_occurrence(
     }))
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
     Ok(record)
+}
+
+#[inline(always)]
+fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("session_temporal.persistence.source_projections")
+            .inc(work.source_projections);
+        hotpath::gauge!("session_temporal.persistence.envelope_parses").inc(work.envelope_parses);
+        hotpath::gauge!("session_temporal.persistence.projection_output_index_rows")
+            .inc(work.indexed_outputs);
+        hotpath::gauge!("session_temporal.persistence.projection_output_lookups")
+            .inc(work.output_lookups);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = work;
 }
 
 pub(super) async fn ensure_thread(
@@ -726,54 +797,60 @@ pub(super) async fn validate_copy(
 ) -> SessionStoreResult<bool> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     validate_copy_proof(conn, batch, copy).await?;
+    let mut rows = conn
+        .query(
+            "SELECT occurrence_id, knowledge_at, valid_time_json
+             FROM session_occurrences
+             WHERE session_id = ?1 AND generation = ?2
+               AND occurrence_id IN (?3, ?4)",
+            params![
+                batch.session_id().as_str(),
+                generation,
+                copy.occurrence_id.as_str(),
+                copy.copied_from_occurrence_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let mut seen_source = false;
     let mut target_knowledge_at = None;
     let mut target_valid_time = None;
-    for occurrence_id in [&copy.occurrence_id, &copy.copied_from_occurrence_id] {
-        let mut rows = conn
-            .query(
-                "SELECT knowledge_at, valid_time_json FROM session_occurrences
-                 WHERE session_id = ?1 AND generation = ?2 AND occurrence_id = ?3",
-                params![
-                    batch.session_id().as_str(),
-                    generation,
-                    occurrence_id.as_str()
-                ],
-            )
-            .await
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        let occurrence_id: String = row
+            .get(0)
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?
-            .ok_or_else(|| {
-                storage_message(
-                    PERSIST_OPERATION,
-                    "logical copy endpoint is outside the owning session generation",
-                )
-            })?;
-        if occurrence_id == &copy.occurrence_id {
+        if occurrence_id == copy.occurrence_id.as_str() {
             target_knowledge_at = Some(
-                row.get::<i64>(0)
+                row.get::<i64>(1)
                     .map_err(|error| storage(PERSIST_OPERATION, error))?,
             );
             target_valid_time = Some(
-                row.get::<String>(1)
+                row.get::<String>(2)
                     .map_err(|error| storage(PERSIST_OPERATION, error))?,
             );
         }
+        if occurrence_id == copy.copied_from_occurrence_id.as_str() {
+            seen_source = true;
+        }
     }
-    let target_knowledge_at = target_knowledge_at.ok_or_else(|| {
-        storage_message(
+    let (Some(target_knowledge_at), Some(target_valid_time)) =
+        (target_knowledge_at, target_valid_time)
+    else {
+        return Err(storage_message(
             PERSIST_OPERATION,
-            "logical copy target knowledge_at is missing",
-        )
-    })?;
-    let target_valid_time = target_valid_time.ok_or_else(|| {
-        storage_message(
+            "logical copy endpoint is outside the owning session generation",
+        ));
+    };
+    if !seen_source {
+        return Err(storage_message(
             PERSIST_OPERATION,
-            "logical copy target valid_time is missing",
-        )
-    })?;
+            "logical copy endpoint is outside the owning session generation",
+        ));
+    }
     let expected_valid_time = serde_json::to_string(&copy.valid_time)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     if copy.knowledge_at.0 != target_knowledge_at || expected_valid_time != target_valid_time {
@@ -826,8 +903,7 @@ pub(super) async fn occurrence_observation_and_anchor(
     let observation_id = tracedecay_domain::CanonicalObservationIdV1::new(observation_id)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let (_, observation) = read_observation(conn, &observation_id).await?;
-    let envelope = serde_json::from_value(observation.payload().clone())
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let envelope = observation_envelope(&observation)?;
     Ok((observation, envelope, anchor_id))
 }
 
@@ -1024,7 +1100,7 @@ pub(super) async fn validate_assertion(
 ) -> SessionStoreResult<()> {
     let mut rows = conn
         .query(
-            "SELECT occurrence.source_observation_id, anchor.anchor_json
+            "SELECT DISTINCT occurrence.source_observation_id, anchor.anchor_json
              FROM session_occurrences AS occurrence
              JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = occurrence.retrieval_anchor_id
@@ -1054,10 +1130,21 @@ pub(super) async fn validate_assertion(
     let anchor_json: String = subject
         .get(1)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+        .is_some()
+    {
+        return Err(storage_message(
+            PERSIST_OPERATION,
+            "assertion subject anchor resolves to multiple source observations",
+        ));
+    }
     drop(rows);
     let mut object_rows = conn
         .query(
-            "SELECT occurrence.source_observation_id, anchor.anchor_json
+            "SELECT DISTINCT occurrence.source_observation_id, anchor.anchor_json
              FROM session_occurrences AS occurrence
              JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = occurrence.retrieval_anchor_id
@@ -1087,6 +1174,17 @@ pub(super) async fn validate_assertion(
     let object_anchor_json = object
         .get::<String>(1)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    if object_rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+        .is_some()
+    {
+        return Err(storage_message(
+            PERSIST_OPERATION,
+            "assertion object anchor resolves to multiple source observations",
+        ));
+    }
     drop(object_rows);
     let observation_id = tracedecay_domain::CanonicalObservationIdV1::new(observation_id)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
@@ -1095,12 +1193,8 @@ pub(super) async fn validate_assertion(
         tracedecay_domain::CanonicalObservationIdV1::new(object_observation_id)
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let (_, object_observation) = read_observation(conn, &object_observation_id).await?;
-    let subject_envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let object_envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(object_observation.payload().clone())
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let subject_envelope = observation_envelope(&observation)?;
+    let object_envelope = observation_envelope(&object_observation)?;
     let anchor: RetrievalAnchorRecord =
         serde_json::from_str(&anchor_json).map_err(|error| storage(PERSIST_OPERATION, error))?;
     let object_anchor: RetrievalAnchorRecord = serde_json::from_str(&object_anchor_json)
@@ -1126,49 +1220,8 @@ pub(super) async fn validate_assertion(
             .contains(&object_observation_id)
         && subject_envelope.relations().session_id() == batch.session_id()
         && object_envelope.relations().session_id() == batch.session_id();
-    let mut subject_occurrence_rows = conn
-        .query(
-            "SELECT occurrence_id
-             FROM session_occurrences
-             WHERE session_id = ?1 AND generation = ?2 AND retrieval_anchor_id = ?3
-             ORDER BY occurrence_id
-             LIMIT 2",
-            params![
-                batch.session_id().as_str(),
-                generation_i64(batch.generation(), PERSIST_OPERATION)?,
-                assertion.subject_anchor_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let subject_occurrence_id = subject_occurrence_rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PERSIST_OPERATION,
-                "assertion subject occurrence is not retained in the owning generation",
-            )
-        })?
-        .get::<String>(0)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if subject_occurrence_rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .is_some()
-    {
-        return Err(storage_message(
-            PERSIST_OPERATION,
-            "assertion subject anchor resolves to ambiguous occurrences",
-        ));
-    }
-    drop(subject_occurrence_rows);
-    let subject_occurrence_id = MessageOccurrenceIdV1::new(subject_occurrence_id)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let expected_assertion_id = derived_temporal_assertion_id(
-        &subject_occurrence_id,
+        &assertion.subject_anchor_id,
         assertion.kind,
         &assertion.object_anchor_id,
     );
@@ -1208,15 +1261,31 @@ pub(super) const fn assertion_kind_for_relation(
     }
 }
 
+#[hotpath::measure]
 pub(super) async fn rebuild_current_occurrences(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
+    let affected_anchors = batch
+        .occurrences()
+        .iter()
+        .map(|occurrence| occurrence.retrieval_anchor_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if affected_anchors.is_empty() {
+        return Ok(());
+    }
+    let affected_anchors_json = serde_json::to_string(&affected_anchors)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     conn.execute(
         "DELETE FROM session_current_entities
-         WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'occurrence_anchor'",
-        params![batch.session_id().as_str(), generation],
+         WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'occurrence_anchor'
+           AND entity_id IN (SELECT value FROM json_each(?3))",
+        params![
+            batch.session_id().as_str(),
+            generation,
+            affected_anchors_json.as_str()
+        ],
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
@@ -1236,6 +1305,7 @@ pub(super) async fn rebuild_current_occurrences(
                    ) AS precedence
             FROM session_occurrences
             WHERE session_id = ?1 AND generation = ?2
+              AND retrieval_anchor_id IN (SELECT value FROM json_each(?3))
          )
          INSERT INTO session_current_entities (
             session_id, generation, entity_kind, entity_id,
@@ -1245,17 +1315,24 @@ pub(super) async fn rebuild_current_occurrences(
                 NULL, occurrence_id,
                 json_object('occurrence_count', occurrence_count)
          FROM ranked WHERE precedence = 1",
-        params![batch.session_id().as_str(), generation],
+        params![
+            batch.session_id().as_str(),
+            generation,
+            affected_anchors_json.as_str()
+        ],
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) async fn rebuild_assertion_derivatives(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    checkpoint_relation_rebuild_control(control)?;
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     conn.execute(
         "DELETE FROM session_assertion_supersession
@@ -1264,6 +1341,7 @@ pub(super) async fn rebuild_assertion_derivatives(
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    checkpoint_relation_rebuild_control(control)?;
     conn.execute(
         "DELETE FROM session_current_entities
          WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'assertion_anchor'",
@@ -1272,6 +1350,7 @@ pub(super) async fn rebuild_assertion_derivatives(
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
 
+    checkpoint_relation_rebuild_control(control)?;
     conn.execute(
         "INSERT INTO session_assertion_supersession (
             session_id, generation, superseded_assertion_id,
@@ -1332,6 +1411,7 @@ pub(super) async fn rebuild_assertion_derivatives(
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    checkpoint_relation_rebuild_control(control)?;
     conn.execute(
         "WITH RECURSIVE chains (
              root_anchor_id, assertion_id, subject_anchor_id,
@@ -1396,5 +1476,6 @@ pub(super) async fn rebuild_assertion_derivatives(
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    checkpoint_relation_rebuild_control(control)?;
     Ok(())
 }

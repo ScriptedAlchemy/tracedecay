@@ -15,6 +15,9 @@ use tracedecay_sessions::lcm::contracts::{
     LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessageMetadata, LcmRawMessageOverview,
     LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
+use tracedecay_sessions::runtime::lcm::raw::{
+    RAW_MESSAGE_METADATA_SELECT_COLUMNS, raw_message_metadata_from_row,
+};
 
 macro_rules! field {
     ($row:expr, $column:expr) => {
@@ -404,10 +407,10 @@ async fn describe_summary_sources(
         match source_ref {
             LcmSourceRef::RawMessage { store_id } => {
                 // An *absent* raw row is not an ownership violation: the
-                // projection-durability retention drop pass (plan 38 §3)
-                // deletes raw rows precisely because the summary is the durable
-                // survivor, so the lineage outlives the row it names. Describe
-                // still reports the source — eliding it would understate the
+                // projection-durability retention drop pass deletes raw rows
+                // precisely because the summary is the durable survivor, so
+                // the lineage outlives the row it names. Describe still
+                // reports the source — eliding it would understate the
                 // summary's lineage — but carries no raw metadata for it, which
                 // is how this overview already spells "no raw row backs this
                 // ref" (`role`/`storage_kind` are read straight off that row).
@@ -500,40 +503,16 @@ async fn find_raw_message(
     snapshot: &(impl QueryExecutor + ?Sized),
     store_id: i64,
 ) -> Result<Option<LcmRawMessageMetadata>, LcmError> {
-    let mut rows = query(
-        snapshot,
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                '' AS snippet_text, legacy_source, legacy_truncated, metadata_json
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
          FROM lcm_raw_messages
-         WHERE store_id = ?1",
-        params![store_id],
-    )
-    .await?;
+         WHERE store_id = ?1"
+    );
+    let mut rows = query(snapshot, &sql, params![store_id]).await?;
     let Some(row) = next_row(&mut rows).await? else {
         return Ok(None);
     };
     raw_message_metadata_from_row(&row).map(Some)
-}
-
-fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
-    let storage_kind_text: String = field!(row, 9)?;
-    let storage_kind = storage_kind(&storage_kind_text)?;
-    Ok(LcmRawMessageMetadata {
-        provider: field!(row, 0)?,
-        message_id: field!(row, 1)?,
-        session_id: field!(row, 2)?,
-        store_id: field!(row, 3)?,
-        role: field!(row, 4)?,
-        ordinal: field!(row, 5)?,
-        timestamp: field!(row, 6)?,
-        content_hash: field!(row, 8)?,
-        storage_kind,
-        payload_ref: field!(row, 10)?,
-        legacy_source: field!(row, 12, i64).unwrap_or(0) != 0,
-        legacy_truncated: field!(row, 13, i64).unwrap_or(0) != 0,
-        metadata_json: field!(row, 14)?,
-    })
 }
 
 async fn load_summary_node(
@@ -623,9 +602,9 @@ async fn relation_source_refs(
 /// Resolves the `store_id` an anchored summary source names.
 ///
 /// The anchor is bound to a message occurrence, and the occurrence reaches the
-/// locator only through the raw row, so the retention drop pass (plan 38 §3)
-/// takes the mapping down with the row it deletes. That must not make the
-/// summary unreadable, so a resolution that finds no raw row falls back to the
+/// locator only through the raw row, so the retention drop pass takes the
+/// mapping down with the row it deletes. That must not make the summary
+/// unreadable, so a resolution that finds no raw row falls back to the
 /// projected lineage, which retains the locator; see
 /// [`retention_dropped_store_id`].
 async fn anchor_store_id(
@@ -749,12 +728,11 @@ async fn load_summary_sources(
                 // proves every raw source exists and is session-owned before the
                 // lineage row is written (`operations::sources::prepare_raw_source`),
                 // so a row missing at read time was removed afterwards — by the
-                // projection-durability retention drop pass (plan 38 §3), whose
-                // whole premise is that the summary is the durable survivor.
-                // Report the source as retention-expired (plan 23 hydration
-                // state) and keep rendering; aborting would make every summary
-                // older than the drop window unreadable, and would do so under a
-                // misleading ownership error.
+                // projection-durability retention drop pass, whose whole premise
+                // is that the summary is the durable survivor. Report the source
+                // as `HydrationStateV1::RetentionExpired` and keep rendering;
+                // aborting would make every summary older than the drop window
+                // unreadable, and would do so under a misleading ownership error.
                 let Some(metadata) = raw.get(store_id).cloned() else {
                     out.push(LcmExpandedSummarySource {
                         source_ref: source_ref.clone(),
@@ -817,9 +795,7 @@ async fn load_raw_messages(
     }
     let placeholders = build_qmark_placeholders(store_ids.len());
     let sql = format!(
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                '' AS snippet_text, legacy_source, legacy_truncated, metadata_json
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
          FROM lcm_raw_messages
          WHERE store_id IN ({placeholders})"
     );

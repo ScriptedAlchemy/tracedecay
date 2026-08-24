@@ -604,7 +604,10 @@ pub async fn overview(
             .and_then(|freshness| freshness.source_revision),
         None => None,
     };
-    let generation_freshness = generation_projection(&changes, indexed_commit);
+    let generation_freshness = hotpath::measure_block!(
+        "dashboard.freshness.projection",
+        generation_projection(&changes, indexed_commit)
+    );
     let live_head = live_head_commit(&changes).and_then(|head| CommitId::new(head).ok());
 
     let delivery = match (state.delivery_read_authority.as_ref(), control, live_head) {

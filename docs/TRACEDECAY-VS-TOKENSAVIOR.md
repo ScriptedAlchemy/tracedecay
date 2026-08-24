@@ -186,7 +186,7 @@ tool's parameters.
 ### 1.10 Reproducible benchmark harness
 
 `tracedecay bench` ships with a default TOML query set
-(`benchmarks/queries/default.toml`) and emits a colored table or JSON of
+(`benchmark_data/queries/default.toml`) and emits a colored table or JSON of
 retrieval-savings ratios for the current project. token-savior's benchmarks
 are external (`Mibayy/tsbench`) and require a synthetic project.
 
@@ -279,7 +279,7 @@ a long-lived `tracedecay serve --timings` session — the per-query column
 reports the handler's `_meta.duration_us`, stripping JSON-RPC / stdio /
 Python-parse overhead. token-savior runs in-process.
 
-Script: [`benchmarks/run_benchmarks.py`](../benchmarks/run_benchmarks.py),
+Script: [`benchmark_data/run_benchmarks.py`](../benchmark_data/run_benchmarks.py),
 which writes `comparison-report.md` into its results directory.
 
 | Metric | token-savior | tracedecay | Delta |
@@ -370,8 +370,8 @@ Our adaptation:
   minutes wall time across one Max OAuth session.
 
 Reproduction harness and patch in
-[`benchmarks/tsbench/`](../benchmarks/tsbench/) — see
-[`benchmarks/tsbench/README.md`](../benchmarks/tsbench/README.md).
+[`benchmark_data/tsbench/`](../benchmark_data/tsbench/) — see
+[`benchmark_data/tsbench/README.md`](../benchmark_data/tsbench/README.md).
 
 ---
 

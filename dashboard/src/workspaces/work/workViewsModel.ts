@@ -33,10 +33,10 @@ import {
 import type { WorkTaskView } from './workProductView.ts';
 
 /**
- * The four Work projections of plan 11c, derived from the reads this build can
+ * The four Work projections, derived from the reads this build can
  * actually make.
  *
- * Plan 11c maps each projection onto a grammar the app has already proved:
+ * Each projection maps onto a grammar the app has already proved:
  * the DAG onto transit strata, the timeline onto the loom weave, the causal
  * view onto the disagreement field, and the workload onto cortex aggregation.
  * The data arrives from three reads, and which read a channel comes from is the
@@ -56,9 +56,9 @@ import type { WorkTaskView } from './workProductView.ts';
  *                       instants, the workload figures, and the live runtime
  *                       attempt projection with its own coverage
  *
- * All three are mounted. The graph read is `operation.work.views`, and it is
- * what closed 11c's effort, concurrency and churn gaps: they were absent
- * because no route carried `WorkProductProjectionBundleV1`, and one does now.
+ * All three are mounted. The graph read is `operation.work.views`; effort,
+ * concurrency and churn come from `WorkProductProjectionBundleV1` on that
+ * route rather than being inferred from an adjacent read.
  *
  * TWO ABSENCES SURVIVE THE MOUNT, and they are the interesting ones, because a
  * new read is exactly the moment a gap is most likely to be quietly filled with
@@ -80,9 +80,9 @@ import type { WorkTaskView } from './workProductView.ts';
  *                    own honest ceiling in the weave's `observedOrder`.
  *
  * A channel is never estimated to fill a gap, and a channel that goes live is
- * live because a read proved it rather than because a read arrived. 11c is
- * explicit: attempt counts, queue ages and wall-times are real or absent, and a
- * degenerate distribution is said rather than drawn.
+ * live because a read proved it rather than because a read arrived. Attempt
+ * counts, queue ages and wall-times are real or absent, and a degenerate
+ * distribution is said rather than drawn.
  */
 
 /*
@@ -99,7 +99,7 @@ import type { WorkTaskView } from './workProductView.ts';
  *
  * Cycles are condensed rather than broken, the same Tarjan discipline the code
  * strata use. A component with more than one member is a declared dependency
- * cycle, which 11c says to draw and caption as an observation — it is a real
+ * cycle, which must be drawn and captioned as an observation — it is a real
  * reading of the plan, not a rendering error.
  */
 export interface WorkDagComponent {
@@ -417,8 +417,8 @@ export interface WorkWeaveThread {
 
 export interface WorkWeaveReading {
   readonly threads: readonly WorkWeaveThread[];
-  /** Tasks no run has landed on. 11c requires these to occupy an explicit
-   * band rather than being omitted from the weave. */
+  /** Tasks no run has landed on. These occupy an explicit band rather than
+   * being omitted from the weave. */
   readonly unwoven: readonly { readonly taskId: string; readonly title: string }[];
   readonly crossings: number;
   readonly wallClock: WorkChannel<never>;
@@ -602,8 +602,8 @@ export function workWeaveReading(
  *
  * `dependent_ahead` is the loud state: a task has a terminal attempt while the
  * task it declares a dependency on has none. The dependency either did
- * not gate the work or is not the dependency the plan says it is, and 11c
- * names that hidden coupling in the plan itself.
+ * not gate the work or is not the dependency the plan says it is: that
+ * hidden coupling lives in the plan itself.
  *
  * `order_unread` is the honest middle. Both ends finished, and with no
  * timestamp anywhere in this read there is nothing to order them by. It is not
@@ -753,7 +753,7 @@ export interface WorkloadRegion {
 
 export interface WorkloadReading {
   readonly regions: readonly WorkloadRegion[];
-  /** Tasks the store attaches to no run. 11c draws unattributed work hollow
+  /** Tasks the store attaches to no run. Unattributed work is drawn hollow
    * rather than guessing who did it. */
   readonly unattributed: readonly { readonly taskId: string; readonly title: string }[];
   readonly taskCount: number;
@@ -779,8 +779,8 @@ export interface WorkloadReading {
  *
  * The aggregation ratio a cortex view must print is `taskCount` against
  * `regions.length`. Area stays TASK COUNT and says so: the regions are the
- * exact graph's run/task attempt incidence, and `effortMass` — the measurement 11c
- * actually asks for — is a property of the whole work-product graph rather than
+ * exact graph's run/task attempt incidence, and `effortMass` — the effort
+ * measurement — is a property of the whole work-product graph rather than
  * of any run. The two are kept as separate readings instead of one being
  * rescaled by the other, because the graph version and snapshot page need not
  * cover the same tasks and a bar weighted across that seam would be a number

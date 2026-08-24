@@ -487,11 +487,8 @@ fn receipt_authentication_digest(
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
     mac.update(&authenticated);
-    ManifestDigest::new(format!(
-        "sha256:{}",
-        hex::encode(mac.finalize().into_bytes())
-    ))
-    .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)
+    ManifestDigest::from_sha256_bytes(&mac.finalize().into_bytes())
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)
 }
 
 async fn read_validation_receipt_key(

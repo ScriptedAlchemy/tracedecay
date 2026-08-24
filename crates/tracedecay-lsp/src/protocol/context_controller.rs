@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use super::diagnostics_controller::refresh_pending_failure;
 use super::{
     Arc, BTreeMap, BTreeSet, CodeGenerationId, CommitId, CompletionDisposition, ContentDigest,
@@ -14,6 +16,50 @@ use super::{
     TRACEDECAY_SUBSCRIBE_METHOD, Value, error_response, is_supported_context_projection, json,
     request_id, success_response,
 };
+
+struct CountingSink {
+    written: u64,
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_payload_exceeds(value: &Value, max_bytes: usize) -> bool {
+    let mut output = CountingSink { written: 0 };
+    serde_json::to_writer(&mut output, value).map_or(true, |()| output.written > max_bytes as u64)
+}
+
+fn context_envelope_value<T: Serialize>(
+    envelope: &T,
+    exceeded: &'static str,
+) -> Result<Value, RpcFailure> {
+    let payload = serde_json::to_vec(envelope).map_err(|_| RpcFailure {
+        code: -32603,
+        message: "Internal error",
+        data: Value::Null,
+    })?;
+    if payload.len() > MAX_CONTEXT_PROJECTION_BYTES {
+        return Err(refresh_pending_failure(
+            None,
+            None,
+            Some(exceeded.to_owned()),
+            None,
+        ));
+    }
+    serde_json::from_slice(&payload).map_err(|_| RpcFailure {
+        code: -32603,
+        message: "Internal error",
+        data: Value::Null,
+    })
+}
 
 fn valid_context_projection_identity(identity: &ContextProjectionIdentity) -> bool {
     CommitId::new(identity.head_commit_id.clone()).is_ok()
@@ -66,7 +112,7 @@ pub(super) fn bind_context_document_digest(
         .document_uri
         .as_deref()
         .and_then(|uri| overlays.snapshot(uri))
-        .map(|snapshot| ContentDigest::of_bytes(snapshot.text.as_bytes()));
+        .map(|snapshot| snapshot.content_digest.clone());
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>
@@ -413,21 +459,7 @@ where
                 Some("superseded-generation".to_owned()),
             ));
         }
-        let value = serde_json::to_value(&envelope).map_err(|_| RpcFailure {
-            code: -32603,
-            message: "Internal error",
-            data: Value::Null,
-        })?;
-        if serde_json::to_vec(&value)
-            .map_or(true, |payload| payload.len() > MAX_CONTEXT_PROJECTION_BYTES)
-        {
-            return Err(refresh_pending_failure(
-                None,
-                None,
-                Some("projection-payload-exceeded".to_owned()),
-                None,
-            ));
-        }
+        let value = context_envelope_value(&envelope, "projection-payload-exceeded")?;
         self.context.currentness.insert(
             key,
             ContextProjectionCurrentness {
@@ -536,21 +568,8 @@ where
         match outcome {
             ContextExpansionOutcome::Ready(envelope) => {
                 self.validate_context_expansion(&envelope)?;
-                let value = serde_json::to_value(envelope).map_err(|_| RpcFailure {
-                    code: -32603,
-                    message: "Internal error",
-                    data: Value::Null,
-                })?;
-                if serde_json::to_vec(&value)
-                    .map_or(true, |payload| payload.len() > MAX_CONTEXT_PROJECTION_BYTES)
-                {
-                    return Err(refresh_pending_failure(
-                        None,
-                        None,
-                        Some("context-expansion-payload-exceeded".to_owned()),
-                        None,
-                    ));
-                }
+                let value =
+                    context_envelope_value(&envelope, "context-expansion-payload-exceeded")?;
                 Ok(Some(value))
             }
             ContextExpansionOutcome::Denied => Err(RpcFailure::unavailable(
@@ -861,8 +880,7 @@ where
                 "method": TRACEDECAY_CONTEXT_CHANGED_METHOD,
                 "params": params,
             });
-            if serde_json::to_vec(&notification)
-                .map_or(true, |payload| payload.len() > MAX_CONTEXT_PROJECTION_BYTES)
+            if json_payload_exceeds(&notification, MAX_CONTEXT_PROJECTION_BYTES)
                 || !self.enqueue_value(notification)
             {
                 break;

@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, ClaudeObservationIdentityMaterialV1,
     ComponentVersion, DurableClaudeObservationV1, ObservationContractError, ObservationId,
@@ -161,11 +161,7 @@ impl ClaudeSanitizerPolicyV1 {
             hasher.update(length.to_be_bytes());
             hasher.update(key.as_bytes());
         }
-        let mut fingerprint = String::with_capacity(64);
-        for byte in hasher.finalize() {
-            write!(&mut fingerprint, "{byte:02x}")
-                .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
-        }
+        let fingerprint = encode_lowercase_hex(&hasher.finalize());
         let base_version = if self.provider_neutral {
             OBSERVATION_SANITIZER_VERSION_V1
         } else {
@@ -446,10 +442,7 @@ fn protect_observation_identity(
     let provider = identity.source().provider().clone();
     let (session_id, session_changed) =
         protected_session_id(identity.source().session_id().as_str())?;
-    let source_has_explicit_key = serde_json::to_value(identity.source())
-        .map_err(|_| PrivacySanitizerError::StructuralIdentityProtection)?
-        .get("source_key")
-        .is_some();
+    let source_has_explicit_key = identity.source().explicit_source_key().is_some();
     let (source_key, source_key_changed) =
         protected_session_id(identity.source().source_key().as_str())?;
     let source = if source_has_explicit_key {

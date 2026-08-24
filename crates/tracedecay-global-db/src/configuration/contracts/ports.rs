@@ -37,7 +37,7 @@ pub struct ScopeRevalidationEvidenceV1 {
     pub policy_epoch: u64,
 }
 
-/// Plan 16-backed authority resolver. This port owns re-resolution; adapters
+/// Authority resolver. This port owns re-resolution; adapters
 /// and the configuration layer do not infer project authority from a path,
 /// CWD, source locator, collection label, or host profile. Resolution is
 /// asynchronous so a durable authority implementation never has to block a

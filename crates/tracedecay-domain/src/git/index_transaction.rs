@@ -320,7 +320,7 @@ impl GitIndexTransactionReceiptV1 {
             created_commit,
             outcome,
             committed_at,
-            receipt_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+            receipt_digest: ManifestDigest::zero()?,
         };
         receipt.receipt_digest = receipt.compute_receipt_digest()?;
         receipt.validate()?;
@@ -429,10 +429,6 @@ impl GitIndexTransactionReceiptV1 {
     }
 }
 
-const fn default_true() -> bool {
-    true
-}
-
 impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -447,7 +443,7 @@ impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
             operation: GitIndexTransactionOperationV1,
             old_snapshot_digest: ManifestDigest,
             final_snapshot_digest: ManifestDigest,
-            #[serde(default = "default_true")]
+            #[serde(default = "crate::canonical_text::default_true")]
             final_snapshot_captured: bool,
             old_index_tree: Option<GitOidV1>,
             new_index_tree: Option<GitOidV1>,

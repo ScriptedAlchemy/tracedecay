@@ -230,19 +230,19 @@ impl MarkdownExtractor {
             return;
         }
         let last_line = (bounds.len() - 1) as u32;
-        let headings = state.headings.clone();
-        for (order, (index, level, start_line)) in headings.iter().enumerate() {
-            let next_start = headings[order + 1..]
+        for order in 0..state.headings.len() {
+            let (index, level, start_line) = state.headings[order];
+            let next_start = state.headings[order + 1..]
                 .iter()
-                .find(|(_, other_level, _)| other_level <= level)
+                .find(|(_, other_level, _)| *other_level <= level)
                 .map(|(_, _, other_start)| *other_start);
             let mut end_line = match next_start {
                 Some(next) => next.saturating_sub(1),
                 None => last_line,
             }
             .min(last_line)
-            .max(*start_line);
-            while end_line > *start_line {
+            .max(start_line);
+            while end_line > start_line {
                 let (line_start, line_end) = bounds[end_line as usize];
                 if state.source[line_start..line_end]
                     .iter()
@@ -254,7 +254,7 @@ impl MarkdownExtractor {
                 }
             }
             let (line_start, line_end) = bounds[end_line as usize];
-            let node = &mut state.nodes[*index];
+            let node = &mut state.nodes[index];
             node.end_line = end_line;
             node.end_column = (line_end - line_start) as u32;
         }
@@ -410,19 +410,25 @@ impl MarkdownExtractor {
     /// ATX uses `atx_h{1..6}_marker` children; setext uses level-1 (`===`) or
     /// level-2 (`---`) underlines, identified by the marker child kind.
     fn heading_level(node: TsNode<'_>) -> usize {
-        for child in node.children(&mut node.walk()) {
-            let k = child.kind();
-            if let Some(rest) = k.strip_prefix("atx_h")
-                && let Some(d) = rest.strip_suffix("_marker")
-                && let Ok(n) = d.parse::<usize>()
-            {
-                return n.clamp(1, 6);
-            }
-            if k == "setext_h1_underline" {
-                return 1;
-            }
-            if k == "setext_h2_underline" {
-                return 2;
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let k = cursor.node().kind();
+                if let Some(rest) = k.strip_prefix("atx_h")
+                    && let Some(d) = rest.strip_suffix("_marker")
+                    && let Ok(n) = d.parse::<usize>()
+                {
+                    return n.clamp(1, 6);
+                }
+                if k == "setext_h1_underline" {
+                    return 1;
+                }
+                if k == "setext_h2_underline" {
+                    return 2;
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
         }
         1
@@ -555,8 +561,19 @@ impl MarkdownExtractor {
 }
 
 fn child_of_kind<'tree>(node: TsNode<'tree>, kind: &str) -> Option<TsNode<'tree>> {
-    node.children(&mut node.walk())
-        .find(|child| child.kind() == kind)
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == kind {
+                return Some(child);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    None
 }
 
 /// CommonMark label matching: trim, collapse whitespace, case-fold.

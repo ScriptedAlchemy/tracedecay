@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use crate::mcp::hook_events::HookEvent;
@@ -71,11 +71,8 @@ pub(super) fn bounded_failure_reason(reason: &str) -> String {
 /// Stable short hash for high-cardinality or private identifiers. Never
 /// embeds the raw value — only `h:` + truncated SHA-256 hex.
 fn hashed_cardinality_label(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    format!(
-        "h:{}",
-        hex::encode(&digest[..(CARDINALITY_LABEL_HASH_CHARS / 2)])
-    )
+    let digest = sha256_hex(value.as_bytes());
+    format!("h:{}", &digest[..CARDINALITY_LABEL_HASH_CHARS])
 }
 
 fn optional_hashed_label(value: Option<&str>) -> Option<String> {

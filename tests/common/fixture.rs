@@ -707,18 +707,6 @@ impl GitFixture {
         self.assert_collapses_onto_primary(path)
     }
 
-    /// Adds a linked worktree with a detached `HEAD`.
-    pub fn detached_worktree(&self, path: &Path) -> PathBuf {
-        self.run(&[
-            "worktree",
-            "add",
-            "--detach",
-            &path.to_string_lossy(),
-            "main",
-        ]);
-        self.assert_collapses_onto_primary(path)
-    }
-
     fn assert_collapses_onto_primary(&self, path: &Path) -> PathBuf {
         let path = path.canonicalize().unwrap_or_else(|err| {
             panic!(

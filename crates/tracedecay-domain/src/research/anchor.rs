@@ -420,12 +420,10 @@ impl<'de> Deserialize<'de> for RetrievalAnchorTargetV3 {
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
-        let target = if let Ok(legacy) =
-            serde_json::from_value::<RetrievalAnchorTargetV2>(value.clone())
-        {
+        let target = if let Ok(legacy) = RetrievalAnchorTargetV2::deserialize(&value) {
             legacy.into()
         } else {
-            match serde_json::from_value::<EvidenceWire>(value).map_err(serde::de::Error::custom)? {
+            match EvidenceWire::deserialize(value).map_err(serde::de::Error::custom)? {
                 EvidenceWire::ExactSourceOccurrence(occurrence_id) => {
                     Self::ExactSourceOccurrence(occurrence_id)
                 }

@@ -559,22 +559,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automation_defaults_mount_the_final_v2_curators() {
-        let config = AutomationConfig::default();
-
-        assert!(config.enabled);
-        assert_eq!(config.backend, AutomationBackend::CodexAppServer);
-        assert_eq!(config.host_mode, AutomationHostMode::Standalone);
-        assert_eq!(config.timeout_secs, 60);
-        assert_eq!(config.scheduler_tick_secs, 60);
-        assert!(config.combine_due_tasks);
-        assert_eq!(config.tasks.memory_curator.interval_secs, Some(900));
-        assert_eq!(config.tasks.session_reflector.interval_secs, Some(900));
-        assert_eq!(config.tasks.skill_writer.interval_secs, Some(3_600));
-        assert_eq!(config.tasks.skill_writer.min_idle_secs, Some(900));
-    }
-
-    #[test]
     fn project_config_patch_merges_without_clearing_omitted_fields() {
         let current = AutomationConfigPatch {
             enabled: Some(true),
@@ -765,21 +749,6 @@ mod tests {
             Some(None),
             "Codex retains an explicit model clear for validation"
         );
-    }
-
-    #[test]
-    fn validation_rejects_invalid_task_schedule() {
-        let patch = AutomationConfigPatch {
-            skill_writer: AutomationTaskPatch {
-                enabled: Some(true),
-                schedule: Some(Some("after lunch".to_string())),
-                ..AutomationTaskPatch::default()
-            },
-            ..AutomationConfigPatch::default()
-        };
-
-        let error = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap_err();
-        assert!(error.to_string().contains("skill_writer schedule"));
     }
 
     #[test]

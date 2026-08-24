@@ -57,8 +57,10 @@ fn executable_is_resolvable(bin: &str) -> bool {
     if path.components().count() > 1 {
         return path.is_file();
     }
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+    crate::agents::host_cli::resolve_on_path(bin, std::env::var_os("PATH").as_deref())
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 pub async fn run_agent_task_with_retry(

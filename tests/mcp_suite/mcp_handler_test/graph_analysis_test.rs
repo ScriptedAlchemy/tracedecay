@@ -2,13 +2,13 @@
 
 mod graph_readiness;
 
+use crate::common::fixture::git_run;
 use crate::support::*;
 use graph_readiness::{find_node_id, wait_for_current_graph};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
@@ -138,57 +138,39 @@ async fn setup_empty_analysis_project() -> (ProductionCompositionFixture, (), ()
     (fixture, (), ())
 }
 
+fn write_integration_test_risk_sources(project: &Path) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"risk_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), "pub mod api;\n").unwrap();
+    fs::write(
+        project.join("src/api.rs"),
+        "pub fn public_entry() -> String { format_greeting(\"world\") }\n\
+         pub fn unused_public_api() -> String { \"unused\".to_string() }\n\
+         fn format_greeting(name: &str) -> String { format!(\"Hello, {}!\", name) }\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tests/integration_api.rs"),
+        "use risk_fixture::api::public_entry;\n\
+         #[test]\nfn integration_public_entry() {\n    assert_eq!(public_entry(), \"Hello, world!\");\n}\n",
+    )
+    .unwrap();
+}
+
 async fn setup_integration_test_risk_project() -> (ProductionCompositionFixture, ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::create_dir_all(project.join("tests")).unwrap();
-        fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = \"risk_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(project.join("src/lib.rs"), "pub mod api;\n").unwrap();
-        fs::write(
-            project.join("src/api.rs"),
-            "pub fn public_entry() -> String { format_greeting(\"world\") }\n\
-             pub fn unused_public_api() -> String { \"unused\".to_string() }\n\
-             fn format_greeting(name: &str) -> String { format!(\"Hello, {}!\", name) }\n",
-        )
-        .unwrap();
-        fs::write(
-            project.join("tests/integration_api.rs"),
-            "use risk_fixture::api::public_entry;\n\
-             #[test]\nfn integration_public_entry() {\n    assert_eq!(public_entry(), \"Hello, world!\");\n}\n",
-        )
-        .unwrap();
-    })
-    .await;
+    let fixture =
+        production_composition_fixture_with_sources(write_integration_test_risk_sources).await;
     (fixture, ())
 }
 
 async fn setup_test_risk_non_src_fixture() -> (ProductionCompositionFixture, ()) {
     let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::create_dir_all(project.join("tests")).unwrap();
-        fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = \"risk_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(project.join("src/lib.rs"), "pub mod api;\n").unwrap();
-        fs::write(
-            project.join("src/api.rs"),
-            "pub fn public_entry() -> String { format_greeting(\"world\") }\n\
-             pub fn unused_public_api() -> String { \"unused\".to_string() }\n\
-             fn format_greeting(name: &str) -> String { format!(\"Hello, {}!\", name) }\n",
-        )
-        .unwrap();
-        fs::write(
-            project.join("tests/integration_api.rs"),
-            "use risk_fixture::api::public_entry;\n\
-             #[test]\nfn integration_public_entry() {\n    assert_eq!(public_entry(), \"Hello, world!\");\n}\n",
-        )
-        .unwrap();
+        write_integration_test_risk_sources(project);
         fs::write(
             project.join("build.rs"),
             "fn build_script_helper(flag: &str) -> String { format!(\"cargo:warning={flag}\") }\n\
@@ -257,9 +239,10 @@ pub fn safe_add(a: u64, b: u64) -> u64 {
 
 async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
     if !project.join(".git").is_dir() {
-        for args in [
-            &["init", "--quiet"][..],
-            &["add", "."][..],
+        git_run(project, &["init", "--quiet"]);
+        git_run(project, &["add", "."]);
+        git_run(
+            project,
             &[
                 "-c",
                 "user.name=TraceDecay Tests",
@@ -269,15 +252,8 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
                 "--quiet",
                 "-m",
                 "fixture",
-            ][..],
-        ] {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(project)
-                .status()
-                .expect("graph-analysis fixture git command");
-            assert!(status.success(), "git {args:?} must succeed");
-        }
+            ],
+        );
     }
     let isolation_root = project
         .parent()
@@ -297,19 +273,6 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 
 #[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
-    fn git(project: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(project)
-            .output()
-            .expect("git command failed to spawn");
-        assert!(
-            status.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-    }
-
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
@@ -320,12 +283,12 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "test@test.com"]);
-    git(project, &["config", "user.name", "Test"]);
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "initial"]);
-    git(project, &["branch", "-M", "main"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "test@test.com"]);
+    git_run(project, &["config", "user.name", "Test"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "initial"]);
+    git_run(project, &["branch", "-M", "main"]);
 
     let _initialized = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
     let tracedecay_dir = resolve_layout_for_current_profile(project)
@@ -338,7 +301,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     .unwrap();
 
     let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
-    git(project, &["checkout", "-b", "feature"]);
+    git_run(project, &["checkout", "-b", "feature"]);
 
     // Branch drift diagnostics moved off `tracedecay_branch_list` (now the
     // paginated branch-ref snapshot read) to the active-project context's
@@ -355,30 +318,51 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     assert_eq!(branch["branch_resolution"], json!("stale_serving_branch"));
 }
 
-// ---------------------------------------------------------------------------
-// 14. tracedecay_dead_code
-// ---------------------------------------------------------------------------
-
+/// The shared fixture plants exactly four functions, and every one of them is
+/// excluded from the default dead-code census for a *different* reason:
+///
+/// | symbol            | why it is not dead                                  |
+/// |-------------------|-----------------------------------------------------|
+/// | `main`            | entry-point name exclusion                          |
+/// | `test_helper`     | `test`-prefixed and `#[test]`-annotated             |
+/// | `helper`          | `pub`, and `include_public` defaults to false       |
+/// | `format_greeting` | private, but `helper` calls it (incoming edge)      |
+///
+/// So the correct answer is an empty dead-code set. Resolving `format_greeting`
+/// first is the anti-vacuity gate: it waits for the graph to become current and
+/// panics unless that private, *called* symbol is in the census, which makes the
+/// zero below a real negative result rather than an unpopulated index.
 #[tokio::test]
 async fn test_dead_code() {
     let (cg, _dir) = setup_project().await;
+    let _populated = find_node_id(&cg, "format_greeting").await;
+
     let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+    let symbols = payload["symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("dead_code must return a symbols array: {payload}"));
+
+    assert_eq!(
+        payload["dead_code_count"].as_u64(),
+        Some(0),
+        "no fixture symbol qualifies as dead code: {payload}"
+    );
     assert!(
-        text.contains("dead_code_count"),
-        "should have dead_code_count key"
+        symbols.is_empty(),
+        "dead_code_count and symbols must agree: {payload}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// 15. tracedecay_diff_context
-// ---------------------------------------------------------------------------
-
+/// `src/utils.rs` holds `helper` and `format_greeting`, and `main` (in
+/// `src/main.rs`) calls `helper`. A correct semantic diff therefore reports both
+/// of the file's symbols as modified and `main` as impacted downstream.
 #[tokio::test]
 async fn test_diff_context() {
     let (cg, _dir) = setup_project().await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_diff_context",
@@ -388,34 +372,73 @@ async fn test_diff_context() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("changed_files"),
-        "should have changed_files key"
+    let payload = extract_json(&result.value);
+
+    assert_eq!(
+        payload["changed_files"],
+        json!(["src/utils.rs"]),
+        "changed_files must echo the requested paths: {payload}"
     );
+
+    let modified: Vec<&str> = payload["modified_symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diff_context must return modified_symbols: {payload}"))
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    for expected in ["helper", "format_greeting"] {
+        assert!(
+            modified.contains(&expected),
+            "every symbol defined in src/utils.rs must be reported modified, \
+             missing `{expected}` in {modified:?}: {payload}"
+        );
+    }
+
+    let impacted = payload["impacted_symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diff_context must return impacted_symbols: {payload}"));
+    assert_eq!(
+        payload["impacted_symbols_count"].as_u64(),
+        Some(impacted.len() as u64),
+        "impacted_symbols_count must match the returned list: {payload}"
+    );
+    let impacted_names: Vec<&str> = impacted
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
     assert!(
-        text.contains("modified_symbols"),
-        "should have modified_symbols key"
+        impacted_names.contains(&"main"),
+        "`main` calls `helper`, so it must appear downstream of a utils.rs change, \
+         got {impacted_names:?}: {payload}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// 17. tracedecay_circular
-// ---------------------------------------------------------------------------
-
+/// The fixture's file dependencies are strictly acyclic (`main.rs` imports
+/// `utils.rs`; nothing imports back), so a correct analysis reports no cycles.
+/// Resolving a symbol first proves the graph is populated, so the zero below is
+/// a real "no cycles here" rather than "nothing was analysed".
 #[tokio::test]
 async fn test_circular() {
     let (cg, _dir) = setup_project().await;
+    let _populated = find_node_id(&cg, "helper").await;
+
     let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("cycle_count"), "should have cycle_count key");
-}
+    let payload = extract_json(&result.value);
 
-// ---------------------------------------------------------------------------
-// 20. tracedecay_rename_preview
-// ---------------------------------------------------------------------------
+    assert_eq!(
+        payload["cycle_count"].as_u64(),
+        Some(0),
+        "the acyclic fixture must not report dependency cycles: {payload}"
+    );
+    assert_eq!(payload["reported_cycle_count"].as_u64(), Some(0));
+    assert_eq!(payload["omitted_cycle_count"].as_u64(), Some(0));
+    assert!(
+        payload["cycles"].as_array().is_some_and(Vec::is_empty),
+        "cycle_count and cycles must agree: {payload}"
+    );
+}
 
 #[tokio::test]
 async fn test_rename_preview() {
@@ -430,48 +453,103 @@ async fn test_rename_preview() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("reference_count"),
-        "should have reference_count key"
+    let payload = extract_json(&result.value);
+
+    assert_eq!(payload["symbol"], json!("helper"), "payload: {payload}");
+    assert_eq!(
+        payload["node"]["name"],
+        json!("helper"),
+        "payload: {payload}"
     );
-    assert!(text.contains("node"), "should have node key");
+    assert_eq!(
+        payload["node"]["file"],
+        json!("src/utils.rs"),
+        "payload: {payload}"
+    );
+    assert_eq!(
+        payload["read_only"],
+        json!(true),
+        "rename_preview must never claim to have written: {payload}"
+    );
+
+    // `main` calls `helper`, so renaming it has at least that one real
+    // reference to update.
+    let references = payload["references"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rename_preview must return references: {payload}"));
+    assert_eq!(
+        payload["reference_count"].as_u64(),
+        Some(references.len() as u64),
+        "reference_count must match the returned references: {payload}"
+    );
+    let referrers: Vec<&str> = references
+        .iter()
+        .filter_map(|reference| reference["from_name"].as_str())
+        .collect();
+    assert!(
+        referrers.contains(&"main"),
+        "`main` calls `helper`, so it must appear as a rename reference, \
+         got {referrers:?}: {payload}"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// 21. tracedecay_unused_imports
-// ---------------------------------------------------------------------------
-
+/// Both `use crate::utils::helper;` statements the fixture plants (in
+/// `src/main.rs` and `tests/test_utils.rs`) are followed by a real `helper()`
+/// call, so nothing is unused. `scanned_files` is the anti-vacuity signal: a
+/// zero finding only means something if the scan actually inspected files.
 #[tokio::test]
 async fn test_unused_imports() {
     let (cg, _dir) = setup_project().await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+
     assert!(
-        text.contains("unused_import_count"),
-        "should have unused_import_count key"
+        payload["scanned_files"].as_u64().is_some_and(|n| n > 0),
+        "a zero finding is only meaningful if files were scanned: {payload}"
+    );
+    assert_eq!(
+        payload["complete"],
+        json!(true),
+        "the fixture is far under the scan budget: {payload}"
+    );
+    assert_eq!(
+        payload["unused_import_count"].as_u64(),
+        Some(0),
+        "every fixture import is used, so none may be flagged: {payload}"
+    );
+    assert!(
+        payload["imports"].as_array().is_some_and(Vec::is_empty),
+        "unused_import_count and imports must agree: {payload}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// 28. tracedecay_recursion
-// ---------------------------------------------------------------------------
-
+/// The fixture's call graph is a straight chain (`main` -> `helper` ->
+/// `format_greeting`) with no symbol calling itself or looping back, so a
+/// correct analysis finds no recursion. Resolving a symbol on that chain first
+/// proves the call edges are present, which is what makes zero meaningful.
 #[tokio::test]
 async fn test_recursion() {
     let (cg, _dir) = setup_project().await;
+    let _populated = find_node_id(&cg, "format_greeting").await;
+
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("cycle_count"), "should have cycle_count key");
-}
+    let payload = extract_json(&result.value);
 
-// ---------------------------------------------------------------------------
-// 32. tracedecay_changelog — requires git refs, expect graceful error
-// ---------------------------------------------------------------------------
+    assert_eq!(
+        payload["cycle_count"].as_u64(),
+        Some(0),
+        "the non-recursive fixture must not report call cycles: {payload}"
+    );
+    assert!(
+        payload["cycles"].as_array().is_some_and(Vec::is_empty),
+        "cycle_count and cycles must agree: {payload}"
+    );
+}
 
 #[tokio::test]
 async fn test_changelog_no_git() {
@@ -539,10 +617,6 @@ async fn pr_context_no_git_returns_structured_git_error() {
     assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
 }
 
-// ---------------------------------------------------------------------------
-// 33. tracedecay_port_status — no matching dirs expected
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_port_status() {
     let (cg, _dir) = setup_project().await;
@@ -556,20 +630,56 @@ async fn test_port_status() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
+    let payload = extract_json(&result.value);
+
+    assert_eq!(payload["source_dir"], json!("src"), "payload: {payload}");
+    assert_eq!(payload["target_dir"], json!("tests"), "payload: {payload}");
+
+    // `src/` holds `main`, `helper`, and `format_greeting`; `tests/` holds only
+    // `test_helper`. No source name has a counterpart in the target, so nothing
+    // is matched and coverage is exactly zero.
+    let source_count = payload["source_count"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("port_status must report source_count: {payload}"));
     assert!(
-        text.contains("coverage_percent"),
-        "should have coverage_percent key"
+        source_count >= 3,
+        "src/ defines at least main, helper, and format_greeting: {payload}"
     );
+    assert_eq!(
+        payload["matched"].as_u64(),
+        Some(0),
+        "`test_helper` is not a counterpart of any src symbol: {payload}"
+    );
+    assert_eq!(
+        payload["unmatched"].as_u64(),
+        Some(source_count),
+        "matched + unmatched must account for every source symbol: {payload}"
+    );
+    assert_eq!(
+        payload["coverage_percent"].as_f64(),
+        Some(0.0),
+        "zero matches must render as zero percent coverage: {payload}"
+    );
+
+    let target_only: Vec<&str> = payload["target_only_symbols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("port_status must report target_only_symbols: {payload}"))
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert!(
+        target_only.contains(&"test_helper"),
+        "`test_helper` exists only in the target dir, got {target_only:?}: {payload}"
+    );
+
     close_test_graph(cg).await;
 }
 
-/// Regression: port_status used to match symbols purely on (name,
-/// kind_compat_group), so common method names like `new`, `process`, `fmt`,
-/// or `reset` produced wild cross-type "matches" — e.g. `Biquad::new` would
-/// pair with an unrelated `Adaa::new` simply because both methods are named
-/// "new". The match key must also include the parent type so siblings of
-/// distinct owners stay unmatched.
+/// `port_status` must not match symbols purely on (name, kind_compat_group).
+/// Common method names like `new`, `process`, `fmt`, or `reset` produced
+/// wild cross-type "matches" — e.g. `Biquad::new` pairing with an unrelated
+/// `Adaa::new`. The match key must also include the parent type so siblings
+/// of distinct owners stay unmatched.
 #[tokio::test]
 async fn port_status_does_not_match_methods_of_different_parents() {
     let dir = test_temp_dir();
@@ -676,10 +786,6 @@ async fn port_status_matches_methods_with_same_parent_type() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 34. tracedecay_port_order
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_port_order() {
     let (cg, _dir) = setup_project().await;
@@ -693,17 +799,63 @@ async fn test_port_order() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("total_symbols"),
-        "should have total_symbols key"
-    );
-    assert!(text.contains("levels"), "should have levels key");
-}
+    let payload = extract_json(&result.value);
 
-// ---------------------------------------------------------------------------
-// Extra: rename_preview with nonexistent node
-// ---------------------------------------------------------------------------
+    assert_eq!(payload["source_dir"], json!("src"), "payload: {payload}");
+    let total_symbols = payload["total_symbols"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("port_order must report total_symbols: {payload}"));
+    assert!(
+        total_symbols >= 3,
+        "src/ defines at least main, helper, and format_greeting: {payload}"
+    );
+
+    let levels = payload["levels"]
+        .as_array()
+        .unwrap_or_else(|| panic!("port_order must report levels: {payload}"));
+    assert!(!levels.is_empty(), "payload: {payload}");
+
+    // Map every ordered symbol to the level it landed in.
+    let mut level_of = std::collections::HashMap::<&str, u64>::new();
+    let mut emitted = 0usize;
+    for level in levels {
+        let index = level["level"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("each level must carry its index: {payload}"));
+        for symbol in level["symbols"]
+            .as_array()
+            .unwrap_or_else(|| panic!("each level must carry symbols: {payload}"))
+        {
+            emitted += 1;
+            if let Some(name) = symbol["name"].as_str() {
+                level_of.insert(name, index);
+            }
+        }
+    }
+    assert_eq!(
+        payload["returned"].as_u64(),
+        Some(emitted as u64),
+        "`returned` must count the symbols actually laid out: {payload}"
+    );
+
+    // The fixture's dependency chain is main -> helper -> format_greeting, and
+    // port order is leaves first, so the chain must come back strictly
+    // reversed. This is the assertion that a topological sort can actually
+    // fail: a broken layering collapses all three into one level.
+    let level_for = |name: &str| -> u64 {
+        *level_of
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` missing from the port order: {payload}"))
+    };
+    assert!(
+        level_for("format_greeting") < level_for("helper"),
+        "`helper` depends on `format_greeting`, so the leaf must be ported first: {payload}"
+    );
+    assert!(
+        level_for("helper") < level_for("main"),
+        "`main` depends on `helper`, so `helper` must be ported first: {payload}"
+    );
+}
 
 #[tokio::test]
 async fn test_rename_preview_not_found() {
@@ -725,43 +877,11 @@ async fn test_rename_preview_not_found() {
     );
 }
 
-#[tokio::test]
-async fn test_diff_context_missing_files() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_diff_context", json!({}), None, None).await;
-    assert!(result.is_err(), "diff_context without files should error");
-}
-
-#[tokio::test]
-async fn test_changelog_missing_refs() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_changelog", json!({}), None, None).await;
-    assert!(result.is_err(), "changelog without from_ref should error");
-}
-
-#[tokio::test]
-async fn test_port_status_missing_dirs() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_port_status", json!({}), None, None).await;
-    assert!(
-        result.is_err(),
-        "port_status without source_dir should error"
-    );
-}
-
-#[tokio::test]
-async fn test_port_order_missing_source_dir() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_port_order", json!({}), None, None).await;
-    assert!(
-        result.is_err(),
-        "port_order without source_dir should error"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_changelog with a real git repo
-// ---------------------------------------------------------------------------
+// The missing-required-argument cases for `tracedecay_diff_context`,
+// `tracedecay_changelog`, `tracedecay_port_status`, and `tracedecay_port_order`
+// live in `schema_test::schema_required_arguments_match_representative_handler_parsers`,
+// which pairs each one with the schema `required` array the handler parser is
+// supposed to mirror instead of only asserting that *some* error came back.
 
 #[tokio::test]
 async fn commit_context_clean_worktree_returns_json() {
@@ -769,22 +889,14 @@ async fn commit_context_clean_worktree_returns_json() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-    }
-
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "t@t"]);
-    git(project, &["config", "user.name", "t"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join(".gitignore"), ".tracedecay/\nhome/\n").unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn clean() {}\n").unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
 
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(
@@ -818,51 +930,21 @@ async fn test_changelog_with_real_git() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
-    // Initialize git repo and make a first commit
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project)
-        .output()
-        .expect("git init failed");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "test@test.com"]);
+    git_run(project, &["config", "user.name", "Test"]);
 
     fs::write(project.join("src/lib.rs"), "pub fn original() {}\n").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "initial"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "initial"]);
 
-    // Make a second commit with changes
     fs::write(
         project.join("src/lib.rs"),
         "pub fn original() {}\npub fn added() {}\n",
     )
     .unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "add function"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "add function"]);
 
     let (cg, _env) = init_test_project(project).await;
 
@@ -877,27 +959,32 @@ async fn test_changelog_with_real_git() {
     .unwrap();
 
     let text = extract_text(&result.value);
-    // Should not report "git diff failed" since it's a real git repo
     assert!(
         !text.contains("git diff failed"),
         "changelog in git repo should not fail, got: {}",
         text,
     );
-    assert!(
-        text.contains("changed_file_count") || text.contains("lib.rs"),
-        "changelog should mention changed files, got: {}",
-        text,
+
+    // The second commit touches exactly one file, so the tree diff between
+    // HEAD~1 and HEAD is precisely `src/lib.rs`.
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["from_ref"], json!("HEAD~1"), "payload: {payload}");
+    assert_eq!(payload["to_ref"], json!("HEAD"), "payload: {payload}");
+    assert_eq!(
+        payload["changed_file_count"].as_u64(),
+        Some(1),
+        "the second commit changed exactly one file: {payload}"
+    );
+    assert_eq!(
+        payload["changed_files"],
+        json!(["src/lib.rs"]),
+        "src/lib.rs is the only file in the diff: {payload}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Extra: tracedecay_dead_code with custom kinds parameter
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_dead_code_custom_kinds() {
     let (cg, _dir) = setup_project().await;
-    // Ask only for struct dead code
     let result = handle_tool_call(
         &cg,
         "tracedecay_dead_code",
@@ -912,7 +999,6 @@ async fn test_dead_code_custom_kinds() {
         text.contains("dead_code_count"),
         "should have dead_code_count key"
     );
-    // Parse and verify any returned items are structs
     let parsed: Value = serde_json::from_str(text).unwrap_or(json!({}));
     if let Some(items) = parsed["dead_code"].as_array() {
         for item in items {
@@ -924,10 +1010,6 @@ async fn test_dead_code_custom_kinds() {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_gini
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_gini() {
@@ -969,10 +1051,6 @@ async fn test_gini_default_metric() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_dependency_depth
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_dependency_depth() {
     let (cg, _dir) = setup_project().await;
@@ -997,10 +1075,6 @@ async fn test_dependency_depth() {
         "ideal_depth field should exist"
     );
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_health
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_health_summary() {
@@ -1048,10 +1122,10 @@ async fn test_health_detailed() {
     assert!(dims.get("modularity").is_some(), "modularity score missing");
 }
 
-/// Issue #83: tracedecay_redundancy must surface AST-isomorphic duplicate
-/// pairs and rank them by composite similarity. Plant two structurally
-/// identical functions in a fixture and assert the pair surfaces in the
-/// top hit with the `definite` severity bucket.
+/// `tracedecay_redundancy` must surface AST-isomorphic duplicate pairs and
+/// rank them by composite similarity. Plant two structurally identical
+/// functions in a fixture and assert the pair surfaces in the top hit with
+/// the `definite` severity bucket.
 #[tokio::test]
 async fn test_redundancy_finds_planted_duplicate() {
     let dir = test_temp_dir();
@@ -1165,9 +1239,9 @@ pub fn unrelated(x: i32) -> i32 {
     assert_eq!(parsed2["pair_count"], parsed["pair_count"]);
 }
 
-/// Issue #82: `details=true` must surface raw counts + interpretation per
-/// dimension, not just the scalar score, so callers don't have to compose
-/// six separate tools to reproduce the breakdown.
+/// `details=true` must surface raw counts + interpretation per dimension,
+/// not just the scalar score, so callers don't have to compose six
+/// separate tools to reproduce the breakdown.
 #[tokio::test]
 async fn test_health_detailed_includes_raw_signals() {
     let (cg, _dir) = setup_project().await;
@@ -1212,10 +1286,6 @@ async fn test_health_detailed_includes_raw_signals() {
     assert!(dims["modularity"].get("interpretation").is_some());
     assert!(dims["redundancy"].get("dead_count").is_some());
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_dsm
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_dsm_stats() {
@@ -1293,10 +1363,6 @@ async fn test_dsm_clusters() {
         text
     );
 }
-
-// ---------------------------------------------------------------------------
-// tracedecay_test_risk
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_test_risk() {
@@ -1530,10 +1596,6 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
     close_test_graph(cg).await;
 }
 
-// ---------------------------------------------------------------------------
-// tracedecay_todos
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_todos_finds_markers() {
     let dir = test_temp_dir();
@@ -1637,10 +1699,9 @@ async fn test_todos_empty_when_clean() {
     close_test_graph(cg).await;
 }
 
-/// Regression for bug #5: `tracedecay_diff_context.impacted_symbols` must not
-/// list the same downstream node more than once. The sonium report showed
-/// the same id appearing 6+ times consecutively when several modified
-/// symbols all reached the same dependent.
+/// `tracedecay_diff_context.impacted_symbols` must not list the same
+/// downstream node more than once. The same id appeared 6+ times
+/// consecutively when several modified symbols all reached the same dependent.
 #[tokio::test]
 async fn diff_context_dedupes_impacted_symbols() {
     let dir = test_temp_dir();
@@ -1685,8 +1746,8 @@ pub fn second() { dep::shared(); }
     );
 }
 
-/// Regression for bug #6 / review P1: `tracedecay_recursion` must preserve
-/// genuine direct recursion while filtering length-1 self-edge artifacts.
+/// `tracedecay_recursion` must preserve genuine direct recursion while
+/// filtering length-1 self-edge artifacts.
 #[tokio::test]
 async fn recursion_keeps_direct_recursion() {
     let dir = test_temp_dir();
@@ -1808,60 +1869,31 @@ pub fn c() { a(); }
     }
 }
 
-/// Regression for bug #4: `tracedecay_changelog`'s response must not list
-/// directories under `files_not_indexed`. We construct a small git repo
-/// with a real commit history that touches both a real file and a
-/// (synthesised) directory path then verify the handler filters out the
-/// directory.
+/// `tracedecay_changelog`'s response must not list directories under
+/// `files_not_indexed`. A small git repo with a real commit history that
+/// touches both a real file and a synthesised directory path must have the
+/// directory filtered out.
 #[tokio::test]
 async fn changelog_filters_directory_paths() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project)
-        .output()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "t@t"])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "t"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("src/sub")).unwrap();
     fs::write(project.join("src/sub/keep.rs"), "pub fn k() {}\n").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
     fs::write(
         project.join("src/sub/keep.rs"),
         "pub fn k() { let _ = 1; }\n",
     )
     .unwrap();
     fs::write(project.join("src/sub/added.rs"), "pub fn a() {}\n").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "two"])
-        .current_dir(project)
-        .output()
-        .unwrap();
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "two"]);
     let (cg, _env) = init_test_project(project).await;
 
     let result = handle_tool_call(
@@ -1890,11 +1922,10 @@ async fn changelog_filters_directory_paths() {
     }
 }
 
-/// Regression for bug #8b: `tracedecay_unused_imports` must actually flag
-/// unused imports. The previous implementation tested `incoming.is_empty()`
-/// for every Use node, but Use nodes always have at least one incoming
-/// edge (from their containing module/file via Contains), so the
-/// condition never fired and the tool returned 0 on every real codebase.
+/// `tracedecay_unused_imports` must flag unused imports. Testing
+/// `incoming.is_empty()` on every Use node never fires: Use nodes always
+/// have at least one incoming Contains edge from their containing
+/// module/file, so that condition returned 0 on every real codebase.
 #[tokio::test]
 async fn unused_imports_detects_truly_unused() {
     let dir = test_temp_dir();
@@ -1930,11 +1961,10 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for the "empty results on small crates" bug: an import named only
-/// in a nearby comment (like the audit fixture's own
-/// `// Planted unused import: BTreeMap …`) was read as "used" by the text scan
-/// and never flagged. Asserts the masked scan flags it in BOTH markdown and
-/// JSON with file:line, and that a genuinely-used import is NOT flagged.
+/// An import named only in a nearby comment (like the audit fixture's own
+/// `// Planted unused import: BTreeMap …`) must not be read as "used" by the
+/// text scan. The masked scan must flag it in both markdown and JSON with
+/// file:line, and must not flag a genuinely-used import.
 #[tokio::test]
 async fn unused_imports_reports_in_markdown_and_json() {
     let dir = test_temp_dir();
@@ -2042,10 +2072,9 @@ async fn unused_imports_keeps_implicit_format_capture() {
     );
 }
 
-/// Regression for bug #8a: `tracedecay_dead_code` must support `include_public`
-/// so agents can audit pub items with no callers in the indexed scope. The
-/// previous SQL hard-coded `visibility != 'public'`, so on a codebase that
-/// is mostly `pub` the tool reported 0 dead symbols.
+/// `tracedecay_dead_code` must support `include_public` so agents can audit
+/// pub items with no callers in the indexed scope. SQL that hard-codes
+/// `visibility != 'public'` reports 0 dead symbols on a mostly-`pub` codebase.
 #[tokio::test]
 async fn dead_code_with_include_public_finds_pub_unreferenced() {
     let dir = test_temp_dir();
@@ -2098,10 +2127,9 @@ pub fn caller() { called(); }
     );
 }
 
-/// Regression for bug #7: `build_file_adjacency` previously included
-/// `implements` and `extends` edges, which are heavily resolver-fuzzy-bound
-/// to nonsense targets in unrelated files. After the fix, only `uses` and
-/// `calls` edges count for file-level dependency depth.
+/// `build_file_adjacency` must count only `uses` and `calls` for file-level
+/// dependency depth. `implements` and `extends` edges are heavily
+/// resolver-fuzzy-bound to nonsense targets in unrelated files.
 #[tokio::test]
 async fn dependency_depth_excludes_implements_and_extends() {
     let dir = test_temp_dir();
@@ -2165,12 +2193,12 @@ pub trait T {}
     );
 }
 
-/// Regression: `tracedecay_diagnose` must normalize span paths before
-/// looking them up in the graph. cargo emits absolute and (on Windows)
-/// backslash-separated paths; the graph stores project-relative,
-/// forward-slash paths. Without normalization a diagnostic with span
-/// `/abs/path/to/project/src/lib.rs:42:1` or `src\lib.rs:42:1` resolves
-/// to `node: null` even though the file is indexed.
+/// `tracedecay_diagnose` must normalize span paths before looking them up
+/// in the graph. cargo emits absolute and (on Windows) backslash-separated
+/// paths; the graph stores project-relative, forward-slash paths. Without
+/// normalization a diagnostic with span `/abs/path/to/project/src/lib.rs:42:1`
+/// or `src\lib.rs:42:1` resolves to `node: null` even though the file is
+/// indexed.
 #[tokio::test]
 async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let dir = test_temp_dir();
@@ -2285,8 +2313,8 @@ pub fn compute_b(input: i32) -> i32 {
     assert!(top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0);
 }
 
-/// Regression: the resolver's kind-compatibility filter must apply to
-/// the same-file blocklist branches too. Without it, common names like
+/// The resolver's kind-compatibility filter must apply to the same-file
+/// blocklist branches too. Without it, common names like
 /// `new`/`default`/`clone` can still bind a `Calls` reference to a
 /// non-callable same-file symbol — e.g. a const literally named
 /// `default` — when it's the only same-file match for a blocklisted
@@ -2299,9 +2327,9 @@ async fn resolver_blocklist_branch_respects_kind_filter() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Use a struct named after a blocklisted identifier ("new") plus a
-    // call site that the parser definitely treats as a call_expression.
-    // Pre-fix the resolver's same-file blocklist branch would bind the
-    // Calls ref to this struct because no other "new" lives in the file.
+    // call site that the parser treats as a call_expression. The same-file
+    // blocklist branch must not bind the Calls ref to this struct just
+    // because no other "new" lives in the file.
     fs::write(
         project.join("src/lib.rs"),
         r#"
@@ -2345,14 +2373,13 @@ pub fn helper() {}
     }
 }
 
-/// Regression for bug #11: when an `impl Trait for X` reference cannot
-/// resolve to a real trait node (e.g. `Default` lives in std and isn't
-/// indexed), the resolver MUST NOT fuzzy-bind it to an unrelated node
-/// kind. The sonium codebase had a parser `Token` enum whose `Default`
-/// variant became the target of 150 stray `implements` edges from
-/// manual `impl Default for X` blocks, completely poisoning
-/// `tracedecay_rank --edge-kind implements`. Implements/Extends/derives
-/// references must only resolve to trait-shaped targets.
+/// When an `impl Trait for X` reference cannot resolve to a real trait node
+/// (e.g. `Default` lives in std and isn't indexed), the resolver must not
+/// fuzzy-bind it to an unrelated node kind. A parser `Token` enum whose
+/// `Default` variant became the target of 150 stray `implements` edges from
+/// manual `impl Default for X` blocks poisoned `tracedecay_rank --edge-kind
+/// implements`. Implements/Extends/derives references must only resolve to
+/// trait-shaped targets.
 #[tokio::test]
 async fn implements_refs_dont_resolve_to_enum_variants() {
     let dir = test_temp_dir();
@@ -2407,11 +2434,9 @@ impl Default for B { fn default() -> Self { B } }
     );
 }
 
-/// Regression for bug #10: `tracedecay_circular` must report one entry per
-/// strongly-connected component, not every walk through the cycle. The
-/// sonium codebase had 73 "cycles" that were all different DFS paths
-/// through the same SCC. After the SCC refactor, the same data yields
-/// one entry per genuine component.
+/// `tracedecay_circular` must report one entry per strongly-connected
+/// component, not every walk through the cycle. Counting DFS paths through
+/// the same SCC reported 73 "cycles" that were one genuine component.
 #[tokio::test]
 async fn circular_reports_one_entry_per_scc_not_per_walk() {
     let dir = test_temp_dir();
@@ -2420,7 +2445,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     // Three-file cycle: a uses b, b uses c, c uses a. Multiple DFS walks
-    // through this triangle would have reported 3+ "cycles" pre-fix
+    // through this triangle must not report 3+ "cycles"
     // (a→b→c→a, b→c→a→b, c→a→b→c).
     fs::write(project.join("src/lib.rs"), "mod a; mod b; mod c;\n").unwrap();
     fs::write(
@@ -2463,11 +2488,10 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     assert_eq!(cycle["omitted_member_count"].as_u64(), Some(0));
 }
 
-/// Regression for bug #12: `tracedecay_port_order`'s `cycles` output must
-/// expose the SCCs forming each cycle separately, instead of collapsing
-/// all unsorted nodes into a single mega-blob. Without this, on a real
-/// codebase the cycle entry contained 200+ unrelated symbols and the
-/// agent had no way to know what to break first.
+/// `tracedecay_port_order`'s `cycles` output must expose the SCCs forming
+/// each cycle separately, instead of collapsing all unsorted nodes into a
+/// single mega-blob. Collapsing them packed 200+ unrelated symbols into one
+/// entry with no way to know what to break first.
 #[tokio::test]
 async fn port_order_reports_separate_scc_groups() {
     let dir = test_temp_dir();
@@ -2475,10 +2499,9 @@ async fn port_order_reports_separate_scc_groups() {
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
-    // Two disjoint mutually-recursive pairs: (a, b) and (c, d). Before
-    // the fix, both pairs would be lumped into a single "Mutual
-    // dependency" entry. After the fix, each pair appears as its own
-    // cycle group.
+    // Two disjoint mutually-recursive pairs: (a, b) and (c, d). Each pair
+    // must appear as its own cycle group, not one lumped "Mutual
+    // dependency" entry.
     fs::write(project.join("src/lib.rs"), "pub mod m;\n").unwrap();
     fs::write(
         project.join("src/m.rs"),
@@ -2528,12 +2551,11 @@ pub fn leaf() {}
     }
 }
 
-/// Regression for new bug-report batch (#25): `tracedecay_port_order` must
-/// expose intra-cycle ordering signals so an agent can pick a starting
-/// point inside a 200-symbol SCC instead of staring at an undifferentiated
-/// blob. We expect each cycle entry to carry per-symbol in-cycle degree
-/// data, a file-level member-count breakdown, and explicit `entry_point`
-/// / `break_point_candidate` suggestions.
+/// `tracedecay_port_order` must expose intra-cycle ordering signals so an
+/// agent can pick a starting point inside a 200-symbol SCC instead of
+/// staring at an undifferentiated blob. Each cycle entry must carry
+/// per-symbol in-cycle degree data, a file-level member-count breakdown,
+/// and explicit `entry_point` / `break_point_candidate` suggestions.
 #[tokio::test]
 async fn port_order_provides_intra_cycle_ordering() {
     let dir = test_temp_dir();
@@ -2607,9 +2629,8 @@ pub fn h() { a(); }
     );
 }
 
-/// Regression for the Sonium port-order report: self-edges from fuzzy
-/// resolution (`self.rows.push(...)` inside a method named `push`) should
-/// not make singleton symbols appear as cycles.
+/// Self-edges from fuzzy resolution (`self.rows.push(...)` inside a method
+/// named `push`) must not make singleton symbols appear as cycles.
 #[tokio::test]
 async fn port_order_ignores_self_edges() {
     let dir = test_temp_dir();
@@ -2652,8 +2673,8 @@ impl Triplet {
     );
 }
 
-/// Regression for bug #9: `tracedecay_inheritance_depth` must surface Rust
-/// supertrait chains (`trait T: U`) as `Extends` edges.
+/// `tracedecay_inheritance_depth` must surface Rust supertrait chains
+/// (`trait T: U`) as `Extends` edges.
 #[tokio::test]
 async fn inheritance_depth_walks_rust_supertraits() {
     let dir = test_temp_dir();
@@ -2690,12 +2711,11 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
-/// Regression for new bug-report batch (#26): `tracedecay_circular` must
-/// emit *disjoint* SCCs — no file should appear in more than one cycle
-/// entry. The sonium run reported 216 cycles "sharing long tails", which
-/// would only be possible if the SCC condensation step were broken. This
-/// stress test wires up many disjoint cycles plus DAG-style tails between
-/// them and asserts no file leaks into a second cycle entry.
+/// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
+/// in more than one cycle entry. Cycles "sharing long tails" mean the SCC
+/// condensation step is broken. This stress test wires up many disjoint
+/// cycles plus DAG-style tails between them and asserts no file leaks into
+/// a second cycle entry.
 #[tokio::test]
 async fn circular_emits_disjoint_sccs_under_load() {
     let dir = test_temp_dir();
@@ -2768,11 +2788,10 @@ async fn circular_emits_disjoint_sccs_under_load() {
     }
 }
 
-/// Regression for new bug-report batch (#24): `tracedecay_diff_context`'s
-/// `modified_symbols` must dedup by node id, even when callers pass the
-/// same path multiple times in `files`. The sonium run showed an
-/// `hmatrix.rs` file node listed 7× in a row because the caller had the
-/// same file path duplicated upstream.
+/// `tracedecay_diff_context`'s `modified_symbols` must dedup by node id,
+/// even when callers pass the same path multiple times in `files`. A file
+/// node listed 7× in a row is the caller duplicating the same path
+/// upstream.
 #[tokio::test]
 async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
     let dir = test_temp_dir();
@@ -2810,38 +2829,30 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
     );
 }
 
-/// Regression for new bug-report batch (#23): when a whole subtree is
-/// removed in a diff, `tracedecay_changelog` must not report the deleted
-/// directory under `files_not_indexed`. The previous `is_dir()` filter
-/// missed this case because the path was gone from disk by the time we
-/// checked. The fix uses gix's `entry_mode` flag to skip tree entries
-/// before they're ever pushed into the change list.
+/// When a whole subtree is removed in a diff, `tracedecay_changelog` must
+/// not report the deleted directory under `files_not_indexed`. An `is_dir()`
+/// filter misses this because the path is gone from disk by the time it is
+/// checked. gix's `entry_mode` flag skips tree entries before they enter
+/// the change list.
 #[tokio::test]
 async fn changelog_filters_deleted_directory_entries() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-    }
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "t@t"]);
-    git(project, &["config", "user.name", "t"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("crates/sub")).unwrap();
     fs::write(project.join("crates/sub/keep.rs"), "pub fn k() {}\n").unwrap();
     fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
     // Remove the whole subtree so gix's tree-diff yields a directory-mode
     // deletion entry.
     fs::remove_dir_all(project.join("crates")).unwrap();
-    git(project, &["add", "-A"]);
-    git(project, &["commit", "-m", "drop crates"]);
+    git_run(project, &["add", "-A"]);
+    git_run(project, &["commit", "-m", "drop crates"]);
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
@@ -2867,28 +2878,20 @@ async fn changelog_filters_deleted_directory_entries() {
     );
 }
 
-/// Regression for new bug-report batch (#22): `tracedecay_pr_context` must
-/// NOT explode Cargo.toml (or any .toml/.yaml/.json config file) into one
-/// symbol per `[name]`, `[version]`, `[dependencies]` key. On real PRs a
-/// Cargo.toml change with ~30 dependency lines produced ~70 entries that
-/// pushed the response past 760k tokens. Config files should collapse to
-/// a single summary symbol.
+/// `tracedecay_pr_context` must not explode Cargo.toml (or any
+/// .toml/.yaml/.json config file) into one symbol per `[name]`,
+/// `[version]`, `[dependencies]` key. A Cargo.toml change with ~30
+/// dependency lines produced ~70 entries that pushed the response past
+/// 760k tokens. Config files should collapse to a single summary symbol.
 #[tokio::test]
 async fn pr_context_collapses_cargo_toml_keys() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-    }
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "t@t"]);
-    git(project, &["config", "user.name", "t"]);
+    git_run(project, &["init"]);
+    git_run(project, &["config", "user.email", "t@t"]);
+    git_run(project, &["config", "user.name", "t"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("Cargo.toml"),
@@ -2896,8 +2899,8 @@ async fn pr_context_collapses_cargo_toml_keys() {
     )
     .unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "init"]);
     // Second commit: bloat Cargo.toml with many deps.
     let mut bloated = String::from(
         "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
@@ -2906,8 +2909,8 @@ async fn pr_context_collapses_cargo_toml_keys() {
         let _ = writeln!(bloated, "dep{i} = \"0.1.{i}\"");
     }
     fs::write(project.join("Cargo.toml"), &bloated).unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "deps"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", "deps"]);
 
     let (cg, _env) = init_test_project(project).await;
 
@@ -2949,13 +2952,10 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
-/// Regression for new bug-report batch (#21): `tracedecay_unused_imports`
-/// must flag genuinely unused identifiers inside grouped `use foo::{A, B}`
-/// imports. Real-world Rust style is dominated by grouped imports
-/// (`use std::collections::{HashMap, HashSet, BTreeMap};`); without
-/// per-identifier splitting, the heuristic could never flag anything from
-/// a grouped import, which is why the user's run reported 0 / 3,404 use
-/// nodes.
+/// `tracedecay_unused_imports` must flag genuinely unused identifiers
+/// inside grouped `use foo::{A, B}` imports. Without per-identifier
+/// splitting, the heuristic never flags anything from a grouped import
+/// (`use std::collections::{HashMap, HashSet, BTreeMap};`).
 #[tokio::test]
 async fn unused_imports_handles_grouped_use() {
     let dir = test_temp_dir();
@@ -3009,15 +3009,12 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for new bug-report batch (#20): `tracedecay_dead_code` must not
-/// consider non-reference edges like `annotates` or `derives_macro` as
-/// "this function is alive" evidence. Previously, a private helper with no
-/// callers but an `#[inline]` (or any other attribute) on it had an
-/// incoming `annotates` edge from the synthesised annotation_usage node,
-/// which the SQL `NOT EXISTS (target = id AND kind != 'contains')` filter
-/// accepted as a live reference. Real-world Rust codebases use attributes
-/// pervasively, which is why the user's run found zero dead functions
-/// across 5,715.
+/// `tracedecay_dead_code` must not treat non-reference edges like
+/// `annotates` or `derives_macro` as "this function is alive" evidence. A
+/// private helper with no callers but an `#[inline]` (or any other
+/// attribute) has an incoming `annotates` edge from the synthesised
+/// annotation_usage node, which `NOT EXISTS (target = id AND kind !=
+/// 'contains')` accepted as a live reference.
 #[tokio::test]
 async fn dead_code_flags_unreferenced_fn_with_attribute() {
     let dir = test_temp_dir();
@@ -3059,10 +3056,10 @@ fn dead_helper_with_attr() {}
     );
 }
 
-/// Regression test for the empty-output bug: `tracedecay_unsafe_patterns`
-/// detected the unsafe block (the JSON payload was correct) but the Markdown
-/// renderer dropped every finding and printed "No diagnostics.", so agents saw
-/// nothing. The default (Markdown) response must now surface the site.
+/// `tracedecay_unsafe_patterns` detected the unsafe block (the JSON payload
+/// was correct) but the Markdown renderer dropped every finding and printed
+/// "No diagnostics.", so agents saw nothing. The default (Markdown) response
+/// must surface the site.
 #[tokio::test]
 async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
     let (cg, _project) = setup_unsafe_block_fixture().await;

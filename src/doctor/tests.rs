@@ -475,3 +475,82 @@ fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
     )
     .unwrap();
 }
+
+fn canonical_temp_path(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+#[tokio::test]
+async fn store_layout_resolution_surfaces_split_identity_conflict()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let project_root = canonical_temp_path(&project_root);
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&project_root)
+        .status()?;
+    assert!(status.success());
+
+    for project_id in ["proj_doctor_selected", "proj_doctor_legacy"] {
+        let layout = crate::storage::profile_sharded_layout(
+            &project_root,
+            &profile_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )?;
+        std::fs::create_dir_all(&layout.data_root)?;
+        std::fs::write(&layout.graph_db_path, b"graph")?;
+        crate::storage::write_store_manifest(&layout)?;
+    }
+    crate::storage::write_repository_identity_marker(&project_root, "proj_doctor_selected")?;
+
+    let open_options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let selected_db = profile_root.join("projects/proj_doctor_selected/tracedecay.db");
+    let legacy_db = profile_root.join("projects/proj_doctor_legacy/tracedecay.db");
+    let selected_before = std::fs::read(&selected_db)?;
+    let legacy_before = std::fs::read(&legacy_db)?;
+
+    let resolution = crate::tracedecay::TraceDecay::try_initialized_store_layout_with_options(
+        &project_root,
+        &open_options,
+    )
+    .await;
+    let diagnostic = format!("{resolution:?}");
+    assert!(
+        diagnostic.contains("identity cutover conflict"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("proj_doctor_selected"), "{diagnostic}");
+    assert!(diagnostic.contains("proj_doctor_legacy"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("tracedecay migrate consolidate"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("--source-project-id proj_doctor_legacy"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("--target-project-id proj_doctor_selected"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("no files changed"), "{diagnostic}");
+    assert_eq!(std::fs::read(selected_db)?, selected_before);
+    assert_eq!(std::fs::read(legacy_db)?, legacy_before);
+    Ok(())
+}

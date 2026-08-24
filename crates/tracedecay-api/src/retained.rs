@@ -90,21 +90,25 @@ async fn invoke<O>(
 where
     O: RetainedApplicationOwner,
 {
-    let Ok(Json(body)) = body else {
-        return invalid_request_response(
-            request_id,
-            "retained.invalid_body",
-            "The retained application request body is invalid or exceeds the configured limit",
-        );
+    let request = match hotpath::measure_block!("api.http.admission", {
+        match body {
+            Ok(Json(body)) => Ok(RetainedHttpRequest {
+                operation,
+                request_id,
+                controls,
+                body,
+            }),
+            Err(_) => Err(invalid_request_response(
+                request_id,
+                "retained.invalid_body",
+                "The retained application request body is invalid or exceeds the configured limit",
+            )),
+        }
+    }) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
-    owner
-        .invoke_retained(RetainedHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        })
-        .await
+    hotpath::measure_block!("api.http.handler", owner.invoke_retained(request).await)
 }
 
 pub fn retained_invalid_request_response(request_id: RequestId) -> Response {

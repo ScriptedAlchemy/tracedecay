@@ -14,6 +14,7 @@ import {
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { ReadSection, type ReadState } from '../../ui/ReadSection.tsx';
+import { VirtualList } from '../../ui/VirtualList.tsx';
 import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
@@ -439,6 +440,10 @@ function projectionValue<P extends DeliveryProjection>(
     case 'denied':
     case 'not_published':
       return null;
+    default: {
+      const unhandled: never = projection;
+      return unhandled;
+    }
   }
 }
 
@@ -484,6 +489,10 @@ function ProjectionState({ projection }: { projection: DeliveryProjection }) {
           detail={parts.length > 0 ? parts.join(' · ') : undefined}
         />
       );
+    }
+    default: {
+      const unhandled: never = projection;
+      return unhandled;
     }
   }
 }
@@ -684,7 +693,11 @@ function threadLocation(thread: ReviewThread): string {
 }
 
 function renderReviews(timeline: DeliveryReviewTimelineV1) {
-  const threads = groupReviewThreads(timeline.items);
+  return <ReviewTimeline timeline={timeline} />;
+}
+
+function ReviewTimeline({ timeline }: { timeline: DeliveryReviewTimelineV1 }) {
+  const threads = useMemo(() => groupReviewThreads(timeline.items), [timeline.items]);
   return (
     <div className="flex flex-col gap-1.5">
       <HeadComparison
@@ -996,9 +1009,13 @@ function FieldAxis({ field }: { field: DeliveryField }) {
   );
 }
 
+const REPO_ROW =
+  'grid grid-cols-[minmax(8rem,2fr)_minmax(6rem,1fr)_minmax(6rem,1fr)_minmax(5rem,1fr)_minmax(6rem,1fr)] items-center text-2xs';
+
 /** The field's accessible equivalent, and the scanning surface: one line per
  * repository instead of the header-plus-row pair the flat list used to spend
- * on each one. */
+ * on each one. Windowed through `VirtualList` so a large registry does not
+ * mount every row; below the list threshold the DOM is the full population. */
 function RepoTable({
   field,
   selectedId,
@@ -1012,104 +1029,57 @@ function RepoTable({
   truncated: boolean;
   nowSecs: number;
 }) {
+  const caption =
+    'Every repository on the field, most recently indexed first, with its branch count, checkouts and default branch.';
+  const windowed = field.bodies.length > 200;
   return (
     <section aria-label="Repositories" className="flex min-w-0 flex-col">
       <Legend>repositories · most recently indexed first</Legend>
       <div
-        role="region"
-        aria-label="Repositories table"
-        // Table rows hold no focusable elements, so the scroll region itself
-        // must be keyboard-operable.
-        tabIndex={0}
-        className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle"
+        role="table"
+        aria-label={caption}
+        className={cn(
+          'mt-1.5 border border-edge-subtle',
+          windowed ? 'h-80' : 'max-h-80 overflow-auto',
+        )}
       >
-        <table className="w-full border-collapse text-2xs">
-          <caption className="sr-only">
-            Every repository on the field, most recently indexed first, with its
-            branch count, checkouts and default branch.
-          </caption>
-          <thead className="sticky top-0 bg-surface-2">
-            <tr className="text-left text-text-secondary">
-              <th scope="col" className="px-2 py-1 font-medium">Repository</th>
-              <th scope="col" className="px-2 py-1 font-medium">Default branch</th>
-              <th scope="col" className="px-2 py-1 text-right font-medium">Branches</th>
-              <th scope="col" className="px-2 py-1 text-right font-medium">Checkouts</th>
-              <th scope="col" className="px-2 py-1 text-right font-medium">Indexed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {field.bodies.map((body) => (
-              <tr
-                key={body.id}
-                className={cn(
-                  'border-t border-edge-subtle',
-                  selectedId === body.id && 'bg-accent/10',
-                )}
-              >
-                <td className="max-w-0 px-2 py-1">
-                  <button
-                    type="button"
-                    onClick={() => onSelect(selectedId === body.id ? null : body.id)}
-                    aria-pressed={selectedId === body.id}
-                    className="flex min-h-[var(--touch-target-min)] w-full min-w-0 items-center gap-1.5 text-left"
-                  >
-                    {body.branches == null ? (
-                      <FolderGit2 aria-hidden size={11} className="shrink-0 text-text-muted" />
-                    ) : (
-                      <GitBranch aria-hidden size={11} className="shrink-0 text-text-muted" />
-                    )}
-                    <span className="truncate text-text-primary">{body.label}</span>
-                    {body.active ? (
-                      <span className="td-legend shrink-0 bg-accent/15 px-1 text-text-primary">
-                        active
-                      </span>
-                    ) : null}
-                  </button>
-                </td>
-                <td className="max-w-0 truncate px-2 py-1 text-text-secondary">
-                  {body.defaultBranch ?? '—'}
-                </td>
-                <td className="px-2 py-1 text-right" data-cell="numeric">
-                  {body.branches == null ? (
-                    <span className="text-text-muted">unknown</span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5">
-                      <Meter
-                        fraction={
-                          field.branchCeiling > 0
-                            ? body.branches / field.branchCeiling
-                            : null
-                        }
-                        className="w-10 shrink-0"
-                      />
-                      <span className="tabular-nums text-text-primary">
-                        {body.branches}
-                      </span>
-                    </span>
-                  )}
-                </td>
-                <td
-                  className="px-2 py-1 text-right text-text-secondary tabular-nums"
-                  data-cell="numeric"
-                >
-                  {body.checkouts}
-                  {body.worktrees > 0 ? (
-                    <span className="text-text-muted"> ({body.worktrees} wt)</span>
-                  ) : null}
-                </td>
-                <td
-                  className="px-2 py-1 text-right text-text-muted tabular-nums"
-                  data-cell="numeric"
-                >
-                  <FreshnessMeter
-                    tier={freshnessTier(Math.max(0, nowSecs - body.lastSeenAt))}
-                    label={relativeAge(body.lastSeenAt, nowSecs) ?? 'not recorded'}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <VirtualList
+          items={field.bodies}
+          getKey={(body) => body.id}
+          estimateHeight={44}
+          className={windowed ? 'h-full' : undefined}
+          header={
+            <div
+              role="row"
+              className={cn(REPO_ROW, 'sticky top-0 bg-surface-2 text-left text-text-secondary')}
+            >
+              <span role="columnheader" className="px-2 py-1 font-medium">
+                Repository
+              </span>
+              <span role="columnheader" className="px-2 py-1 font-medium">
+                Default branch
+              </span>
+              <span role="columnheader" className="px-2 py-1 text-right font-medium">
+                Branches
+              </span>
+              <span role="columnheader" className="px-2 py-1 text-right font-medium">
+                Checkouts
+              </span>
+              <span role="columnheader" className="px-2 py-1 text-right font-medium">
+                Indexed
+              </span>
+            </div>
+          }
+          renderItem={(body) => (
+            <RepoRow
+              body={body}
+              field={field}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              nowSecs={nowSecs}
+            />
+          )}
+        />
       </div>
       {truncated ? (
         <p className="pt-1 text-2xs text-text-muted">
@@ -1118,6 +1088,87 @@ function RepoTable({
         </p>
       ) : null}
     </section>
+  );
+}
+
+function RepoRow({
+  body,
+  field,
+  selectedId,
+  onSelect,
+  nowSecs,
+}: {
+  body: DeliveryBody;
+  field: DeliveryField;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  nowSecs: number;
+}) {
+  const active = selectedId === body.id;
+  return (
+    <div
+      role="row"
+      className={cn(REPO_ROW, 'border-t border-edge-subtle', active && 'bg-accent/10')}
+    >
+      <div role="cell" className="min-w-0 px-2 py-1">
+        <button
+          type="button"
+          onClick={() => onSelect(active ? null : body.id)}
+          aria-pressed={active}
+          className="flex min-h-[var(--touch-target-min)] w-full min-w-0 items-center gap-1.5 text-left"
+        >
+          {body.branches == null ? (
+            <FolderGit2 aria-hidden size={11} className="shrink-0 text-text-muted" />
+          ) : (
+            <GitBranch aria-hidden size={11} className="shrink-0 text-text-muted" />
+          )}
+          <span className="truncate text-text-primary">{body.label}</span>
+          {body.active ? (
+            <span className="td-legend shrink-0 bg-accent/15 px-1 text-text-primary">
+              active
+            </span>
+          ) : null}
+        </button>
+      </div>
+      <div role="cell" className="min-w-0 truncate px-2 py-1 text-text-secondary">
+        {body.defaultBranch ?? '—'}
+      </div>
+      <div role="cell" className="px-2 py-1 text-right" data-cell="numeric">
+        {body.branches == null ? (
+          <span className="text-text-muted">unknown</span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5">
+            <Meter
+              fraction={
+                field.branchCeiling > 0 ? body.branches / field.branchCeiling : null
+              }
+              className="w-10 shrink-0"
+            />
+            <span className="tabular-nums text-text-primary">{body.branches}</span>
+          </span>
+        )}
+      </div>
+      <div
+        role="cell"
+        className="px-2 py-1 text-right text-text-secondary tabular-nums"
+        data-cell="numeric"
+      >
+        {body.checkouts}
+        {body.worktrees > 0 ? (
+          <span className="text-text-muted"> ({body.worktrees} wt)</span>
+        ) : null}
+      </div>
+      <div
+        role="cell"
+        className="px-2 py-1 text-right text-text-muted tabular-nums"
+        data-cell="numeric"
+      >
+        <FreshnessMeter
+          tier={freshnessTier(Math.max(0, nowSecs - body.lastSeenAt))}
+          label={relativeAge(body.lastSeenAt, nowSecs) ?? 'not recorded'}
+        />
+      </div>
+    </div>
   );
 }
 

@@ -342,7 +342,7 @@ impl WorkflowFanOutCensusStoragePort for WorkflowSqliteAuthority {
             ),
         }
         .map_err(unavailable)?;
-        let heads = rows
+        let mut heads = rows
             .rows
             .iter()
             .map(|row| {
@@ -369,20 +369,14 @@ impl WorkflowFanOutCensusStoragePort for WorkflowSqliteAuthority {
                 Ok((run_id, workflow_sequence, census_sequence))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let page_heads = heads
-            .iter()
-            .take(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1)
-            .cloned()
-            .collect::<Vec<_>>();
         let continuation = (heads.len() > WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1).then(|| {
             WorkflowActiveRunRecoveryCursorV1 {
-                after_run_id: page_heads[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1]
-                    .0
-                    .clone(),
+                after_run_id: heads[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1].0.clone(),
             }
         });
+        heads.truncate(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1);
         let mut projections = Vec::new();
-        for (run_id, workflow_sequence, census_sequence) in page_heads {
+        for (run_id, workflow_sequence, census_sequence) in heads {
             if census_sequence.is_some_and(|sequence| sequence > workflow_sequence) {
                 let _ = transaction.rollback();
                 return Err(WorkflowFanOutCensusError::InvalidHistory);

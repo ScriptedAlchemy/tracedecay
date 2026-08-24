@@ -1,4 +1,4 @@
-//! Canonical, payload-safe Plan 26 observability contracts.
+//! Canonical, payload-safe observability contracts.
 
 mod activity;
 #[cfg(test)]

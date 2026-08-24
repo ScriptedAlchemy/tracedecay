@@ -39,7 +39,7 @@ impl NativeHistoricalBlobReaderV1 {
         }
     }
 
-    /// Read one exact commit/path blob through the mounted Plan 36 authority.
+    /// Read one exact commit/path blob through the mounted Git authority.
     pub fn read(
         &self,
         request: &GitHistoricalBlobRequestV1,

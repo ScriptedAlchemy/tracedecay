@@ -1,5 +1,7 @@
 //! Canonical fact commit engine: append order, identity, anchors, and assertions.
 
+use std::collections::HashSet;
+
 use super::super::primitives::{
     COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, row_exists, row_i64, row_optional_string,
     row_string, storage_error, storage_message, to_json,
@@ -12,7 +14,7 @@ use super::{
     insert_event, payload_is_purged_projection, publish_current_projection, receipt_outcome,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
+use crate::db::engine::{params, params_from_iter};
 use serde::Serialize;
 use tracedecay_domain::{
     FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId, FactLineageEventV1,
@@ -296,36 +298,58 @@ async fn fact_identity_matches(
         && identity_matches)
 }
 
+/// The largest `anchor_id IN (...)` batch one referenced-anchor availability
+/// probe binds, kept clear of `SQLite`'s default variable ceiling.
+const REFERENCED_ANCHOR_BATCH: usize = 500;
+
 async fn ensure_referenced_anchors(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<()> {
-    for anchor_id in batch.referenced_anchor_ids() {
+    let anchor_ids = batch.referenced_anchor_ids();
+    if anchor_ids.is_empty() {
+        return Ok(());
+    }
+    let mut present = HashSet::new();
+    for chunk in anchor_ids.chunks(REFERENCED_ANCHOR_BATCH) {
+        let placeholders = (2..=chunk.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT anchor.anchor_id FROM retrieval_anchors AS anchor
+             WHERE anchor.owner_json = ?1
+               AND anchor.anchor_id IN ({placeholders})
+               AND COALESCE((
+                   SELECT disposition.state
+                   FROM retrieval_anchor_dispositions AS disposition
+                   WHERE disposition.anchor_id = anchor.anchor_id
+                     AND disposition.owner_json = anchor.owner_json
+                   ORDER BY disposition.sequence DESC LIMIT 1
+               ), 'active') = 'active'"
+        );
+        let mut bindings = Vec::with_capacity(chunk.len() + 1);
+        bindings.push(owner.json.as_str());
+        bindings.extend(chunk.iter().map(RetrievalAnchorId::as_str));
         let mut rows = transaction
-            .query(
-                "SELECT 1 FROM retrieval_anchors AS anchor
-                 WHERE anchor.anchor_id = ?1 AND anchor.owner_json = ?2
-                   AND COALESCE((
-                       SELECT disposition.state
-                       FROM retrieval_anchor_dispositions AS disposition
-                       WHERE disposition.anchor_id = anchor.anchor_id
-                         AND disposition.owner_json = anchor.owner_json
-                       ORDER BY disposition.sequence DESC LIMIT 1
-                   ), 'active') = 'active'",
-                params![anchor_id.as_str(), owner.json.as_str()],
-            )
+            .query(&sql, params_from_iter(bindings))
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        let Some(_row) = rows
+        while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?
-        else {
+        {
+            present.insert(row_string(&row, 0, COMMIT_OPERATION)?);
+        }
+    }
+    for anchor_id in anchor_ids {
+        if !present.contains(anchor_id.as_str()) {
             return Err(FactStoreError::MissingEvidenceAnchor {
                 anchor_id: anchor_id.clone(),
             });
-        };
+        }
     }
     Ok(())
 }

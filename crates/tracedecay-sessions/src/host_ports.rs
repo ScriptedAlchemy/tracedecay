@@ -27,7 +27,6 @@ use std::sync::OnceLock;
 pub mod hermes_profile_pin {
     use super::{OnceLock, Path};
 
-    /// Resolver installed by the composition root.
     pub type Resolver = fn(&Path) -> Option<String>;
 
     static RESOLVER: OnceLock<Resolver> = OnceLock::new();
@@ -50,7 +49,6 @@ pub mod hermes_profile_pin {
 pub mod session_review {
     use super::{Future, OnceLock, Pin};
 
-    /// Scheduler installed by the composition root.
     pub type Scheduler =
         for<'a> fn(&'a str, Option<&'a str>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
@@ -81,7 +79,6 @@ pub mod unregistered_admission {
     use crate::admission::HostAdmission;
     use tracedecay_domain::ProjectId;
 
-    /// Scope an unregistered facade is nominally bound to.
     #[derive(Clone, Debug)]
     pub enum Scope {
         /// Bound to one project identity, without a registered database.
@@ -90,7 +87,6 @@ pub mod unregistered_admission {
         Profile,
     }
 
-    /// Factory installed by the composition root.
     pub type Factory = fn(Scope) -> Box<dyn HostAdmission>;
 
     static FACTORY: OnceLock<Factory> = OnceLock::new();
@@ -118,7 +114,6 @@ pub fn vscode_data_dir(home: &Path) -> PathBuf {
     platform_data_dir(home, "Code")
 }
 
-/// Kiro user-data root for `home`.
 #[must_use]
 pub fn kiro_data_dir(home: &Path) -> PathBuf {
     platform_data_dir(home, "Kiro")

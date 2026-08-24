@@ -1,17 +1,11 @@
-//! Root shim for the store-runtime registry that moved into the kernel.
+//! Re-export of the kernel store-runtime registry, plus the daemon-owned
+//! session registry that cannot move into the kernel.
 //!
-//! `src/daemon/store_runtime/` was 12.9K lines that referenced `crate::db` 59
-//! times and `crate::storage` 14 times against 25 genuine `crate::daemon`
-//! references, and `StoreRuntimeClientLease` holds a `db::DatabaseAuthority`. It now
-//! lives in `tracedecay_runtime_core::store_runtime`; this glob keeps every
-//! historical `crate::daemon::store_runtime::…` path resolving.
-//!
-//! `session_registry` did **not** follow. It stores `RegisteredGlobalDbLeaseV1`
-//! in its public surface, and `tracedecay-global-db` depends on the kernel —
-//! so the kernel taking that edge is a Cargo cycle. It also reaches
-//! `daemon::{authority,
-//! code_index_scheduler, profile_identity, transport}` and `log_daemon_event`.
-//! See `tracedecay_runtime_core`'s crate-level doc for why.
+//! `session_registry` stays here because it stores `RegisteredGlobalDbLeaseV1`
+//! on its public surface, and `tracedecay-global-db` already depends on the
+//! kernel — taking that edge would be a Cargo cycle. It also reaches
+//! `daemon::{authority, code_index_scheduler, profile_identity, transport}`
+//! and `log_daemon_event`. See `tracedecay_runtime_core`'s crate-level doc.
 
 pub(crate) use tracedecay_runtime_core::store_runtime::*;
 

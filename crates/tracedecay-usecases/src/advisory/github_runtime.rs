@@ -96,6 +96,26 @@ pub use store::{
     ProjectGitHubReviewStoreV1,
 };
 
+/// Appends hotpath's ureq middleware to a GitHub agent config builder so
+/// outbound requests are timed and reported in the `http` report, keyed by
+/// normalized endpoint (method + host/path only — no query string, fragment,
+/// or credential ever crosses into the recorded key). A no-op with the
+/// `hotpath` feature disabled, so every call site compiles identically both
+/// ways.
+#[cfg(feature = "hotpath")]
+fn instrument_github_ureq_agent(
+    builder: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    builder.middleware(hotpath::UreqHttpMiddleware::new())
+}
+
+#[cfg(not(feature = "hotpath"))]
+fn instrument_github_ureq_agent(
+    builder: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    builder
+}
+
 /// Raw GitHub response bytes are transient parser input only. They are never
 /// put into a checkpoint, an ingress result, or this transport's receipt.
 pub const MAX_GITHUB_READ_RESPONSE_BYTES_V1: usize = 1024 * 1024;

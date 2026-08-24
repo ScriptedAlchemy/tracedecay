@@ -2,7 +2,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './AgentsPage.tsx';
-import type { AnalyticsUsageSummaryV1 } from '../../contracts/generated.ts';
+import type {
+  AnalyticsDiagnosticsPayloadV1,
+  AnalyticsUnderusedPayloadV1,
+  AnalyticsUsageSummaryV1,
+} from '../../contracts/generated.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
 afterEach(() => {
@@ -13,8 +17,8 @@ describe('AgentsPage read coverage', () => {
   it('keeps an unavailable usage count distinct from a measured zero', async () => {
     stubAnalytics({
       usage: usageSummary({ message_count: 8 }),
-      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
-      underused: { available: false, families: [] },
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload({ available: false }),
     });
     renderAgents();
 
@@ -30,9 +34,9 @@ describe('AgentsPage read coverage', () => {
   it('keeps an underused-family query failure distinct from an empty family list', async () => {
     stubAnalytics({
       usage: usageSummary({ message_count: 8 }),
-      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
+      diagnostics: diagnosticsPayload({ available: false }),
       underused: unavailableAnalyticsEnvelope(
-        { available: false, families: [] },
+        underusedPayload({ available: false }),
         'session-message query failed: no such table: session_messages',
       ),
     });
@@ -46,12 +50,11 @@ describe('AgentsPage read coverage', () => {
     expect(screen.queryByText(/no tool families reported/i)).toBeNull();
   });
 
-  /** An unreported window size used to be substituted with the categorized
-   * total, which made the two agree by construction: the uncategorized
-   * remainder came out as zero and the whole disclosure disappeared, so unknown
-   * coverage read as complete coverage. The composition caption had the mirror
-   * defect — "share of 0" under counts that were really served. */
-  it('does not let an unreported window size read as complete categorization', async () => {
+  /** The fast usage read and slower diagnostics fold are separate snapshots.
+   * An unavailable usage total must stay unknown rather than borrowing the
+   * categorized sum, while diagnostics composition uses the count served with
+   * its own rows instead of the fixture's former fabricated zero. */
+  it('keeps an unknown usage window distinct from diagnostics composition', async () => {
     stubAnalytics({
       usage: usageSummary({
         source: 'analytics_events',
@@ -62,25 +65,24 @@ describe('AgentsPage read coverage', () => {
           { kind: 'tool', category: 'read', events: 2 },
         ],
       }),
-      diagnostics: {
-        available: true,
+      diagnostics: diagnosticsPayload({
+        event_count: 4,
         by_event_kind: [{ event_kind: 'pre_tool_use', count: 4 }],
         by_outcome: [{ outcome: 'ok', count: 4 }],
-        by_mcp_tool: [],
-        recent_events: [],
-      },
-      underused: { available: true, families: [] },
+      }),
+      underused: underusedPayload(),
     });
     renderAgents();
 
     expect(
       await screen.findByText(/window's own event count was not reported/i),
     ).toBeTruthy();
-    // The quantified disclosure needs a window size; only the unknown reading
-    // is on screen, and no count of uncategorized events is claimed.
+    // The usage disclosure still has no denominator, so it makes no quantified
+    // completeness claim. The two diagnostics figures have their own exact
+    // four-event denominator from the same diagnostics snapshot.
     expect(screen.queryByText(/events in the window carry no tool/i)).toBeNull();
-    expect(screen.queryByText(/share of 0$/)).toBeNull();
-    expect(screen.getAllByText(/window total unreported/i).length).toBe(2);
+    expect(screen.queryAllByText(/share of 0$/)).toHaveLength(0);
+    expect(screen.getAllByText(/share of 4$/)).toHaveLength(2);
   });
 
   it('discloses that hook counts come from a truncated recent suffix', async () => {
@@ -91,21 +93,19 @@ describe('AgentsPage read coverage', () => {
         event_count: 2,
         by_category: [{ kind: 'tool', category: 'shell', events: 2 }],
       }),
-      diagnostics: {
-        available: true,
+      diagnostics: diagnosticsPayload({
         event_count: 2,
         hook_call_count: 77,
         mcp_tool_call_count: 1,
-        by_mcp_tool: [],
-        recent_events: [],
-        hook_window: {
+        hook_window: hookWindow({
           window_rows: 10_000,
           rows_scanned: 10_000,
           rows_included: 10_000,
           truncated: true,
-        },
-      },
-      underused: { available: true, families: [] },
+          total_rows_known: false,
+        }),
+      }),
+      underused: underusedPayload(),
     });
     renderAgents();
 
@@ -116,8 +116,8 @@ describe('AgentsPage read coverage', () => {
   it('renders subagent delegation counts from the session store', async () => {
     stubAnalytics({
       usage: usageSummary({ message_count: 2 }),
-      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
-      underused: { available: true, families: [] },
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload(),
       agents: {
         available: true,
         source: 'sessions',
@@ -136,7 +136,7 @@ describe('AgentsPage read coverage', () => {
   });
 
   /**
-   * The three plan-11 measures added beside the delegation rollup. The stub
+   * The three measures beside the delegation rollup. The stub
    * `fetch` below answers `/api/work/views` with a dashboard envelope rather
    * than the application envelope that route actually carries, so the graph
    * read is refused as a shape this build cannot decode — which is exactly the
@@ -151,8 +151,7 @@ describe('AgentsPage read coverage', () => {
         event_count: 400,
         by_category: [{ kind: 'tool', category: 'shell', events: 400 }],
       }),
-      diagnostics: {
-        available: true,
+      diagnostics: diagnosticsPayload({
         event_count: 400,
         tool_call_count: 200,
         mcp_tool_call_count: 150,
@@ -163,12 +162,27 @@ describe('AgentsPage read coverage', () => {
           { outcome: 'error', count: 20 },
         ],
         by_mcp_tool: [{ tool_name: 'tracedecay_grep', count: 150 }],
-        recent_hooks: [{ agent: 'Codex', tool_name: 'tracedecay_grep', session_id: 's1' }],
-        recent_events: [
-          { timestamp: 1_700_000_000, tool_name: 'tracedecay_read', outcome: 'error' },
+        recent_hooks: [
+          {
+            agent: 'Codex',
+            tool_name: 'tracedecay_grep',
+            session_id: 's1',
+            hook_name: 'pre_tool_use',
+            prompt_category: 'search',
+            ts_unix_ms: 1_700_000_000_000,
+          },
         ],
-      },
-      underused: { available: true, families: [] },
+        recent_events: [
+          {
+            timestamp: 1_700_000_000,
+            tool_name: 'tracedecay_read',
+            outcome: 'error',
+            event_kind: 'post_tool_use',
+            hook_name: 'post_tool_use',
+          },
+        ],
+      }),
+      underused: underusedPayload(),
       agents: { available: true, source: 'sessions', by_agent: [] },
     });
     renderAgents();
@@ -196,8 +210,8 @@ describe('AgentsPage read coverage', () => {
   it('keeps an unavailable subagent read distinct from zero delegations', async () => {
     stubAnalytics({
       usage: usageSummary({ message_count: 2 }),
-      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
-      underused: { available: true, families: [] },
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload(),
       agents: unavailableAnalyticsEnvelope(
         { available: false, source: 'session_store_unavailable', by_agent: [] },
         'analytics_agents_source_unavailable',
@@ -229,6 +243,76 @@ function usageSummary(
     by_category: [],
     ...overrides,
   };
+}
+
+/**
+ * The diagnostics fold as `analytics_api` sends it. Every member of
+ * `AnalyticsDiagnosticsPayloadV1` is present because the page decodes this
+ * endpoint with the generated contract schema: a partial stub is rejected as
+ * an undecodable shape, which reads on screen as "could not be read" rather
+ * than as the unavailability a test means to set up.
+ */
+function diagnosticsPayload(
+  overrides: Partial<AnalyticsDiagnosticsPayloadV1> = {},
+): AnalyticsDiagnosticsPayloadV1 {
+  return {
+    available: true,
+    source: 'analytics_events',
+    message_count: 0,
+    event_count: 0,
+    tool_call_count: 0,
+    mcp_tool_call_count: 0,
+    tracedecay_call_count: 0,
+    hook_call_count: 0,
+    hook_sources: [],
+    hook_readiness: null,
+    events_per_hour: null,
+    ratios: {
+      events_per_message: 0,
+      hook_calls_per_message: 0,
+      mcp_tool_calls_per_message: 0,
+      tool_calls_per_message: 0,
+    },
+    by_event_kind: [],
+    by_tool: [],
+    by_mcp_tool: [],
+    by_tool_category: [],
+    by_outcome: [],
+    by_hook: [],
+    by_prompt_category: [],
+    hint_efficacy: {
+      available: false,
+      source: 'hook_analytics',
+      totals: { acted: 0, emitted: 0, ignored: 0, unresolved: 0 },
+      by_category: [],
+    },
+    hook_window: hookWindow(),
+    recent_events: [],
+    recent_hooks: [],
+    ...overrides,
+  };
+}
+
+function hookWindow(
+  overrides: Partial<AnalyticsDiagnosticsPayloadV1['hook_window']> = {},
+): AnalyticsDiagnosticsPayloadV1['hook_window'] {
+  return {
+    window_rows: 0,
+    rows_scanned: 0,
+    rows_included: 0,
+    truncated: false,
+    total_rows_known: true,
+    newest_ts_unix_ms: null,
+    oldest_ts_unix_ms: null,
+    ...overrides,
+  };
+}
+
+/** The underused-family read as `analytics_api` sends it, `db` included. */
+function underusedPayload(
+  overrides: Partial<AnalyticsUnderusedPayloadV1> = {},
+): AnalyticsUnderusedPayloadV1 {
+  return { available: true, db: 'analytics.db', families: [], ...overrides };
 }
 
 function stubAnalytics(payloads: Record<string, unknown>) {

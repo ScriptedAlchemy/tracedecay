@@ -80,6 +80,7 @@ impl GitRepositoryAuthority {
     }
 
     /// Bounded traversal with caller-owned cancellation and resource limits.
+    #[hotpath::measure]
     pub fn history_with_control(
         &self,
         options: &GitHistoryOptions,

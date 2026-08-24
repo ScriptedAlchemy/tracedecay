@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Handles `tracedecay_dead_code` tool calls.
 pub(crate) async fn handle_dead_code(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

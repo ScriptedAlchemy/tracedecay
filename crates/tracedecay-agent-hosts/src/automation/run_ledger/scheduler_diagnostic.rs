@@ -327,10 +327,9 @@ mod tests {
 
     #[test]
     fn malformed_row_before_anchor_does_not_block_diagnostic_reuse() {
-        // The reverse scan now stops at the effectful anchor (Finding 2), so
-        // a malformed row OLDER than the anchor is never reached and no
-        // longer blocks diagnostic reuse for a candidate that is NEWER than
-        // the anchor.
+        // The reverse scan stops at the effectful anchor, so a malformed row
+        // older than the anchor is never reached and no longer blocks
+        // diagnostic reuse for a candidate newer than the anchor.
         let temp = tempfile::TempDir::new().unwrap();
         let path = run_ledger_path(temp.path());
         let anchor = record("effect-anchor", "succeeded", "scheduler", None);
@@ -365,18 +364,12 @@ mod tests {
 
     #[test]
     fn diagnostic_before_anchor_is_reappended_when_older_than_anchor() {
-        // NOTE: this test's original name/assertions ("reused_without_append")
-        // described pre-Finding-2 behavior, where the reverse scan looked
-        // past the anchor into older history to find a matching diagnostic.
-        // File order here is candidate(oldest), anchor(newest): with the
-        // break restored (Finding 2), the scan reaches the anchor first and
-        // stops, so the older candidate occurrence is never seen. This is
-        // the same class of change as
-        // malformed_row_before_anchor_does_not_block_diagnostic_reuse: rows
-        // older than the anchor are out of scope for reuse detection, by
-        // design, in exchange for O(1)-relative-to-anchor scan cost and
-        // resilience to bad old rows. The candidate is therefore appended
-        // again (a second, newer occurrence), not reused.
+        // File order here is candidate(oldest), anchor(newest): the reverse
+        // scan reaches the anchor first and stops, so the older candidate
+        // occurrence is never seen. Rows older than the anchor are out of
+        // scope for reuse detection, in exchange for scan cost bounded to
+        // the anchor and resilience to bad old rows. The candidate is
+        // therefore appended again (a second, newer occurrence), not reused.
         let temp = tempfile::TempDir::new().unwrap();
         let path = run_ledger_path(temp.path());
         let anchor = record("effect-anchor", "succeeded", "scheduler", None);
@@ -414,8 +407,8 @@ mod tests {
         // File order (chronological): candidate(oldest), anchor(middle),
         // candidate(newest). The reverse scan encounters the newest
         // candidate occurrence before it reaches the anchor and stops at
-        // the anchor (Finding 2), so the older duplicate before the anchor
-        // is never seen. Reusing the newest occurrence is safe and
+        // the anchor, so the older duplicate before the anchor is never
+        // seen. Reusing the newest occurrence is safe and
         // idempotent: the row content is identical, so returning it instead
         // of erroring does not lose any information, and no new row is
         // appended.
@@ -445,17 +438,11 @@ mod tests {
 
     #[test]
     fn conflicting_diagnostic_before_anchor_no_longer_blocks_append() {
-        // NOTE: this test's original name/assertions ("is_rejected")
-        // described pre-Finding-2 behavior, where the reverse scan looked
-        // past the anchor into older history and found a stale row sharing
-        // the candidate's run_id but with different content ("conflict"),
-        // rejecting the append. File order here is conflict(oldest),
-        // anchor(newest): with the break restored (Finding 2), the scan
-        // stops at the anchor and never sees the older conflicting row, so
-        // the append now succeeds. This trades catching an arbitrarily old
+        // File order here is conflict(oldest), anchor(newest): the reverse
+        // scan stops at the anchor and never sees the older conflicting row,
+        // so the append succeeds. This trades catching an arbitrarily old
         // identity conflict for a bounded, anchor-relative scan cost and
-        // resilience to bad old rows (the same trade-off as
-        // malformed_row_before_anchor_does_not_block_diagnostic_reuse).
+        // resilience to bad old rows.
         let temp = tempfile::TempDir::new().unwrap();
         let path = run_ledger_path(temp.path());
         let anchor = record("effect-anchor", "succeeded", "scheduler", None);
@@ -538,25 +525,12 @@ mod tests {
 
     #[test]
     fn multi_megabyte_anchor_allows_exact_reuse_and_append() {
-        // DEVIATION FROM LITERAL TASK TEXT: the task described this test as
-        // needing to "keep passing unchanged". Empirically that is
-        // impossible together with the two required fixes: this test
-        // originally placed `candidate` BEFORE the (multi-megabyte) anchor
-        // in the file, i.e. older than the anchor, and relied on the
-        // reverse scan continuing past the anchor to find it. That is
-        // exactly the O(ledger) full-history scan Finding 2 removes, and
-        // with the break restored the candidate would no longer be found,
-        // causing a second, duplicate append (see
-        // diagnostic_before_anchor_is_reappended_when_older_than_anchor and
-        // conflicting_diagnostic_before_anchor_no_longer_blocks_append for
-        // the same class of change with rationale). To preserve this test's
-        // actual intent -- verifying the reverse scan handles a
-        // multi-megabyte anchor row with bounded memory and still supports
-        // exact reuse plus a subsequent append -- the anchor is now written
-        // BEFORE the candidate (i.e. the candidate is newer than the
-        // anchor, the realistic ordering for a scheduler skip diagnostic
-        // computed against the latest effectful anchor). All assertions are
-        // otherwise unchanged.
+        // The reverse scan must handle a multi-megabyte anchor with bounded
+        // memory and still support exact reuse plus a later append. The
+        // candidate is newer than the anchor — the realistic order for a
+        // scheduler skip diagnostic computed against the latest effectful
+        // run — because a scan that stops at the anchor cannot reuse an
+        // older candidate without walking the full ledger.
         let temp = tempfile::TempDir::new().unwrap();
         let path = run_ledger_path(temp.path());
         let candidate = record(

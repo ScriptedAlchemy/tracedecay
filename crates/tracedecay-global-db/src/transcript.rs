@@ -16,6 +16,11 @@ pub enum TranscriptPersistenceError {
         expected: ParseOffset,
         actual: ParseOffset,
     },
+    PairConflict {
+        path: String,
+        expected: ParseOffset,
+        actual: ParseOffset,
+    },
     Storage {
         operation: &'static str,
         source: Box<dyn Error + Send + Sync>,
@@ -42,6 +47,14 @@ impl std::fmt::Display for TranscriptPersistenceError {
                 formatter,
                 "transcript parse offset conflict: expected {expected:?}, actual {actual:?}"
             ),
+            Self::PairConflict {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript parse offset pair conflict at {path}: expected {expected:?}, actual {actual:?}"
+            ),
             Self::Storage { operation, source } => write!(formatter, "{operation}: {source}"),
         }
     }
@@ -50,7 +63,7 @@ impl std::fmt::Display for TranscriptPersistenceError {
 impl Error for TranscriptPersistenceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Conflict { .. } => None,
+            Self::Conflict { .. } | Self::PairConflict { .. } => None,
             Self::Storage { source, .. } => Some(source.as_ref()),
         }
     }
@@ -588,6 +601,52 @@ impl RegisteredGlobalDb {
         })
     }
 
+    /// Exact compare-and-set for versioned parse-offset authorities whose
+    /// numeric fields are not monotonic transcript positions.
+    pub async fn replace_parse_offset_result(
+        &self,
+        path: &str,
+        expected: ParseOffset,
+        next: ParseOffset,
+    ) -> Result<(), TranscriptPersistenceError> {
+        let transaction = self.begin_transcript_transaction().await?;
+        require_expected_offset(&transaction, path, expected).await?;
+        set_parse_offset(&transaction, path, next).await?;
+        transaction.commit().await.map_err(|error| {
+            TranscriptPersistenceError::storage("commit transcript parse-offset replacement", error)
+        })
+    }
+
+    /// Atomically compare-and-replace two parse-offset keys. Both expected
+    /// values are checked before either write and one transaction owns the
+    /// pair through commit.
+    pub async fn replace_parse_offset_pair_result(
+        &self,
+        first: (&str, ParseOffset, ParseOffset),
+        second: (&str, ParseOffset, ParseOffset),
+    ) -> Result<(), TranscriptPersistenceError> {
+        if first.0 == second.0 {
+            return Err(TranscriptPersistenceError::storage(
+                "replace transcript parse-offset pair",
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "parse-offset pair keys must be distinct",
+                ),
+            ));
+        }
+        let transaction = self.begin_transcript_transaction().await?;
+        require_expected_pair_offset(&transaction, first.0, first.1).await?;
+        require_expected_pair_offset(&transaction, second.0, second.1).await?;
+        set_parse_offset(&transaction, first.0, first.2).await?;
+        set_parse_offset(&transaction, second.0, second.2).await?;
+        transaction.commit().await.map_err(|error| {
+            TranscriptPersistenceError::storage(
+                "commit transcript parse-offset pair replacement",
+                error,
+            )
+        })
+    }
+
     async fn set_parse_offset_monotonic_in_existing_tx(
         conn: &impl Executor,
         path: &str,
@@ -614,5 +673,22 @@ impl RegisteredGlobalDb {
         .await
         .map(|_| ())
         .map_err(|error| format!("failed to advance transcript parse offset: {error}"))
+    }
+}
+
+async fn require_expected_pair_offset(
+    conn: &impl QueryExecutor,
+    path: &str,
+    expected: ParseOffset,
+) -> Result<(), TranscriptPersistenceError> {
+    match require_expected_offset(conn, path, expected).await {
+        Err(TranscriptPersistenceError::Conflict { expected, actual }) => {
+            Err(TranscriptPersistenceError::PairConflict {
+                path: path.to_owned(),
+                expected,
+                actual,
+            })
+        }
+        result => result,
     }
 }

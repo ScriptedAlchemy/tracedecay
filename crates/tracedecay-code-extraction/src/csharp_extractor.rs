@@ -48,12 +48,17 @@ impl ExtractionState {
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -70,10 +75,7 @@ impl ExtractionState {
 }
 
 impl CSharpExtractor {
-    /// Extract code graph nodes and edges from a C# source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the C# source code to parse.
     pub fn extract_csharp(file_path: &str, source: &str) -> ExtractionResult {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
@@ -102,7 +104,6 @@ impl CSharpExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -157,7 +158,6 @@ impl CSharpExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -171,7 +171,6 @@ impl CSharpExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "namespace_declaration" | "file_scoped_namespace_declaration" => {
@@ -191,7 +190,6 @@ impl CSharpExtractor {
             "event_declaration" | "event_field_declaration" => Self::visit_event(state, node),
             "attribute_list" => Self::visit_attribute_list(state, node),
             _ => {
-                // Recurse into children for any unhandled node types.
                 Self::visit_children(state, node);
             }
         }
@@ -238,7 +236,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -248,7 +245,6 @@ impl CSharpExtractor {
             });
         }
 
-        // Visit namespace body.
         state.node_stack.push((name, id));
         // For braced namespaces, visit the body (declaration_list)
         if let Some(body) = node.child_by_field_name("body") {
@@ -309,7 +305,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -319,7 +314,6 @@ impl CSharpExtractor {
             });
         }
 
-        // Unresolved Uses reference.
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id: id,
             reference_name: path,
@@ -377,7 +371,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -387,13 +380,10 @@ impl CSharpExtractor {
             });
         }
 
-        // Extract attributes on this class.
         Self::extract_attributes_from_declaration(state, node, &id);
 
-        // Extract base list (extends/implements).
         Self::extract_base_list(state, node, &id, true);
 
-        // Visit class body.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -443,7 +433,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -453,10 +442,8 @@ impl CSharpExtractor {
             });
         }
 
-        // Extract base list (struct can implement interfaces).
         Self::extract_base_list(state, node, &id, false);
 
-        // Visit struct body.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -506,7 +493,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -516,10 +502,8 @@ impl CSharpExtractor {
             });
         }
 
-        // Extract base list (interfaces can extend other interfaces).
         Self::extract_base_list(state, node, &id, false);
 
-        // Visit interface body.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -569,7 +553,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -579,7 +562,6 @@ impl CSharpExtractor {
             });
         }
 
-        // Extract enum members from the body.
         state.node_stack.push((name, id));
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_enum_members(state, body);
@@ -655,7 +637,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -717,7 +698,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -727,10 +707,8 @@ impl CSharpExtractor {
             });
         }
 
-        // Extract attributes on this method.
         Self::extract_attributes_from_declaration(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -777,7 +755,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -787,10 +764,8 @@ impl CSharpExtractor {
             });
         }
 
-        // Extract attributes on this constructor.
         Self::extract_attributes_from_declaration(state, node, &id);
 
-        // Extract call sites from the constructor body.
         if let Some(body) = node.child_by_field_name("body") {
             Self::extract_call_sites(state, body, &id);
         }
@@ -813,7 +788,6 @@ impl CSharpExtractor {
             start_line,
         );
 
-        // Extract the type from the type field
         let type_str = node
             .child_by_field_name("type")
             .map(|n| state.node_text(n))
@@ -847,7 +821,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -950,7 +923,6 @@ impl CSharpExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -1007,7 +979,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1017,7 +988,6 @@ impl CSharpExtractor {
             });
         }
 
-        // Visit record body if present.
         state.node_stack.push((name, id));
         state.class_depth += 1;
         if let Some(body) = node.child_by_field_name("body") {
@@ -1071,7 +1041,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1129,7 +1098,6 @@ impl CSharpExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1190,7 +1158,6 @@ impl CSharpExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Annotates unresolved ref.
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: id.clone(),
                         reference_name: attr_name,
@@ -1200,7 +1167,6 @@ impl CSharpExtractor {
                         file_path: state.file_path.clone(),
                     });
 
-                    // If we found the target, create a direct Annotates edge.
                     if let Some(ref tid) = target_id {
                         state.edges.push(Edge {
                             source: id,
@@ -1216,10 +1182,6 @@ impl CSharpExtractor {
             }
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the name of a node by looking for a "name" field child.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
@@ -1542,7 +1504,6 @@ impl CSharpExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Annotates edge from annotation to target declaration.
                     state.edges.push(Edge {
                         source: id.clone(),
                         target: target_id.to_string(),
@@ -1550,7 +1511,6 @@ impl CSharpExtractor {
                         line: Some(start_line),
                     });
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -1662,7 +1622,6 @@ impl CSharpExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                         });
-                        // Recurse for nested calls inside arguments.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "object_creation_expression" => {

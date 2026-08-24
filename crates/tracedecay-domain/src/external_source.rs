@@ -135,7 +135,7 @@ pub enum SourceContentStateV1 {
     TemporarilyUnavailable,
 }
 
-/// Provider capabilities decoded from one exact Plan 27 acquisition contract.
+/// Provider capabilities decoded from one exact acquisition contract.
 ///
 /// This is intentionally a closed capability set rather than a provider
 /// descriptor or connector registry. The provider adapter owns acquisition;
@@ -195,7 +195,7 @@ impl SourceAcquisitionCapabilitiesV1 {
     }
 }
 
-/// Exact provider/capability contract emitted by the Plan 27 adapter.
+/// Exact provider/capability contract emitted by the provider adapter.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceAcquisitionContractV1 {
@@ -241,7 +241,6 @@ impl SourceAcquisitionContractV1 {
     }
 }
 
-/// Immutable provider-neutral source definition.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceDefinitionV1 {

@@ -22,7 +22,6 @@ pub enum OverlayParseState {
     Unavailable(OverlayParseUnavailable),
 }
 
-/// Typed reason an accepted text overlay has no current retained tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverlayParseUnavailable {
     UnsupportedLanguage,
@@ -103,6 +102,7 @@ pub(super) struct RetainedOverlayParse {
 }
 
 impl RetainedOverlayParse {
+    #[hotpath::measure(label = "lsp_overlay_parse_open", impl_type = "RetainedOverlayParse")]
     pub(super) fn open(identity: ParseDocumentIdentity, language_id: &str, source: &str) -> Self {
         let Some(extractor) = extractor_for(identity.logical_path()) else {
             return Self::unavailable(OverlayParseUnavailable::UnsupportedLanguage);
@@ -133,6 +133,7 @@ impl RetainedOverlayParse {
         }
     }
 
+    #[hotpath::measure(label = "lsp_overlay_parse_update", impl_type = "RetainedOverlayParse")]
     pub(super) fn update(
         &mut self,
         next_identity: ParseDocumentIdentity,
@@ -148,9 +149,13 @@ impl RetainedOverlayParse {
         let prepared_source = extractor.prepare_parse_source(source);
         let result = if let Some(document) = self.document.as_mut() {
             let report = if full_replacement {
-                document.replace_prepared(next_identity, source, prepared_source)
+                hotpath::measure_block!("lsp_overlay_parse_replace", {
+                    document.replace_prepared(next_identity, source, prepared_source)
+                })
             } else {
-                document.apply_edits_prepared(next_identity, edits, source, prepared_source)
+                hotpath::measure_block!("lsp_overlay_parse_reuse", {
+                    document.apply_edits_prepared(next_identity, edits, source, prepared_source)
+                })
             };
             report.map(|report| (None, report))
         } else {
@@ -187,6 +192,7 @@ impl RetainedOverlayParse {
         &self.extraction_state
     }
 
+    #[hotpath::measure(label = "lsp_overlay_extract", impl_type = "RetainedOverlayParse")]
     fn extract(&mut self, extractor: &dyn LanguageExtractor, report: &ParseReport) {
         let Some(document) = self.document.as_ref() else {
             self.prior_raw_extraction = None;

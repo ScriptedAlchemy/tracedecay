@@ -1,6 +1,5 @@
 //! Occurrence identity, source spans, and revision/digest primitives for the
-//! query code-intelligence model (Plan 25, "Identity and lineage" and
-//! "Code-search chunk and projection contract").
+//! query code-intelligence model.
 //!
 //! Generation-local occurrence identity is exact. Logical identity remains
 //! stable only while its declared repository, language, qualified-structure,
@@ -82,7 +81,7 @@ impl ContentDigest {
 }
 
 /// Byte range inside one sanitized source file. Mutable line numbers are
-/// never part of identity (Plan 25).
+/// never part of identity.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -113,7 +112,7 @@ impl SourceSpan {
 
 /// The logical inputs that define chunk identity. Two chunks share one
 /// `CodeSearchChunkId` exactly when every field matches; content and
-/// generation are deliberately absent (Plan 25).
+/// generation are deliberately absent.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChunkLogicalIdentityV1 {

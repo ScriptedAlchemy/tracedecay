@@ -299,6 +299,7 @@ impl Connection {
         self.runtime.reader_pool_occupancy()
     }
 
+    #[hotpath::measure]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;

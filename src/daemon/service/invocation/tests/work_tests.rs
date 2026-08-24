@@ -1,6 +1,3 @@
-//! `work` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
-
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -6,7 +6,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +29,7 @@ use super::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_protocol_problem, remote_replay_result_contract_v1,
 };
+use crate::clock::try_now_micros;
 use crate::{
     ApplicationContractError, ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt, PolicyDecisionRef,
@@ -456,13 +456,7 @@ pub struct SystemRemoteReplayClockV1;
 
 impl RemoteReplayClockPortV1 for SystemRemoteReplayClockV1 {
     fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)?
-            .as_micros();
-        i64::try_from(micros)
-            .map(UtcMicros)
-            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
+        try_now_micros().map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
     }
 }
 
@@ -880,6 +874,7 @@ fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolF
             | RemoteReplayApplicationErrorV1::PolicyUnavailable
             | RemoteReplayApplicationErrorV1::ClockUnavailable
             | RemoteReplayApplicationErrorV1::Persistence(_)
+            | RemoteReplayApplicationErrorV1::AttemptCleanupFailed { .. }
             | RemoteReplayApplicationErrorV1::Transaction(
                 RemoteReplayTransactionErrorV1::CanonicalEffect
                 | RemoteReplayTransactionErrorV1::Unavailable,
@@ -959,13 +954,22 @@ fn with_replay_attempt<T>(
     let replay_attempt = spool
         .begin_replay_attempt(event_id, observed_at)
         .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    let result = operation(replay_attempt);
-    if result.is_err() {
-        spool
-            .abandon_replay_attempt(event_id, replay_attempt)
-            .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
+    let operation_error = match operation(replay_attempt) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    // A failed abandon leaves the attempt marker non-null, so every later
+    // `begin_replay_attempt` for this event is rejected as corruption until
+    // startup recovery runs. That durable condition outlives the operation
+    // error that triggered the cleanup, so both are reported together rather
+    // than either one being discarded.
+    match spool.abandon_replay_attempt(event_id, replay_attempt) {
+        Ok(()) => Err(operation_error),
+        Err(cleanup) => Err(RemoteReplayApplicationErrorV1::AttemptCleanupFailed {
+            operation: Box::new(operation_error),
+            cleanup,
+        }),
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1152,25 +1156,19 @@ pub fn mark_remote_capture_gc_eligible(
     {
         return Err(RemoteReplayApplicationErrorV1::InvalidSpoolState);
     }
-    let replay_attempt = spool
-        .begin_replay_attempt(&frame.event_id, observed_at)
-        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    let result = transition(
-        spool,
-        frame,
-        RemoteReplayStateV1::Acknowledged,
-        RemoteReplayStateV1::GarbageCollectionEligible,
-        replay_attempt,
-        observed_at,
-        None,
-        Some(receipt),
-    );
-    if result.is_err() {
-        spool
-            .abandon_replay_attempt(&frame.event_id, replay_attempt)
-            .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    }
-    result.map(|_| ())
+    with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
+        transition(
+            spool,
+            frame,
+            RemoteReplayStateV1::Acknowledged,
+            RemoteReplayStateV1::GarbageCollectionEligible,
+            replay_attempt,
+            observed_at,
+            None,
+            Some(receipt),
+        )
+        .map(|_| ())
+    })
 }
 
 fn validate_scope_and_fence(
@@ -1343,6 +1341,15 @@ pub enum RemoteReplayApplicationErrorV1 {
     Persistence(RemoteCapturePersistenceErrorV1),
     #[error(transparent)]
     Transaction(RemoteReplayTransactionErrorV1),
+    /// A replay attempt failed and clearing its durable attempt marker failed
+    /// too. Both causes are carried: the operation error explains why the
+    /// replay stopped, and the cleanup error explains why the event stays
+    /// blocked until startup recovery clears the marker.
+    #[error("remote replay attempt cleanup failed ({cleanup}) after {operation}")]
+    AttemptCleanupFailed {
+        operation: Box<RemoteReplayApplicationErrorV1>,
+        cleanup: RemoteCapturePersistenceErrorV1,
+    },
 }
 
 #[cfg(test)]
@@ -1410,6 +1417,88 @@ mod tests {
             remote_replay_result_contract_v1(),
             super::super::protocol::remote_enrollment_result_contract_v1()
         );
+    }
+
+    struct AttemptSpool {
+        abandon: Result<(), RemoteCapturePersistenceErrorV1>,
+    }
+
+    impl RemoteReplaySpoolPortV1 for AttemptSpool {
+        fn state(
+            &self,
+            _event_id: &str,
+        ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
+            unreachable!("the attempt guard never reads spool state")
+        }
+
+        fn transition(
+            &self,
+            _transition: RemoteReplayTransitionV1,
+        ) -> Result<RemoteReplayTransitionReceiptV1, RemoteCapturePersistenceErrorV1> {
+            unreachable!("the attempt guard never transitions the spool")
+        }
+
+        fn begin_replay_attempt(
+            &self,
+            _event_id: &str,
+            _observed_at: UtcMicros,
+        ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
+            Ok(7)
+        }
+
+        fn abandon_replay_attempt(
+            &self,
+            _event_id: &str,
+            _replay_attempt: u64,
+        ) -> Result<(), RemoteCapturePersistenceErrorV1> {
+            self.abandon
+        }
+    }
+
+    #[test]
+    fn failed_attempt_cleanup_reaches_the_caller_with_both_causes() {
+        let spool = AttemptSpool {
+            abandon: Err(RemoteCapturePersistenceErrorV1::Unavailable),
+        };
+        let error = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), |attempt| {
+            assert_eq!(attempt, 7);
+            Err::<(), _>(RemoteReplayApplicationErrorV1::InvalidSpoolState)
+        })
+        .expect_err("a failed cleanup must not be reported as success");
+
+        assert_eq!(
+            error,
+            RemoteReplayApplicationErrorV1::AttemptCleanupFailed {
+                operation: Box::new(RemoteReplayApplicationErrorV1::InvalidSpoolState),
+                cleanup: RemoteCapturePersistenceErrorV1::Unavailable,
+            }
+        );
+        assert_eq!(
+            replay_protocol_failure(RemoteReplayServiceErrorV1::Replay(error)),
+            RemoteProtocolFailureV1::AuthorityUnavailable
+        );
+    }
+
+    #[test]
+    fn successful_attempt_cleanup_preserves_the_operation_error() {
+        let spool = AttemptSpool { abandon: Ok(()) };
+        let error = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), |_| {
+            Err::<(), _>(RemoteReplayApplicationErrorV1::InvalidSpoolState)
+        })
+        .expect_err("the operation error still surfaces");
+
+        assert_eq!(error, RemoteReplayApplicationErrorV1::InvalidSpoolState);
+    }
+
+    #[test]
+    fn successful_operation_never_abandons_the_attempt() {
+        let spool = AttemptSpool {
+            abandon: Err(RemoteCapturePersistenceErrorV1::Unavailable),
+        };
+        let attempt = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), Ok)
+            .expect("a successful operation is unaffected by cleanup");
+
+        assert_eq!(attempt, 7);
     }
 
     #[test]

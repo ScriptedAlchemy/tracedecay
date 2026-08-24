@@ -36,7 +36,7 @@ fn session() -> DaemonLspProtocolSession<Feedback, Semantics, UnavailableDiagnos
         &upstream_capabilities,
     );
     DaemonLspProtocolSession::without_diagnostic_provider(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback,
@@ -281,7 +281,7 @@ where
         &upstream_capabilities,
     );
     DaemonLspProtocolSession::without_diagnostic_provider(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback,
@@ -350,7 +350,7 @@ fn lsp_context_request_stays_correlated_until_async_projection_completes() {
         &upstream_capabilities,
     );
     let mut session = DaemonLspProtocolSession::without_diagnostic_provider(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback,
@@ -443,7 +443,7 @@ fn lsp_context_expansion_is_namespaced_and_returns_canonical_evidence() {
         &upstream_capabilities,
     );
     let mut session = DaemonLspProtocolSession::without_diagnostic_provider(
-        DaemonLspGateway::with_semantic_provider(
+        DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             effective,
             Feedback,

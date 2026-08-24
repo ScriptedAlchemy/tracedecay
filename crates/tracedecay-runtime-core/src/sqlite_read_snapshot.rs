@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 #[path = "sqlite_snapshot_connection.rs"]
 mod connection;
@@ -105,6 +106,7 @@ impl SnapshotDatabase {
     ///
     /// The backup reads only the already-captured immutable/copy connection;
     /// it never opens the live source authority.
+    #[hotpath::measure]
     pub async fn backup_to(&self, destination: &Path) -> io::Result<()> {
         let source = Arc::clone(&self.connection.connection);
         let destination = destination.to_path_buf();
@@ -224,6 +226,7 @@ impl SnapshotSet {
         Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign, control).await
     }
 
+    #[hotpath::measure]
     async fn capture_with_policy(
         paths: &[PathBuf],
         root: &Path,
@@ -514,7 +517,7 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     if family_state(path)? != before {
         return Err(changed_during_snapshot(path));
     }
-    Ok(hex::encode(hash.finalize()))
+    Ok(encode_lowercase_hex(&hash.finalize()))
 }
 
 /// How long a bounded probe waits on a lock before giving up.

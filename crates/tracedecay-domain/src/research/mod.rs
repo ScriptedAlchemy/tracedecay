@@ -69,17 +69,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_modules_and_compatibility_facades_resolve_the_same_ids() {
-        let owned: crate::research::id::ShardId =
-            crate::research::id::ShardId::new("shard.fixture").unwrap();
-        let research_facade: crate::research::ShardId = owned.clone();
-        let crate_facade: crate::ShardId = research_facade.clone();
-
-        assert_eq!(owned, research_facade);
-        assert_eq!(research_facade, crate_facade);
-    }
-
-    #[test]
     fn constrained_anchor_collections_reject_empty_and_duplicates() {
         type Anchors = NonEmptyUniqueVec<RetrievalAnchorId>;
 

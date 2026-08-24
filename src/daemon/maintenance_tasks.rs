@@ -2,10 +2,6 @@
 //!
 //! Long-lived-process opt-in for session-store maintenance, and the periodic
 //! semantic artifact GC whose task is joined during daemon shutdown.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use std::sync::Arc;
 
@@ -58,26 +54,30 @@ impl Drop for SemanticArtifactGcMaintenanceTask {
 }
 
 pub(super) fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask {
-    let task = tokio::spawn(async {
-        let mut interval = tokio::time::interval(SEMANTIC_ARTIFACT_GC_PERIOD);
-        loop {
-            interval.tick().await;
-            let Some(owner) = crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared()
-            else {
-                continue;
-            };
-            let now_unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            if owner.run_daemon_artifact_gc(now_unix).is_err() {
-                log_daemon_event(
-                    "semantic_artifact_gc",
-                    &[("outcome", "retry_next_interval".to_owned())],
-                );
+    let task = tokio::spawn(hotpath::future!(
+        async {
+            let mut interval = tokio::time::interval(SEMANTIC_ARTIFACT_GC_PERIOD);
+            loop {
+                interval.tick().await;
+                let Some(owner) =
+                    crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared()
+                else {
+                    continue;
+                };
+                let now_unix = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if owner.run_daemon_artifact_gc(now_unix).is_err() {
+                    log_daemon_event(
+                        "semantic_artifact_gc",
+                        &[("outcome", "retry_next_interval".to_owned())],
+                    );
+                }
             }
-        }
-    });
+        },
+        label = "daemon.maintenance.semantic_artifact_gc"
+    ));
     SemanticArtifactGcMaintenanceTask {
         task: Arc::new(tokio::sync::Mutex::new(Some(task))),
     }

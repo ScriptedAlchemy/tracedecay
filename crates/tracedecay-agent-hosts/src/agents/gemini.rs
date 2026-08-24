@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-08-08
 //! Gemini CLI agent integration.
 //!
 //! Gemini CLI has a first-party extension lifecycle — `gemini extensions
@@ -58,7 +57,6 @@ use extension::{
     stage_dir_is_tracedecay, staged_context_path, staged_manifest_path, user_context_path,
 };
 
-/// Gemini CLI agent.
 pub struct GeminiIntegration;
 
 impl AgentIntegration for GeminiIntegration {
@@ -291,8 +289,6 @@ fn gemini_extension_registration_state(
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check the TraceDecay-owned extension source: present, owned, current
-/// version, and declaring the MCP server the way Gemini needs it.
 fn doctor_check_staged_extension(dc: &mut DoctorCounters, home: &Path) {
     let stage_dir = extension_stage_dir(home);
     let manifest_path = staged_manifest_path(home);

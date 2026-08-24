@@ -1,7 +1,6 @@
 import type { LucideIcon } from 'lucide-react';
 import {
   AlertTriangle,
-  Ban,
   CheckCircle2,
   CircleSlash,
   Clock,
@@ -20,8 +19,8 @@ import {
 } from 'lucide-react';
 import { cn } from './cn';
 
-/** The nineteen-state domain taxonomy (plan 11). Token + icon + label —
- * never color alone. */
+/** The nineteen-state domain taxonomy. Token + icon + label — never color
+ * alone. */
 export type DomainStateKind =
   | 'loading'
   | 'complete_zero_findings'
@@ -51,6 +50,12 @@ export type DomainStateKind =
   | 'error'
   | 'unsupported'
   | 'unsupported_schema';
+
+const UNSUPPORTED_SCHEMA_VISUAL = {
+  label: 'Unsupported schema',
+  icon: FileQuestion,
+  tokenClass: 'text-state-unsupported-schema',
+};
 
 const STATE: Record<
   DomainStateKind,
@@ -86,11 +91,7 @@ const STATE: Record<
     icon: CircleSlash,
     tokenClass: 'text-state-unsupported-schema',
   },
-  unsupported_schema: {
-    label: 'Unsupported schema',
-    icon: FileQuestion,
-    tokenClass: 'text-state-unsupported-schema',
-  },
+  unsupported_schema: UNSUPPORTED_SCHEMA_VISUAL,
 };
 
 /** The lamp bar down the chip's leading edge. Spelled out per state (rather
@@ -127,33 +128,17 @@ export function StateChip({
   detail?: string;
   className?: string;
 }) {
-  const s = STATE[kind] ?? {
-    label: 'Unsupported schema',
-    icon: Ban,
-    tokenClass: 'text-state-unsupported-schema',
-  };
+  const s = STATE[kind] ?? UNSUPPORTED_SCHEMA_VISUAL;
   const lampClass = LAMP[kind] ?? 'bg-state-unsupported-schema';
   const Icon = s.icon;
   return (
     <span
       className={cn(
-        // An indicator segment, not a pill: square, hairline-bezelled, with the
-        // state hue carried by a lamp bar down its leading edge so the chip
-        // reads at a glance across a dense panel.
-        //
-        // flex-wrap: when the detail text does not fit next to the icon +
-        // label on one row, the whole detail span drops to its own line
-        // (nearly the chip's full width) instead of every sibling staying
-        // pinned to one nowrap row and squeezing the detail text into
-        // whatever sliver is left — that sliver could be ~30px in a narrow
-        // rail, which wrapped the detail text one word per line.
-        'relative inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 border border-edge-subtle bg-surface-2',
+        // Indicator segment, not a pill: hue lives on the leading lamp.
+        // flex-wrap + max-w-full lets detail drop to its own line in a
+        // narrow rail instead of squeezing one word per line.
+        'relative inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 border border-edge-subtle bg-surface-2',
         'py-[3px] pl-2.5 pr-2 text-3xs font-medium',
-        // Wrap as a block, not as a column. Without this the detail text kept
-        // its narrow slot beside the label in a constrained rail and broke one
-        // word per line into a four-line ribbon; wrapping lets it drop to its
-        // own full-width line under the label instead.
-        'max-w-full flex-wrap',
         className,
       )}
       data-state={kind}

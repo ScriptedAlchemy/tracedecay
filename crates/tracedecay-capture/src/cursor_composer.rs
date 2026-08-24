@@ -49,6 +49,8 @@ pub fn normalize_cursor_composer_observation_with_projected_message_id(
     )
 }
 
+/// Cursor composer composition for one source bubble, not a per-token walk.
+#[hotpath::measure]
 pub fn normalize_cursor_composer_observation_with_message_id(
     native: &Value,
     composer_id: &str,
@@ -370,6 +372,8 @@ pub fn composer_todos_have_admittable_items(native: &Value) -> bool {
         })
 }
 
+/// Cursor composer composition for one source envelope, not a per-token walk.
+#[hotpath::measure]
 pub fn normalize_cursor_composer_envelope_observation(
     native: &Value,
     composer_id: &str,

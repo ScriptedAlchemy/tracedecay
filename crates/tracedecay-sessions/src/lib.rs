@@ -18,16 +18,16 @@
 //! exact paths and contents. Re-seal them together from a clean source
 //! commit if they ever need to move or regenerate — never hand-edit:
 //!
-//! - `benchmarks/claude-observation/workload-v1.json` and
-//!   `benchmarks/claude-observation/result-2026-07-26-dc17dd73.json`
-//! - `benchmarks/session-temporal/workload-v1.json` and
-//!   `benchmarks/session-temporal/result-provisional.json`
+//! - `benchmark_data/claude-observation/workload-v1.json` and
+//!   `benchmark_data/claude-observation/result-2026-07-26-dc17dd73.json`
+//! - `benchmark_data/session-temporal/workload-v1.json` and
+//!   `benchmark_data/session-temporal/result-provisional.json`
 //! - `tests/fixtures/transcript_golden/cline_like/manifest.json` and
 //!   `tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json`
 //! - `tests/fixtures/provider_normalization/codex/README.md`
 //!
 //! Their `include_str!`/`include_bytes!` sites resolve for workspace builds
-//! but reach outside this crate's package root (repo-root `benchmarks/` and
+//! but reach outside this crate's package root (repo-root `benchmark_data/` and
 //! `tests/fixtures/`), so `cargo package`/`cargo publish` for this crate
 //! cannot see them. `publish = false` is set, so this is accepted rather than
 //! vendoring the fixtures under `crates/tracedecay-sessions/tests/`.

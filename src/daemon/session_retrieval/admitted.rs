@@ -73,7 +73,7 @@ pub(crate) type SessionApplicationRetrievalFutureV1<'a> =
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
 
-/// Application-level Plan 23 retrieval over one already-mounted session root.
+/// Application-level retrieval over one already-mounted session root.
 ///
 /// The caller has already crossed its application admission boundary. This
 /// port therefore accepts the original immutable context and never routes
@@ -173,7 +173,7 @@ impl SessionApplicationRetrievalPortV1 for UnavailableSessionApplicationRetrieva
         _query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a> {
         Box::pin(async move {
-            if context.scope() != &self.scope {
+            if !context.scope().identifies_same_checkout(&self.scope) {
                 SessionRetrievalServiceOutcome::Denied
             } else {
                 SessionRetrievalServiceOutcome::Unavailable(
@@ -390,7 +390,12 @@ fn admitted_session_binding(
         .identity
         .session_request_scope()
         .map_err(|_| Box::new(SessionRetrievalServiceOutcome::WrongScope))?;
-    if context.scope() != &scope {
+    // Checkout identity, not the branch label: the mounted session identity
+    // carries the branch its graph scope was registered under, the request
+    // context carries the branch HEAD currently points at, and a session store
+    // is partitioned by project/repository/worktree only. See
+    // `ResolvedScope::identifies_same_checkout`.
+    if !context.scope().identifies_same_checkout(&scope) {
         return Err(Box::new(SessionRetrievalServiceOutcome::WrongScope));
     }
     let cancellation = CancellationToken::for_admitted_application_request(
@@ -550,5 +555,122 @@ mod tests {
         );
         assert!(binding.cancellation().is_cancelled());
         assert_eq!(binding.validate_context(&context), Ok(()));
+    }
+
+    fn retrieval_root(branch: &str) -> DaemonSessionRetrievalRoot {
+        let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
+        DaemonSessionRetrievalRoot {
+            store_scope: SessionRetrievalStoreScope::Project,
+            identity: ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.session-retrieval").expect("profile identity"),
+                project_id.clone(),
+                SessionStoreId::new("store.project.test").expect("store identity"),
+                SessionRootId::new("root.project.test").expect("root identity"),
+                ResolvedGitRoute::new(
+                    RepositoryId::new("repository.project.test").expect("repository identity"),
+                    WorktreeId::new("worktree.project.test").expect("worktree identity"),
+                    BranchId::new(branch).expect("branch identity"),
+                ),
+            ),
+            project_id: Some(project_id.as_str().to_owned()),
+            authorized_root: None,
+            expected_runtime_shard: None,
+        }
+    }
+
+    fn request_context_for(scope: tracedecay_application::ResolvedScope) -> RequestContext {
+        let actor = ActorId::new("actor.message-search").expect("actor");
+        let grant_digest =
+            ManifestDigest::new(format!("sha256:{}", "5".repeat(64))).expect("grant digest");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.message-search").expect("grant id"),
+            1,
+            grant_digest,
+            actor.clone(),
+            UtcMicros(10),
+            UtcMicros(1_000),
+            scope.clone(),
+            BTreeSet::from([
+                CapabilityId::new("capability.session.temporal-retrieval").expect("capability")
+            ]),
+            BTreeSet::from([
+                UseCaseId::new("use-case.session.temporal-retrieval").expect("use case")
+            ]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        RequestContext::new(
+            actor,
+            scope,
+            grant,
+            RequestId::new("request.message-search").expect("request id"),
+            Deadline::new(UtcMicros(900)).expect("deadline"),
+            CancellationContext::active("cancellation.message-search").expect("cancellation"),
+        )
+        .expect("request context")
+    }
+
+    /// The production failure this guards: the mounted session identity records
+    /// the branch its *graph scope* was registered under (`master`), while the
+    /// request context carries whatever branch HEAD points at. Comparing whole
+    /// scopes made every `message_search` and `lcm_grep` on a feature branch
+    /// answer `WrongScope`, which the retained surface renders as
+    /// `not_found_or_not_authorized`.
+    #[test]
+    fn admitted_binding_serves_the_same_checkout_on_a_different_branch() {
+        let root = retrieval_root("master");
+        let serving_scope = root
+            .identity
+            .session_request_scope()
+            .expect("application scope");
+        let head_scope = tracedecay_application::ResolvedScope::new(
+            serving_scope.project_id.clone(),
+            serving_scope.repository_id.clone(),
+            serving_scope.worktree_id.clone(),
+            Some(
+                tracedecay_domain::RefId::new("refs/heads/feature/hot-paths")
+                    .expect("head reference"),
+            ),
+        )
+        .expect("head scope");
+        assert_ne!(head_scope, serving_scope);
+        assert!(head_scope.identifies_same_checkout(&serving_scope));
+
+        let context = request_context_for(head_scope);
+        let binding = admitted_session_binding(
+            &root,
+            SessionRetrievalConfiguration::new(2, 5).expect("retrieval configuration"),
+            &context,
+        )
+        .expect("branch label divergence must not refuse the mounted checkout");
+        assert_eq!(binding.identity(), &root.identity);
+    }
+
+    #[test]
+    fn admitted_binding_still_refuses_a_foreign_worktree() {
+        let root = retrieval_root("master");
+        let serving_scope = root
+            .identity
+            .session_request_scope()
+            .expect("application scope");
+        let foreign_scope = tracedecay_application::ResolvedScope::new(
+            serving_scope.project_id.clone(),
+            serving_scope.repository_id.clone(),
+            WorktreeId::new("worktree.project.other").expect("worktree identity"),
+            serving_scope.reference.clone(),
+        )
+        .expect("foreign scope");
+
+        let context = request_context_for(foreign_scope);
+        let outcome = admitted_session_binding(
+            &root,
+            SessionRetrievalConfiguration::new(2, 5).expect("retrieval configuration"),
+            &context,
+        )
+        .expect_err("a different worktree is not the mounted checkout");
+        assert!(matches!(
+            *outcome,
+            SessionRetrievalServiceOutcome::WrongScope
+        ));
     }
 }

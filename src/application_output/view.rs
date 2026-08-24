@@ -337,11 +337,35 @@ mod tests {
     };
     use tracedecay_domain::UtcMicros;
 
-    use super::super::markdown;
-    use super::{CanonicalHumanView, payload_summary};
+    use super::{CanonicalHumanView, HumanField, HumanFieldValue, payload_summary};
+    use serde_json::Value;
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
+        ResultContractRef, SafeDiagnostic,
+    };
+    use tracedecay_tool_catalog::{BindingId, SchemaId};
 
+    fn code(label: &'static str, value: &str) -> HumanField {
+        HumanField {
+            label,
+            value: HumanFieldValue::Code(value.to_owned()),
+        }
+    }
+
+    fn text(label: &'static str, value: &str) -> HumanField {
+        HumanField {
+            label,
+            value: HumanFieldValue::Text(value.to_owned()),
+        }
+    }
+
+    /// Partial evidence must be projected into the typed human fields that name
+    /// what was and was not covered — coverage, per-domain state, omissions,
+    /// paging cursor, receipt, and cancellation. Markdown rendering and
+    /// escaping belong to `cli::output::markdown`, so a display-label rename
+    /// must not land here.
     #[test]
-    fn partial_evidence_markdown_matches_the_golden_contract() {
+    fn partial_evidence_extracts_the_typed_coverage_fields() {
         let mut view = CanonicalHumanView {
             heading: "feedback_list".to_owned(),
             fields: Vec::new(),
@@ -392,20 +416,80 @@ mod tests {
             payload_summary(Some(&json!({"items": [1, 2]}))).unwrap(),
         );
 
+        assert_eq!(view.heading, "feedback_list");
         assert_eq!(
-            markdown::render(view).as_str(),
-            concat!(
-                "## feedback\\_list\n",
-                "\n- Coverage: `partial`",
-                "\n- Coverage counts: `visited=5, eligible=4, returned=2`",
-                "\n- Coverage domains: `source:partial, test:unknown`",
-                "\n- Omissions: `source:budget=2`",
-                "\n- Cursor: `cursor.opaque`",
-                "\n- Termination: `partial`",
-                "\n- Receipt: `started=10, ended=20, deadline=30, units=3, bytes=40, elapsed_us=10`",
-                "\n- Cancellation stage: `during_read`",
-                "\n- Payload: object(keys=items; json\\_bytes=15); complete: --json",
-            )
+            view.fields,
+            vec![
+                code("Coverage", "partial"),
+                code("Coverage counts", "visited=5, eligible=4, returned=2"),
+                code("Coverage domains", "source:partial, test:unknown"),
+                code("Omissions", "source:budget=2"),
+                code("Cursor", "cursor.opaque"),
+                code("Termination", "partial"),
+                code(
+                    "Receipt",
+                    "started=10, ended=20, deadline=30, units=3, bytes=40, elapsed_us=10",
+                ),
+                code("Cancellation stage", "during_read"),
+                text(
+                    "Payload",
+                    "object(keys=items; json_bytes=15); complete: --json"
+                ),
+            ]
+        );
+    }
+
+    /// A canonical problem envelope must be projected into the full, ordered set of
+    /// typed human fields — every field the CLI promises about a problem, in order,
+    /// with the right `Code`/`Text` presentation. Markdown rendering and escaping
+    /// are the contract of `cli::output::markdown`, not of this extraction, so a
+    /// display-label rename must not land here.
+    #[test]
+    fn canonical_problem_view_extracts_the_typed_problem_fields() {
+        let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
+            RequestId::new("request.cli.golden").unwrap(),
+            ApplicationProblem::unavailable(
+                SafeDiagnostic::new(
+                    "daemon_unavailable",
+                    "The owning TraceDecay daemon is unavailable",
+                )
+                .unwrap(),
+            ),
+        )
+        .expect("construct canonical CLI golden problem"));
+        let view = CanonicalHumanView::from_application_result(
+            "feedback_list",
+            &BindingId::new("binding.cli.feedback-list.v1").unwrap(),
+            &result,
+        )
+        .unwrap();
+
+        assert_eq!(view.heading, "feedback_list");
+        assert_eq!(
+            view.fields,
+            vec![
+                code("Operation", "feedback_list"),
+                code("Binding", "binding.cli.feedback-list.v1"),
+                code("Status", "problem"),
+                code("Contract", "schema.test.result@3"),
+                code("Problem", "daemon_unavailable"),
+                code("Problem kind", "unavailable"),
+                code("Problem revision", "1"),
+                code("Owning layer", "application"),
+                code("Terminality", "pre_admission"),
+                code("Request", "request.cli.golden"),
+                code("Trace", "request.cli.golden"),
+                text("Message", "The owning TraceDecay daemon is unavailable"),
+                code("Retryable", "true"),
+                code("Retry", "after_delay"),
+                code("Retry scope", "same_request"),
+                code("Retry after", "250ms"),
+                code("Cancellation stage", "none"),
+                text("Details", "none"),
+                code("Legal actions", "retry"),
+                code("Coverage", "not_available"),
+            ]
         );
     }
 }

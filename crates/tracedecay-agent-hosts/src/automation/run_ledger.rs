@@ -143,6 +143,16 @@ pub struct AutomationRunLedgerRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_key: Option<String>,
     pub backend: String,
+    /// The durable backend/configuration identity this run executed under.
+    ///
+    /// A settled deterministic failure stays suppressed only while this
+    /// matches the identity now configured, so the scheduler can re-admit the
+    /// task the moment the backend or configuration changes. Records written
+    /// before this field existed carry `None` and never suppress: an
+    /// unidentified failure cannot be shown to have failed under the current
+    /// identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +248,7 @@ pub fn run_artifact_path(
         .join(format!("{}.json", kind.as_str())))
 }
 
+#[hotpath::measure(label = "automation_run_artifact_write")]
 pub async fn write_run_artifact(
     dashboard_root: &Path,
     run_id: &str,
@@ -251,14 +262,17 @@ pub async fn write_run_artifact(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| config_error(format!("failed to create run artifact directory: {e}")))?;
+            .map_err(|e| TraceDecayError::File {
+                message: format!("failed to create run artifact directory: {e}"),
+                path: parent.display().to_string(),
+            })?;
     }
-    tokio::fs::write(&path, &bytes).await.map_err(|e| {
-        config_error(format!(
-            "failed to write automation run artifact '{}': {e}",
-            path.display()
-        ))
-    })?;
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| TraceDecayError::File {
+            message: format!("failed to write automation run artifact: {e}"),
+            path: path.display().to_string(),
+        })?;
 
     Ok(artifact)
 }
@@ -299,12 +313,12 @@ pub async fn read_run_artifact_payload(
     let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
     crate::storage::reject_symlink_components(&path, "automation artifact")
         .map_err(TraceDecayError::from)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        config_error(format!(
-            "failed to read automation run artifact '{}': {e}",
-            path.display()
-        ))
-    })?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| TraceDecayError::File {
+            message: format!("failed to read automation run artifact: {e}"),
+            path: path.display().to_string(),
+        })?;
     let actual_hash = super::artifact_refs::sha256_bytes(&bytes);
     if actual_hash != artifact.sha256 {
         return Err(config_error(format!(
@@ -322,6 +336,7 @@ pub async fn find_run_record(
     find_run_record_exact_bounded(dashboard_root, run_id).await
 }
 
+#[hotpath::measure(label = "automation_run_ledger_append")]
 pub async fn append_run_record(
     dashboard_root: &Path,
     record: &AutomationRunLedgerRecord,
@@ -332,11 +347,9 @@ pub async fn append_run_record(
     tokio::task::spawn_blocking(move || append_jsonl_line_locked(&write_path, &line))
         .await
         .map_err(|e| config_error(format!("failed to join automation run ledger write: {e}")))?
-        .map_err(|e| {
-            config_error(format!(
-                "failed to write automation run ledger '{}': {e}",
-                path.display()
-            ))
+        .map_err(|e| TraceDecayError::File {
+            message: format!("failed to write automation run ledger: {e}"),
+            path: path.display().to_string(),
         })?;
     Ok(())
 }
@@ -777,6 +790,7 @@ pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File)
 /// The ledger is append-only and grows without bound, so rows are located from
 /// the tail using fixed-size scan buffers. Full JSON records are decoded only
 /// after their bounded identity projection passes the filter and dedup checks.
+#[hotpath::measure(label = "automation_run_ledger_load")]
 pub async fn load_run_records(
     dashboard_root: &Path,
     limit: usize,
@@ -920,6 +934,7 @@ pub async fn load_run_records_for_task_key(
 /// exclusive ledger lock is held. Scheduler ticks and dashboard status requests
 /// therefore rescan the ledger only after it actually changed; see
 /// `RUN_LEDGER_SUMMARY_MEMO` for the append-only invariant this relies on.
+#[hotpath::measure(label = "automation_run_ledger_task_summary")]
 pub async fn load_run_ledger_task_summary(
     dashboard_root: &Path,
     task: AgentTaskKind,
@@ -1918,7 +1933,7 @@ mod tests {
         // A blank line between two committed rows must not be fatal:
         // consecutive newlines (e.g. from an operator edit or a legacy
         // writer) are benign and the pre-rewrite parser explicitly skipped
-        // them. Regression coverage for the scan_jsonl_row fix (Finding 1).
+        // them. Regression coverage for the scan_jsonl_row fix.
         let row1 = ledger_line("run-blank-between-a", 100);
         let row2 = ledger_line("run-blank-between-b", 200);
         let temp = tempfile::TempDir::new().unwrap();
@@ -1947,7 +1962,7 @@ mod tests {
     fn trailing_blank_line_is_skipped_across_tail_page_append_and_summary() {
         // A ledger ending in a trailing blank line ("{row}\n\n") must not
         // permanently break every scan. Regression coverage for the
-        // scan_jsonl_row fix (Finding 1).
+        // scan_jsonl_row fix.
         let row = ledger_line("run-blank-trailing-a", 100);
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(RUN_LEDGER_FILENAME);
@@ -1975,7 +1990,7 @@ mod tests {
     fn whitespace_only_line_is_skipped_by_the_reverse_page_scan() {
         // A pure "\n\n" blank line is absorbed by ReverseJsonlScanner's
         // newline trimming and never reaches scan_jsonl_row, so the two
-        // blank-line tests above exercise the Finding-1 fix only through
+        // blank-line tests above exercise the scan_jsonl_row skip only through
         // ForwardJsonlScanner (append + summary). A whitespace-only line
         // with non-newline bytes ("   \n") DOES reach scan_jsonl_row from
         // the reverse scanner; it must be skipped as benign, not counted

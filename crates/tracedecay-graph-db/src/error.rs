@@ -88,27 +88,23 @@ pub enum GraphDbError {
 }
 
 impl GraphDbError {
-    /// Constructs a typed contract-validation failure.
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
             message: message.into(),
         }
     }
 
-    /// Constructs a typed authority or infrastructure availability failure.
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::Unavailable {
             message: message.into(),
         }
     }
 
-    /// Constructs a typed budget-exhaustion failure that names the ceiling.
     #[must_use]
     pub const fn budget_exhausted(kind: GraphBudgetKind, limit: u64) -> Self {
         Self::BudgetExhausted { kind, limit }
     }
 
-    /// Constructs a typed budget-exhaustion failure from a `usize` ceiling.
     #[must_use]
     pub fn budget_exhausted_count(kind: GraphBudgetKind, limit: usize) -> Self {
         Self::budget_exhausted(kind, u64::try_from(limit).unwrap_or(u64::MAX))

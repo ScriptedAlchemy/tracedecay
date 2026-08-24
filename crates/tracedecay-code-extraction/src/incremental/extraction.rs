@@ -20,7 +20,14 @@ impl RetainedParseDocument {
         report: &ParseReport,
         previous: Option<&ExtractionResult>,
     ) -> Result<ParsedExtraction, ParseError> {
-        let previous_artifact = previous.cloned().map(ExtractionArtifactV1::from_result);
+        // Only the Noop and Incremental paths read the prior extraction; the
+        // Initial and Reset paths must not pay its deep clone.
+        let previous_artifact = match report.reuse {
+            ParseReuse::Noop | ParseReuse::Incremental => {
+                previous.cloned().map(ExtractionArtifactV1::from_result)
+            }
+            ParseReuse::Initial | ParseReuse::Reset { .. } => None,
+        };
         self.extract_canonical_artifact(extractor, report, previous_artifact.as_ref())
             .map(ParsedExtractionArtifactV1::into_parsed)
     }
@@ -29,6 +36,20 @@ impl RetainedParseDocument {
     /// current retained tree. Incremental deltas replace every affected import
     /// statement's rows, including when deletion produces no replacement row.
     pub fn extract_canonical_artifact(
+        &self,
+        extractor: &dyn LanguageExtractor,
+        report: &ParseReport,
+        previous: Option<&ExtractionArtifactV1>,
+    ) -> Result<ParsedExtractionArtifactV1, ParseError> {
+        crate::hotpath_observe::measure_extract_file(
+            extractor.language_name(),
+            self.source.len(),
+            || self.extract_canonical_artifact_unmeasured(extractor, report, previous),
+            crate::hotpath_observe::ExtractOutputCounts::from_extract_result,
+        )
+    }
+
+    fn extract_canonical_artifact_unmeasured(
         &self,
         extractor: &dyn LanguageExtractor,
         report: &ParseReport,
@@ -96,9 +117,10 @@ impl RetainedParseDocument {
             );
         }
 
-        let delta = extractor.extract_parsed_artifact(
+        let delta = extractor.extract_parsed_artifact_prepared(
             self.identity.logical_path(),
             &self.source,
+            self.parsed_source_text(),
             &self.tree,
             ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
         );
@@ -128,9 +150,10 @@ impl RetainedParseDocument {
         extractor: &dyn LanguageExtractor,
         reason: Option<ParsedExtractionResetReason>,
     ) -> ParsedExtractionArtifactV1 {
-        let extracted = extractor.extract_parsed_artifact(
+        let extracted = extractor.extract_parsed_artifact_prepared(
             self.identity.logical_path(),
             &self.source,
+            self.parsed_source_text(),
             &self.tree,
             ParsedExtractionScope::FullDocument,
         );
@@ -152,7 +175,14 @@ impl RetainedParseDocument {
             ParsedExtractionDisposition::Reset {
                 reason: ParsedExtractionResetReason::CompositeGrammar,
             } => ParsedExtractionArtifactV1::reset(
-                extractor.extract_artifact(self.identity.logical_path(), &self.source),
+                // Markdown is the sole composite-grammar producer and uses
+                // the default artifact shape. Build it directly so this
+                // fallback does not re-enter the full traversal span.
+                crate::hotpath_observe::measure_markdown_composite_fallback(|| {
+                    ExtractionArtifactV1::from_result(
+                        extractor.extract(self.identity.logical_path(), &self.source),
+                    )
+                }),
                 ParsedExtractionResetReason::CompositeGrammar,
                 self.source.len(),
             ),
@@ -168,6 +198,7 @@ fn parse_reset_reason(reason: ParseResetReason) -> ParsedExtractionResetReason {
     }
 }
 
+#[hotpath::measure]
 fn merge_changed_artifact(
     previous: &ExtractionArtifactV1,
     delta: ExtractionArtifactV1,

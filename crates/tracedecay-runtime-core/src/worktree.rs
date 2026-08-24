@@ -14,8 +14,6 @@
 //!
 //! Detection is best-effort: when git is unavailable or the path isn't a
 //! repo, it reports "no mismatch" and callers carry on unchanged.
-//!
-//! Ported from `codegraph/src/sync/worktree.ts` (#312).
 
 use std::path::{Path, PathBuf};
 
@@ -307,8 +305,8 @@ pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
 }
 
 /// Resolve symlinks where possible so tmp/realpath quirks don't break
-/// equality checks. Falls back to a plain `absolutize` when canonicalize
-/// fails (e.g. directory was deleted between rev-parse and the fs call).
+/// equality checks. `None` when canonicalize fails (e.g. directory was
+/// deleted between rev-parse and the fs call); callers choose the fallback.
 fn realpath(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
 }

@@ -3,9 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
 
-use super::{CodeIndexSchedulerErrorV1, StaticLanguageRegistry, classification, sha256_hex};
+use super::{
+    CodeIndexSchedulerErrorV1, StaticLanguageRegistry, classification, encode_tagged_lowercase_hex,
+};
 use crate::code_index::languages::LanguageRegistry;
 
 const FRESHNESS_WITNESS_FILE_NAME: &str = "freshness_witness.v1";
@@ -57,7 +60,10 @@ pub(super) fn worktree_stat_signature_for(
         buf.extend_from_slice(&mtime_nanos.to_le_bytes());
         buf.push(0xff);
     }
-    Ok(format!("sha256:{}", sha256_hex(&buf)))
+    Ok(encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(&buf),
+    ))
 }
 
 /// Durable binding between one sealed generation and the exact ordinary plus

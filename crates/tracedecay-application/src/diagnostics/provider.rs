@@ -215,8 +215,9 @@ pub struct DiagnosticProviderIdentityParts {
     pub policy: PolicyDecisionRef,
 }
 
-/// Canonical identity for every provider result. Plan 35 may cache or execute
-/// providers behind this shape, but cannot redefine its identity semantics.
+/// Canonical identity for every provider result. Downstream cache or
+/// execution may sit behind this shape, but cannot redefine its identity
+/// semantics.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticProviderIdentity {

@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// Handles `tracedecay_outline` — flat symbol map for a file with optional
-/// `kinds` filter.
+/// Flat symbol map for a file with optional `kinds` filter.
 pub(crate) async fn handle_outline(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

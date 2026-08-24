@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -27,34 +27,61 @@ const SOURCE_UNAVAILABLE_STATES: &[&str] = &[
     "unavailable",
 ];
 
+struct LoadedSummarySource {
+    session_id: String,
+    source_horizon_json: String,
+    publication_json: String,
+    summary_anchor_id: String,
+    owner_json: String,
+}
+
 pub(super) async fn prepare_sources(
     conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
 ) -> Result<Vec<PreparedSource>, LcmError> {
-    let mut sources = Vec::with_capacity(publication.draft.source_refs.len());
     let now = unixepoch(conn).await?;
+    let mut store_ids = Vec::new();
+    let mut summary_ids = Vec::new();
+    for source in &publication.draft.source_refs {
+        match source {
+            LcmSourceRef::RawMessage { store_id } => store_ids.push(*store_id),
+            LcmSourceRef::SummaryNode { node_id } => summary_ids.push(node_id.as_str()),
+        }
+    }
+    let raw_by_store_id = raw_messages_by_store_id(conn, &store_ids).await?;
+    let summary_by_id = summary_nodes_by_id(conn, &summary_ids).await?;
+    let mut sources = Vec::with_capacity(publication.draft.source_refs.len());
     for source in &publication.draft.source_refs {
         match source {
             LcmSourceRef::RawMessage { store_id } => {
-                sources.push(prepare_raw_source(conn, publication, *store_id, now).await?);
+                let Some(raw) = raw_by_store_id.get(store_id) else {
+                    return Err(LcmError::SummarySourceNotOwnedBySession);
+                };
+                sources.push(prepare_raw_source(conn, publication, *store_id, raw, now).await?);
             }
             LcmSourceRef::SummaryNode { node_id } => {
-                sources.push(prepare_summary_source(conn, publication, node_id).await?);
+                let Some(node) = summary_by_id.get(node_id.as_str()) else {
+                    return Err(LcmError::SummaryNodeNotFound);
+                };
+                sources.push(prepare_summary_source(conn, publication, node_id, node).await?);
             }
         }
     }
     Ok(sources)
 }
 
-async fn prepare_raw_source(
+async fn raw_messages_by_store_id(
     conn: &impl Executor,
-    publication: &LcmImmutableSummaryPublication,
-    store_id: i64,
-    now: i64,
-) -> Result<PreparedSource, LcmError> {
+    store_ids: &[i64],
+) -> Result<BTreeMap<i64, Value>, LcmError> {
+    if store_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_ids =
+        serde_json::to_string(store_ids).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT json_object(
+            "SELECT store_id, json_object(
                     'provider', provider,
                     'session_id', session_id,
                     'timestamp', timestamp,
@@ -64,16 +91,62 @@ async fn prepare_raw_source(
                     'metadata', metadata_json,
                     'message_id', message_id
                 )
-             FROM lcm_raw_messages WHERE store_id = ?1",
-            params![store_id],
+             FROM lcm_raw_messages
+             WHERE store_id IN (SELECT value FROM json_each(?1))",
+            params![encoded_ids],
         )
         .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    };
-    let encoded = row.get::<String>(0)?;
-    let raw: serde_json::Value =
-        serde_json::from_str(&encoded).map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut messages = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let encoded = row.get::<String>(1)?;
+        let raw: Value =
+            serde_json::from_str(&encoded).map_err(|error| LcmError::Db(error.to_string()))?;
+        messages.entry(store_id).or_insert(raw);
+    }
+    Ok(messages)
+}
+
+async fn summary_nodes_by_id(
+    conn: &impl Executor,
+    summary_ids: &[&str],
+) -> Result<BTreeMap<String, LoadedSummarySource>, LcmError> {
+    if summary_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_ids =
+        serde_json::to_string(summary_ids).map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT node.summary_id, node.session_id, node.source_horizon_json,
+                    node.publication_json, node.summary_anchor_id, anchor.owner_json
+             FROM session_summary_nodes node
+             JOIN retrieval_anchors anchor ON anchor.anchor_id = node.summary_anchor_id
+             WHERE node.summary_id IN (SELECT value FROM json_each(?1))",
+            params![encoded_ids],
+        )
+        .await?;
+    let mut nodes = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let summary_id: String = row.get(0)?;
+        nodes.entry(summary_id).or_insert(LoadedSummarySource {
+            session_id: row.get(1)?,
+            source_horizon_json: row.get(2)?,
+            publication_json: row.get(3)?,
+            summary_anchor_id: row.get(4)?,
+            owner_json: row.get(5)?,
+        });
+    }
+    Ok(nodes)
+}
+
+async fn prepare_raw_source(
+    conn: &impl Executor,
+    publication: &LcmImmutableSummaryPublication,
+    store_id: i64,
+    raw: &Value,
+    now: i64,
+) -> Result<PreparedSource, LcmError> {
     let string = |field: &str| {
         raw[field]
             .as_str()
@@ -135,30 +208,15 @@ async fn prepare_summary_source(
     conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
     node_id: &str,
+    node: &LoadedSummarySource,
 ) -> Result<PreparedSource, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT node.session_id, node.source_horizon_json, node.publication_json,
-                    node.summary_anchor_id, anchor.owner_json
-             FROM session_summary_nodes node
-             JOIN retrieval_anchors anchor ON anchor.anchor_id = node.summary_anchor_id
-             WHERE node.summary_id = ?1",
-            params![node_id],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummaryNodeNotFound);
-    };
-    if row.get::<String>(0)? != publication.draft.session_id {
+    if node.session_id != publication.draft.session_id {
         return Err(LcmError::SummarySourceNotOwnedBySession);
     }
-    let manifest_raw: String = row.get(2)?;
-    let manifest: CanonicalPublicationManifest =
-        serde_json::from_str(&manifest_raw).map_err(|_| LcmError::ImmutableSummaryConflict {
+    let manifest: CanonicalPublicationManifest = serde_json::from_str(&node.publication_json)
+        .map_err(|_| LcmError::ImmutableSummaryConflict {
             summary_id: node_id.to_string(),
         })?;
-    let summary_anchor_id: String = row.get(3)?;
-    let owner_json: String = row.get(4)?;
     let expected_owner_json = session_owner_json(
         conn,
         &publication.draft.provider,
@@ -167,16 +225,15 @@ async fn prepare_summary_source(
     .await?;
     if manifest.session_id != publication.draft.session_id
         || manifest.provider != publication.draft.provider
-        || manifest.summary_anchor_id != summary_anchor_id
+        || manifest.summary_anchor_id != node.summary_anchor_id
         || manifest.owner_json != expected_owner_json
-        || manifest.owner_json != owner_json
+        || manifest.owner_json != node.owner_json
         || manifest.depth >= publication.draft.depth
     {
         return Err(LcmError::SummarySourceNotOwnedBySession);
     }
     ensure_source_summary_available(conn, &publication.draft.session_id, node_id).await?;
-    let horizon: String = row.get(1)?;
-    let timestamp = serde_json::from_str::<Value>(&horizon)
+    let timestamp = serde_json::from_str::<Value>(&node.source_horizon_json)
         .ok()
         .and_then(|value| value.get("knowledge_through").and_then(Value::as_i64))
         .ok_or_else(|| unavailable(node_id, "unverifiable_source_horizon"))?;
@@ -528,9 +585,12 @@ pub(super) async fn insert_payload_manifests(
     conn: &impl Executor,
     manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
+    let created_at_by_ref =
+        payload_authority_created_at_by_ref(conn, &manifest.payloads, &manifest.session_id).await?;
     for payload in &manifest.payloads {
-        let created_at =
-            payload_authority_created_at(conn, &payload.payload_ref, &manifest.session_id).await?;
+        let created_at = *created_at_by_ref
+            .get(&payload.payload_ref)
+            .ok_or(LcmError::PayloadNotOwnedBySession)?;
         conn.execute(
             "INSERT OR IGNORE INTO session_external_payload_manifests (
                 payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
@@ -545,70 +605,123 @@ pub(super) async fn insert_payload_manifests(
             ],
         )
         .await?;
-        verify_payload_binding(conn, payload, &manifest.session_id, created_at).await?;
     }
-    Ok(())
+    verify_payload_bindings(
+        conn,
+        &manifest.payloads,
+        &manifest.session_id,
+        &created_at_by_ref,
+    )
+    .await
 }
 
 pub(super) async fn verify_payload_manifests(
     conn: &impl Executor,
     manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
-    for payload in &manifest.payloads {
-        let created_at =
-            payload_authority_created_at(conn, &payload.payload_ref, &manifest.session_id).await?;
-        verify_payload_binding(conn, payload, &manifest.session_id, created_at).await?;
-    }
-    Ok(())
+    let created_at_by_ref =
+        payload_authority_created_at_by_ref(conn, &manifest.payloads, &manifest.session_id).await?;
+    verify_payload_bindings(
+        conn,
+        &manifest.payloads,
+        &manifest.session_id,
+        &created_at_by_ref,
+    )
+    .await
 }
 
-async fn payload_authority_created_at(
+async fn payload_authority_created_at_by_ref(
     conn: &impl Executor,
-    payload_ref: &str,
+    payloads: &[PreparedPayload],
     session_id: &str,
-) -> Result<i64, LcmError> {
+) -> Result<BTreeMap<String, i64>, LcmError> {
+    if payloads.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded_refs = encoded_payload_refs(payloads)?;
     let mut rows = conn
         .query(
-            "SELECT created_at FROM lcm_external_payloads
-             WHERE payload_ref = ?1 AND session_id = ?2",
-            params![payload_ref, session_id],
+            "SELECT payload_ref, created_at FROM lcm_external_payloads
+             WHERE session_id = ?1
+               AND payload_ref IN (SELECT value FROM json_each(?2))",
+            params![session_id, encoded_refs],
         )
         .await?;
-    rows.next()
-        .await?
-        .ok_or(LcmError::PayloadNotOwnedBySession)?
-        .get(0)
-        .map_err(Into::into)
+    let mut created_at = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
+        let at: i64 = row.get(1)?;
+        created_at.entry(payload_ref).or_insert(at);
+    }
+    for payload in payloads {
+        if !created_at.contains_key(&payload.payload_ref) {
+            return Err(LcmError::PayloadNotOwnedBySession);
+        }
+    }
+    Ok(created_at)
 }
 
-async fn verify_payload_binding(
+async fn verify_payload_bindings(
     conn: &impl Executor,
-    payload: &PreparedPayload,
+    payloads: &[PreparedPayload],
     session_id: &str,
-    created_at: i64,
+    created_at_by_ref: &BTreeMap<String, i64>,
 ) -> Result<(), LcmError> {
+    if payloads.is_empty() {
+        return Ok(());
+    }
+    let encoded_refs = encoded_payload_refs(payloads)?;
     let mut rows = conn
         .query(
-            "SELECT session_id, payload_digest, manifest_json, receipt_id, created_at
-             FROM session_external_payload_manifests WHERE payload_ref = ?1",
-            params![payload.payload_ref.as_str()],
+            "SELECT payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
+             FROM session_external_payload_manifests
+             WHERE payload_ref IN (SELECT value FROM json_each(?1))",
+            params![encoded_refs],
         )
         .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::PayloadMissing);
-    };
-    let receipt_id: String = row.get(3)?;
-    if row.get::<String>(0)? != session_id
-        || row.get::<String>(1)? != payload.digest
-        || row.get::<String>(2)? != payload.manifest_json
-        || row.get::<i64>(4)? != created_at
-        || !receipt_binds_payload(conn, payload, session_id, &receipt_id).await?
-    {
-        return Err(LcmError::ImmutablePayloadConflict {
-            payload_ref: payload.payload_ref.clone(),
-        });
+    let mut bindings = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
+        bindings.entry(payload_ref).or_insert((
+            row.get::<String>(1)?,
+            row.get::<String>(2)?,
+            row.get::<String>(3)?,
+            row.get::<String>(4)?,
+            row.get::<i64>(5)?,
+        ));
+    }
+    for payload in payloads {
+        let Some((bound_session, digest, manifest_json, receipt_id, created_at)) =
+            bindings.get(&payload.payload_ref)
+        else {
+            return Err(LcmError::PayloadMissing);
+        };
+        let expected_created_at = created_at_by_ref
+            .get(&payload.payload_ref)
+            .copied()
+            .ok_or(LcmError::PayloadNotOwnedBySession)?;
+        if bound_session != session_id
+            || digest != &payload.digest
+            || manifest_json != &payload.manifest_json
+            || *created_at != expected_created_at
+            || !receipt_binds_payload(conn, payload, session_id, receipt_id).await?
+        {
+            return Err(LcmError::ImmutablePayloadConflict {
+                payload_ref: payload.payload_ref.clone(),
+            });
+        }
     }
     Ok(())
+}
+
+fn encoded_payload_refs(payloads: &[PreparedPayload]) -> Result<String, LcmError> {
+    serde_json::to_string(
+        &payloads
+            .iter()
+            .map(|payload| payload.payload_ref.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| LcmError::Db(error.to_string()))
 }
 
 async fn receipt_binds_payload(

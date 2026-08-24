@@ -265,7 +265,7 @@ async fn protected_replay_locator_re_resolves_the_authoritative_native_lifecycle
     let session_id = lookup_registered_context_scout_native_session(
         hook_project_id,
         hook_worktree_id,
-        crate::hooks::protected_native_session_id("session.native.codex"),
+        tracedecay_agent_hosts::hooks::protected_native_session_id("session.native.codex"),
     )
     .await
     .unwrap();

@@ -1401,7 +1401,7 @@ pub enum FeedbackEvaluationStageV1 {
     Total,
 }
 
-/// One durable Plan-26 post-edit observation. Session-only overlay cycles cannot
+/// One durable post-edit observation. Session-only overlay cycles cannot
 /// construct this value and therefore cannot enter telemetry or any other
 /// durable observation path.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

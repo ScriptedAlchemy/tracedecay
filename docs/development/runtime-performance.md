@@ -280,7 +280,7 @@ explicit decision to promote a budget.
 
 Relative comparison margins are not accepted from measured output. They live
 in the independently versioned and hashed
-`benchmarks/runtime/policies/journey-margins-v1.json` artifact, separately for
+`benchmark_data/runtime/policies/journey-margins-v1.json` artifact, separately for
 CLI, MCP, query, dashboard, host, storage, daemon steady-state, and foreground
 under maintenance. Policy loading rejects modified journey identities,
 eligibility counts, or margins. Paired reports hash both acceptance and journey

@@ -1,28 +1,8 @@
 /**
- * SSE monotone event reducer (framework-free).
- *
- * Implements the plan's reducer contract exactly
- * (docs/plans/tracedecay-v2/11-dashboard-frontend.md):
- *
- *   - dedupe by stream/event/revision identity;
- *   - reject stale-generation events;
- *   - retain already-observed receipts (survive reload/restart);
- *   - detect revision gaps and emit ONE canonical refetch signal;
- *   - bounded queue (5,000 events or 10 MiB) — overflow marks the projection
- *     stale and emits ONE invalidation;
- *   - expose a coalescing batch boundary; the render layer owns the <=10/s
- *     clock and calls `takeBatch()` at each tick. This module owns no timers.
- *
- * The canonical refresh the last two bullets ask for is asynchronous and slow:
- * it awaits every active query while the stream keeps arriving. So it is a
- * transaction here, not a flag — `beginReseed()` stamps it with the current
- * canonical-signal epoch, and `commitReseed()` clears the state that refresh
- * superseded only if no newer signal arrived in the meantime. A refresh that was
- * superseded, or that failed, clears nothing.
- *
- * The reducer never derives product semantics (branch stack, merge order,
- * conflict result, readiness, legal action) from payloads — it only sequences
- * envelopes.
+ * Framework-free monotone SSE reducer. Canonical refresh is a transaction
+ * stamped with the signal epoch: commit clears superseded state only if no
+ * newer signal arrived; a superseded or failed refresh clears nothing.
+ * Owns no timers and derives no product semantics from payloads.
  */
 import {
   MAX_OBSERVED_IDENTITIES,
@@ -57,11 +37,14 @@ interface StreamWatermark {
 }
 
 function dedupeKey(event: SseEventEnvelope): string {
-  // stream / event / revision identity.
   return `${event.stream.stream_id}\u0000${event.event_id}\u0000${event.revision.event_revision}`;
 }
 
-function defaultSizeOf(event: SseEventEnvelope): number {
+function defaultSizeOf<TPayload>(event: SseEventEnvelope<TPayload>): number {
+  const frameBytes = event.frameBytes;
+  if (typeof frameBytes === "number" && Number.isFinite(frameBytes) && frameBytes >= 0) {
+    return frameBytes;
+  }
   return JSON.stringify(event).length;
 }
 
@@ -100,7 +83,7 @@ export function createSseReducer<TPayload = unknown>(
 ) {
   const maxEvents = options.maxEvents ?? MAX_QUEUED_EVENTS;
   const maxBytes = options.maxBytes ?? MAX_QUEUED_BYTES;
-  const sizeOf = options.sizeOf ?? (defaultSizeOf as (e: SseEventEnvelope<TPayload>) => number);
+  const sizeOf = options.sizeOf ?? defaultSizeOf;
 
   // Generation + revision watermark are tracked per stream: each stream/run has
   // its own monotone revision sequence and reconnect generation. Dedupe,
@@ -174,14 +157,11 @@ export function createSseReducer<TPayload = unknown>(
     const incomingGen = event.stream.generation;
     const mark = watermarks.get(streamId);
 
-    // 1. Stale-generation rejection.
     if (mark && incomingGen < mark.generation) {
       return false;
     }
-    // 2. Reconnect to a newer generation. Dedupe state and the revision
-    //    identities are preserved, but the per-run revision sequence restarts.
-    //    Mark the canonical projection for refetch and accept the new run's
-    //    first event instead of comparing it to the previous run's watermark.
+    // Newer generation: keep dedupe identities, restart this run's revision
+    // sequence, and refetch instead of comparing against the prior watermark.
     if (mark && incomingGen > mark.generation) {
       mark.generation = incomingGen;
       mark.lastEventRevision = -1;
@@ -199,9 +179,7 @@ export function createSseReducer<TPayload = unknown>(
       return false;
     }
 
-    // 3. Dedupe by stream/event/revision identity.
     if (observed.has(key)) {
-      // Retain already-observed receipts; never re-queue (avoids double render).
       retainReceipt(key, event);
       return false;
     }
@@ -217,8 +195,6 @@ export function createSseReducer<TPayload = unknown>(
       return false;
     }
 
-    // 4. Overflow: bounded projection queue. Mark stale + one canonical
-    //    invalidation.
     const size = sizeOf(event);
     const wouldOverflow = queue.length + 1 > maxEvents || queuedBytes + size > maxBytes;
     if (wouldOverflow) {
@@ -228,13 +204,11 @@ export function createSseReducer<TPayload = unknown>(
       return false;
     }
 
-    // 5. Revision-gap detection: emit one canonical refetch. We still accept the
-    //    event and advance the watermark; the refetch reseeds the projection.
+    // Gap: still accept and advance the watermark; the refetch reseeds later.
     if (lastRev !== null && rev > lastRev + 1) {
       requestCanonicalRefresh("revision_gap");
     }
 
-    // 6. Accept.
     rememberIdentity(key);
     observedCount += 1;
     if (mark) {

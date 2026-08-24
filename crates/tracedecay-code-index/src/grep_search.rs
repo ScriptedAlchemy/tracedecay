@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::Path;
 
 use regex::{Regex, RegexBuilder};
@@ -33,6 +34,10 @@ pub struct GrepSearchResult {
     pub hits: Vec<GrepSearchHit>,
     pub files_scanned: usize,
     pub lines_examined: usize,
+    /// Line slices pulled from source text. Early match, cancel, and
+    /// per-file caps must stop pulling; materializing every line first
+    /// makes this equal the file's line count even when examination stops.
+    pub lines_visited: usize,
     pub omissions: GrepScanOmissionsV1,
     pub truncated: bool,
     pub cancelled: bool,
@@ -82,6 +87,7 @@ impl std::fmt::Display for GrepSearchError {
 
 impl std::error::Error for GrepSearchError {}
 
+#[hotpath::measure]
 pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,
@@ -96,6 +102,8 @@ pub fn search_tree_with_cancel(
     })?;
     let mut result = GrepSearchResult::default();
     let max_results = query.max_results.max(1);
+    #[cfg(feature = "hotpath")]
+    let mut source_bytes = 0_u64;
 
     for entry in walker {
         if is_cancelled() {
@@ -133,47 +141,142 @@ pub fn search_tree_with_cancel(
             result.omissions.unavailable_sources += 1;
             continue;
         };
-        result.files_scanned += 1;
-        let lines = content.lines().collect::<Vec<_>>();
-        let mut file_hits = 0;
-        for (index, line) in lines.iter().enumerate() {
-            if is_cancelled() {
-                result.cancelled = true;
-                return Ok(result);
-            }
-            if line.len() > MAX_LINE_BYTES {
-                result.omissions.oversized_lines += 1;
-                continue;
-            }
-            result.lines_examined += 1;
-            if !matcher.is_match(line) {
-                continue;
-            }
-            if file_hits >= MAX_HITS_PER_FILE {
-                result.truncated = true;
-                break;
-            }
-            file_hits += 1;
-            result.hits.push(GrepSearchHit {
-                file: relative.to_string_lossy().replace('\\', "/"),
-                line: index as u32 + 1,
-                text: (*line).to_owned(),
-                before: context_slice(&lines, index.saturating_sub(query.context_lines), index),
-                after: context_slice(
-                    &lines,
-                    index + 1,
-                    (index + 1 + query.context_lines).min(lines.len()),
-                ),
-            });
-            // Collect one past the cap so callers can report truncation
-            // without scanning the remainder of a high-frequency tree.
-            if result.hits.len() > max_results {
-                result.truncated = true;
-                return Ok(result);
-            }
+        #[cfg(feature = "hotpath")]
+        {
+            source_bytes = source_bytes.saturating_add(content.len() as u64);
+        }
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let stop = if crate::hotpath_observe::sample_hot_loop() {
+            hotpath::measure_block!(
+                "code_index_grep_file",
+                examine_grep_file(
+                    &matcher,
+                    query,
+                    &relative,
+                    &content,
+                    &mut result,
+                    max_results,
+                    &is_cancelled,
+                )
+            )
+        } else {
+            examine_grep_file(
+                &matcher,
+                query,
+                &relative,
+                &content,
+                &mut result,
+                max_results,
+                &is_cancelled,
+            )
+        };
+        if stop {
+            crate::hotpath_observe::record_files(result.files_scanned);
+            #[cfg(feature = "hotpath")]
+            crate::hotpath_observe::record_source_bytes(source_bytes);
+            return Ok(result);
         }
     }
+    crate::hotpath_observe::record_files(result.files_scanned);
+    #[cfg(feature = "hotpath")]
+    crate::hotpath_observe::record_source_bytes(source_bytes);
     Ok(result)
+}
+
+fn examine_grep_file<C: Fn() -> bool>(
+    matcher: &Regex,
+    query: &GrepSearchQuery,
+    relative: &str,
+    content: &str,
+    result: &mut GrepSearchResult,
+    max_results: usize,
+    is_cancelled: &C,
+) -> bool {
+    result.files_scanned += 1;
+    let context_lines = query.context_lines;
+    let mut before = VecDeque::new();
+    let mut pending = VecDeque::new();
+    let mut source = content.lines().enumerate();
+    let mut file_hits = 0;
+    while let Some((index, line)) = next_grep_line(&mut source, &mut pending, result) {
+        if is_cancelled() {
+            result.cancelled = true;
+            return true;
+        }
+        if line.len() > MAX_LINE_BYTES {
+            result.omissions.oversized_lines += 1;
+            remember_before(&mut before, line, context_lines);
+            continue;
+        }
+        result.lines_examined += 1;
+        if !matcher.is_match(line) {
+            remember_before(&mut before, line, context_lines);
+            continue;
+        }
+        if file_hits >= MAX_HITS_PER_FILE {
+            result.truncated = true;
+            break;
+        }
+        file_hits += 1;
+        fill_after_context(&mut source, &mut pending, result, context_lines);
+        result.hits.push(GrepSearchHit {
+            file: relative.to_owned(),
+            line: index as u32 + 1,
+            text: line.to_owned(),
+            before: before.iter().copied().map(str::to_owned).collect(),
+            after: pending
+                .iter()
+                .take(context_lines)
+                .map(|(_, peeked)| (*peeked).to_owned())
+                .collect(),
+        });
+        remember_before(&mut before, line, context_lines);
+        // Collect one past the cap so callers can report truncation
+        // without scanning the remainder of a high-frequency tree.
+        if result.hits.len() > max_results {
+            result.truncated = true;
+            return true;
+        }
+    }
+    false
+}
+
+fn next_grep_line<'a>(
+    source: &mut impl Iterator<Item = (usize, &'a str)>,
+    pending: &mut VecDeque<(usize, &'a str)>,
+    result: &mut GrepSearchResult,
+) -> Option<(usize, &'a str)> {
+    if let Some(line) = pending.pop_front() {
+        return Some(line);
+    }
+    let line = source.next()?;
+    result.lines_visited = result.lines_visited.saturating_add(1);
+    Some(line)
+}
+
+fn fill_after_context<'a>(
+    source: &mut impl Iterator<Item = (usize, &'a str)>,
+    pending: &mut VecDeque<(usize, &'a str)>,
+    result: &mut GrepSearchResult,
+    context_lines: usize,
+) {
+    while pending.len() < context_lines {
+        let Some(line) = source.next() else {
+            break;
+        };
+        result.lines_visited = result.lines_visited.saturating_add(1);
+        pending.push_back(line);
+    }
+}
+
+fn remember_before<'a>(before: &mut VecDeque<&'a str>, line: &'a str, context_lines: usize) {
+    if context_lines == 0 {
+        return;
+    }
+    if before.len() == context_lines {
+        before.pop_front();
+    }
+    before.push_back(line);
 }
 
 fn build_matcher(query: &GrepSearchQuery) -> Result<Regex, GrepSearchError> {
@@ -189,15 +292,6 @@ fn build_matcher(query: &GrepSearchQuery) -> Result<Regex, GrepSearchError> {
             pattern: query.pattern.clone(),
             message: error.to_string(),
         })
-}
-
-fn context_slice(lines: &[&str], start: usize, end: usize) -> Vec<String> {
-    lines
-        .get(start..end)
-        .unwrap_or_default()
-        .iter()
-        .map(|line| (*line).to_owned())
-        .collect()
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {
@@ -251,5 +345,78 @@ mod tests {
 
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].file, "tracked.txt");
+    }
+
+    #[test]
+    fn early_file_cap_does_not_visit_unexamined_lines() {
+        let project = tempfile::tempdir().unwrap();
+        const TOTAL_LINES: usize = 8_192;
+        std::fs::write(
+            project.path().join("dense.txt"),
+            "HIT_TOKEN\n".repeat(TOTAL_LINES),
+        )
+        .unwrap();
+        let mut query = query("HIT_TOKEN");
+        query.max_results = 1;
+
+        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
+
+        assert_eq!(result.hits.len(), 2);
+        assert!(result.truncated);
+        assert_eq!(result.lines_examined, 2);
+        assert!(
+            result.lines_visited <= result.lines_examined + query.context_lines,
+            "visited {} lines after examining {}; full collect materializes every line",
+            result.lines_visited,
+            result.lines_examined
+        );
+        assert!(result.lines_visited < TOTAL_LINES);
+    }
+
+    #[test]
+    fn context_windows_include_oversized_neighbors_without_full_collect() {
+        let project = tempfile::tempdir().unwrap();
+        let oversized = "X".repeat(MAX_LINE_BYTES + 1);
+        let body = format!("before\n{oversized}\nHIT_TOKEN\nafter\nTAIL\n");
+        std::fs::write(project.path().join("ctx.txt"), body).unwrap();
+        let mut query = query("HIT_TOKEN");
+        query.context_lines = 1;
+        query.max_results = 1;
+
+        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].line, 3);
+        assert_eq!(result.hits[0].before, vec![oversized]);
+        assert_eq!(result.hits[0].after, vec!["after".to_owned()]);
+        assert_eq!(result.omissions.oversized_lines, 1);
+        assert_eq!(result.lines_examined, 4);
+        assert!(
+            result.lines_visited <= result.lines_examined + result.omissions.oversized_lines,
+            "visited {} after examining {} plus one oversized neighbor",
+            result.lines_visited,
+            result.lines_examined
+        );
+    }
+
+    #[test]
+    fn path_glob_does_not_visit_out_of_scope_files() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("keep.txt"), "SCOPE_TOKEN\nextra\n").unwrap();
+        std::fs::write(
+            project.path().join("skip.txt"),
+            "SCOPE_TOKEN\n".repeat(4_096),
+        )
+        .unwrap();
+        let mut query = query("SCOPE_TOKEN");
+        query.path_glob = Some("keep.txt".to_owned());
+        query.max_results = 1;
+
+        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
+
+        assert_eq!(result.files_scanned, 1);
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].file, "keep.txt");
+        assert!(result.lines_visited < 4_096);
     }
 }

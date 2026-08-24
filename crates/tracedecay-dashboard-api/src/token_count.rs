@@ -21,7 +21,6 @@
 //! the Savings tab doesn't pay the initial counting cost.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
@@ -30,7 +29,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::DashboardState;
-use super::util::query_rows;
+use super::util::{query_rows, str_field};
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
@@ -169,14 +168,14 @@ fn displayed_message_cache() -> DisplayedMessageCache {
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
 /// built from.
 struct OverlayCache {
-    /// Cheap aggregate fingerprint of `session_messages` at build time.
-    /// Includes text/model lengths. Provider-accounting metadata is deliberately
+    /// Cheap aggregate fingerprint of `session_messages` at build time:
+    /// `(COUNT(*), MAX(rowid))`. Provider-accounting metadata is deliberately
     /// excluded because it is not content-token evidence.
     fingerprint: OverlayFingerprint,
     overlay: Arc<Vec<MessageTokens>>,
 }
 
-type OverlayFingerprint = (i64, i64, u64);
+type OverlayFingerprint = (i64, i64);
 
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub struct TokenCountCache {
@@ -276,13 +275,6 @@ pub struct MessageTokens {
     pub tokenized: bool,
 }
 
-fn row_str(row: &Value, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// Builds the non-usage overlay: every stored message lacking transcript
 /// usage data, with cached-or-computed token counts. Returns `None` when no
 /// session store is being served (callers fall back to the SQL estimates).
@@ -315,27 +307,17 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
 async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
-        "SELECT rowid, provider, message_id, model, LENGTH(text) AS text_len
-         FROM session_messages ORDER BY rowid",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS max_rowid
+         FROM session_messages",
         (),
     )
     .await
     .ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut max_rowid = 0_i64;
-    for row in &rows {
-        let rowid = row.get("rowid").and_then(Value::as_i64).unwrap_or(0);
-        max_rowid = max_rowid.max(rowid);
-        rowid.hash(&mut hasher);
-        row_str(row, "provider").hash(&mut hasher);
-        row_str(row, "message_id").hash(&mut hasher);
-        row_str(row, "model").hash(&mut hasher);
-        row.get("text_len")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .hash(&mut hasher);
-    }
-    Some((rows.len() as i64, max_rowid, hasher.finish()))
+    let row = rows.first()?;
+    Some((
+        row.get("n").and_then(Value::as_i64).unwrap_or(0),
+        row.get("max_rowid").and_then(Value::as_i64).unwrap_or(0),
+    ))
 }
 
 async fn build_overlay(
@@ -359,13 +341,13 @@ async fn build_overlay(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for row in &rows {
-            let provider = row_str(row, "provider");
-            let message_id = row_str(row, "message_id");
+            let provider = str_field(row, "provider");
+            let message_id = str_field(row, "message_id");
             let len = row.get("msg_len").and_then(Value::as_i64).unwrap_or(0);
-            let key = (provider, message_id);
+            let key = (provider.to_owned(), message_id.to_owned());
             let stale = map.get(&key).is_none_or(|c| c.text_len != len);
             if stale && counting_available() && len > 0 {
-                misses.push((key.0, key.1, row_str(row, "model"), len));
+                misses.push((key.0, key.1, str_field(row, "model").to_owned(), len));
             }
         }
     }
@@ -382,17 +364,17 @@ async fn build_overlay(
     let overlay = rows
         .iter()
         .map(|row| {
-            let provider = row_str(row, "provider");
-            let message_id = row_str(row, "message_id");
+            let provider = str_field(row, "provider");
+            let message_id = str_field(row, "message_id");
             let len = row.get("msg_len").and_then(Value::as_i64).unwrap_or(0);
             let cached = map
-                .get(&(provider.clone(), message_id))
+                .get(&(provider.to_owned(), message_id.to_owned()))
                 .filter(|c| c.text_len == len);
             MessageTokens {
-                provider,
-                session_id: row_str(row, "session_id"),
-                model: row_str(row, "model"),
-                role: row_str(row, "role"),
+                provider: provider.to_owned(),
+                session_id: str_field(row, "session_id").to_owned(),
+                model: str_field(row, "model").to_owned(),
+                role: str_field(row, "role").to_owned(),
                 timestamp: row.get("timestamp").and_then(Value::as_i64),
                 tokens: cached.map_or_else(|| chars_estimate(len), |c| c.tokens),
                 tokenized: cached.is_some(),
@@ -441,8 +423,11 @@ async fn count_and_store(
             .iter()
             .map(|row| {
                 (
-                    (row_str(row, "provider"), row_str(row, "message_id")),
-                    row_str(row, "text"),
+                    (
+                        str_field(row, "provider").to_owned(),
+                        str_field(row, "message_id").to_owned(),
+                    ),
+                    str_field(row, "text").to_owned(),
                 )
             })
             .collect();

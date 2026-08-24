@@ -56,167 +56,188 @@ async fn preflight_is_read_only_and_never_ingests_active_messages() {
     );
 }
 
-#[tokio::test]
-async fn preflight_requests_compression_for_over_threshold_eligible_backlog() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    insert_raw_messages(
-        &db,
-        "cursor",
-        "session-1",
-        &["old-1 token", "old-2 token", "fresh-1", "fresh-2"],
-    )
-    .await;
-
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(120));
-    request.threshold_tokens = Some(100);
-
-    let response = db.lcm_preflight(request).await.unwrap();
-
-    assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "threshold_backlog_ready");
+/// How a decision case seeds its stored transcript.
+#[derive(Clone, Copy)]
+enum Seed {
+    /// Assistant-role contents, seeded through `insert_raw_messages`.
+    Contents(&'static [&'static str]),
+    /// Explicit `(role, content)` pairs, seeded through
+    /// `insert_raw_messages_with_roles`.
+    Roles(&'static [(&'static str, &'static str)]),
 }
 
-#[tokio::test]
-async fn preflight_skips_threshold_when_backlog_below_leaf_chunk_threshold() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    insert_raw_messages(&db, "cursor", "session-1", &["tiny", "fresh-1", "fresh-2"]).await;
-
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(120));
-    request.threshold_tokens = Some(100);
-    request.leaf_chunk_tokens = Some(10);
-    request.max_source_messages = Some(2);
-
-    let response = db.lcm_preflight(request).await.unwrap();
-
-    assert_eq!(response.status, "ok");
-    assert!(!response.should_compress);
-    assert_eq!(response.reason, "threshold_no_eligible_backlog");
+/// One preflight decision: a seeded transcript plus the request overrides that
+/// distinguish it, and the `(should_compress, reason)` the daemon must answer.
+struct Case {
+    name: &'static str,
+    seed: Seed,
+    current_tokens: i64,
+    threshold_tokens: Option<i64>,
+    leaf_chunk_tokens: Option<i64>,
+    max_source_messages: Option<usize>,
+    max_assembly_tokens: Option<i64>,
+    context_length: Option<i64>,
+    reserve_tokens_floor: Option<i64>,
+    should_compress: bool,
+    reason: &'static str,
 }
 
-#[tokio::test]
-async fn preflight_threshold_eligibility_uses_full_backlog_despite_source_message_cap() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    insert_raw_messages(
-        &db,
-        "cursor",
-        "session-1",
-        &["m1", "m2", "m3", "m4", "m5", "m6", "fresh-1", "fresh-2"],
-    )
-    .await;
-
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(120));
-    request.threshold_tokens = Some(100);
-    request.leaf_chunk_tokens = Some(5);
-    request.max_source_messages = Some(2);
-
-    let response = db.lcm_preflight(request).await.unwrap();
-
-    assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "threshold_backlog_ready");
+/// Base case with every optional override cleared; each table row fills in only
+/// the overrides that case is actually about.
+const fn case(
+    name: &'static str,
+    seed: Seed,
+    current_tokens: i64,
+    should_compress: bool,
+    reason: &'static str,
+) -> Case {
+    Case {
+        name,
+        seed,
+        current_tokens,
+        threshold_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        max_assembly_tokens: None,
+        context_length: None,
+        reserve_tokens_floor: None,
+        should_compress,
+        reason,
+    }
 }
 
+/// The forced-overflow cases all share this two-message transcript: a system
+/// anchor that cannot be evicted plus one fresh user turn.
+const SYSTEM_ANCHOR_AND_FRESH_USER: &[(&str, &str)] =
+    &[("system", "system anchor"), ("user", "fresh user")];
+
+/// Threshold-backlog and forced-overflow decisions. The table is a fixed-size
+/// array, so it can never iterate empty. Each case gets its own session id, so
+/// the cases stay isolated the way the per-test databases used to isolate them,
+/// while sharing one `TempDir` + `open_lcm_db` setup.
 #[tokio::test]
-async fn preflight_requests_compression_for_forced_overflow_without_replay_change() {
+async fn preflight_decides_compression_from_threshold_and_overflow_pressure() {
+    let cases: [Case; 7] = [
+        Case {
+            threshold_tokens: Some(100),
+            ..case(
+                "over-threshold eligible backlog",
+                Seed::Contents(&["old-1 token", "old-2 token", "fresh-1", "fresh-2"]),
+                120,
+                true,
+                "threshold_backlog_ready",
+            )
+        },
+        Case {
+            threshold_tokens: Some(100),
+            leaf_chunk_tokens: Some(10),
+            max_source_messages: Some(2),
+            ..case(
+                "backlog below the leaf-chunk threshold skips compression",
+                Seed::Contents(&["tiny", "fresh-1", "fresh-2"]),
+                120,
+                false,
+                "threshold_no_eligible_backlog",
+            )
+        },
+        Case {
+            threshold_tokens: Some(100),
+            leaf_chunk_tokens: Some(5),
+            max_source_messages: Some(2),
+            ..case(
+                "threshold eligibility uses the full backlog despite the source-message cap",
+                Seed::Contents(&["m1", "m2", "m3", "m4", "m5", "m6", "fresh-1", "fresh-2"]),
+                120,
+                true,
+                "threshold_backlog_ready",
+            )
+        },
+        Case {
+            max_assembly_tokens: Some(50),
+            ..case(
+                "forced overflow from an explicit assembly cap, without replay change",
+                Seed::Roles(SYSTEM_ANCHOR_AND_FRESH_USER),
+                50,
+                true,
+                "forced_overflow_pressure",
+            )
+        },
+        // Mirrors hermes-lcm `_effective_assembly_token_cap`: with no explicit
+        // max_assembly_tokens, the assembly cap derives from
+        // context_length - reserve_tokens_floor when both are positive.
+        Case {
+            context_length: Some(80),
+            reserve_tokens_floor: Some(30),
+            ..case(
+                "forced-overflow cap derived from the context window reserve floor",
+                Seed::Roles(SYSTEM_ANCHOR_AND_FRESH_USER),
+                50,
+                true,
+                "forced_overflow_pressure",
+            )
+        },
+        // Mirrors hermes-lcm: a reserve floor that consumes the whole context
+        // window disables the reserve-based cap instead of clamping it to zero.
+        Case {
+            context_length: Some(30),
+            reserve_tokens_floor: Some(30),
+            ..case(
+                "reserve floor without headroom disables the derived cap",
+                Seed::Roles(SYSTEM_ANCHOR_AND_FRESH_USER),
+                50,
+                false,
+                "no_compression_needed",
+            )
+        },
+        // Mirrors hermes-lcm: when both an explicit max_assembly_tokens and a
+        // reserve-derived cap apply, the effective cap is the minimum of the two.
+        Case {
+            max_assembly_tokens: Some(200),
+            context_length: Some(80),
+            reserve_tokens_floor: Some(30),
+            ..case(
+                "effective cap is the minimum of explicit and reserve-derived",
+                Seed::Roles(SYSTEM_ANCHOR_AND_FRESH_USER),
+                50,
+                true,
+                "forced_overflow_pressure",
+            )
+        },
+    ];
+
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
-    insert_raw_messages_with_roles(
-        &db,
-        "cursor",
-        "session-1",
-        &[("system", "system anchor"), ("user", "fresh user")],
-    )
-    .await;
 
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
-    request.max_assembly_tokens = Some(50);
+    for (index, case) in cases.iter().enumerate() {
+        let session_id = format!("session-{}", index + 1);
+        match case.seed {
+            Seed::Contents(contents) => {
+                insert_raw_messages(&db, "cursor", &session_id, contents).await;
+            }
+            Seed::Roles(messages) => {
+                insert_raw_messages_with_roles(&db, "cursor", &session_id, messages).await;
+            }
+        }
 
-    let response = db.lcm_preflight(request).await.unwrap();
+        let mut request =
+            preflight_request("cursor", &session_id, Vec::new(), Some(case.current_tokens));
+        request.threshold_tokens = case.threshold_tokens;
+        request.leaf_chunk_tokens = case.leaf_chunk_tokens;
+        request.max_source_messages = case.max_source_messages;
+        request.max_assembly_tokens = case.max_assembly_tokens;
+        request.context_length = case.context_length;
+        request.reserve_tokens_floor = case.reserve_tokens_floor;
 
-    assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "forced_overflow_pressure");
-}
+        let response = db.lcm_preflight(request).await.unwrap();
 
-// Mirrors hermes-lcm `_effective_assembly_token_cap`: with no explicit
-// max_assembly_tokens, the assembly cap derives from
-// context_length - reserve_tokens_floor when both are positive.
-#[tokio::test]
-async fn preflight_derives_forced_overflow_cap_from_context_window_reserve_floor() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    insert_raw_messages_with_roles(
-        &db,
-        "cursor",
-        "session-1",
-        &[("system", "system anchor"), ("user", "fresh user")],
-    )
-    .await;
-
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
-    request.context_length = Some(80);
-    request.reserve_tokens_floor = Some(30);
-
-    let response = db.lcm_preflight(request).await.unwrap();
-
-    assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "forced_overflow_pressure");
-}
-
-// Mirrors hermes-lcm: a reserve floor that consumes the whole context window
-// disables the reserve-based cap instead of clamping it to zero.
-#[tokio::test]
-async fn preflight_reserve_floor_without_headroom_disables_derived_cap() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    insert_raw_messages_with_roles(
-        &db,
-        "cursor",
-        "session-1",
-        &[("system", "system anchor"), ("user", "fresh user")],
-    )
-    .await;
-
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
-    request.context_length = Some(30);
-    request.reserve_tokens_floor = Some(30);
-
-    let response = db.lcm_preflight(request).await.unwrap();
-
-    assert_eq!(response.status, "ok");
-    assert!(!response.should_compress);
-    assert_eq!(response.reason, "no_compression_needed");
-}
-
-// Mirrors hermes-lcm: when both an explicit max_assembly_tokens and a
-// reserve-derived cap apply, the effective cap is the minimum of the two.
-#[tokio::test]
-async fn preflight_effective_cap_uses_minimum_of_explicit_and_reserve_derived() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    insert_raw_messages_with_roles(
-        &db,
-        "cursor",
-        "session-1",
-        &[("system", "system anchor"), ("user", "fresh user")],
-    )
-    .await;
-
-    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
-    request.max_assembly_tokens = Some(200);
-    request.context_length = Some(80);
-    request.reserve_tokens_floor = Some(30);
-
-    let response = db.lcm_preflight(request).await.unwrap();
-
-    assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "forced_overflow_pressure");
+        assert_eq!(response.status, "ok", "{}", case.name);
+        assert_eq!(
+            response.should_compress, case.should_compress,
+            "{}",
+            case.name
+        );
+        assert_eq!(response.reason, case.reason, "{}", case.name);
+    }
 }
 
 #[tokio::test]

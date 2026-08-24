@@ -2,10 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
-
-fn is_default<T: Default + PartialEq>(value: &T) -> bool {
-    value == &T::default()
-}
+use tracedecay_runtime_core::serde_util::is_default;
 
 /// Search scope for messages emitted by one workflow run or agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
