@@ -26,7 +26,7 @@ pub(crate) use placeholder_scan::{
     PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
     any_placeholder_text_row, bind_placeholder_like_patterns, count_placeholder_text_rows,
     gc_prefix_like_patterns, gc_prefix_ref_like_patterns, live_prefix_like_patterns,
-    placeholder_text_like_sql, scan_placeholder_text_rows,
+    live_prefix_ref_like_patterns, placeholder_text_like_sql, scan_placeholder_text_rows,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -817,6 +817,9 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
     let marks = gc_marks(conn, &candidates).await?;
     let mut marks_to_upsert = Vec::new();
     let mut stale_marks = Vec::new();
+    // One reference-closure scan for the whole batch instead of one per
+    // candidate: only a payload's own deletion can change its own membership.
+    let mut referenced_closure = payload::ReferencedClosureCache::default();
 
     for payload_ref in &candidates {
         let mark = marks.get(payload_ref);
@@ -851,11 +854,12 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         }
         let bytes = metadata_bytes.get(payload_ref).copied().unwrap_or_default();
         if apply {
-            match payload::delete_external_payload_in_transaction(
+            match payload::delete_external_payload_in_transaction_with_cache(
                 conn,
                 storage_root,
                 payload_ref,
                 &payload::DeleteOpts::default(),
+                &mut referenced_closure,
             )
             .await
             {
@@ -950,6 +954,8 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     }
     let marks = gc_marks(conn, &missing_refs).await?;
     let mut marks_to_upsert = Vec::new();
+    // As in `reap_unreferenced_metadata`: one scan per provider for the batch.
+    let mut referenced_closure = payload::ReferencedClosureCache::default();
     for payload_ref in &missing_refs {
         let first_seen_at = match marks.get(payload_ref) {
             Some((state, first_seen_at)) if state == "missing" => *first_seen_at,
@@ -965,7 +971,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
             report.batch_cap(1);
             continue;
         }
-        match payload::delete_external_payload_in_transaction(
+        match payload::delete_external_payload_in_transaction_with_cache(
             conn,
             storage_root,
             payload_ref,
@@ -974,6 +980,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
                 remove_file: false,
                 verify_hash: false,
             },
+            &mut referenced_closure,
         )
         .await
         {

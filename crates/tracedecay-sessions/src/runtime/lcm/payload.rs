@@ -13,8 +13,8 @@ mod rollback;
 #[cfg(test)]
 pub use delete_recovery::delete_external_payload;
 pub use delete_recovery::{
-    CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
-    remove_committed_payload_file,
+    CommittedPayloadRemoval, PreparedPayloadDelete, ReferencedClosureCache,
+    payload_file_fingerprint, remove_committed_payload_file,
 };
 pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
@@ -34,6 +34,27 @@ pub async fn delete_external_payload_in_transaction(
 ) -> Result<PreparedPayloadDelete, LcmError> {
     delete_recovery::delete_external_payload_in_transaction(conn, storage_root, payload_ref, opts)
         .await
+}
+
+/// [`delete_external_payload_in_transaction`] for callers that delete a batch of
+/// payloads inside one transaction and can share a single reference-closure
+/// scan across the batch. See [`ReferencedClosureCache`] for why the shared
+/// snapshot answers each payload exactly as its own scan would have.
+pub async fn delete_external_payload_in_transaction_with_cache(
+    conn: &(impl Executor + ?Sized),
+    storage_root: &Path,
+    payload_ref: &str,
+    opts: &DeleteOpts,
+    referenced: &mut ReferencedClosureCache,
+) -> Result<PreparedPayloadDelete, LcmError> {
+    delete_recovery::delete_external_payload_in_transaction_with_cache(
+        conn,
+        storage_root,
+        payload_ref,
+        opts,
+        referenced,
+    )
+    .await
 }
 
 pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
