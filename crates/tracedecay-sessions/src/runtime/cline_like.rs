@@ -1414,6 +1414,7 @@ mod observation_tests {
                     status: HostAdmissionStatus::Unavailable,
                     retryable: true,
                     reason_code: Some("authority_unavailable"),
+                    recovery: None,
                 },
             );
             assert!(matches!(

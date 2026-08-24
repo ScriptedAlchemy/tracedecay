@@ -531,6 +531,11 @@ pub fn classify_claude_observation_failure(
             crate::observation::ObservationApplicationError::BatchContainsNonDurable => {
                 permanent("observation_batch_non_durable")
             }
+            // The worker went away before reaching a verdict, so nothing was
+            // decided about the payload. Re-running the same input can succeed.
+            crate::observation::ObservationApplicationError::BatchWorkerStopped => {
+                unavailable("observation_batch_worker_stopped")
+            }
         },
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
         Ingest::InvalidFrameState => permanent("observation_frame_state_invalid"),
