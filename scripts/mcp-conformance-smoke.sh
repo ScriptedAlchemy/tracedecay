@@ -36,7 +36,8 @@ run_smoke() {
   local work_dir="$1"
   local fixture="$2"
   local tools_a tools_b call_out res_out
-  local diagnostics_out affected_out test_map_out symbol_json impact_out node_id
+  local diagnostics_out affected_out test_map_out symbol_json impact_out impact_err node_id
+  local impact_deadline impact_ready
   local failures=0
 
   inspect() {
@@ -100,6 +101,7 @@ run_smoke() {
 
   symbol_json="$work_dir/find-exact-symbol.json"
   impact_out="$work_dir/impact.json"
+  impact_err="$work_dir/impact.err"
   extract_exact_symbol_id() {
     node - "$1" <<'NODE'
 const fs = require("fs");
@@ -169,9 +171,17 @@ NODE
     fail "tools/call tracedecay_test_map returns typed evidence"
   fi
 
-  if [[ -n ${node_id:-} ]] &&
-    inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>/dev/null &&
-    json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+  impact_ready=0
+  impact_deadline=$((SECONDS + CALL_TIMEOUT_SECS))
+  while [[ -n ${node_id:-} ]] && ((SECONDS < impact_deadline)); do
+    if inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>"$impact_err" &&
+      json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+      impact_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if ((impact_ready == 1)); then
     ok "tools/call tracedecay_impact returns typed evidence"
   else
     echo "mcp-conformance-smoke: impact node_id='${node_id:-}'" >&2
@@ -182,6 +192,10 @@ NODE
     if [[ -s "$impact_out" ]]; then
       echo "----- tracedecay_impact -----" >&2
       cat "$impact_out" >&2 || true
+    fi
+    if [[ -s "$impact_err" ]]; then
+      echo "----- tracedecay_impact stderr -----" >&2
+      cat "$impact_err" >&2 || true
     fi
     fail "tools/call tracedecay_impact returns typed evidence"
   fi
