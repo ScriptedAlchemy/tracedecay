@@ -804,3 +804,23 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
         }
     );
 }
+
+#[test]
+fn a_stopped_batch_worker_is_retryable_and_unavailable() {
+    // Distinct from BatchContainsNonDurable, which is permanent: that one means
+    // the batch itself was invalid, while this one means no verdict was ever
+    // reached because the worker went away. Re-running the same input can
+    // succeed, so it must not be classified as permanent.
+    let error = claude_observation::ClaudeObservationIngestError::Application(
+        crate::observation::ObservationApplicationError::BatchWorkerStopped,
+    );
+
+    let failure = classify_claude_observation_failure(&error);
+
+    assert_eq!(failure.reason_code, "observation_batch_worker_stopped");
+    assert!(failure.retryable);
+    assert_eq!(
+        failure.status,
+        crate::admission::HostAdmissionStatus::Unavailable
+    );
+}

@@ -531,6 +531,14 @@ pub fn classify_claude_observation_failure(
             crate::observation::ObservationApplicationError::BatchContainsNonDurable => {
                 permanent("observation_batch_non_durable")
             }
+            // The batch worker went away before the batch completed, so this
+            // pass never reached a verdict about the observation itself. That
+            // is a missing runtime, not backpressure and not bad data: the
+            // same input succeeds once a worker is running again, so it is
+            // retryable and reported as unavailable rather than contended.
+            crate::observation::ObservationApplicationError::BatchWorkerStopped => {
+                unavailable("observation_batch_worker_stopped")
+            }
         },
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
         Ingest::InvalidFrameState => permanent("observation_frame_state_invalid"),
