@@ -863,6 +863,17 @@ pub mod test_support {
     }
 
     pub fn admitted_artifact() -> AdmittedArtifactV1 {
+        admitted_artifact_sized(5, 9, 64 * 1024 * 1024)
+    }
+
+    /// Same fixture with caller-chosen member sizes and process ceiling, so a
+    /// test can reproduce production-scale resident arithmetic (a ~600 MB
+    /// model under a 2 GiB process budget) without a real artifact.
+    pub fn admitted_artifact_sized(
+        model_bytes: u64,
+        tokenizer_bytes: u64,
+        max_resident_bytes: u64,
+    ) -> AdmittedArtifactV1 {
         let model_digest = Sha256DigestHex::of_bytes(b"model");
         let tokenizer_digest = Sha256DigestHex::of_bytes(b"tokenizer");
         let config_digest = Sha256DigestHex::of_bytes(b"config");
@@ -878,7 +889,7 @@ pub mod test_support {
                 spdx_license: "MIT".to_owned(),
                 model_member: ArtifactMemberPinV1 {
                     digest: model_digest.clone(),
-                    byte_length: 5,
+                    byte_length: model_bytes,
                 },
                 tokenizer_digest: tokenizer_digest.clone(),
                 config_digest: config_digest.clone(),
@@ -889,13 +900,13 @@ pub mod test_support {
                         role: ArtifactMemberRoleV1::Model,
                         path: "model.onnx".to_owned(),
                         digest: model_digest,
-                        byte_length: 5,
+                        byte_length: model_bytes,
                     },
                     ArtifactPackageMemberV1 {
                         role: ArtifactMemberRoleV1::Tokenizer,
                         path: "tokenizer.json".to_owned(),
                         digest: tokenizer_digest,
-                        byte_length: 9,
+                        byte_length: tokenizer_bytes,
                     },
                     ArtifactPackageMemberV1 {
                         role: ArtifactMemberRoleV1::Config,
@@ -947,9 +958,9 @@ pub mod test_support {
                 },
                 device: DeviceClassV1::Cpu,
                 resource_ceiling: ResourceCeilingV1 {
-                    max_model_bytes: 1024,
-                    max_tokenizer_bytes: 1024,
-                    max_resident_bytes: 64 * 1024 * 1024,
+                    max_model_bytes: model_bytes.max(1024),
+                    max_tokenizer_bytes: tokenizer_bytes.max(1024),
+                    max_resident_bytes,
                     max_threads: 4,
                     max_batch_size: 8,
                     max_sequence_length: 512,

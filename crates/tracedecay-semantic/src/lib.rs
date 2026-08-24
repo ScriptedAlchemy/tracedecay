@@ -992,14 +992,18 @@ where
     ) -> Self {
         let intra_threads =
             embedding_parallelism::embedding_intra_threads(configured_intra_threads);
+        let width =
+            embedding_parallelism::embedding_session_width(configured_intra_threads, u32::MAX);
+        // The width the host arithmetic asks for. Compare against
+        // `semantic_embed_sessions_held` to see what the pool actually
+        // granted; the two diverging is the only symptom pool pressure has on
+        // this path, because acquisition here never blocks.
+        hotpath::gauge!("semantic_embed_session_width").set(width);
         Self {
             runtime,
             progress,
             sessions: Vec::new(),
-            width: embedding_parallelism::embedding_session_width(
-                configured_intra_threads,
-                u32::MAX,
-            ),
+            width,
             intra_threads,
             completed_units: 0,
         }
@@ -1016,9 +1020,20 @@ where
             match self.runtime.acquire() {
                 Ok(session) => self.sessions.push(session),
                 Err(error) if self.sessions.is_empty() => return Err(error.to_string()),
-                Err(_) => break,
+                // The pool refused, so embedding narrows rather than failing.
+                // This is the ONLY way pool pressure reaches the projection
+                // path: acquisition here is non-blocking, so no caller ever
+                // waits and `semantic.session_pool.wait` can never record it.
+                // Counting the refusal is therefore the only way a narrowed
+                // run is distinguishable from a deliberately narrow host.
+                Err(_) => {
+                    hotpath::gauge!("semantic_embed_session_shortfall").inc(1);
+                    break;
+                }
             }
         }
+        hotpath::gauge!("semantic_embed_sessions_wanted").set(wanted);
+        hotpath::gauge!("semantic_embed_sessions_held").set(self.sessions.len());
         Ok(self.sessions.len())
     }
 }
@@ -1062,14 +1077,19 @@ where
             "semantic projection authority does not match its inference batch identity".to_owned(),
         );
     }
-    let batch = BoundedSanitizedTextBatchV1::try_new(
-        chunks
-            .iter()
-            .map(|chunk| chunk.sanitized_text.as_str().to_owned())
-            .collect(),
-        max_texts,
-        max_bytes,
-    )
+    // The one copy between canonical chunks and tensor input: every chunk's
+    // sanitized text is cloned into an owned String. Timed separately so it
+    // cannot hide inside `semantic.embed.infer`.
+    let batch = hotpath::measure_block!("semantic.embed.batch_assembly", {
+        BoundedSanitizedTextBatchV1::try_new(
+            chunks
+                .iter()
+                .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+                .collect(),
+            max_texts,
+            max_bytes,
+        )
+    })
     .map_err(|error| error.to_string())?;
     let vectors = session
         .embed_batch(&batch, progress)
@@ -1077,13 +1097,18 @@ where
     if vectors.len() != chunks.len() {
         return Err("semantic projector returned an unexpected vector batch size".to_owned());
     }
-    let encoded = vectors
-        .into_iter()
-        .map(|vector| {
-            vector.validate().map_err(|error| error.to_string())?;
-            Ok(vector.values)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    // Per-vector dimension/finite validation plus the move out of the
+    // adapter's vector type. Also timed separately: a regression here would
+    // otherwise be read as slower inference.
+    let encoded = hotpath::measure_block!("semantic.embed.vector_writeback", {
+        vectors
+            .into_iter()
+            .map(|vector| {
+                vector.validate().map_err(|error| error.to_string())?;
+                Ok(vector.values)
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })?;
     Ok((encoded, chunks.len() as u64))
 }
 
@@ -1156,6 +1181,10 @@ where
         }
         let sessions = self.ensure_sessions(groups.len())?;
         if sessions <= 1 || groups.len() == 1 {
+            // One stripe. Counted so a run that never widens is visible as a
+            // count rather than inferred from the absence of parallel spans.
+            hotpath::gauge!("semantic_embed_sequential_dispatch").inc(1);
+            hotpath::gauge!("semantic_embed_encode_stripes").set(1_usize);
             let progress = Arc::clone(&self.progress);
             let intra_threads = self.intra_threads;
             let mut encoded = Vec::with_capacity(groups.len());
@@ -1187,6 +1216,7 @@ where
 
         let stripe_len = groups.len().div_ceil(sessions);
         let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
+        hotpath::gauge!("semantic_embed_encode_stripes").set(stripes.len());
         let progress = Arc::clone(&self.progress);
         let intra_threads = self.intra_threads;
         let mut stripe_results: Vec<EncodedStripeResultV1> =
