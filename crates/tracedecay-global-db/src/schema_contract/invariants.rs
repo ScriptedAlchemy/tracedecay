@@ -26,11 +26,12 @@ use rows::{
     validate_receipt_authority_rows, validate_source_cursor_authority_chunk,
     validate_source_cursor_authority_rows,
 };
-pub(crate) use triggers::invariant_trigger_sql_for_tables;
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
+pub(crate) use triggers::{invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables};
 pub use triggers::{
-    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
+    released_v3_invariant_triggers_intact, restore_immutability_after_canonical_repair,
+    suspend_immutability_for_canonical_repair,
 };
 
 const OPERATION: &str = "ensure global database authority invariants";

@@ -82,7 +82,7 @@ pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub(crate) use schema::{
     SessionTemporalSchemaAdmission, install_session_temporal_schema,
-    require_admissible_session_temporal_schema,
+    migrate_released_v3_session_temporal_schema, require_admissible_session_temporal_schema,
 };
 pub use store::GlobalDbSessionTemporalStore;
 

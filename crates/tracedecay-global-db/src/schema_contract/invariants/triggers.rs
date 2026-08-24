@@ -1,6 +1,6 @@
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use crate::global_db_operation_error;
+use crate::{global_db_operation_error, global_db_operation_message};
 
 use super::rows::authority_violation;
 use super::{OPERATION, normalize_trigger_sql};
@@ -1593,6 +1593,19 @@ pub(crate) fn invariant_trigger_sql_for_tables(tables: &[&str]) -> Vec<&'static 
         .collect()
 }
 
+pub(crate) fn invariant_trigger_names_for_tables(tables: &[&str]) -> Vec<&'static str> {
+    INVARIANTS
+        .iter()
+        .flat_map(|invariant| invariant.triggers)
+        .filter(|trigger| {
+            tables
+                .iter()
+                .any(|table| table.eq_ignore_ascii_case(trigger.table))
+        })
+        .map(|trigger| trigger.name)
+        .collect()
+}
+
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
@@ -1618,9 +1631,50 @@ pub(super) async fn trigger_contracts_intact(
     Ok(true)
 }
 
+pub async fn released_v3_invariant_triggers_intact(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<bool> {
+    const CURRENT_ACCOUNTING: &str = "AND NEW.committed_records = receipt.committed_item_count";
+    const RELEASED_V3_ACCOUNTING: &str = "AND NEW.committed_records =
+                                receipt.occurrence_count
+                                + receipt.copy_count
+                                + receipt.assertion_count";
+
+    for invariant in INVARIANTS {
+        for trigger in invariant.triggers {
+            if trigger.name == "session_refresh_progress_insert_guard_v1" {
+                let released_sql =
+                    trigger
+                        .create_sql
+                        .replacen(CURRENT_ACCOUNTING, RELEASED_V3_ACCOUNTING, 1);
+                if released_sql == trigger.create_sql {
+                    return Err(global_db_operation_message(
+                        OPERATION,
+                        "released v3 refresh accounting trigger contract is unavailable",
+                    ));
+                }
+                if !trigger_matches_sql(conn, trigger, &released_sql).await? {
+                    return Ok(false);
+                }
+            } else if !trigger_matches(conn, trigger).await? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 async fn trigger_matches(
     conn: &impl QueryExecutor,
     trigger: &Trigger,
+) -> tracedecay_runtime_core::errors::Result<bool> {
+    trigger_matches_sql(conn, trigger, trigger.create_sql).await
+}
+
+async fn trigger_matches_sql(
+    conn: &impl QueryExecutor,
+    trigger: &Trigger,
+    expected_sql: &str,
 ) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
@@ -1644,7 +1698,7 @@ async fn trigger_matches(
         .get::<String>(1)
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     Ok(table.eq_ignore_ascii_case(trigger.table)
-        && normalize_trigger_sql(&sql) == normalize_trigger_sql(trigger.create_sql))
+        && normalize_trigger_sql(&sql) == normalize_trigger_sql(expected_sql))
 }
 
 pub async fn suspend_immutability_for_canonical_repair(
