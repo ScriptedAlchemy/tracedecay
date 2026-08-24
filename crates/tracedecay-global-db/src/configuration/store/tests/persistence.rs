@@ -3,24 +3,25 @@
 use super::super::mutation::{
     commit_configuration_transaction, map_store_error, validate_commit_bindings,
 };
-use super::super::write::insert_snapshot_entries;
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
-    ConfigurationStoreError, CredentialWritePort, Executor, QueryExecutor, params,
+    ConfigurationRevisionStore, ConfigurationStoreError, CredentialWritePort, Executor,
+    QueryExecutor, params,
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
     GlobalDbConfigurationControlStore, HostAdmissionScope, TestConnection, TransactionBehavior,
-    UtcMicros, WriteOnlyCredentialMutation, control_authority, count, direct_project_layer,
-    global_setup, id, protected_commit, root_revision, seed_revision, setup,
+    UtcMicros, WriteOnlyCredentialMutation, control_authority,
+    control_authority_with_key_for_layer, count, direct_project_layer, global_setup, id,
+    protected_commit, root_revision, seed_revision, setup,
 };
 use crate::configuration::contracts::DirectConfigurationMutation;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::configuration::{
-    CodeIndexWorkerSelectionV1, ConfigurationMutationOperationV1, ConfigurationSnapshotV1,
-    ConfigurationValueV1 as DomainConfigurationValueV1, CredentialKindV1, SettingKey,
+    CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationMutationOperationV1, CredentialKindV1, SettingKey,
     USER_CODE_INDEX_WORKERS_SETTING_KEY,
 };
 
@@ -74,88 +75,103 @@ async fn canonical_initialization_publishes_one_final_revision_without_legacy_st
 }
 
 #[tokio::test]
-async fn registry_added_code_index_worker_default_converges_once_as_a_child_revision() {
+async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
     let directory = tempfile::tempdir().unwrap();
     let profile_root = directory.path().join("profile");
-    let project_root = directory.path().join("project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::project(
-        &profile_root,
-        &project_root,
-        tracedecay_domain::ProjectId::new("project.configuration-worker-convergence").unwrap(),
-    )
-    .await
-    .unwrap();
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
+    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
         .unwrap();
-    let mut legacy = root_revision();
-    let worker_key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).unwrap();
-    let mut effective_values = legacy.snapshot.effective_values;
-    let mut provenance = legacy.snapshot.provenance;
-    effective_values.remove(&worker_key);
-    provenance.remove(&worker_key);
-    legacy.snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let profile_id = db.binding().shard_id.profile_id.clone();
+    let store =
+        super::super::ProfileCodeIndexWorkerConfigurationStore::new_registered(db, &profile_id)
+            .unwrap();
 
-    let transaction = db.begin_write_transaction().await.unwrap();
-    transaction
-        .execute(
-            "INSERT INTO configuration_revisions (
-                revision_id, parent_revision_id, snapshot_id,
-                effective_behavior_digest, resolution_provenance_digest,
-                actor_id, operation_kind, created_at
-             ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                legacy.revision_id.as_str(),
-                legacy.snapshot.snapshot_id.as_str(),
-                legacy.snapshot.effective_behavior_digest.as_str(),
-                legacy.snapshot.resolution_provenance_digest.as_str(),
-                legacy.actor_id.as_str(),
-                legacy.operation_kind.as_str(),
-                legacy.created_at.0,
-            ],
+    let initialized = store.read_or_initialize(UtcMicros(1)).await.unwrap();
+    assert_eq!(initialized.selection, CodeIndexWorkerSelectionV1::Automatic);
+    let authority = control_authority_with_key_for_layer(
+        ConfigurationMutationOperationV1::DirectMutation,
+        &initialized.revision_id,
+        Some(
+            ConfigurationIdempotencyKey::new(
+                "configuration.idempotency.profile-worker-exact".to_owned(),
+            )
+            .unwrap(),
+        ),
+        ConfigurationLayerIdV1::UserProfile {
+            profile_id: profile_id.clone(),
+        },
+    );
+    let committed = store
+        .commit_selection(
+            &authority,
+            CodeIndexWorkerSelectionV1::Exact { workers: 8 },
+            &initialized.revision_id,
         )
         .await
         .unwrap();
-    insert_snapshot_entries(&transaction, &legacy.revision_id, &legacy.snapshot)
-        .await
-        .unwrap();
-    transaction.commit().await.unwrap();
-
-    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    assert_ne!(committed.current.revision_id, initialized.revision_id);
+    assert_eq!(
+        committed.current.selection,
+        CodeIndexWorkerSelectionV1::Exact { workers: 8 }
+    );
+    let restarted = store.read_or_initialize(UtcMicros(2)).await.unwrap();
+    assert_eq!(restarted, committed.current);
     assert!(matches!(
         store
-            .converge_registered_additive_defaults(
-                &id("configuration.revision.stale"),
-                UtcMicros(2),
+            .commit_selection(
+                &authority,
+                CodeIndexWorkerSelectionV1::Automatic,
+                &initialized.revision_id,
             )
             .await,
-        Err(ConfigurationError::RevisionConflict)
+        Err(ConfigurationError::IdempotencyConflict | ConfigurationError::RevisionConflict)
     ));
-    let converged = store
-        .converge_registered_additive_defaults(&legacy.revision_id, UtcMicros(2))
-        .await
-        .unwrap();
-    assert_ne!(converged.revision_id, legacy.revision_id);
-    assert_eq!(
-        converged.snapshot.effective_values.get(&worker_key),
-        Some(&DomainConfigurationValueV1::CodeIndexWorkerSelection(
-            CodeIndexWorkerSelectionV1::Automatic,
-        ))
+
+    let worker_key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).unwrap();
+    assert!(
+        ConfigurationRegistry::core()
+            .unwrap()
+            .definition(&worker_key)
+            .is_err()
     );
-    let unchanged = store
-        .converge_registered_additive_defaults(&converged.revision_id, UtcMicros(3))
+    assert!(
+        ConfigurationRegistry::profile_code_index_workers()
+            .unwrap()
+            .definition(&worker_key)
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn project_revision_store_rejects_profile_worker_snapshot() {
+    let (_directory, runtime, root) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    let profile_registry = ConfigurationRegistry::profile_code_index_workers().unwrap();
+    let profile_snapshot = resolve_configuration(&profile_registry, &[])
+        .unwrap()
+        .snapshot;
+    let (plan, mut commit) = protected_commit(&root);
+    commit.next_revision.snapshot = profile_snapshot;
+
+    ConfigurationRevisionStore::save_change_plan(&store, &plan)
         .await
         .unwrap();
-    assert_eq!(unchanged.revision_id, converged.revision_id);
-    let read = db.read_snapshot().await.unwrap();
-    let mut rows = read
-        .query("SELECT COUNT(*) FROM configuration_revisions", ())
-        .await
-        .unwrap();
+    let result = ConfigurationRevisionStore::commit(&store, commit).await;
+    assert!(matches!(
+        result,
+        Err(ConfigurationStoreError::InvalidData(_))
+    ));
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        2
+        ConfigurationRevisionStore::current_revision(&store)
+            .await
+            .unwrap(),
+        root
     );
 }
 

@@ -6,13 +6,18 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{SessionStoreResult, SessionTemporalProjectionBatchV1};
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};
+use super::super::rebuild::checkpoint_relation_rebuild_control;
 
+#[hotpath::measure]
 pub(super) async fn rebuild_derived_evidence(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    checkpoint_relation_rebuild_control(control)?;
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     let session_id = batch.session_id().as_str();
     conn.execute(
@@ -22,6 +27,7 @@ pub(super) async fn rebuild_derived_evidence(
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    checkpoint_relation_rebuild_control(control)?;
     conn.execute(
         "DELETE FROM session_derived_evidence
          WHERE session_id = ?1 AND generation = ?2",
@@ -29,8 +35,9 @@ pub(super) async fn rebuild_derived_evidence(
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    checkpoint_relation_rebuild_control(control)?;
 
-    let occurrences = load_occurrence_refs(conn, batch.session_id(), generation).await?;
+    let occurrences = load_occurrence_refs(conn, batch.session_id(), generation, control).await?;
     if occurrences.is_empty() {
         return Ok(());
     }
@@ -40,7 +47,8 @@ pub(super) async fn rebuild_derived_evidence(
     let derived =
         derive_session_evidence_from_occurrences(batch.session_id(), &occurrences, &policy)?;
     for record in derived {
-        persist_derived_record(conn, batch.session_id(), generation, &record).await?;
+        checkpoint_relation_rebuild_control(control)?;
+        persist_derived_record(conn, batch.session_id(), generation, &record, control).await?;
     }
     Ok(())
 }
@@ -49,7 +57,9 @@ async fn load_occurrence_refs(
     conn: &impl Executor,
     session_id: &SessionId,
     generation: i64,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<Vec<DerivedEvidenceOccurrenceRefV1>> {
+    checkpoint_relation_rebuild_control(control)?;
     let mut rows = conn
         .query(
             "SELECT occurrence.occurrence_id,
@@ -77,6 +87,7 @@ async fn load_occurrence_refs(
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?
     {
+        checkpoint_relation_rebuild_control(control)?;
         let occurrence_id = row
             .get::<String>(0)
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
@@ -130,7 +141,9 @@ async fn persist_derived_record(
     session_id: &SessionId,
     generation: i64,
     record: &SessionDerivedEvidenceRecordV1,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    checkpoint_relation_rebuild_control(control)?;
     ensure_derived_anchor(conn, record).await?;
     let evidence_json =
         serde_json::to_string(record).map_err(|error| storage(PERSIST_OPERATION, error))?;
@@ -161,6 +174,7 @@ async fn persist_derived_record(
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
     for member in record.members() {
+        checkpoint_relation_rebuild_control(control)?;
         conn.execute(
             "INSERT INTO session_derived_evidence_members (
                 session_id, generation, evidence_kind, evidence_id,

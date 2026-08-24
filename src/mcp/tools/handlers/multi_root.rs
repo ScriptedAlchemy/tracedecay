@@ -27,6 +27,7 @@ use super::tool_call_support::json_result;
 
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 
+#[hotpath::measure(label = "mcp.dispatch.multi_root")]
 pub(super) async fn handle_multi_root(
     tool_name: &str,
     body: Value,
