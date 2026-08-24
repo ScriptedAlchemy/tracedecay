@@ -9,6 +9,7 @@ mod error;
 mod idempotency;
 mod inbox;
 mod outbox;
+mod prune;
 mod schema;
 mod sqlite;
 
