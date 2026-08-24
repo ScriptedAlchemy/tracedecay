@@ -1164,6 +1164,14 @@ impl DaemonSessionRuntimeRegistryV1 {
         generation_id: CodeGenerationId,
         project_database: Arc<crate::db::Database>,
         replay_binding: crate::daemon::code_index_scheduler::CodeGraphReplayBindingV1,
+        // The generation the code index just decoded to serve queries, when the
+        // caller has one. Offering it to the manifest provider is what makes
+        // cold activation parse the sealed payload once instead of twice
+        // (plan 40, stage 1). `None` simply leaves the provider reading the
+        // canonical seal exactly as before.
+        decoded_generation: Option<
+            Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+        >,
     ) -> Result<RetainedCodeGraphRuntimeV1> {
         let project_shard = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
@@ -1197,6 +1205,23 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|failure| {
                 session_registry_error("retain exact code graph authority", format!("{failure:?}"))
             })?;
+        // Offer the already-decoded seal before any publication or recovery can
+        // reach the manifest provider. The offer is keyed by the exact shard the
+        // provider resolves bindings under, and is only ever served on an exact
+        // generation-and-digest match, so a stale offer cannot displace the
+        // canonical seal.
+        if let Some(decoded_generation) = decoded_generation {
+            self.graph_manifest_provider
+                .offer_decoded_code_generation(
+                    authority.binding().shard_id.clone(),
+                    generation_id.clone(),
+                    replay_binding.sealed_state_digest.clone(),
+                    decoded_generation,
+                )
+                .map_err(|error| {
+                    session_registry_error("offer decoded code generation", error.to_string())
+                })?;
+        }
         let replay_root = project_database
             .database_path()
             .with_extension("graph-replay");

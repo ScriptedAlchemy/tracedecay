@@ -173,6 +173,7 @@ impl CodeGraphActivationAuthorityV1 {
                         generation_id,
                         Arc::clone(project_database),
                         replay_binding,
+                        Some(latest.generation_handle()),
                     )
                     .await
                     .map_err(|error| {
