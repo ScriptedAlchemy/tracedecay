@@ -25,6 +25,8 @@ use crate::store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 
+const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 #[hotpath::measure]
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: RegisteredGlobalDbLeaseV1,
@@ -208,6 +210,18 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     label = "session_temporal_refresh.cancellation_wait"
                 ) => return,
                 () = wake => {}
+                () = hotpath::future!(
+                    tokio::time::sleep(HISTORY_IDLE_RECHECK_INTERVAL),
+                    label = "session_temporal_refresh.history_idle_wait"
+                ) => {
+                    if history
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_some()
+                    {
+                        state.wake_history();
+                    }
+                }
             }
         }
     }
@@ -478,7 +492,11 @@ async fn apply_refresh_effect(
     match effect {
         SessionTemporalRefreshEffect::Projection { progress, batch } => {
             match store
-                .persist_session_refresh_projection_batch(progress, batch)
+                .persist_session_refresh_projection_batch_controlled(
+                    progress,
+                    batch,
+                    state.completion_control(),
+                )
                 .await
             {
                 Ok(_) => report.projected_batches += 1,
@@ -748,6 +766,14 @@ pub(super) async fn run_session_temporal_refresh_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tempfile::TempDir;
+    use tracedecay_domain::{SessionId, TemporalCoverageCountsV1, UtcMicros};
+    use tracedecay_store::{SessionRefreshBeginOrJoinRequestV1, SessionTemporalProjectionBatchV1};
+    use tracedecay_usecases::host_admission::HostAdmissionScope;
+
+    use crate::host_admission::HostAdmissionTestRuntimeV1;
 
     #[test]
     fn dropping_worker_instrumentation_clears_pending_state_once() {
@@ -768,5 +794,86 @@ mod tests {
         state.cancel();
         assert!(!state.dirty.load(Ordering::Acquire));
         assert!(!state.has_pending_work());
+    }
+
+    #[tokio::test]
+    async fn cancelled_worker_control_prevents_projection_batch_persistence() {
+        let temp = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(temp.path())
+            .await
+            .unwrap();
+        let store = runtime
+            .session_temporal_store_for_test(HostAdmissionScope::Profile)
+            .unwrap();
+        let session_id = SessionId::new("session.scheduler.cancelled-persistence").unwrap();
+        let started = store
+            .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+                session_id.clone(),
+                SessionRefreshFrontierV1::new(0, 0).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let progress = SessionRefreshProgressV1::new(
+            started.operation_id().clone(),
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).unwrap(),
+            TemporalCoverageCountsV1 {
+                visible: 0,
+                hidden: 0,
+                unknown: 0,
+                redacted: 0,
+            },
+            1,
+            0,
+            UtcMicros(
+                i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_micros(),
+                )
+                .unwrap(),
+            ),
+        );
+        let batch = SessionTemporalProjectionBatchV1::new(
+            session_id.clone(),
+            recovery.candidate_generation(),
+            recovery.frozen_watermarks().clone(),
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_checkpoint(0, 0, 0)
+        .unwrap();
+        let state = SessionTemporalRefreshWakeState::default();
+        state.cancel();
+        let mut report = SessionTemporalRefreshPassReport::default();
+
+        apply_refresh_effect(
+            &store,
+            &state,
+            &recovery,
+            SessionTemporalRefreshEffect::Projection { progress, batch },
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.projected_batches, 0);
+        assert_eq!(report.terminal_errors, 1);
+        assert_eq!(
+            store
+                .session_refresh_recovery(&session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .restart_state(),
+            SessionRefreshRestartStateV1::BeginProjection
+        );
     }
 }

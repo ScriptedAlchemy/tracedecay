@@ -168,17 +168,20 @@ pub(super) async fn delete_external_payload_in_transaction(
     opts: &DeleteOpts,
 ) -> Result<PreparedPayloadDelete, LcmError> {
     let mut referenced = ReferencedClosureCache::default();
-    delete_external_payload_in_transaction_with_cache(
+    let prepared = prepare_external_payload_delete_in_transaction_with_cache(
         conn,
         storage_root,
         payload_ref,
         opts,
         &mut referenced,
     )
-    .await
+    .await?;
+    let deleted_refs = [payload_ref.to_string()];
+    gc::delete_gc_marks(conn, &deleted_refs).await?;
+    Ok(prepared)
 }
 
-pub(super) async fn delete_external_payload_in_transaction_with_cache(
+pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
@@ -256,11 +259,6 @@ pub(super) async fn delete_external_payload_in_transaction_with_cache(
     }
     conn.execute(
         "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",
-        params![payload_ref],
-    )
-    .await?;
-    conn.execute(
-        "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
         params![payload_ref],
     )
     .await?;

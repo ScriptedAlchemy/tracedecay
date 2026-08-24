@@ -332,6 +332,7 @@ async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Res
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
     drop_raw_reference(&store, &payload_ref).await?;
+    insert_gc_mark(&store, &payload_ref, "unreferenced", 1).await?;
 
     let outcome = payload::delete_external_payload(
         &store.conn,
@@ -349,6 +350,13 @@ async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Res
         payload::load_payload_metadata(&store.conn, &payload_ref)
             .await
             .is_err()
+    );
+    assert!(
+        gc_mark(&store.conn, &payload_ref)
+            .await
+            .map_err(|err| err.to_string())?
+            .is_none(),
+        "ordinary deletion must clear the payload's GC mark"
     );
     assert!(!payload_path(&store, &payload_ref).exists());
 
@@ -369,6 +377,7 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to preserve").await?;
     drop_raw_reference(&store, &payload_ref).await?;
+    insert_gc_mark(&store, &payload_ref, "unreferenced", 1).await?;
 
     let transaction = store
         .conn
@@ -401,6 +410,13 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
         payload::load_payload_metadata(&store.conn, &payload_ref)
             .await
             .is_ok()
+    );
+    assert!(
+        gc_mark(&store.conn, &payload_ref)
+            .await
+            .map_err(|err| err.to_string())?
+            .is_some(),
+        "rollback must restore the payload's GC mark"
     );
     assert!(
         schema::get_gc_meta(&store.conn, &pending_payload_delete_key(&payload_ref))
@@ -1755,19 +1771,26 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
 /// the pass a fixed amount however many payloads the batch reaps.
 ///
 /// Measured as a marginal, not read off the SQL: reap two batch sizes and
-/// compare. Each extra payload still pays for its own metadata delete and its
-/// own GC-mark delete — a single-payload delete must clear that payload's own
-/// mark, and no batching removes that. What must *not* be in the marginal is a
-/// reference-closure scan; if one creeps back the marginal rises and this
-/// fails, whatever the statement text looks like.
+/// compare. Each extra payload still pays for the work that is irreducibly its
+/// own — its metadata read, its placeholder sweep, its row deletes. What must
+/// *not* be in the marginal is a pass-level query; if a reference-closure scan
+/// creeps back into the loop the marginal rises and this fails, whatever the
+/// statement text looks like.
+///
+/// The reap loop prepares each delete and clears the whole batch's GC marks in
+/// one bounded statement afterwards, so the mark delete is not in the marginal
+/// either. That is a batch-only property: `delete_external_payload_in_transaction`
+/// still clears a single payload's own mark, and no batching removes that —
+/// `delete_external_payload_applies_db_then_file_and_is_idempotent` gates it.
 #[tokio::test]
 async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Result<(), String> {
     /// Round trips one additional reaped payload adds, measured. It covers the
     /// work that is irreducibly that payload's own: loading its metadata row,
-    /// its residual-placeholder sweep, its two row deletes, and its
-    /// pending-delete tombstone write. A reference-closure scan is *not* in
-    /// there — that is the hoist this test guards.
-    const PER_PAYLOAD_ROUND_TRIPS: usize = 5;
+    /// its residual-placeholder sweep, its metadata-row delete, and its
+    /// pending-delete tombstone write. Neither a reference-closure scan nor a
+    /// GC-mark delete is in there — both are paid once for the batch, and that
+    /// is what this test guards.
+    const PER_PAYLOAD_ROUND_TRIPS: usize = 4;
     const SMALL: usize = 2;
     const LARGE: usize = 8;
 
@@ -1779,7 +1802,8 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
         (LARGE - SMALL) * PER_PAYLOAD_ROUND_TRIPS,
         "reap cost {small} round trips for {SMALL} payloads and {large} for {LARGE}: \
          the per-payload marginal is not {PER_PAYLOAD_ROUND_TRIPS}, so the reference-closure \
-         scan (or another pass-level query) is back inside the per-payload loop"
+         scan, the GC-mark delete, or another batch-level statement is back inside the \
+         per-payload loop"
     );
     Ok(())
 }
@@ -1800,7 +1824,7 @@ async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result
         .await
         .map_err(|err| err.to_string())?;
     let mut cache = payload::ReferencedClosureCache::default();
-    payload::delete_external_payload_in_transaction_with_cache(
+    payload::prepare_external_payload_delete_in_transaction_with_cache(
         &transaction,
         &store.storage_root,
         &reaped,
@@ -1809,7 +1833,7 @@ async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result
     )
     .await
     .map_err(|err| err.to_string())?;
-    let still_referenced = payload::delete_external_payload_in_transaction_with_cache(
+    let still_referenced = payload::prepare_external_payload_delete_in_transaction_with_cache(
         &transaction,
         &store.storage_root,
         &kept,

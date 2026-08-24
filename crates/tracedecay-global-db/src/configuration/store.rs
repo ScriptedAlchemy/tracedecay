@@ -17,19 +17,21 @@ use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ChangePlanId,
-    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
-    ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
-    ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
-    SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding, SettingKey,
-    SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    CodeIndexWorkerSelectionV1, ConfigurationAuditEvent, ConfigurationAuditEventId,
+    ConfigurationAuditEventKindV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
+    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
+    CredentialReferenceMetadataV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, ProtectedChange,
+    ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
+    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
+    ScopeSourceBinding, SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store::configuration::{
     ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationProtectedOperationV1,
     ConfigurationProtectedPlanRecordV1, ConfigurationRevisionRecordV1, ConfigurationRevisionStore,
@@ -59,14 +61,17 @@ use mutation::commit_configuration_transaction;
 #[cfg(test)]
 use mutation::validate_commit_bindings;
 use mutation::{
-    ConfigurationCommitDraft, current_state_from_transaction, derived_identifier,
-    map_protected_change_snapshot_error, map_store_error,
+    ConfigurationCommitDraft, commit_direct_in_transaction_with_registry,
+    current_state_from_transaction, derived_identifier, map_protected_change_snapshot_error,
+    map_store_error,
 };
 use read::read_revision_from_executor;
-use read::validate_snapshot_registry_completeness;
 #[cfg(test)]
 use read::{current_revision_id_from_executor, read_change_plan_from_executor};
-use revision::insert_revision;
+use read::{
+    validate_snapshot_registry_completeness, validate_snapshot_registry_completeness_with_registry,
+};
+use revision::{insert_revision, insert_revision_with_registry};
 #[cfg(test)]
 use write::insert_change_plan;
 
@@ -388,6 +393,18 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         resolution: &ConfigurationResolutionV1,
         occurred_at: UtcMicros,
     ) -> Result<(), ConfigurationError> {
+        let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
+        self.initialize_canonical_with_registry(revision_id, resolution, occurred_at, &registry)
+            .await
+    }
+
+    async fn initialize_canonical_with_registry(
+        &self,
+        revision_id: &ConfigurationRevisionId,
+        resolution: &ConfigurationResolutionV1,
+        occurred_at: UtcMicros,
+        registry: &ConfigurationRegistry,
+    ) -> Result<(), ConfigurationError> {
         revision_id
             .validate()
             .map_err(ConfigurationError::validation)?;
@@ -395,7 +412,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .snapshot
             .validate()
             .map_err(ConfigurationError::validation)?;
-        validate_snapshot_registry_completeness(&resolution.snapshot).map_err(map_store_error)?;
+        validate_snapshot_registry_completeness_with_registry(&resolution.snapshot, registry)
+            .map_err(map_store_error)?;
         let transaction = self
             .db
             .begin_write_transaction()
@@ -434,7 +452,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 operation_kind: "canonical_initialization".to_owned(),
                 created_at: occurred_at,
             };
-            insert_revision(&transaction, &revision)
+            insert_revision_with_registry(&transaction, &revision, registry)
                 .await
                 .map_err(map_store_error)
         }
@@ -562,10 +580,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 return Err(ConfigurationError::RevisionConflict);
             }
             let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
-            let additive_keys = [
-                INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-                USER_CODE_INDEX_WORKERS_SETTING_KEY,
-            ]
+            let additive_keys = [INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY]
             .into_iter()
             .map(SettingKey::new)
             .collect::<Result<std::collections::BTreeSet<_>, _>>()
@@ -749,6 +764,196 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
+        })
+    }
+}
+
+/// Durable profile-session projection for the daemon-wide code-index worker
+/// selection. Its revision is independent from every project configuration
+/// revision and is therefore the only valid CAS token for worker changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileCodeIndexWorkerConfigurationV1 {
+    pub revision_id: ConfigurationRevisionId,
+    pub snapshot_id: tracedecay_domain::configuration::ConfigurationSnapshotId,
+    pub selection: CodeIndexWorkerSelectionV1,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileCodeIndexWorkerCommitV1 {
+    pub receipt: ConfigurationMutationReceipt,
+    pub current: ProfileCodeIndexWorkerConfigurationV1,
+}
+
+/// Exact adapter over one registered `ProfileSessions` database.
+pub struct ProfileCodeIndexWorkerConfigurationStore<'db> {
+    store: GlobalDbConfigurationControlStore<'db>,
+    profile_id: UserProfileId,
+}
+
+impl<'db> ProfileCodeIndexWorkerConfigurationStore<'db> {
+    pub fn new_registered(
+        db: &'db RegisteredGlobalDb,
+        profile_id: &UserProfileId,
+    ) -> Result<Self, ConfigurationError> {
+        let binding = db.binding();
+        if binding.shard_id.profile_id != *profile_id
+            || binding.shard_id.scope != StoreShardScopeV1::ProfileSessions
+        {
+            return Err(ConfigurationError::validation_message(
+                "code-index worker configuration requires the exact registered profile-sessions database",
+            ));
+        }
+        Ok(Self {
+            store: GlobalDbConfigurationControlStore::new_registered(db),
+            profile_id: profile_id.clone(),
+        })
+    }
+
+    pub async fn read_or_initialize(
+        &self,
+        occurred_at: UtcMicros,
+    ) -> Result<ProfileCodeIndexWorkerConfigurationV1, ConfigurationError> {
+        match self.current().await {
+            Ok(current) => return Ok(current),
+            Err(error) => {
+                if !self.store.is_uninitialized().await? {
+                    return Err(error);
+                }
+            }
+        }
+        let registry = ConfigurationRegistry::profile_code_index_workers()
+            .map_err(ConfigurationError::validation)?;
+        let initial_revision_id = ConfigurationRevisionId::new(
+            "configuration.profile-code-index-workers.initial.v1".to_owned(),
+        )
+        .map_err(ConfigurationError::validation)?;
+        let resolution = super::resolver::resolve_configuration(&registry, &[])
+            .map_err(ConfigurationError::validation)?;
+        match self
+            .store
+            .initialize_canonical_with_registry(
+                &initial_revision_id,
+                &resolution,
+                occurred_at,
+                &registry,
+            )
+            .await
+        {
+            Ok(()) | Err(ConfigurationError::RevisionConflict) => self.current().await,
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn current(
+        &self,
+    ) -> Result<ProfileCodeIndexWorkerConfigurationV1, ConfigurationError> {
+        let read = self
+            .store
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        let current = current_state_from_transaction(&read).await?;
+        self.project(current)
+    }
+
+    pub fn mutation(
+        &self,
+        selection: CodeIndexWorkerSelectionV1,
+    ) -> Result<DirectConfigurationMutation, ConfigurationError> {
+        selection
+            .validate()
+            .map_err(ConfigurationError::validation)?;
+        Ok(DirectConfigurationMutation::Set {
+            layer: ConfigurationLayerIdV1::UserProfile {
+                profile_id: self.profile_id.clone(),
+            },
+            key: SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY)
+                .map_err(ConfigurationError::validation)?,
+            value: Box::new(ConfigurationValueV1::CodeIndexWorkerSelection(selection)),
+        })
+    }
+
+    pub async fn commit_selection(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        selection: CodeIndexWorkerSelectionV1,
+        expected_revision: &ConfigurationRevisionId,
+    ) -> Result<ProfileCodeIndexWorkerCommitV1, ConfigurationError> {
+        let registry = ConfigurationRegistry::profile_code_index_workers()
+            .map_err(ConfigurationError::validation)?;
+        let mutation = self.mutation(selection)?;
+        let transaction = self
+            .store
+            .db
+            .begin_write_transaction()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        let outcome = commit_direct_in_transaction_with_registry(
+            &transaction,
+            authority,
+            &mutation,
+            expected_revision,
+            &registry,
+        )
+        .await;
+        match outcome {
+            Ok(outcome) => {
+                let current = self.project(outcome.current)?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| ConfigurationError::Unavailable)?;
+                Ok(ProfileCodeIndexWorkerCommitV1 {
+                    receipt: outcome.receipt,
+                    current,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn project(
+        &self,
+        current: ConfigurationCurrentStateV1,
+    ) -> Result<ProfileCodeIndexWorkerConfigurationV1, ConfigurationError> {
+        let registry = ConfigurationRegistry::profile_code_index_workers()
+            .map_err(ConfigurationError::validation)?;
+        validate_snapshot_registry_completeness_with_registry(&current.snapshot, &registry)
+            .map_err(map_store_error)?;
+        let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY)
+            .map_err(ConfigurationError::validation)?;
+        let Some(ConfigurationValueV1::CodeIndexWorkerSelection(selection)) =
+            current.snapshot.effective_values.get(&key)
+        else {
+            return Err(ConfigurationError::validation_message(
+                "profile code-index worker configuration has the wrong value kind",
+            ));
+        };
+        selection
+            .validate()
+            .map_err(ConfigurationError::validation)?;
+        let provenance = current.snapshot.provenance.get(&key).ok_or_else(|| {
+            ConfigurationError::validation_message(
+                "profile code-index worker configuration is missing provenance",
+            )
+        })?;
+        if provenance.iter().any(|candidate| match &candidate.layer {
+            ConfigurationLayerIdV1::Default => false,
+            ConfigurationLayerIdV1::UserProfile { profile_id } => profile_id != &self.profile_id,
+            ConfigurationLayerIdV1::Project { .. } | ConfigurationLayerIdV1::Collection { .. } => {
+                true
+            }
+        }) {
+            return Err(ConfigurationError::validation_message(
+                "profile code-index worker configuration provenance does not match the registered profile",
+            ));
+        }
+        let selection = *selection;
+        Ok(ProfileCodeIndexWorkerConfigurationV1 {
+            revision_id: current.revision_id,
+            snapshot_id: current.snapshot.snapshot_id,
+            selection,
         })
     }
 }

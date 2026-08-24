@@ -125,6 +125,7 @@ impl CodeGraphReadAdmissionPort for DashboardTestCodeGraphAdmissionV1 {
 pub(crate) struct DashboardTestRuntimeV1 {
     profile_root: std::path::PathBuf,
     profile_database: RegisteredGlobalDbLeaseV1,
+    profile_sessions_database: RegisteredGlobalDbLeaseV1,
     project_database: RegisteredGlobalDbLeaseV1,
     graph: dashboard::DashboardGraphTestRuntimeV1,
     project_id: ProjectId,
@@ -153,6 +154,7 @@ impl DashboardTestRuntimeV1 {
             .join(project_id.as_str());
         let graph = dashboard::DashboardGraphTestRuntimeV1::open(&graph_profile_root).await?;
         let profile_database = graph.profile_database();
+        let profile_sessions_database = graph.profile_sessions_database();
         let project_database = graph
             .project_sessions(project_root, project_id.clone())
             .await?;
@@ -165,6 +167,7 @@ impl DashboardTestRuntimeV1 {
         Ok(Self {
             profile_root: profile_root.to_path_buf(),
             profile_database,
+            profile_sessions_database,
             project_database,
             graph,
             project_id,
@@ -231,6 +234,22 @@ impl DashboardTestRuntimeV1 {
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
     ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
+        let authority = self
+            .dashboard_test_authority_with_session_reads_base(cg)
+            .await?;
+        let (_, profile_code_index_worker_settings) =
+            dashboard::dashboard_configuration_authorities_for_test(
+                Arc::clone(cg),
+                self.profile_sessions_database.clone(),
+            )
+            .await?;
+        Ok(authority.with_profile_code_index_worker_settings(profile_code_index_worker_settings))
+    }
+
+    async fn dashboard_test_authority_with_session_reads_base(
+        self: &Arc<Self>,
+        cg: &Arc<TraceDecay>,
+    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self.dashboard_test_authority()?;
         let (automation_authority, automation_writer) =
             dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile_root)
@@ -264,10 +283,18 @@ impl DashboardTestRuntimeV1 {
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
     ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
-        let authority = self.dashboard_test_authority_with_session_reads(cg).await?;
-        let application_runtime =
-            dashboard::dashboard_configuration_application_runtime_for_test(Arc::clone(cg)).await?;
-        Ok(authority.with_application_invocation_executor(application_runtime))
+        let authority = self
+            .dashboard_test_authority_with_session_reads_base(cg)
+            .await?;
+        let (application_runtime, profile_code_index_worker_settings) =
+            dashboard::dashboard_configuration_authorities_for_test(
+                Arc::clone(cg),
+                self.profile_sessions_database.clone(),
+            )
+            .await?;
+        Ok(authority
+            .with_profile_code_index_worker_settings(profile_code_index_worker_settings)
+            .with_application_invocation_executor(application_runtime))
     }
 
     /// The registered project identity this fixture runtime was opened for.

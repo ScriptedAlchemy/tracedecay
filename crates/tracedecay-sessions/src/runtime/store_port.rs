@@ -9,12 +9,50 @@
 use std::future::Future;
 use std::path::Path;
 
-use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptStoreResult, TranscriptWriteBatch};
+use tracedecay_store::{
+    ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult, TranscriptWriteBatch,
+};
 
 use crate::runtime::SessionRecord;
 use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 
 pub trait TranscriptIngestStore: TranscriptStore {
+    /// Atomically replaces two typed parse-offset authorities after checking
+    /// both exact prior values. Implementations must not expose a partially
+    /// updated pair if either comparison, write, or commit fails.
+    fn replace_parse_offset_pair(
+        &self,
+        first: (&Path, ParseOffset, ParseOffset),
+        second: (&Path, ParseOffset, ParseOffset),
+    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+        async move {
+            let _ = (first, second);
+            Err(TranscriptStoreError::Storage {
+                operation: "replace parse-offset pair",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "atomic parse-offset pair replacement is unavailable",
+                )),
+            })
+        }
+    }
+
+    /// Replaces a typed parse-offset state with compare-and-set semantics.
+    /// Unlike the monotonic helper, this permits a versioned epoch transition
+    /// to reset its plain cursor without saturating or packing the value.
+    fn replace_parse_offset(
+        &self,
+        cursor_path: &Path,
+        expected: ParseOffset,
+        next: ParseOffset,
+    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+        async move {
+            let batch =
+                TranscriptWriteBatch::advance_offset(cursor_path.to_path_buf(), expected, next)?;
+            self.persist_transcript_batch(batch).await
+        }
+    }
+
     /// Advances a parse offset only when it moves forward, reading the
     /// current offset as the compare-and-set expectation.
     fn advance_parse_offset_monotonic(
