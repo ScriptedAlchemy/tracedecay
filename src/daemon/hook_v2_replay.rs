@@ -459,7 +459,7 @@ fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredRe
     ROOTS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
     registered_replay_roots().lock().is_ok_and(|roots| {
         roots.get(data_root).is_some_and(|consumer| {
