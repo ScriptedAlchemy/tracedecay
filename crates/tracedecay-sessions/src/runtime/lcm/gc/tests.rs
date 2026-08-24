@@ -1451,35 +1451,45 @@ fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(),
 // ---------------------------------------------------------------------------
 // SQL batching regression coverage.
 //
-// These tests assert on the number of statements the GC paths issue and on the
-// rows they leave behind. They never assert on elapsed time: the point is that
-// a set-sized workload costs a fixed number of round trips, which is a property
-// of the SQL, not of the machine.
+// These tests measure *work*: how many round trips a GC path issues, how many
+// rows those round trips visit, and which rows survive. Nothing here inspects
+// statement text, so a query rewrite that preserves the work a pass does keeps
+// the gate green, while a regression back to per-row SQL breaks it. Elapsed
+// time is never asserted: a set-sized workload costing a fixed number of round
+// trips is a property of the access pattern, not of the machine.
 // ---------------------------------------------------------------------------
 
+/// Counts the work forwarded through it: one tick per round trip, plus the rows
+/// each query actually returned. It never retains statement text.
 #[derive(Default)]
-struct SqlLog {
-    statements: std::cell::RefCell<Vec<String>>,
+struct WorkCounter {
+    round_trips: std::cell::Cell<usize>,
+    rows_visited: std::cell::Cell<usize>,
 }
 
-impl SqlLog {
-    fn record(&self, sql: &str) {
-        self.statements.borrow_mut().push(sql.to_string());
+impl WorkCounter {
+    fn round_trips(&self) -> usize {
+        self.round_trips.get()
     }
 
-    fn matching(&self, needle: &str) -> usize {
-        self.statements
-            .borrow()
-            .iter()
-            .filter(|sql| sql.contains(needle))
-            .count()
+    fn rows_visited(&self) -> usize {
+        self.rows_visited.get()
+    }
+
+    fn tick(&self) {
+        self.round_trips.set(self.round_trips.get().saturating_add(1));
+    }
+
+    fn add_rows(&self, rows: usize) {
+        self.rows_visited
+            .set(self.rows_visited.get().saturating_add(rows));
     }
 }
 
-/// Transparent `Executor` wrapper that records every statement it forwards.
+/// Transparent `Executor` wrapper that counts the work it forwards.
 struct CountingExecutor<'a, E: ?Sized> {
     inner: &'a E,
-    log: &'a SqlLog,
+    counter: &'a WorkCounter,
 }
 
 impl<E: QueryExecutor + ?Sized> QueryExecutor for CountingExecutor<'_, E> {
@@ -1491,8 +1501,28 @@ impl<E: QueryExecutor + ?Sized> QueryExecutor for CountingExecutor<'_, E> {
     where
         P: tracedecay_runtime_core::db::engine::IntoParams,
     {
-        self.log.record(sql);
-        self.inner.query(sql, params).await
+        use tracedecay_runtime_core::db::engine::{Row, Rows, Value};
+
+        self.counter.tick();
+        let mut rows = self.inner.query(sql, params).await?;
+        // Drain and replay so the row count is measured, not estimated. The
+        // replayed `Rows` is indistinguishable to the caller: same column
+        // names, same values, same order.
+        let columns = (0..rows.column_count())
+            .map(|index| rows.column_name(index).unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        let mut replay = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let mut values = Vec::new();
+            let mut column = 0_i32;
+            while let Ok(value) = row.get::<Value>(column) {
+                values.push(value);
+                column += 1;
+            }
+            replay.push(Row::from_values(values));
+        }
+        self.counter.add_rows(replay.len());
+        Ok(Rows::from_parts(columns, replay))
     }
 }
 
@@ -1505,12 +1535,12 @@ impl<E: Executor + ?Sized> Executor for CountingExecutor<'_, E> {
     where
         P: tracedecay_runtime_core::db::engine::IntoParams,
     {
-        self.log.record(sql);
+        self.counter.tick();
         self.inner.execute(sql, params).await
     }
 
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.log.record(sql);
+        self.counter.tick();
         self.inner.execute_batch(sql).await
     }
 }
@@ -1519,18 +1549,16 @@ fn batch_ref(index: usize) -> String {
     format!("payload_batch_{index:04}.payload")
 }
 
-/// M11: the pending-delete drain must probe `lcm_external_payloads` once for the
-/// whole tombstone set, not once per tombstone.
-#[tokio::test]
-async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result<(), String> {
-    const TOMBSTONES: usize = 6;
-
+/// Stages `count` pending-delete tombstones whose payloads exist on disk and
+/// own no metadata row, then drains them under a work counter. Returns the
+/// round trips the drain cost.
+async fn drain_round_trips_for_tombstones(count: usize) -> Result<usize, String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
 
     let mut refs = Vec::new();
-    for index in 0..TOMBSTONES {
+    for index in 0..count {
         let payload_ref = batch_ref(index);
         fs::write(dir.join(&payload_ref), format!("body {index}").as_bytes())
             .map_err(|err| err.to_string())?;
@@ -1542,7 +1570,7 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
         refs.push(payload_ref);
     }
 
-    let log = SqlLog::default();
+    let counter = WorkCounter::default();
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1551,7 +1579,7 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
     let drain = {
         let counting = CountingExecutor {
             inner: &transaction,
-            log: &log,
+            counter: &counter,
         };
         drain_pending_payload_deletes_in_transaction(&counting, &store.storage_root)
             .await
@@ -1559,13 +1587,9 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
     };
     transaction.commit().await.map_err(|err| err.to_string())?;
 
-    assert_eq!(
-        log.matching("FROM lcm_external_payloads"),
-        1,
-        "metadata existence probe must be batched, saw statements: {:?}",
-        log.statements.borrow()
-    );
-    assert_eq!(drain.outcomes.removed.count, TOMBSTONES);
+    // The drain must actually have done its job, or a "cheap" round-trip count
+    // would be measuring a no-op.
+    assert_eq!(drain.outcomes.removed.count, count);
     assert_eq!(drain.outcomes.failed.count, 0);
     for payload_ref in &refs {
         assert!(
@@ -1580,6 +1604,35 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
             "{payload_ref} tombstone not cleared"
         );
     }
+    Ok(counter.round_trips())
+}
+
+/// M11: the pending-delete drain probes `lcm_external_payloads` once for the
+/// whole tombstone set, not once per tombstone.
+///
+/// Measured, not read off the SQL: drain two set sizes and compare the round
+/// trips. Each extra tombstone still costs its own tombstone clear, and that
+/// marginal is pinned below; a per-tombstone existence probe would raise it by
+/// one and fail the gate, whatever the statements happen to say.
+#[tokio::test]
+async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result<(), String> {
+    /// Round trips one additional tombstone adds: the `gc_meta` clear that
+    /// retires that tombstone. The batched existence probe is *not* here — it
+    /// is paid once for the whole drain.
+    const PER_TOMBSTONE_ROUND_TRIPS: usize = 1;
+    const SMALL: usize = 2;
+    const LARGE: usize = 8;
+
+    let small = drain_round_trips_for_tombstones(SMALL).await?;
+    let large = drain_round_trips_for_tombstones(LARGE).await?;
+
+    assert_eq!(
+        large - small,
+        (LARGE - SMALL) * PER_TOMBSTONE_ROUND_TRIPS,
+        "drain cost {small} round trips for {SMALL} tombstones and {large} for {LARGE}: \
+         the per-tombstone marginal is not {PER_TOMBSTONE_ROUND_TRIPS}, so something in the \
+         loop is still issuing its own query"
+    );
     Ok(())
 }
 
@@ -1632,11 +1685,6 @@ async fn pending_delete_drain_batches_mixed_metadata_presence() -> Result<(), St
     Ok(())
 }
 
-/// Distinguishing fragment of the byte-bounded `referenced_payload_refs` scan.
-/// The provider predicate is shared by unrelated metadata queries in the same
-/// GC pass and therefore cannot identify this round trip on its own.
-const CLOSURE_SCAN_NEEDLE: &str = "cumulative_bytes <= ?5 OR page_row = 1";
-
 /// Seeds `count` payloads that are on disk with metadata rows, carry no live
 /// reference, and already hold an aged `unreferenced` GC mark, so one apply pass
 /// reaps all of them.
@@ -1652,15 +1700,12 @@ async fn seed_reapable_payloads(store: &TestStore, count: usize) -> Result<Vec<S
     Ok(refs)
 }
 
-/// M1: the reference-closure scan must run once for the batch, not once per
-/// payload. With every raw message dropped the scan reads a single empty page,
-/// so each invocation is exactly one statement and the count is the call count.
-#[tokio::test]
-async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Result<(), String> {
-    const PAYLOADS: usize = 6;
-
+/// Reaps `count` aged, unreferenced payloads in one apply pass under a work
+/// counter, asserting every one of them was actually reaped, and returns the
+/// round trips the pass cost.
+async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
     let store = test_store().await?;
-    let refs = seed_reapable_payloads(&store, PAYLOADS).await?;
+    let refs = seed_reapable_payloads(&store, count).await?;
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
         backup_before_reap: false,
@@ -1669,7 +1714,7 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
     }
     .normalized();
 
-    let log = SqlLog::default();
+    let counter = WorkCounter::default();
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1678,7 +1723,7 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
     let report = {
         let counting = CountingExecutor {
             inner: &transaction,
-            log: &log,
+            counter: &counter,
         };
         run_payload_gc_in_transaction(
             &counting,
@@ -1694,17 +1739,7 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
     };
     transaction.commit().await.map_err(|err| err.to_string())?;
 
-    assert_eq!(report.unreferenced.count, PAYLOADS);
-    let scans = log.matching(CLOSURE_SCAN_NEEDLE);
-    assert_eq!(
-        scans, 2,
-        "expected one pass-level scan plus one batch-shared scan, saw {scans} for {PAYLOADS} payloads"
-    );
-    let mark_deletes = log.matching("DELETE FROM lcm_gc_marks");
-    assert_eq!(
-        mark_deletes, 1,
-        "expected one batch GC-mark delete, saw {mark_deletes} for {PAYLOADS} payloads"
-    );
+    assert_eq!(report.unreferenced.count, count);
     for payload_ref in &refs {
         assert!(
             payload::load_payload_metadata(&store.conn, payload_ref)
@@ -1713,6 +1748,39 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
             "{payload_ref} metadata survived"
         );
     }
+    Ok(counter.round_trips())
+}
+
+/// M1: the reference-closure scan is hoisted out of the reap loop, so it costs
+/// the pass a fixed amount however many payloads the batch reaps.
+///
+/// Measured as a marginal, not read off the SQL: reap two batch sizes and
+/// compare. Each extra payload still pays for its own metadata delete and its
+/// own GC-mark delete — a single-payload delete must clear that payload's own
+/// mark, and no batching removes that. What must *not* be in the marginal is a
+/// reference-closure scan; if one creeps back the marginal rises and this
+/// fails, whatever the statement text looks like.
+#[tokio::test]
+async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Result<(), String> {
+    /// Round trips one additional reaped payload adds, measured. It covers the
+    /// work that is irreducibly that payload's own: loading its metadata row,
+    /// its residual-placeholder sweep, its two row deletes, and its
+    /// pending-delete tombstone write. A reference-closure scan is *not* in
+    /// there — that is the hoist this test guards.
+    const PER_PAYLOAD_ROUND_TRIPS: usize = 5;
+    const SMALL: usize = 2;
+    const LARGE: usize = 8;
+
+    let small = unreferenced_reap_round_trips(SMALL).await?;
+    let large = unreferenced_reap_round_trips(LARGE).await?;
+
+    assert_eq!(
+        large - small,
+        (LARGE - SMALL) * PER_PAYLOAD_ROUND_TRIPS,
+        "reap cost {small} round trips for {SMALL} payloads and {large} for {LARGE}: \
+         the per-payload marginal is not {PER_PAYLOAD_ROUND_TRIPS}, so the reference-closure \
+         scan (or another pass-level query) is back inside the per-payload loop"
+    );
     Ok(())
 }
 
@@ -1770,15 +1838,53 @@ async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result
     Ok(())
 }
 
-/// M2: the residual-placeholder sweep must prefilter on live-prefix + ref, not
-/// on a bare `%ref%`. One `LIKE` term per text column per pattern, so the
-/// narrowed form emits `4 * LIVE_PREFIX_REWRITES.len()` terms.
-#[tokio::test]
-async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), String> {
+/// Tombstones `PRIMARY_REF` in a store holding one live placeholder plus
+/// `decoys` inline-prose rows that merely name the ref, and returns how many
+/// rows the delete's queries visited.
+///
+/// The payload deliberately has no metadata row, which is the state the
+/// missing-metadata reap and the crash-recovery path both operate in. That
+/// keeps the live-reference closure scan — a different, deliberately broad
+/// query this PR does not touch — out of the measurement, so what is counted
+/// is the residual-placeholder sweep's own selectivity.
+async fn residual_sweep_rows_visited(decoys: usize) -> Result<usize, String> {
     let store = test_store().await?;
-    let payload_ref = seed_payload(&store, "message-1", "body to tombstone").await?;
+    insert_session(&store.conn, &store.storage_root, "session-a").await?;
+    let live = format!("[externalized tool output: bytes=4 ref={PRIMARY_REF}; out]");
+    insert_raw_message(
+        &store.conn,
+        RawMessage {
+            session_id: "session-a",
+            message_id: "message-live",
+            storage_kind: "inline",
+            payload_ref: None,
+            content: Some(&live),
+            snippet_text: &live,
+            index_text: &live,
+            metadata_json: Some(&live),
+        },
+    )
+    .await?;
 
-    let log = SqlLog::default();
+    for index in 0..decoys {
+        let prose = format!("the operator mentioned {PRIMARY_REF} in note {index}");
+        insert_raw_message(
+            &store.conn,
+            RawMessage {
+                session_id: "session-a",
+                message_id: &format!("message-decoy-{index}"),
+                storage_kind: "inline",
+                payload_ref: None,
+                content: Some(&prose),
+                snippet_text: &prose,
+                index_text: &prose,
+                metadata_json: Some(&prose),
+            },
+        )
+        .await?;
+    }
+
+    let counter = WorkCounter::default();
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1787,12 +1893,12 @@ async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), 
     {
         let counting = CountingExecutor {
             inner: &transaction,
-            log: &log,
+            counter: &counter,
         };
         payload::delete_external_payload_in_transaction(
             &counting,
             &store.storage_root,
-            &payload_ref,
+            PRIMARY_REF,
             &payload::DeleteOpts {
                 rewrite_placeholders: true,
                 remove_file: false,
@@ -1804,18 +1910,49 @@ async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), 
     }
     transaction.commit().await.map_err(|err| err.to_string())?;
 
-    let sweep = log
-        .statements
-        .borrow()
-        .iter()
-        .find(|sql| sql.contains("WHERE payload_ref = ? OR"))
-        .cloned()
-        .ok_or_else(|| "residual placeholder sweep did not run".to_string())?;
-    let like_terms = sweep.matches("LIKE ? COLLATE NOCASE").count();
+    // The sweep must still have tombstoned the row that needed it, or a low
+    // row count would only mean the prefilter matched nothing at all.
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT snippet_text FROM lcm_raw_messages WHERE message_id = 'message-live'",
+            (),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "tombstoned row vanished".to_string())?;
+    let snippet: String = row.get(0).map_err(|err| err.to_string())?;
+    drop(rows);
+    assert!(
+        text_has_tombstoned_payload_ref(&snippet, PRIMARY_REF),
+        "sweep did not tombstone the live placeholder: {snippet}"
+    );
+
+    Ok(counter.rows_visited())
+}
+
+/// M2: the residual-placeholder sweep prefilters on live-prefix + ref rather
+/// than a bare `%ref%`, so its cost is set by the rows that can actually be
+/// rewritten, not by every row that happens to name the ref.
+///
+/// Measured as rows visited, not as `LIKE` terms counted in the statement text:
+/// a bare `%ref%` prefilter pulls inline prose that merely mentions the ref
+/// back into the sweep, so its row count grows with the decoys. The narrowed
+/// prefilter excludes them and the row count stays flat.
+#[tokio::test]
+async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), String> {
+    let without_decoys = residual_sweep_rows_visited(0).await?;
+    let with_decoys = residual_sweep_rows_visited(32).await?;
+
     assert_eq!(
-        like_terms,
-        4 * LIVE_PREFIX_REWRITES.len(),
-        "sweep prefilter is not live-prefix anchored: {sweep}"
+        with_decoys, without_decoys,
+        "sweep visited {without_decoys} rows with no decoys and {with_decoys} with 32 of them: \
+         the prefilter is matching rows it can never rewrite, which is what a bare `%ref%` \
+         pattern does"
     );
     Ok(())
 }

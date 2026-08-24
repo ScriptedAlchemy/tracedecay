@@ -143,10 +143,23 @@ pub async fn expand_query(
             }
         }
     } else {
-        for node_id in request.node_ids.iter().take(max_results) {
-            let expansion =
-                dag::expand_summary_node(conn, &request.provider, &request.session_id, node_id)
-                    .await?;
+        // Explicitly requested nodes are hydrated as one page: the whole set's
+        // node rows, lineage rows, and source closure are each loaded once,
+        // instead of one independent expansion per node id.
+        let requested_node_ids = request
+            .node_ids
+            .iter()
+            .take(max_results)
+            .cloned()
+            .collect::<Vec<_>>();
+        let expansions = dag::expand_summary_nodes(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &requested_node_ids,
+        )
+        .await?;
+        for expansion in expansions {
             matches.push(LcmExpandQueryMatch {
                 kind: "summary_node".to_string(),
                 node_id: Some(expansion.summary.node_id.clone()),
@@ -640,7 +653,6 @@ fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&s
 struct GrepQueryPlan {
     fts_query: String,
     like_terms: Vec<String>,
-    quoted_phrases: Vec<String>,
     requires_like_fallback: bool,
 }
 
@@ -653,7 +665,6 @@ impl GrepQueryPlan {
 fn grep_query_plan(query: &str) -> GrepQueryPlan {
     let fts_query = sanitize_fts5_query(query);
     let terms = extract_search_terms(query);
-    let quoted_phrases = extract_quoted_phrases(query);
     let mut like_terms = Vec::new();
     for term in terms {
         if !term.is_empty() && !like_terms.iter().any(|existing| existing == &term) {
@@ -670,25 +681,8 @@ fn grep_query_plan(query: &str) -> GrepQueryPlan {
     GrepQueryPlan {
         fts_query,
         like_terms,
-        quoted_phrases,
         requires_like_fallback,
     }
-}
-
-fn compute_like_fallback_fetch_limit(limit: usize, query_plan: &GrepQueryPlan) -> usize {
-    compute_search_fetch_limit(limit, &query_plan.like_terms, &query_plan.quoted_phrases)
-}
-
-fn compute_search_fetch_limit(limit: usize, terms: &[String], phrases: &[String]) -> usize {
-    let base = limit.saturating_mul(5).max(limit).max(20);
-    if is_precise_query_shape(terms, phrases) {
-        return base.max(limit.saturating_mul(10)).max(50);
-    }
-    base
-}
-
-fn is_precise_query_shape(terms: &[String], phrases: &[String]) -> bool {
-    terms.len() == 1 || (phrases.len() == 1 && terms.len() <= 2)
 }
 
 fn sanitize_fts5_query(query: &str) -> String {
@@ -797,21 +791,6 @@ fn extract_search_terms(query: &str) -> Vec<String> {
         }
     }
     terms
-}
-
-fn extract_quoted_phrases(query: &str) -> Vec<String> {
-    let text = query.trim();
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let (phrases, _) = split_quoted(text);
-    let mut unique = Vec::new();
-    for phrase in phrases {
-        if !phrase.is_empty() && !unique.iter().any(|existing| existing == &phrase) {
-            unique.push(phrase);
-        }
-    }
-    unique
 }
 
 fn split_quoted(text: &str) -> (Vec<String>, String) {
@@ -1062,6 +1041,8 @@ mod tests {
                 session_id TEXT NOT NULL,
                 project_key TEXT NOT NULL,
                 project_path TEXT NOT NULL,
+                parent_session_id TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(provider, session_id)
             );",
         )

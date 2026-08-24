@@ -138,30 +138,91 @@ pub async fn expand_summary_node(
     session_id: &str,
     node_id: &str,
 ) -> Result<LcmSummaryExpansion, LcmError> {
-    expand_summary_node_with_content(conn, provider, session_id, node_id, true).await
+    let mut expansions =
+        expand_summary_nodes_with_content(conn, provider, session_id, &[node_id.to_string()], true)
+            .await?;
+    expansions.pop().ok_or(LcmError::SummaryNodeNotFound)
 }
 
-async fn expand_summary_node_with_content(
+/// Expands every requested node against **one** hydration pass.
+///
+/// The node rows, their lineage rows, the raw sources of the whole set, and the
+/// child summary nodes of the whole set are each loaded once, so a page of `N`
+/// explicitly requested nodes costs a fixed number of round trips instead of
+/// `N` independent expansions. Per-node semantics are unchanged: nodes are
+/// assembled in request order and the first ownership or integrity failure
+/// still aborts the whole call with the same error it raised before.
+pub async fn expand_summary_nodes(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
-    node_id: &str,
+    node_ids: &[String],
+) -> Result<Vec<LcmSummaryExpansion>, LcmError> {
+    expand_summary_nodes_with_content(conn, provider, session_id, node_ids, true).await
+}
+
+async fn expand_summary_nodes_with_content(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_ids: &[String],
     include_content: bool,
-) -> Result<LcmSummaryExpansion, LcmError> {
-    let summary =
-        load_summary_node_with_content(conn, provider, session_id, node_id, include_content)
-            .await?;
+) -> Result<Vec<LcmSummaryExpansion>, LcmError> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requested = load_summary_nodes_by_ids(conn, node_ids, include_content).await?;
+
+    // Resolve every requested node up front so the source closure below is the
+    // union of the whole page, then hydrate that union once.
+    let mut summaries = Vec::with_capacity(node_ids.len());
     let mut raw_store_ids = Vec::new();
     let mut child_node_ids = Vec::new();
-    for source_ref in &summary.source_refs {
-        match source_ref {
-            LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
-            LcmSourceRef::SummaryNode { node_id } => child_node_ids.push(node_id.clone()),
+    for node_id in node_ids {
+        let summary = requested
+            .get(node_id)
+            .cloned()
+            .ok_or(LcmError::SummaryNodeNotFound)?;
+        if summary.provider != provider || summary.session_id != session_id {
+            return Err(LcmError::SummaryNodeNotFound);
         }
+        for source_ref in &summary.source_refs {
+            match source_ref {
+                LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
+                LcmSourceRef::SummaryNode { node_id } => child_node_ids.push(node_id.clone()),
+            }
+        }
+        summaries.push(summary);
     }
+
     let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content).await?;
     let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids, include_content).await?;
 
+    let mut expansions = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        expansions.push(assemble_summary_expansion(
+            summary,
+            provider,
+            session_id,
+            include_content,
+            &raw_sources,
+            &child_sources,
+        )?);
+    }
+    Ok(expansions)
+}
+
+/// Assembles one expansion from an already-hydrated source closure. Pure: it
+/// issues no queries, so the round-trip cost of a page lives entirely in
+/// [`expand_summary_nodes_with_content`].
+fn assemble_summary_expansion(
+    summary: LcmSummaryNode,
+    provider: &str,
+    session_id: &str,
+    include_content: bool,
+    raw_sources: &BTreeMap<i64, RawMessageRow>,
+    child_sources: &BTreeMap<String, LcmSummaryNode>,
+) -> Result<LcmSummaryExpansion, LcmError> {
     let mut sources = Vec::with_capacity(summary.source_refs.len());
 
     for source_ref in &summary.source_refs {
@@ -371,86 +432,6 @@ pub fn summary_node_id(
         "summary_hash": summary_hash,
     });
     format!("sum_{}", projected_content_hash(&input.to_string()))
-}
-
-async fn load_summary_node_with_content(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    node_id: &str,
-    include_content: bool,
-) -> Result<LcmSummaryNode, LcmError> {
-    let node = load_summary_node_by_id(conn, node_id, include_content).await?;
-    if node.provider == provider && node.session_id == session_id {
-        Ok(node)
-    } else {
-        Err(LcmError::SummaryNodeNotFound)
-    }
-}
-
-async fn load_summary_node_by_id(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-    include_content: bool,
-) -> Result<LcmSummaryNode, LcmError> {
-    let summary_text = if include_content {
-        "summary_text"
-    } else {
-        "'' AS summary_text"
-    };
-    let sql = format!(
-        "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
-                summary_hash, summary_token_count, source_token_count, source_time_start,
-                source_time_end, expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE node_id = ?1"
-    );
-    let mut rows = conn.query(&sql, params![node_id]).await?;
-    let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
-    let source_refs = load_summary_source_refs(conn, node_id).await?;
-    let node = LcmSummaryNode {
-        node_id: row.get(0)?,
-        provider: row.get(1)?,
-        conversation_id: row.get(2)?,
-        session_id: row.get(3)?,
-        depth: row.get(4)?,
-        summary_text: row.get(5)?,
-        summary_hash: row.get(6)?,
-        summary_token_count: row.get(7)?,
-        source_token_count: row.get(8)?,
-        source_time_start: row.get(9)?,
-        source_time_end: row.get(10)?,
-        expand_hint: row.get(11)?,
-        metadata_json: row.get(12)?,
-        created_at: row.get(13)?,
-        source_refs,
-    };
-    if include_content {
-        verify_summary_content(&node.summary_text, &node.summary_hash)?;
-    }
-    Ok(node)
-}
-
-async fn load_summary_source_refs(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> Result<Vec<LcmSourceRef>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
-             ORDER BY ordinal",
-            params![node_id],
-        )
-        .await?;
-    let mut source_refs = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_kind: String = row.get(0)?;
-        let source_id: String = row.get(1)?;
-        source_refs.push(source_ref_from_db(&source_kind, &source_id)?);
-    }
-    Ok(source_refs)
 }
 
 async fn load_raw_messages_by_store_ids(
