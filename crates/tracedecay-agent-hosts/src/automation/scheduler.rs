@@ -428,23 +428,6 @@ fn schedule_decision_for_trigger(
         ));
     }
 
-    let latest_successful = latest_successful_record(records, task)?;
-
-    // Session-evidence tasks are event-driven across every supported host.
-    // Cursor, Claude, Codex, and Hermes all ingest completed-turn evidence
-    // into the project session store; a newer activity watermark should wake
-    // reflection as soon as the idle window closes instead of waiting for the
-    // periodic interval. The interval remains the repair/backstop schedule.
-    let fresh_session_activity = task_consumes_session_evidence(task)
-        && latest_successful
-            .map(|(record, _)| parse_started_at(record))
-            .transpose()?
-            .is_some_and(|started_at| {
-                activity
-                    .last_activity_secs
-                    .is_some_and(|last_activity| last_activity > started_at)
-            });
-
     // Budget exhaustion and failure cooldown are independent typed states.
     // Evaluate the live budget anchor first so an older failed run whose
     // ordinary cooldown has elapsed cannot bypass a still-active evidence
@@ -471,70 +454,88 @@ fn schedule_decision_for_trigger(
         }
     }
 
-    if let Some((record, completed_at)) = latest_non_skipped_record(
+    let latest_cadence = latest_cadence_terminal_record(
         records,
         task,
         enforce_schedule.then_some(AutomationTrigger::Scheduler),
-    )? {
-        if record.status == AutomationRunStatus::Failed {
-            let failure = agent_task_failure_disposition(
-                record.error_classification,
-                record.error_retryable,
-                record.error.as_deref(),
-            );
-            // Identity-stand first: Permanent is also non-retryable, so a
-            // forever skip here would swallow the suppress that re-admits
-            // after a backend/configuration change. Denied stays off that
-            // forever skip as well — credentials and policy can change, so
-            // it uses the ordinary cooldown.
-            match deterministic_backend_failure_stands(record, config) {
-                Ok(true) => {
-                    return Ok(AutomationScheduleDecision::skipped(
-                        BACKEND_IDENTITY_SUPPRESSED,
-                    ));
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "failed to derive automation backend identity for standing-failure admission"
-                    );
-                    return Err(error);
-                }
+    )?;
+    if let Some((record, completed_at)) = latest_cadence
+        && record.status == AutomationRunStatus::Failed
+    {
+        let failure = agent_task_failure_disposition(
+            record.error_classification,
+            record.error_retryable,
+            record.error.as_deref(),
+        );
+        // Identity-stand first: a deterministic failure stamped under the
+        // current backend stays suppressed until that identity changes.
+        match deterministic_backend_failure_stands(record, config) {
+            Ok(true) => {
+                return Ok(AutomationScheduleDecision::skipped(
+                    BACKEND_IDENTITY_SUPPRESSED,
+                ));
             }
-            if failure.is_non_retryable()
-                && !matches!(
-                    failure.classification,
-                    Some(AgentTaskFailureClass::Permanent | AgentTaskFailureClass::Denied)
-                )
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to derive automation backend identity for standing-failure admission"
+                );
+                return Err(error);
+            }
+        }
+        // Denied is configuration/policy state and uses the ordinary
+        // cooldown so a changed grant can recover without a backend identity
+        // stamp. Other non-retryable failures remain suppressed.
+        if failure.is_non_retryable()
+            && !matches!(failure.classification, Some(AgentTaskFailureClass::Denied))
+        {
+            return Ok(AutomationScheduleDecision::skipped(
+                "scheduler_non_retryable_failure",
+            ));
+        }
+        let cooldown_secs = task_config
+            .cooldown_secs
+            .unwrap_or(DEFAULT_FAILURE_COOLDOWN_SECS);
+        if elapsed_secs(completed_at, now_secs) < cooldown_secs {
+            return Ok(AutomationScheduleDecision::skipped(
+                "scheduler_cooldown_active",
+            ));
+        }
+    }
+
+    // Session-evidence tasks are event-driven across every supported host.
+    // Activity is fresh only relative to the latest terminal that consumed a
+    // scheduling opportunity, including an effectful skip. That prevents an
+    // older successful run from making every post-skip tick look fresh.
+    let fresh_session_activity = task_consumes_session_evidence(task)
+        && latest_cadence
+            .map(|(record, _)| parse_started_at(record))
+            .transpose()?
+            .is_some_and(|started_at| {
+                activity
+                    .last_activity_secs
+                    .is_some_and(|last_activity| last_activity > started_at)
+            });
+
+    if let Some((record, completed_at)) = latest_cadence {
+        // A failed run that has cleared its policy and cooldown gates is
+        // retryable now; it does not wait for the ordinary interval.
+        if record.status != AutomationRunStatus::Failed {
+            if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity)
+                && elapsed_secs(completed_at, now_secs) < interval_secs
             {
                 return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_non_retryable_failure",
+                    "scheduler_interval_not_elapsed",
                 ));
             }
-            let cooldown_secs = task_config
-                .cooldown_secs
-                .unwrap_or(DEFAULT_FAILURE_COOLDOWN_SECS);
-            if elapsed_secs(completed_at, now_secs) < cooldown_secs {
+            if let Some(cron) = cron.filter(|_| !fresh_session_activity)
+                && !cron_is_due(&cron, Some(completed_at), now_secs)
+            {
                 return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_cooldown_active",
+                    "scheduler_cron_not_due",
                 ));
             }
-            return Ok(AutomationScheduleDecision::due());
-        }
-        if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity)
-            && elapsed_secs(completed_at, now_secs) < interval_secs
-        {
-            return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_interval_not_elapsed",
-            ));
-        }
-        if let Some(cron) = cron.filter(|_| !fresh_session_activity)
-            && !cron_is_due(&cron, Some(completed_at), now_secs)
-        {
-            return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_cron_not_due",
-            ));
         }
     } else if let Some(cron) = cron
         && !cron_is_due(&cron, None, now_secs)
@@ -544,18 +545,16 @@ fn schedule_decision_for_trigger(
         ));
     }
 
-    // Session-evidence tasks only re-run when new session activity landed
-    // after their last successful run started; a run without fresh evidence
-    // would re-review the same transcript slices. Skips do not consume the
-    // interval clock, so the task fires on the first tick after new activity.
-    if task_consumes_session_evidence(task)
-        && let Some((record, _)) = latest_successful
-    {
-        let started_at = parse_started_at(record)?;
-        let has_new_activity = activity
-            .last_activity_secs
-            .is_some_and(|last_activity| last_activity > started_at);
-        if !has_new_activity {
+    // Authority is required after failure policy/cooldown gates, so a failed
+    // task cannot become due merely because its cooldown elapsed while the
+    // canonical message-search activity signal is unavailable. Retryable
+    // failures may reuse existing evidence; successes and effectful skips
+    // require genuinely newer activity.
+    if task_consumes_session_evidence(task) {
+        let has_activity_authority = activity.last_activity_secs.is_some();
+        let requires_fresh_activity =
+            latest_cadence.is_some_and(|(record, _)| record.status != AutomationRunStatus::Failed);
+        if !has_activity_authority || (requires_fresh_activity && !fresh_session_activity) {
             return Ok(AutomationScheduleDecision::skipped(
                 "no_new_session_activity",
             ));
@@ -700,18 +699,7 @@ fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&Automa
     }
 }
 
-fn latest_successful_record(
-    records: &[AutomationRunLedgerRecord],
-    task: AgentTaskKind,
-) -> Result<Option<(&AutomationRunLedgerRecord, i64)>> {
-    latest_record_by_canonical_completion(
-        records.iter().filter(|record| {
-            record.task == task && record.status == AutomationRunStatus::Succeeded
-        }),
-    )
-}
-
-fn latest_non_skipped_record(
+fn latest_cadence_terminal_record(
     records: &[AutomationRunLedgerRecord],
     task: AgentTaskKind,
     trigger: Option<AutomationTrigger>,
@@ -719,11 +707,40 @@ fn latest_non_skipped_record(
     latest_record_by_canonical_completion(records.iter().filter(|record| {
         record.task == task
             && trigger.is_none_or(|trigger| record.trigger == trigger)
-            && matches!(
+            && (matches!(
                 record.status,
                 AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
-            )
+            ) || (record.status == AutomationRunStatus::Skipped
+                && !is_scheduler_diagnostic_skip(record.error.as_deref())))
     }))
+}
+
+/// Whether a skipped row records scheduler admission rather than an attempted
+/// task terminal. Admission diagnostics must never move cadence: doing so
+/// would make each `interval_not_elapsed`, disabled, or lock skip postpone the
+/// next real attempt. Other settled skips did enter the task and consume its
+/// evidence/review opportunity, so their completion starts the next interval.
+fn is_scheduler_diagnostic_skip(reason: Option<&str>) -> bool {
+    let Some(reason) = reason else {
+        return false;
+    };
+    reason.starts_with("scheduler_")
+        || matches!(
+            reason,
+            "automation_disabled"
+                | "delegated_host_mode"
+                | "backend_disabled"
+                | "task_not_schedulable"
+                | "task_disabled"
+                | "memory_curator_disabled"
+                | "session_reflector_disabled"
+                | "skill_writer_disabled"
+                | "combined_review_disabled"
+                | "user_job_disabled"
+                | "no_new_session_activity"
+                | SESSION_EVIDENCE_BUDGET_SUPPRESSED
+                | BACKEND_IDENTITY_SUPPRESSED
+        )
 }
 
 fn parse_started_at(record: &AutomationRunLedgerRecord) -> Result<i64> {

@@ -235,6 +235,73 @@ fn scheduler_uses_interval_and_latest_successful_ledger_record() {
 }
 
 #[test]
+fn scheduler_terminal_skips_advance_the_configured_interval() {
+    let config = automation_config(Some("every 15m"), None);
+    let mut skipped = record(
+        "run-skipped",
+        AgentTaskKind::MemoryCurator,
+        AutomationRunStatus::Skipped,
+        1_000,
+    );
+    skipped.error = Some("nothing_to_review".to_string());
+    let mut failed = record(
+        "run-failed",
+        AgentTaskKind::MemoryCurator,
+        AutomationRunStatus::Failed,
+        900,
+    );
+    failed.error = Some("the request is permanently invalid".to_string());
+    failed.error_classification = Some(AgentTaskFailureClass::Permanent);
+    failed.error_retryable = Some(false);
+    let records = vec![failed, skipped];
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_250,
+        )
+        .skip_reason(),
+        Some("scheduler_interval_not_elapsed")
+    );
+    assert!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_900,
+        )
+        .is_due()
+    );
+}
+
+#[test]
+fn scheduler_diagnostic_skips_do_not_advance_the_interval() {
+    let config = automation_config(Some("every 15m"), None);
+    let mut diagnostic = record(
+        "run-diagnostic",
+        AgentTaskKind::MemoryCurator,
+        AutomationRunStatus::Skipped,
+        1_000,
+    );
+    diagnostic.error = Some("scheduler_interval_not_elapsed".to_string());
+
+    assert!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &[diagnostic],
+            SessionActivity::none(),
+            1_001,
+        )
+        .is_due()
+    );
+}
+
+#[test]
 fn fresh_session_activity_bypasses_interval_for_all_host_evidence_tasks() {
     let config = automation_config(Some("every 10m"), None);
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
@@ -258,6 +325,46 @@ fn fresh_session_activity_bypasses_interval_for_all_host_evidence_tasks() {
             "fresh completed-turn evidence should wake {task:?} without waiting for its repair interval"
         );
     }
+}
+
+#[test]
+fn fresh_session_activity_is_relative_to_the_latest_cadence_terminal() {
+    let config = automation_config(Some("every 10m"), None);
+    let success = record(
+        "success",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Succeeded,
+        800,
+    );
+    let mut skipped = record(
+        "skip",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Skipped,
+        1_000,
+    );
+    skipped.error = Some("nothing_to_review".to_string());
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[success, skipped.clone()],
+            SessionActivity::at(900),
+            1_001,
+        )
+        .skip_reason(),
+        Some("scheduler_interval_not_elapsed")
+    );
+    assert!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[skipped],
+            SessionActivity::at(1_100),
+            1_101,
+        )
+        .is_due()
+    );
 }
 
 #[test]
@@ -515,7 +622,7 @@ fn scheduler_supports_all_self_improvement_tasks() {
             &config,
             AgentTaskKind::SessionReflector,
             &[],
-            SessionActivity::none(),
+            SessionActivity::at(900),
             1_000
         )
         .is_due()
@@ -525,7 +632,7 @@ fn scheduler_supports_all_self_improvement_tasks() {
             &config,
             AgentTaskKind::SkillWriter,
             &[],
-            SessionActivity::none(),
+            SessionActivity::at(900),
             1_000
         )
         .is_due()
@@ -958,8 +1065,9 @@ fn scheduler_idle_window_measures_time_since_session_activity() {
     );
     // 600s of quiet have elapsed: the project is idle, the task is due.
     assert!(schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_600).is_due());
-    // Unknown activity (no session store yet) counts as idle.
-    assert!(
+    // Unknown activity satisfies the idle duration but cannot authorize a
+    // session-evidence task.
+    assert_eq!(
         schedule_decision(
             &config,
             AgentTaskKind::SkillWriter,
@@ -967,7 +1075,8 @@ fn scheduler_idle_window_measures_time_since_session_activity() {
             SessionActivity::none(),
             1_100
         )
-        .is_due()
+        .skip_reason(),
+        Some("no_new_session_activity")
     );
 }
 
@@ -1032,21 +1141,17 @@ fn scheduler_skips_session_evidence_tasks_without_new_activity() {
 }
 
 #[test]
-fn scheduler_first_session_evidence_run_is_not_gated_on_activity() {
-    // With no prior successful run there is nothing to deduplicate against;
-    // the runner's own evidence checks handle an empty session store.
+fn scheduler_session_evidence_tasks_stay_dormant_without_message_activity_authority() {
+    // Without the canonical message-search activity watermark there is no
+    // evidence authority for a session task to consume.
     let config = automation_config(Some("every 10m"), None);
 
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::SessionReflector,
-            &[],
-            SessionActivity::none(),
-            1_000
-        )
-        .is_due()
-    );
+    for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
+        assert_eq!(
+            schedule_decision(&config, task, &[], SessionActivity::none(), 1_000).skip_reason(),
+            Some("no_new_session_activity")
+        );
+    }
 }
 
 #[test]
@@ -1073,7 +1178,7 @@ fn scheduler_memory_curator_is_not_gated_on_session_activity() {
 }
 
 #[test]
-fn scheduler_retries_failed_session_evidence_runs_without_new_activity() {
+fn scheduler_retries_failed_session_evidence_runs_with_existing_activity() {
     // The evidence gate keys off the last successful run; a failed run is
     // retried after its cooldown with the same evidence.
     let config = automation_config(Some("every 10m"), None);
@@ -1089,10 +1194,21 @@ fn scheduler_retries_failed_session_evidence_runs_without_new_activity() {
             &config,
             AgentTaskKind::SessionReflector,
             &records,
-            SessionActivity::none(),
+            SessionActivity::at(900),
             1_400
         )
         .is_due()
+    );
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &records,
+            SessionActivity::none(),
+            1_400,
+        )
+        .skip_reason(),
+        Some("no_new_session_activity")
     );
 }
 
