@@ -89,7 +89,12 @@ pub(super) fn remote_query_result_observation(
     )
 }
 
-const MAX_REGISTERED_REMOTE_NODES: usize = 128;
+/// Canonical ceiling on Remote Brain nodes a profile may register.
+///
+/// This is the single declared node-population ceiling: the session registry's
+/// `MAX_RETAINED_REMOTE_NODE_OWNERS` derives from it so the mount admission
+/// check, which refuses before anything is published, always refuses first.
+pub(crate) const MAX_REGISTERED_REMOTE_NODES: usize = 128;
 const MAX_REGISTERED_REMOTE_CREDENTIALS: usize = 8_192;
 
 #[derive(Clone)]

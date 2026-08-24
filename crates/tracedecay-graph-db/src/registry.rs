@@ -3215,4 +3215,50 @@ mod tests {
         assert_ne!(reopened.runtime_identity(), identity);
         assert!(reopened_attachment.shares_runtime_with(&reopened));
     }
+
+    /// `max_open` is a population ceiling for retained owners, so a caller
+    /// sizing it must count *every* owner that will be held, not only the
+    /// per-project ones. This reproduces the daemon's shape at small scale:
+    /// profile-wide owners are attached first, then each project's owners.
+    /// Sized as `profile_wide + per_project * projects` the last project
+    /// attaches; one slot short — the arithmetic slip that made the daemon's
+    /// advertised project capacity unreachable — it is refused with a capacity
+    /// budget error, because a held attachment is never evictable.
+    #[test]
+    fn a_capacity_ceiling_that_omits_profile_wide_owners_refuses_the_final_project() {
+        const PROFILE_WIDE_OWNERS: usize = 2;
+        const OWNERS_PER_PROJECT: usize = 3;
+        const PROJECTS: usize = 2;
+        let required = PROFILE_WIDE_OWNERS + OWNERS_PER_PROJECT * PROJECTS;
+
+        let attach_all = |max_open: usize,
+                          roots: &[TempDir]|
+         -> Result<Vec<crate::GraphDbOwnerAttachmentV1>, GraphDbError> {
+            let registry =
+                GraphDbRegistry::new(GraphDbRegistryConfig { max_open }).unwrap();
+            roots
+                .iter()
+                .enumerate()
+                .map(|(index, root)| {
+                    registry.resolve_owner_attachment(owner_registration(registration_for(
+                        root.path(),
+                        &format!("project.capacity-ceiling-{index}"),
+                    )))
+                })
+                .collect()
+        };
+
+        let roots: Vec<TempDir> = (0..required).map(|_| TempDir::new().unwrap()).collect();
+        let attached = attach_all(required, &roots).expect("derived ceiling admits every owner");
+        assert_eq!(attached.len(), required);
+
+        let short_roots: Vec<TempDir> = (0..required).map(|_| TempDir::new().unwrap()).collect();
+        assert_eq!(
+            attach_all(required - 1, &short_roots).unwrap_err(),
+            GraphDbError::BudgetExhausted {
+                kind: GraphBudgetKind::Capacity,
+                limit: (required - 1) as u64,
+            }
+        );
+    }
 }

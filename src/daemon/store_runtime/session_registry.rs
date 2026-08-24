@@ -55,10 +55,10 @@ use retained_hook_tasks::RetainedHookTasks;
 pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 pub(crate) use profile_memory::open_user_memory_db;
 
-/// Sanity ceilings on concurrently mounted owners, not a bound on how many
-/// projects a profile may enrol.
+/// Sanity ceiling on concurrently mounted project runtime owners, not a bound
+/// on how many projects a profile may enrol.
 ///
-/// These were 8, which is where enrolment actually stopped: a profile with
+/// This was 8, which is where enrolment actually stopped: a profile with
 /// four projects was refused, and once the budget was exhausted even a
 /// read-only `projects list` failed. Nothing about 8 was derived — the working
 /// set of a developer with a few dozen checkouts is far above it.
@@ -72,8 +72,55 @@ pub(crate) use profile_memory::open_user_memory_db;
 /// number of projects actually touched. That is the deliberate trade — a
 /// refusal at 4 projects was the worse failure — and the real fix is idle
 /// project hibernation, which is follow-up work.
+///
+/// This is the *only* declared project-population ceiling. Every other ceiling
+/// that has to admit the same projects is derived from it below, so the
+/// advertised capacity cannot silently become unreachable again.
 const MAX_RETAINED_PROJECT_RUNTIME_OWNERS: usize = 4_096;
-const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = 4_096;
+
+/// Graph owners that exist once per profile rather than once per project: the
+/// profile memory graph and the profile session-relation graph. Both are
+/// retained for the life of the daemon, so they permanently occupy graph
+/// registry slots that no project can use.
+const PROFILE_WIDE_GRAPH_DB_OWNERS: usize = 2;
+
+/// Graph owners one mounted project can hold at the same time.
+///
+/// A `Ready` project holds two: its memory graph and its session-relation
+/// graph. While a session shard is being replaced the project holds a third —
+/// `RecoveryRequired` retains the outgoing session owner alongside the
+/// candidate, and `Faulted` retains both the retained and the faulted session
+/// owner. `drain_retained_graph_owners_for_shutdown` enumerates exactly these
+/// owners, and none of them is reclaimable while the project stays mounted.
+const MAX_GRAPH_DB_OWNERS_PER_PROJECT_RUNTIME: usize = 3;
+
+/// Graph registry slot ceiling, derived so the project ceiling above is
+/// actually reachable.
+///
+/// Written as arithmetic rather than a round literal on purpose. A hand-picked
+/// 8,192 was two slots short of the advertised capacity: the profile-wide
+/// owners take theirs first, so `2 + 2 * 4_095` already filled it and the
+/// 4,096th project failed inside `GraphDbRegistry` before ever reaching
+/// [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`]. Deriving it keeps the two ceilings
+/// from drifting apart when either input changes.
+pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
+    + MAX_GRAPH_DB_OWNERS_PER_PROJECT_RUNTIME * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
+
+/// Remote Brain node owner ceiling, taken from the credential registry rather
+/// than declared independently.
+///
+/// These two ceilings admit the same nodes, and they are not interchangeable
+/// about *when* they refuse. `admit_remote_node_owner` refuses before anything
+/// is published; `DaemonRemoteCredentialAuthorityV1::register_storage` refuses
+/// after `mount_remote_node_storage` has already published the runtime owner
+/// and provisioned the node's `remote.db`. Whenever this ceiling is the looser
+/// of the two, the refusal lands on the later check and leaves a provisioned
+/// database behind — and `mount_registered_remote_nodes` remounts every
+/// discovered `remote.db` at startup with `?`, so the residue turns the next
+/// daemon start into a hard failure. Binding this to the credential ceiling
+/// keeps the earlier, residue-free refusal authoritative by construction.
+const MAX_RETAINED_REMOTE_NODE_OWNERS: usize =
+    crate::daemon::remote_protocol::MAX_REGISTERED_REMOTE_NODES;
 
 struct SessionGraphOwnerV1 {
     graph: GraphDbOwnerAttachmentV1,
@@ -2859,3 +2906,78 @@ mod project_memory_relation_graph_contract_tests;
 
 #[cfg(test)]
 mod tests;
+
+/// Guards on the ceilings above. Each one fails on the exact defect it names,
+/// so raising one ceiling without the ceilings that have to admit the same
+/// population is a test failure rather than a production refusal.
+#[cfg(test)]
+mod owner_capacity_ceiling_tests {
+    use super::*;
+
+    /// The graph registry is what actually refuses a project mount, and the
+    /// profile-wide owners take their slots before any project does. A graph
+    /// ceiling that does not cover
+    /// `profile_wide + per_project * MAX_RETAINED_PROJECT_RUNTIME_OWNERS`
+    /// makes the advertised project capacity unreachable: the hand-picked
+    /// 8,192 left room for only 4,095 projects, so the 4,096th failed inside
+    /// `GraphDbRegistry` with a capacity budget error.
+    #[test]
+    fn graph_slot_ceiling_admits_every_project_the_project_ceiling_advertises() {
+        let required = PROFILE_WIDE_GRAPH_DB_OWNERS
+            .checked_add(
+                MAX_GRAPH_DB_OWNERS_PER_PROJECT_RUNTIME
+                    .checked_mul(MAX_RETAINED_PROJECT_RUNTIME_OWNERS)
+                    .expect("project graph slot demand must not overflow"),
+            )
+            .expect("total graph slot demand must not overflow");
+
+        assert!(
+            MAX_RETAINED_GRAPH_DB_OWNERS >= required,
+            "graph slot ceiling {MAX_RETAINED_GRAPH_DB_OWNERS} cannot admit \
+             {MAX_RETAINED_PROJECT_RUNTIME_OWNERS} projects: they need \
+             {required} slots once the {PROFILE_WIDE_GRAPH_DB_OWNERS} \
+             profile-wide owners have taken theirs"
+        );
+    }
+
+    /// The specific arithmetic the reviewer caught: with the profile-wide
+    /// owners mounted, the *last* project the ceiling advertises must still
+    /// find its own slots. Stated separately from the total so a ceiling that
+    /// is short by exactly the profile-wide owners fails here too.
+    #[test]
+    fn final_advertised_project_still_finds_graph_slots() {
+        let taken_before_final_project = PROFILE_WIDE_GRAPH_DB_OWNERS
+            + MAX_GRAPH_DB_OWNERS_PER_PROJECT_RUNTIME * (MAX_RETAINED_PROJECT_RUNTIME_OWNERS - 1);
+
+        assert!(
+            taken_before_final_project + MAX_GRAPH_DB_OWNERS_PER_PROJECT_RUNTIME
+                <= MAX_RETAINED_GRAPH_DB_OWNERS,
+            "project {MAX_RETAINED_PROJECT_RUNTIME_OWNERS} is refused: \
+             {taken_before_final_project} of {MAX_RETAINED_GRAPH_DB_OWNERS} graph \
+             slots are already taken and it needs \
+             {MAX_GRAPH_DB_OWNERS_PER_PROJECT_RUNTIME} more"
+        );
+    }
+
+    /// Two ceilings admit the same Remote Brain nodes and they refuse at
+    /// different points in the mount. `admit_remote_node_owner` refuses before
+    /// the runtime owner is published and before `remote.db` is provisioned;
+    /// `register_storage` refuses after both. If the mount ceiling is the
+    /// looser of the two, a rejected provisioning leaves a provisioned
+    /// `remote.db` behind, and `mount_registered_remote_nodes` remounts every
+    /// discovered `remote.db` at daemon start with `?` — so the residue wedges
+    /// every subsequent start on the same node.
+    #[test]
+    fn remote_node_mount_ceiling_refuses_before_credential_registration_can() {
+        let credential_ceiling = crate::daemon::remote_protocol::MAX_REGISTERED_REMOTE_NODES;
+
+        assert!(
+            MAX_RETAINED_REMOTE_NODE_OWNERS <= credential_ceiling,
+            "remote mount ceiling {MAX_RETAINED_REMOTE_NODE_OWNERS} exceeds the \
+             credential registry ceiling {credential_ceiling}: node {} would publish \
+             its owner and provision its database before being refused, and the \
+             residue fails every later daemon start",
+            credential_ceiling + 1
+        );
+    }
+}
