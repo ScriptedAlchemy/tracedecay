@@ -9,6 +9,9 @@ use super::*;
 /// evicted to stay within the registry's capacity bound.
 pub(super) type BoundRouteInsertionV1<Server> = (Server, bool, Vec<(ProjectServerKey, Server)>);
 
+/// One retired owner and the project servers that were mounted under it.
+pub(super) type RetiredOwnerServersV1<Server> = (StoreOwnerKey, Vec<(ProjectServerKey, Server)>);
+
 // Fields are `pub(super)` so `branch_admin` can read `server` directly.
 pub(super) struct DatabaseOwnerEntry<Server> {
     pub(super) server: Server,
@@ -285,14 +288,14 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     pub(super) fn retire_lru_ready_under_graph_pressure<F>(
         &mut self,
         mut is_leased: F,
-    ) -> std::result::Result<Option<(StoreOwnerKey, Vec<(ProjectServerKey, Server)>)>, ()>
+    ) -> std::result::Result<Option<RetiredOwnerServersV1<Server>>, ()>
     where
         F: FnMut(&Server) -> bool,
     {
         let owners = self
             .servers
-            .iter()
-            .map(|(key, _)| key.owner.clone())
+            .keys()
+            .map(|key| key.owner.clone())
             .collect::<std::collections::HashSet<_>>();
         let evict = owners
             .into_iter()

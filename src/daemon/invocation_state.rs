@@ -79,7 +79,7 @@ impl DaemonInvocationState {
     }
 
     /// Mount the profile-owned background-worker plan before any projectless
-    /// session or host-admission work can start. The exact ProfileSessions
+    /// session or host-admission work can start. The exact `ProfileSessions`
     /// shard is the persisted user-profile authority; project configuration
     /// must never win this process-wide installation by opening first.
     pub(crate) async fn install_profile_worker_plan(

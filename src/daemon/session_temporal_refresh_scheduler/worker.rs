@@ -25,7 +25,7 @@ use crate::store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 
-const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
 #[hotpath::measure]
 pub(super) async fn run_session_temporal_refresh_scheduler(

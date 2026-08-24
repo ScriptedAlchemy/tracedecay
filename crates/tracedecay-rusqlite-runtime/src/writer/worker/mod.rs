@@ -1612,10 +1612,12 @@ mod auxiliary_scheduling_tests {
     /// validated, reported in telemetry, and never obeyed.
     #[test]
     fn writer_checkpoint_policy_is_the_configured_wal_budget() {
-        let mut admission = tracedecay_store::AdmissionConfigV1::default();
-        admission.wal = tracedecay_store::WalBudgetV1 {
-            soft_limit_bytes: 4 * 1024 * 1024,
-            hard_limit_bytes: 64 * 1024 * 1024,
+        let admission = tracedecay_store::AdmissionConfigV1 {
+            wal: tracedecay_store::WalBudgetV1 {
+                soft_limit_bytes: 4 * 1024 * 1024,
+                hard_limit_bytes: 64 * 1024 * 1024,
+            },
+            ..Default::default()
         };
         admission
             .validate()

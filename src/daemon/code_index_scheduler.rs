@@ -567,7 +567,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
         let mut file = File::open(path).map_err(Self::unavailable)?;
         let mut hasher = Sha256::new();
-        let mut buffer = [0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        let mut buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
         loop {
             let read = file.read(&mut buffer).map_err(Self::unavailable)?;
             if read == 0 {
@@ -591,8 +591,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mut left = File::open(left).map_err(Self::unavailable)?;
         let mut right = File::open(right).map_err(Self::unavailable)?;
-        let mut left_buffer = [0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
-        let mut right_buffer = [0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        let mut left_buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        let mut right_buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
         loop {
             let left_read = left.read(&mut left_buffer).map_err(Self::unavailable)?;
             if left_read == 0 {

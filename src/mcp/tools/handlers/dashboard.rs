@@ -84,7 +84,7 @@ pub(crate) fn compose_dashboard_profile_code_index_worker_settings(
 impl DashboardProfileCodeIndexWorkerSettingsPort
     for DashboardProfileCodeIndexWorkerSettingsAdapter
 {
-    fn read<'a>(&'a self) -> DashboardCodeIndexWorkerSettingsFuture<'a> {
+    fn read(&self) -> DashboardCodeIndexWorkerSettingsFuture<'_> {
         let database = self.database.clone();
         let profile_id = self.profile_id.clone();
         Box::pin(async move {
@@ -98,12 +98,12 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
         })
     }
 
-    fn commit<'a>(
-        &'a self,
+    fn commit(
+        &self,
         selection: CodeIndexWorkerSelectionV1,
         expected_revision: ConfigurationRevisionId,
         idempotency_key: ConfigurationIdempotencyKey,
-    ) -> DashboardCodeIndexWorkerSettingsCommitFuture<'a> {
+    ) -> DashboardCodeIndexWorkerSettingsCommitFuture<'_> {
         let database = self.database.clone();
         let profile_id = self.profile_id.clone();
         let project_root = self.project_root.clone();

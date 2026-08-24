@@ -29,6 +29,21 @@ use crate::{
     GraphProjectionIdentity, GraphReplayCollectionOutcome, VerifiedGraphCommit,
 };
 
+/// The three publication mode choices `publish_verified_inner` varies on.
+///
+/// Grouped because passing them positionally put the function at 8 arguments,
+/// and three adjacent bools at a call site read as noise: `false, true` says
+/// nothing about which knob is which.
+struct GraphPublishModeV1 {
+    /// A manifest supplied by the caller instead of one derived from replay.
+    supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+    /// Reopen metadata rather than treating the existing handle as current.
+    reopen_metadata: bool,
+    /// This call writes a durable staging page, so it retries across the
+    /// boundary to prove the exact commit rather than assuming it landed.
+    durable_stage_boundary: bool,
+}
+
 impl GraphDbRegistry {
     #[hotpath::measure(label = "graph_db.replay_pool.retire", impl_type = "GraphDbRegistry")]
     pub fn retire_one_code_generation_replay(
@@ -410,9 +425,11 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            supplied_manifest,
-            false,
-            false,
+            GraphPublishModeV1 {
+                supplied_manifest,
+                reopen_metadata: false,
+                durable_stage_boundary: false,
+            },
         )
     }
 
@@ -434,9 +451,11 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            supplied_manifest,
-            false,
-            true,
+            GraphPublishModeV1 {
+                supplied_manifest,
+                reopen_metadata: false,
+                durable_stage_boundary: true,
+            },
         )
     }
 
@@ -458,9 +477,11 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            None,
-            false,
-            false,
+            GraphPublishModeV1 {
+                supplied_manifest: None,
+                reopen_metadata: false,
+                durable_stage_boundary: false,
+            },
         )
     }
 
@@ -477,9 +498,11 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            None,
-            true,
-            false,
+            GraphPublishModeV1 {
+                supplied_manifest: None,
+                reopen_metadata: true,
+                durable_stage_boundary: false,
+            },
         )
     }
 
@@ -490,10 +513,13 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
-        reopen_metadata: bool,
-        durable_stage_boundary: bool,
+        mode: GraphPublishModeV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        let GraphPublishModeV1 {
+            supplied_manifest,
+            reopen_metadata,
+            durable_stage_boundary,
+        } = mode;
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
         let database = operation.database().clone();
