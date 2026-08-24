@@ -186,6 +186,8 @@ fn statement(sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlStatement {
 mod authority;
 mod dispatch;
 mod guard;
+#[cfg(feature = "hotpath")]
+mod hotpath_spans;
 mod lease;
 mod limits;
 mod pragma;
