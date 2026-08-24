@@ -54,6 +54,21 @@ fn profile_shard_root(home: &Path) -> PathBuf {
     profile_root(home).join("projects/proj_cli")
 }
 
+fn assert_namespace_absent(path: &Path, context: &str) {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(metadata) => panic!(
+            "{context}: namespace entry remains at {} ({:?})",
+            path.display(),
+            metadata.file_type()
+        ),
+        Err(error) => panic!(
+            "{context}: could not inspect namespace entry {}: {error}",
+            path.display()
+        ),
+    }
+}
+
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
     let profile_root = profile_root(&home);
@@ -1458,6 +1473,177 @@ async fn projects_context_resolves_linked_worktree_path_by_git_common_dir() {
     assert_eq!(
         payload["stores"][0]["store"]["storage_mode"],
         "profile_sharded"
+    );
+}
+
+#[test]
+fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let profile = profile_root(home.path());
+    let config_path = profile.join("config.toml");
+    let identity_path = profile.join("profile-identity.json");
+    std::fs::create_dir_all(&profile).unwrap();
+    let config = toml::to_string_pretty(&tracedecay::user_config::UserConfig::default())
+        .unwrap()
+        .into_bytes();
+    std::fs::write(&config_path, &config).unwrap();
+    let identity = br#"{
+  "schema_version": 1,
+  "brain_id": "brain.wipe-test",
+  "profile_id": "profile.wipe-test"
+}"#;
+    std::fs::write(&identity_path, identity).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let database_paths = [
+        profile.join("global.db"),
+        profile.join("user-sessions.db"),
+        profile.join("user-memory.db"),
+        profile.join("projects/orphan-project/tracedecay.db"),
+        profile.join("projects/orphan-project/sessions.db"),
+        profile.join("stores/legacy-orphan/tracedecay.db"),
+        profile.join(format!("remote/nodes/{}/remote.db", "a".repeat(64))),
+    ];
+    for database in &database_paths {
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut member = database.as_os_str().to_os_string();
+            member.push(suffix);
+            std::fs::write(PathBuf::from(member), b"not a compatible SQLite schema").unwrap();
+        }
+    }
+    let grafeo_paths = [
+        profile.join("user-sessions.grafeo"),
+        profile.join("user-memory.grafeo"),
+    ];
+    for path in &grafeo_paths {
+        std::fs::write(path, b"incompatible graph store").unwrap();
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push(".wal");
+        let wal = PathBuf::from(wal);
+        std::fs::create_dir(&wal).unwrap();
+        std::fs::write(wal.join("segment"), b"graph wal").unwrap();
+    }
+    let host_admission = profile.join(".user-sessions.db.host-admission");
+    std::fs::create_dir(&host_admission).unwrap();
+    std::fs::write(host_admission.join("pending"), b"admission spool").unwrap();
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["wipe", "--all", "--yes"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "wipe --all must not open the databases it destroys\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for named_state in [
+        "user memory and sessions",
+        "project, legacy, and remote stores",
+        "Grafeo WAL and host-admission state",
+    ] {
+        assert!(
+            stderr.contains(named_state),
+            "wipe --all warning omitted {named_state:?}\nstderr:\n{stderr}"
+        );
+    }
+    for database in &database_paths {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut member = database.as_os_str().to_os_string();
+            member.push(suffix);
+            assert_namespace_absent(
+                &PathBuf::from(member),
+                "wipe --all left a database family member",
+            );
+        }
+    }
+    for removed_root in ["projects", "stores", "remote"] {
+        assert_namespace_absent(
+            &profile.join(removed_root),
+            "wipe --all left a fixed database root",
+        );
+    }
+    for path in grafeo_paths {
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push(".wal");
+        assert_namespace_absent(&path, "wipe --all left a Grafeo store");
+        assert_namespace_absent(&PathBuf::from(wal), "wipe --all left a Grafeo WAL");
+    }
+    assert_namespace_absent(
+        &host_admission,
+        "wipe --all left the profile host-admission database companion",
+    );
+    assert_eq!(std::fs::read(&config_path).unwrap(), config);
+    assert_eq!(std::fs::read(&identity_path).unwrap(), identity);
+}
+
+#[test]
+fn wipe_all_rejects_the_user_home_as_its_profile_root() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_temp_path(home.path());
+    let sentinel = home.join("projects/operator-owned/sentinel");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"preserve").unwrap();
+
+    let mut command = tracedecay_command_without_daemon(&home, project.path());
+    command.env("TRACEDECAY_DATA_DIR", &home);
+    command.args(["wipe", "--all", "--yes"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        !output.status.success(),
+        "wipe --all must reject the user home as a database profile root"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve",
+        "dangerous-root admission must run before any deletion"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wipe_local_returns_failure_when_a_selected_store_cannot_be_deleted() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_profile_sharded_fixture(home.path(), project.path());
+    let data_root = profile_shard_root(home.path());
+    let blocked = data_root.join("blocked");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::write(blocked.join("retry-authority"), b"preserve").unwrap();
+    let marker = EnrollmentMarker {
+        project_id: "proj_cli".to_string(),
+        storage_mode: StorageMode::ProfileSharded,
+    };
+    let marker_path = tracedecay::storage::legacy_enrollment_marker_path(project.path());
+    std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+    std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["wipe", "--yes"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    if blocked.exists() {
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a selected-store deletion failure must be a nonzero CLI result\nstderr:\n{stderr}"
+    );
+    assert!(
+        data_root.exists(),
+        "failed local wipe must retain a discoverable target for retry"
+    );
+    assert!(
+        !stderr.contains("Wiped 0 project(s)"),
+        "a failed local wipe must not print a green success summary\nstderr:\n{stderr}"
     );
 }
 

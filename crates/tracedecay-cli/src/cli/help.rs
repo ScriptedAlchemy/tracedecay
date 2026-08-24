@@ -607,18 +607,20 @@ Related: tracedecay projects (registry view), tracedecay wipe.";
 
 pub(crate) const WIPE_LONG_ABOUT: &str = "\
 Deletes .tracedecay stores (code graph, memory, sessions) for the current \
-folder, its parents, and its children — or every tracked project with --all. \
+folder, its parents, and its children. With --all, deletes the complete \
+profile-scoped database state, including global, user memory/session, project, \
+legacy, remote, Grafeo WAL, and host-admission stores. Profile identity, \
+configuration, and agent integration config remain untouched. \
 Destructive and unrecoverable; re-create indexes with `tracedecay init`. \
-Agent integration config is untouched (see `tracedecay uninstall`). \
 Prompts for a `go!` confirmation unless `--yes` is passed.";
 
 pub(crate) const WIPE_AFTER_HELP: &str = "\
 Examples:
   tracedecay wipe                                Wipe stores around the cwd
-  tracedecay wipe --all                          Wipe every tracked project
+  tracedecay wipe --all                          Wipe all profile database state
   tracedecay wipe --all --yes                    Confirm without the prompt
 
-Related: tracedecay list (see what would be affected), tracedecay init
+Related: tracedecay list (inspect nearby project stores), tracedecay init
 (re-index afterwards), tracedecay uninstall (remove agent config instead).";
 
 pub(crate) const LIST_LONG_ABOUT: &str = "\

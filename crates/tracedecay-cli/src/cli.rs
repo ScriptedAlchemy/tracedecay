@@ -720,10 +720,10 @@ pub enum Commands {
         #[command(subcommand)]
         action: ProfileStorageAction,
     },
-    /// Wipe local tracedecay DBs (current folder, parents, and children)
+    /// Wipe local stores, or all profile database state with `--all`
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
     Wipe {
-        /// Wipe ALL tracked projects so the global DB ends empty
+        /// Wipe ALL profile database state while preserving identity and config
         #[arg(short, long)]
         all: bool,
     },
