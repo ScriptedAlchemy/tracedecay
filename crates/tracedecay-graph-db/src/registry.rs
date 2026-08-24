@@ -1894,6 +1894,16 @@ fn rollback_retiring_under_lock(
     Ok(())
 }
 
+/// Reclaims one idle owner so `opening` can take its slot.
+///
+/// A candidate must be `Ready` *and* unleased, and a mounted project never is:
+/// the daemon holds its `GraphDbOwnerAttachmentV1` for as long as the project
+/// stays mounted, so `is_unleased()` stays false and the search below cannot
+/// select it. In practice that means this reclaims nothing for live projects
+/// and the caller's `max_open` behaves as a population ceiling rather than a
+/// working-set one. Making it a true LRU needs a way to hibernate an idle
+/// project's owner and remount it on next access; until that exists, the
+/// ceilings are sized as runaway guards instead.
 fn reserve_capacity_eviction(
     state: &mut RegistryState,
     max_open: usize,

@@ -101,7 +101,14 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
-            GraphDbRegistryConfig { max_open: 8 },
+            // Two graph owners per mounted project (its project shard and its
+            // session-relation shard) plus up to two profile-wide owners, so
+            // the previous 8 admitted exactly three projects before refusing
+            // the fourth. Sized here as a runaway guard well above any real
+            // working set rather than as a population bound; see
+            // MAX_RETAINED_PROJECT_RUNTIME_OWNERS for what actually bounds
+            // residency today.
+            GraphDbRegistryConfig { max_open: 8_192 },
             graph_manifest_provider.clone(),
         )
         .map_err(|error| {
