@@ -35,22 +35,23 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     if continuation.is_some() {
         return outcome;
     }
-    let mut unit_succeeded = outcome.is_complete();
-    if !cancellation.is_cancelled() {
-        let code_generation_succeeded =
-            crate::daemon::store_maintenance::run_code_generation_retention(
-                graph,
-                code_index_schedulers,
-                maintenance_observations,
-                cancellation,
-            )
-            .await;
-        unit_succeeded &= code_generation_succeeded;
-        if !code_generation_succeeded {
-            outcome = MaintenanceTickOutcome::Retry;
-        }
+    let semantic_collection_complete = outcome.is_complete();
+    let code_generation_succeeded = if !cancellation.is_cancelled() {
+        crate::daemon::store_maintenance::run_code_generation_retention(
+            graph,
+            code_index_schedulers,
+            maintenance_observations,
+            cancellation,
+        )
+        .await
+    } else {
+        false
+    };
+    if !code_generation_succeeded && !cancellation.is_cancelled() {
+        outcome = MaintenanceTickOutcome::Retry;
     }
-    if unit_succeeded
+    if semantic_collection_complete
+        && code_generation_succeeded
         && !cancellation.is_cancelled()
         && maintenance_observations.semantic_vector_scope_collection_ready(graph.project_root())
     {
