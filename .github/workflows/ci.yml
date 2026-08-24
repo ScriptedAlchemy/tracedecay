@@ -494,6 +494,13 @@ jobs:
           printf '%s\n' '<!doctype html><title>hawk</title>' > dashboard/app-dist/index.html
 
       - name: Hawk
+        # Reports, does not gate. The job header above states Hawk is not a
+        # required check until the workspace is clean under `-D warnings`, but
+        # the step hard-failed anyway, so Hawk showed as a red required check
+        # while the workspace carries ~9k visibility findings. Keep `-D
+        # warnings` so the report stays honest, and drop the gate until the
+        # backlog is burned down and this line can be removed.
+        continue-on-error: true
         run: cargo +1.97.1 hawk check --target-dir target/hawk -D warnings
 
   fmt:
