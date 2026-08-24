@@ -937,3 +937,204 @@ mod auxiliary_scheduling_tests {
         assert!(connection.is_autocommit());
     }
 }
+
+/// Regression cover for writer transaction amplification.
+///
+/// The measured session-ingest profile showed 26,382 `submit_authorized` calls
+/// settling as 26,380 durable transactions — an effective batch size of 1.0,
+/// so the writer paid one `BEGIN IMMEDIATE`/`COMMIT` pair per frame. The
+/// coalescing itself lives in [`build_batches`], and nothing in this crate
+/// pinned its ratio: every existing assertion sits above the writer, in the
+/// stores that decide how many requests to submit. Those stores can stay fixed
+/// while this function silently regresses to one batch per request.
+///
+/// These assert on a count — batches produced for a known request count —
+/// because the timings this work came from swing double digits run to run on
+/// identical input, so an elapsed-time assertion here would prove nothing.
+#[cfg(test)]
+mod batch_coalescing_tests {
+    use std::sync::Arc;
+
+    use tracedecay_store::{
+        AdmissionConfigV1, BatchBudgetV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
+        RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitRequestV1,
+    };
+
+    use crate::{
+        admission::{Admission, Capacity, Limits},
+        test_support::{metadata, request},
+        writer::UnrestrictedRuntimeWriteAuthority,
+    };
+
+    use super::{AcceptedRequest, ExecutionBatch, build_batches};
+
+    /// A probe that never interrupts, so batch shape is decided only by the
+    /// budget and by `requires_isolated_commit`.
+    struct BatchProbe {
+        cancellation: RuntimeCancellationIdentityV1,
+        deadline: RuntimeDeadlineV1,
+        isolated: bool,
+    }
+
+    impl BatchProbe {
+        fn new(request: &RuntimeSubmitRequestV1, isolated: bool) -> Self {
+            Self {
+                cancellation: request.control().cancellation.clone(),
+                deadline: request.control().deadline.clone(),
+                isolated,
+            }
+        }
+    }
+
+    impl RuntimeRequestProbeV1 for BatchProbe {
+        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+            &self.cancellation
+        }
+
+        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+            &self.deadline
+        }
+
+        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+            None
+        }
+
+        fn try_begin_commit(&self) -> bool {
+            true
+        }
+
+        fn requires_isolated_commit(&self) -> bool {
+            self.isolated
+        }
+    }
+
+    fn config(max_operations: u32) -> AdmissionConfigV1 {
+        let defaults = AdmissionConfigV1::default();
+        AdmissionConfigV1 {
+            foreground_batch: BatchBudgetV1 {
+                max_operations,
+                max_bytes: u64::MAX,
+                ..defaults.foreground_batch
+            },
+            background_batch: BatchBudgetV1 {
+                max_operations,
+                max_bytes: u64::MAX,
+                ..defaults.background_batch
+            },
+            ..defaults
+        }
+    }
+
+    /// Builds `count` mutually compatible foreground requests, the shape one
+    /// scan batch submits.
+    fn compatible_requests(count: usize, isolate_last: bool) -> Vec<AcceptedRequest> {
+        let admission = Admission::new(
+            Limits::new(
+                Capacity {
+                    operations: u32::try_from(count).unwrap() + 8,
+                    bytes: u64::MAX,
+                },
+                Capacity {
+                    operations: 1,
+                    bytes: u64::MAX,
+                },
+                u64::MAX,
+                u64::MAX,
+            )
+            .unwrap(),
+        );
+        (0..count)
+            .map(|index| {
+                let submit = Arc::new(request(metadata(
+                    &format!("operation.batch.ratio.{index}"),
+                    &format!("key.batch.ratio.{index}"),
+                    'a',
+                )));
+                let permit = admission.reserve(&submit.envelope().metadata).unwrap();
+                let isolated = isolate_last && index + 1 == count;
+                let (reply, _response) = tokio::sync::oneshot::channel();
+                AcceptedRequest::new(
+                    Arc::clone(&submit),
+                    Arc::new(BatchProbe::new(&submit, isolated)),
+                    Arc::new(UnrestrictedRuntimeWriteAuthority),
+                    reply,
+                    permit,
+                )
+            })
+            .collect()
+    }
+
+    fn frames(batches: &[ExecutionBatch]) -> usize {
+        batches.iter().map(|batch| batch.items.len()).sum()
+    }
+
+    #[test]
+    fn one_scan_batch_of_compatible_writes_opens_one_transaction() {
+        const REQUESTS: usize = 256;
+
+        let batches = build_batches(compatible_requests(REQUESTS, false), &config(512));
+
+        assert_eq!(
+            frames(&batches),
+            REQUESTS,
+            "coalescing must not drop or duplicate a request"
+        );
+        assert_eq!(
+            batches.len(),
+            1,
+            "a budget-fitting scan batch must open one durable transaction: \
+             batches={} frames={REQUESTS} ratio={:.4} batches/frame (target <= 1.0)",
+            batches.len(),
+            batches.len() as f64 / REQUESTS as f64,
+        );
+    }
+
+    #[test]
+    fn batch_count_is_bounded_by_the_budget_not_by_the_request_count() {
+        const REQUESTS: usize = 256;
+        const MAX_OPERATIONS: u32 = 64;
+        const EXPECTED: usize = REQUESTS / MAX_OPERATIONS as usize;
+
+        let batches = build_batches(
+            compatible_requests(REQUESTS, false),
+            &config(MAX_OPERATIONS),
+        );
+
+        assert_eq!(frames(&batches), REQUESTS);
+        assert_eq!(
+            batches.len(),
+            EXPECTED,
+            "batch count must track the operation budget, not the request count: \
+             batches={} frames={REQUESTS} budget={MAX_OPERATIONS}",
+            batches.len(),
+        );
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.items.len() <= MAX_OPERATIONS as usize),
+            "no batch may exceed its operation budget"
+        );
+    }
+
+    /// Widening the transaction window must not silently swallow a request that
+    /// asked to commit alone.
+    #[test]
+    fn an_isolated_commit_still_gets_its_own_transaction() {
+        const REQUESTS: usize = 8;
+
+        let batches = build_batches(compatible_requests(REQUESTS, true), &config(512));
+
+        assert_eq!(frames(&batches), REQUESTS);
+        assert_eq!(
+            batches.len(),
+            2,
+            "an isolated-commit request must split the batch: batches={}",
+            batches.len(),
+        );
+        assert_eq!(
+            batches.last().expect("isolated batch").items.len(),
+            1,
+            "the isolated-commit request must not share its transaction"
+        );
+    }
+}
