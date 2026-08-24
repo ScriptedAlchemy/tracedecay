@@ -5,6 +5,7 @@
 
 mod access;
 mod anchors;
+mod ci_cache;
 mod decoder;
 mod discovery;
 mod dto;
