@@ -22,6 +22,10 @@ use super::{
 pub const DEFAULT_PER_SHARD_QUEUE_OPERATIONS: u32 = 2_048;
 pub const DEFAULT_PER_SHARD_QUEUE_BYTES: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_GLOBAL_QUEUE_BYTES: u64 = 64 * 1024 * 1024;
+/// Ceiling for [`GlobalQueueProfileV1::ExplicitWorkstation`]. This is the
+/// single largest volume of admission-payload bytes the runtime will ever
+/// hold in flight, under any profile, and it is what [`WAL_HARD_LIMIT_BYTES`]
+/// is deliberately sized against (see that constant's doc comment).
 pub const WORKSTATION_GLOBAL_QUEUE_BYTES: u64 = 256 * 1024 * 1024;
 pub const FOREGROUND_BATCH_MAX_OPERATIONS: u32 = 128;
 pub const FOREGROUND_BATCH_MAX_BYTES: u64 = 1024 * 1024;
@@ -29,7 +33,44 @@ pub const FOREGROUND_BATCH_MAX_DELAY_MS: u64 = 2;
 pub const BACKGROUND_BATCH_MAX_OPERATIONS: u32 = 512;
 pub const BACKGROUND_BATCH_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const BACKGROUND_BATCH_MAX_DELAY_MS: u64 = 10;
+/// Ceiling on [`WalBudgetV1::soft_limit_bytes`], flat and **not** scaled by
+/// [`GlobalQueueProfileV1`].
+///
+/// Crossing the soft threshold only asks the writer's checkpoint controller
+/// to *attempt* an opportunistic, non-blocking PASSIVE checkpoint on the next
+/// evaluation (`tracedecay-rusqlite-runtime`'s
+/// `WriterCheckpointController::evaluate`, run once per committed write
+/// batch, each batch capped at a few MiB). It is a liveness/throughput knob,
+/// not a durability boundary — unlike [`WAL_HARD_LIMIT_BYTES`], nothing
+/// blocks admission or readers while only the soft threshold is crossed.
+///
+/// Under [`GlobalQueueProfileV1::ExplicitWorkstation`] the queue ceiling
+/// ([`WORKSTATION_GLOBAL_QUEUE_BYTES`]) is 8x this value, so a full queue
+/// drain can run well past the soft threshold before the checkpoint
+/// controller ever samples the WAL. That is intentional, not a sizing bug:
+/// the controller samples after every batch (not once per drain), so soft
+/// pressure is still observed and PASSIVE checkpoints are still attempted
+/// far in advance of [`WAL_HARD_LIMIT_BYTES`], which remains the unscaled,
+/// profile-independent ceiling that actually bounds WAL growth (it triggers
+/// `CheckpointPressure::BlockGeneral`, gating new readers, when a PASSIVE
+/// attempt cannot fully drain the WAL). A workstation profile simply means
+/// checkpoints keep firing at the same absolute 32 MiB cadence relative to a
+/// larger admitted-write ceiling — i.e. checkpointing runs more often
+/// relative to that ceiling, never less safely. See
+/// `wal_soft_limit_is_not_scaled_by_the_queue_profile` and
+/// `explicit_workstation_permits_queue_bytes_far_above_the_flat_wal_soft_limit`
+/// in the storage runtime contract tests for the pinned relationship.
 pub const WAL_SOFT_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
+/// Ceiling on [`WalBudgetV1::hard_limit_bytes`], flat and **not** scaled by
+/// [`GlobalQueueProfileV1`] — deliberately equal to
+/// [`WORKSTATION_GLOBAL_QUEUE_BYTES`], the largest in-flight admission
+/// volume the runtime will ever permit under any profile. That equality is
+/// the actual safety invariant: one full queue drain, under the most
+/// permissive profile that exists, must still fit within the hard WAL
+/// ceiling, so the ceiling is reachable only through ordinary queue-admission
+/// backpressure, never overshot in one uncontrolled leap. Crossing it
+/// escalates to `CheckpointPressure::BlockGeneral`, which blocks new general
+/// readers until a checkpoint can fully drain the WAL.
 pub const WAL_HARD_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_MIN_READERS_PER_HOT_SHARD: u16 = 2;
 pub const DEFAULT_MAX_READERS_PER_HOT_SHARD: u16 = 8;
@@ -333,6 +374,14 @@ impl AdmissionConfigV1 {
             BACKGROUND_BATCH_MAX_BYTES,
             BACKGROUND_BATCH_MAX_DELAY_MS,
         )?;
+        // Both WAL ceilings are deliberately flat: neither reads
+        // `self.global_queue_profile`. See the doc comments on
+        // `WAL_SOFT_LIMIT_BYTES` and `WAL_HARD_LIMIT_BYTES` for why an
+        // `ExplicitWorkstation` queue (up to `WORKSTATION_GLOBAL_QUEUE_BYTES`)
+        // does not raise the soft-limit ceiling: soft pressure is a
+        // best-effort checkpoint trigger sampled every batch, not a
+        // durability boundary, while the hard ceiling is already sized to
+        // the largest queue any profile can select.
         if self.wal.soft_limit_bytes > WAL_SOFT_LIMIT_BYTES {
             return Err(StorageRuntimeContractErrorV1::LimitExceeded {
                 field: "WAL soft limit",

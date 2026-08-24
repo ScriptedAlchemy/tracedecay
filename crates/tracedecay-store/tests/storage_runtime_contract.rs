@@ -286,6 +286,71 @@ fn identity_and_budget_validation_fail_closed() {
     assert!(serde_json::from_value::<AdmissionConfigV1>(invalid_wire).is_err());
 }
 
+/// `WAL_SOFT_LIMIT_BYTES` is a flat, profile-independent ceiling: it stays
+/// pinned to half of the *standard* (default) global queue, not half of
+/// whatever queue profile is actually selected. Pins the currently
+/// undocumented numeric relationship (see the doc comment on
+/// `WAL_SOFT_LIMIT_BYTES`) so a future edit to either constant is a
+/// deliberate, reviewed change rather than an accidental drift.
+#[test]
+fn wal_soft_limit_is_not_scaled_by_the_queue_profile() {
+    assert_eq!(WAL_SOFT_LIMIT_BYTES, DEFAULT_GLOBAL_QUEUE_BYTES / 2);
+    assert_eq!(WAL_HARD_LIMIT_BYTES, WORKSTATION_GLOBAL_QUEUE_BYTES);
+
+    // Selecting `ExplicitWorkstation` does not relax the soft-limit ceiling:
+    // an operator asking for a soft limit scaled the same way against the
+    // *workstation* queue (half of 256 MiB) is still rejected.
+    let scaled_soft_limit_rejected = AdmissionConfigV1 {
+        global_queue_max_bytes: WORKSTATION_GLOBAL_QUEUE_BYTES,
+        global_queue_profile: GlobalQueueProfileV1::ExplicitWorkstation,
+        wal: WalBudgetV1 {
+            soft_limit_bytes: WORKSTATION_GLOBAL_QUEUE_BYTES / 2,
+            hard_limit_bytes: WAL_HARD_LIMIT_BYTES,
+        },
+        ..AdmissionConfigV1::default()
+    }
+    .validate();
+    assert!(matches!(
+        scaled_soft_limit_rejected,
+        Err(StorageRuntimeContractErrorV1::LimitExceeded {
+            field: "WAL soft limit",
+            actual,
+            max,
+        }) if actual == WORKSTATION_GLOBAL_QUEUE_BYTES / 2 && max == WAL_SOFT_LIMIT_BYTES
+    ));
+}
+
+/// Under `ExplicitWorkstation`, one full queue drain (up to
+/// `WORKSTATION_GLOBAL_QUEUE_BYTES`, 8x `WAL_SOFT_LIMIT_BYTES`) is accepted
+/// by `AdmissionConfigV1::validate` together with the unscaled default WAL
+/// budget. That is intentional (see the doc comments on `WAL_SOFT_LIMIT_BYTES`
+/// and `WAL_HARD_LIMIT_BYTES`): the hard ceiling, not the soft threshold, is
+/// what bounds WAL growth, and it is sized to exactly this queue ceiling for
+/// every profile, so it is never a looser bound than the largest queue that
+/// can be selected.
+#[test]
+fn explicit_workstation_permits_queue_bytes_far_above_the_flat_wal_soft_limit() {
+    let config = AdmissionConfigV1 {
+        global_queue_max_bytes: WORKSTATION_GLOBAL_QUEUE_BYTES,
+        global_queue_profile: GlobalQueueProfileV1::ExplicitWorkstation,
+        ..AdmissionConfigV1::default()
+    };
+    config.validate().unwrap();
+
+    assert_eq!(config.global_queue_max_bytes, WORKSTATION_GLOBAL_QUEUE_BYTES);
+    assert_eq!(config.wal.soft_limit_bytes, WAL_SOFT_LIMIT_BYTES);
+    assert_eq!(
+        config.global_queue_max_bytes / config.wal.soft_limit_bytes,
+        8
+    );
+
+    // The hard ceiling remains a real ceiling: it is never below the queue
+    // volume it is meant to bound, under either profile that exists today.
+    assert!(WAL_HARD_LIMIT_BYTES >= DEFAULT_GLOBAL_QUEUE_BYTES);
+    assert!(WAL_HARD_LIMIT_BYTES >= WORKSTATION_GLOBAL_QUEUE_BYTES);
+    assert!(config.wal.hard_limit_bytes > config.wal.soft_limit_bytes);
+}
+
 #[test]
 fn identical_idempotency_replays_and_changed_commands_conflict() {
     let committed = IdempotencyIdentityV1 {
