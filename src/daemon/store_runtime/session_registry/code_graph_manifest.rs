@@ -452,8 +452,10 @@ impl DaemonCodeGraphManifestProviderV1 {
         &self,
         owner: &GraphProjectionIdentityV1,
         source: &SealedCodeGenerationReplay,
-    ) -> Result<Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>, GraphDbError>
-    {
+    ) -> Result<
+        Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+        GraphDbError,
+    > {
         let offers = self.decoded.read().map_err(|_| {
             GraphDbError::unavailable("code generation manifest provider lock is poisoned")
         })?;

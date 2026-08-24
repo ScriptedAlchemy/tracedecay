@@ -509,8 +509,8 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
             .expect("active generation pointer"),
     )
     .expect("decode active generation pointer");
-    let sealed_state_digest =
-        SealedGraphStateDigest::try_from(pointer.state_digest.clone()).expect("sealed state digest");
+    let sealed_state_digest = SealedGraphStateDigest::try_from(pointer.state_digest.clone())
+        .expect("sealed state digest");
 
     // Deliberately empty: the provider has nothing it could read from either the
     // canonical root or the replay pool.
