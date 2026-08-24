@@ -426,9 +426,12 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
     eprintln!();
     if all {
         eprintln!(
-            "\x1b[1;31mThis will wipe \x1b[5mALL\x1b[25;1;31m tracked tracedecay projects \
-             AND empty the global DB.\x1b[0m"
+            "\x1b[1;31mThis will wipe \x1b[5mALL\x1b[25;1;31m profile-scoped database state:\x1b[0m"
         );
+        eprintln!("  \x1b[31m✗\x1b[0m global registry, user memory and sessions");
+        eprintln!("  \x1b[31m✗\x1b[0m project, legacy, and remote stores");
+        eprintln!("  \x1b[31m✗\x1b[0m Grafeo WAL and host-admission state");
+        eprintln!("Profile identity, configuration, and agent integrations are preserved.");
     } else {
         eprintln!(
             "\x1b[1;31mThis will wipe local tracedecay DBs in the current folder \
@@ -436,9 +439,9 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
         );
     }
     eprintln!();
-    if targets.is_empty() {
+    if !all && targets.is_empty() {
         eprintln!("  \x1b[33m(no project .tracedecay directories found)\x1b[0m");
-    } else {
+    } else if !targets.is_empty() {
         eprintln!("Targets:");
         for t in targets {
             eprintln!(
@@ -450,9 +453,6 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
                 eprintln!("    marker: {}", marker_root.display());
             }
         }
-    }
-    if all && let Some(p) = tracedecay::global_db::global_db_path() {
-        eprintln!("  \x1b[31m✗\x1b[0m {} (global DB)", p.display());
     }
     eprintln!();
     eprintln!("\x1b[1;5;33mThis cannot be undone.\x1b[0m");
