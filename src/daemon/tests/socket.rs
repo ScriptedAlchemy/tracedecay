@@ -725,9 +725,22 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
+    let endpoint = super::super::transport::DaemonEndpoint::Unix(
+        client_identity.profile_root.join("daemon.sock"),
+    );
+    let daemon_authority = super::super::authority::DaemonAuthority::acquire(
+        &client_identity.profile_root,
+        &endpoint,
+        "user-session-read-test",
+    )
+    .expect("daemon authority");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &client_identity.profile_root,
+        daemon_authority.record().epoch,
+        &daemon_authority.record().process_run_id,
+    )
+    .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
-    let _database_scope =
-        enter_test_daemon_database_scope(&client_identity.profile_root, "user-session-read-test");
     let unregistered_project = home.join("unregistered-project");
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
@@ -783,9 +796,10 @@ async fn user_session_read_bypasses_unregistered_project_route() {
             .expect("message search JSON text"),
     )
     .expect("message search payload");
-    assert_eq!(payload["status"], "ok", "{payload}");
-    assert_eq!(payload["outcome"], "complete_zero", "{payload}");
-    assert_eq!(payload["store_scope"], "profile");
+    let message_search = &payload["outcome"]["value"]["payload"];
+    assert_eq!(message_search["status"], "ok", "{payload}");
+    assert_eq!(message_search["outcome"], "complete_zero", "{payload}");
+    assert_eq!(message_search["store_scope"], "profile");
 
     server_task
         .await

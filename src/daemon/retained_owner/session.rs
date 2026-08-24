@@ -34,7 +34,7 @@ use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_usecases::context::{SessionRootId, SessionStoreId};
+use tracedecay_usecases::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
 use tracedecay_usecases::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
@@ -42,9 +42,10 @@ use tracedecay_usecases::session::{
 use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
 use super::session_refresh::{RetainedSessionRefreshPortV1, admitted_session_refresh_command};
 use crate::daemon::session_retrieval::{
-    SessionApplicationRetrievalPortV1, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
-    SessionRetrievalStoreScope, SessionTemporalMetadataView,
+    DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
+    SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::TraceDecayError;
 use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
@@ -76,6 +77,58 @@ pub(super) struct DirectRetainedSessionPortV1 {
     authorities: ProjectRetainedSessionAuthoritiesV1,
 }
 
+pub(super) struct DirectProfileRetainedSessionPortV1<'a> {
+    registry: &'a DaemonSessionRuntimeRegistryV1,
+    identity: ResolvedSessionIdentity,
+}
+
+impl<'a> DirectProfileRetainedSessionPortV1<'a> {
+    pub(super) const fn profile(
+        registry: &'a DaemonSessionRuntimeRegistryV1,
+        identity: ResolvedSessionIdentity,
+    ) -> Self {
+        Self { registry, identity }
+    }
+
+    async fn execute_message_search(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &MessageSearchRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        ensure_profile_message_scope(request)?;
+        let input = MessageSearchInput::parse(request)?;
+        let query = input.query()?;
+        let database = self
+            .bounded(context, self.registry.profile_sessions())
+            .await?;
+        let retrieval =
+            DaemonSessionRetrievalService::new_admitted_profile(database, self.identity.clone())
+                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        let outcome = retrieve_bounded(context, &retrieval, query).await?;
+        let result = input.result(outcome, SessionRetrievalStoreScope::Profile)?;
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::MessageSearch,
+            RetainedSurfaceResultV1::MessageSearch(result),
+        )
+    }
+
+    async fn bounded<T, F>(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        future: F,
+    ) -> Result<T, RetainedSurfaceExecutionErrorV1>
+    where
+        F: std::future::Future<Output = Result<T, TraceDecayError>>,
+    {
+        tokio::select! {
+            biased;
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead)),
+            result = super::bounded_execution(context, future) => result,
+        }
+    }
+}
+
 impl DirectRetainedSessionPortV1 {
     pub(super) const fn project(authorities: ProjectRetainedSessionAuthoritiesV1) -> Self {
         Self { authorities }
@@ -90,7 +143,7 @@ impl DirectRetainedSessionPortV1 {
         let input = MessageSearchInput::parse(request)?;
         let query = input.query()?;
         let outcome = retrieve_bounded(context, self.authorities.retrieval.as_ref(), query).await?;
-        let result = input.result(outcome)?;
+        let result = input.result(outcome, SessionRetrievalStoreScope::Project)?;
         evidence_outcome(
             context,
             RetainedSurfaceOperation::MessageSearch,
@@ -233,6 +286,27 @@ impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1 {
                 }
                 RetainedSessionRequestV1::Workflows(request) => {
                     self.execute_workflows(&context, request).await
+                }
+            }
+        })
+    }
+}
+
+impl RetainedSessionExecutionPortV1 for DirectProfileRetainedSessionPortV1<'_> {
+    fn execute_session<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: RetainedSessionRequestV1<'a>,
+    ) -> RetainedSurfaceExecutionFutureV1<'a> {
+        Box::pin(async move {
+            match request {
+                RetainedSessionRequestV1::MessageSearch(request) => {
+                    self.execute_message_search(&context, request).await
+                }
+                RetainedSessionRequestV1::SessionRefresh(_)
+                | RetainedSessionRequestV1::SessionsFor(_)
+                | RetainedSessionRequestV1::Workflows(_) => {
+                    Err(RetainedSurfaceExecutionErrorV1::Unsupported)
                 }
             }
         })
@@ -399,8 +473,9 @@ impl MessageSearchInput {
     fn result(
         &self,
         outcome: SessionRetrievalServiceOutcome,
+        store_scope: SessionRetrievalStoreScope,
     ) -> Result<MessageSearchResultV1, RetainedSurfaceExecutionErrorV1> {
-        let mut result = self.base_result();
+        let mut result = self.base_result(store_scope);
         match outcome {
             SessionRetrievalServiceOutcome::Complete { page, freshness } => {
                 result.outcome = RetainedOutcomeStatusV1::Complete;
@@ -469,7 +544,7 @@ impl MessageSearchInput {
         Ok(result)
     }
 
-    fn base_result(&self) -> MessageSearchResultV1 {
+    fn base_result(&self, store_scope: SessionRetrievalStoreScope) -> MessageSearchResultV1 {
         MessageSearchResultV1 {
             catch_up: self.catch_up,
             catch_up_failures: Vec::new(),
@@ -509,7 +584,13 @@ impl MessageSearchInput {
             service_status: None,
             skipped: None,
             skipped_project_count: None,
-            store_scope: Some("project".to_owned()),
+            store_scope: Some(
+                match store_scope {
+                    SessionRetrievalStoreScope::Project => "project",
+                    SessionRetrievalStoreScope::Profile => "profile",
+                }
+                .to_owned(),
+            ),
             temporal: None,
             workflow_agent: self.workflow_agent.clone(),
             workflow_filter_applied: self.workflow_run.as_ref().map(|_| true),
@@ -545,6 +626,17 @@ fn ensure_project_message_scope(
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
     Ok(())
+}
+
+fn ensure_profile_message_scope(
+    request: &MessageSearchRequestV1,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    (request.project_scope.is_none()
+        && request.project_id.is_none()
+        && request.project_path.is_none()
+        && request.project_selector.is_none())
+    .then_some(())
+    .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
 }
 
 fn ensure_session_refresh_identity(
