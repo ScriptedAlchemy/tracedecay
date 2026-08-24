@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
+import { CodeIndexWorkerSelectionV1Schema } from '../../contracts/generated.ts';
 import {
   buildSettingsEditor,
   buildSettingsModel,
@@ -7,6 +8,7 @@ import {
   filterOverrides,
   filterRows,
   isPathLike,
+  planCodeIndexWorkerChangeAgainst,
   planProjectChangeAgainst,
   planUserChangeAgainst,
   readSettingsEnvelope,
@@ -318,6 +320,7 @@ describe('Settings authorized changes', () => {
     expect(buildSettingsEditor(payload)).toEqual({
       projectExpectedRevisionId: 'rev-42',
       userExpectedRevisionId: 'user-rev-7',
+      codeIndexWorkerExpectedRevisionId: 'profile-worker-rev-7',
       project: {
         include: ['src/**', 'dashboard/src/**'],
         exclude: ['target/**', 'node_modules/**'],
@@ -334,6 +337,17 @@ describe('Settings authorized changes', () => {
         upload_enabled: false,
         watcher_debounce: '2s',
         extraction_timeout_secs: '30',
+      },
+      codeIndexWorkers: {
+        code_index_workers: { mode: 'automatic' },
+        code_index_worker_status: {
+          configured: { mode: 'automatic' },
+          environment_override_workers: null,
+          effective_workers: 4,
+          available_logical_cpus: 4,
+          memory_safe_workers: 6,
+          limiting_reason: 'automatic_all_cores',
+        },
       },
     });
   });
@@ -417,6 +431,73 @@ describe('Settings authorized changes', () => {
     });
   });
 
+  it('serializes an exact code-index worker request against its independent revision', () => {
+    const values = {
+      ...editor.codeIndexWorkers,
+      code_index_workers: { mode: 'exact' as const, workers: 4 },
+    };
+
+    expect(planCodeIndexWorkerChangeAgainst(editor, values)).toEqual({
+      outcome: 'ready',
+      expectedRevisionId: 'profile-worker-rev-7',
+      patch: {
+        code_index_workers: { mode: 'exact', workers: 4 },
+      },
+    });
+  });
+
+  it('refuses an exact selection above the current logical CPU admission limit', () => {
+    expect(
+      planCodeIndexWorkerChangeAgainst(editor, {
+        ...editor.codeIndexWorkers,
+        code_index_workers: { mode: 'exact', workers: 5 },
+      }),
+    ).toEqual({
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'code_index_workers',
+          message: 'code_index_workers exact mode must request no more than 4 available logical CPUs',
+        },
+      ],
+    });
+  });
+
+  it('refuses an exact selection above the current memory-safe admission limit', () => {
+    expect(
+      planCodeIndexWorkerChangeAgainst(editor, {
+        ...editor.codeIndexWorkers,
+        code_index_worker_status: {
+          ...editor.codeIndexWorkers.code_index_worker_status!,
+          available_logical_cpus: 6,
+          memory_safe_workers: 4,
+        },
+        code_index_workers: { mode: 'exact', workers: 5 },
+      }),
+    ).toEqual({
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'code_index_workers',
+          message: 'code_index_workers exact mode must request no more than 4 memory-safe workers',
+        },
+      ],
+    });
+  });
+
+  it('rejects unknown keys inside the generated code-index worker selection variants', () => {
+    expect(
+      CodeIndexWorkerSelectionV1Schema.safeParse({ mode: 'automatic', workers: 4 }).success,
+    ).toBe(false);
+    expect(
+      CodeIndexWorkerSelectionV1Schema.safeParse({
+        mode: 'exact',
+        workers: 4,
+        future_limit: 9,
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects user values the backend validation rejects before a request', () => {
     expect(
       planUserChangeAgainst(editor, {
@@ -439,6 +520,23 @@ describe('Settings authorized changes', () => {
     });
   });
 
+  it('rejects an exact code-index worker count below one before a dedicated PATCH', () => {
+    expect(
+      planCodeIndexWorkerChangeAgainst(editor, {
+        ...editor.codeIndexWorkers,
+        code_index_workers: { mode: 'exact', workers: 0 },
+      }),
+    ).toEqual({
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'code_index_workers',
+          message: 'code_index_workers exact mode must request 1 to 65535 workers',
+        },
+      ],
+    });
+  });
+
   it('checks stale revisions against the mutated resource', () => {
     expect(settingsRevisionConflict('project', 'rev-41', payload)).toEqual({
       expectedRevisionId: 'rev-41',
@@ -450,5 +548,14 @@ describe('Settings authorized changes', () => {
       actualRevisionId: 'user-rev-7',
     });
     expect(settingsRevisionConflict('user', 'user-rev-7', payload)).toBeNull();
+    expect(
+      settingsRevisionConflict('code_index_workers', 'profile-worker-rev-6', payload),
+    ).toEqual({
+      expectedRevisionId: 'profile-worker-rev-6',
+      actualRevisionId: 'profile-worker-rev-7',
+    });
+    expect(
+      settingsRevisionConflict('code_index_workers', 'profile-worker-rev-7', payload),
+    ).toBeNull();
   });
 });

@@ -607,6 +607,163 @@ fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
     writer.shutdown_and_join().unwrap();
 }
 
+/// Every compatible write already waiting must commit in one transaction.
+///
+/// The guard is a ratio of two exact counters — commands per committed
+/// transaction — and deliberately not a duration: timings on a loaded machine
+/// swing by more than the effect being protected, so an elapsed-time assertion
+/// here would be noise wearing a threshold. Counters do not move with load.
+///
+/// This is the invariant that makes batching at the submitter worth doing. A
+/// caller that gathers N records and submits them together only pays one commit
+/// if the writer keeps them together; a writer that opened a transaction per
+/// request would turn that batch back into N durable transactions while every
+/// other assertion in this module still passed, because the per-request
+/// outcomes are identical under either shape. The ratio is the only thing that
+/// changes, so the ratio is what gets asserted.
+///
+/// The holder write occupies the worker so the rest are provably queued before
+/// it drains, which is what makes the expected transaction count exact rather
+/// than a race: one transaction for the holder, one for the batch behind it.
+#[test]
+fn queued_compatible_writes_commit_in_one_transaction() {
+    const QUEUED_WRITES: usize = 8;
+
+    let database = TestDatabase::new();
+    let holder = fact_request(
+        "operation.batch-ratio.holder",
+        "key.batch-ratio.holder",
+        'z',
+    );
+    let queued = (0..QUEUED_WRITES)
+        .map(|index| {
+            let digest_byte = char::from(b'a' + u8::try_from(index).unwrap());
+            fact_request(
+                &format!("operation.batch-ratio.{index}"),
+                &format!("key.batch-ratio.{index}"),
+                digest_byte,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer = Arc::new(start_with_persistence(
+        &database,
+        &holder,
+        Box::new(BlockingPersistence {
+            entered: entered_tx,
+            release: release_rx,
+            sequence: 0,
+        }),
+    ));
+    let before = writer.telemetry_snapshot().transactions;
+
+    std::thread::scope(|scope| {
+        let holder_writer = Arc::clone(&writer);
+        let holder_request = holder.clone();
+        let holding = scope.spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(holder_writer.submit(
+                holder_request.clone(),
+                Arc::new(Probe::new(&holder_request, None)),
+            ))
+        });
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            1,
+            "the holder write must occupy the worker before the batch is queued"
+        );
+
+        let batched = queued
+            .iter()
+            .map(|request| {
+                let batch_writer = Arc::clone(&writer);
+                let request = request.clone();
+                scope.spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap();
+                    runtime.block_on(
+                        batch_writer.submit(request.clone(), Arc::new(Probe::new(&request, None))),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting = {
+                let sender = writer
+                    .sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let sender = sender.as_ref().expect("writer admission stays open");
+                sender.max_capacity() - sender.capacity()
+            };
+            if waiting >= QUEUED_WRITES {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the batch never reached the writer's admission channel"
+            );
+            std::thread::yield_now();
+        }
+
+        // Release the holder, then each batched write as it reaches
+        // persistence. The blocking persistence reports one sequence per
+        // request, so the last release carries no observation after it.
+        for expected in 2..=u64::try_from(QUEUED_WRITES).unwrap() + 1 {
+            release_tx.send(()).unwrap();
+            assert_eq!(
+                entered_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                expected,
+                "every queued write must reach persistence"
+            );
+        }
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            holding.join().unwrap().unwrap(),
+            RuntimeSubmitOutcomeV1::Committed { .. }
+        ));
+        for handle in batched {
+            assert!(matches!(
+                handle.join().unwrap().unwrap(),
+                RuntimeSubmitOutcomeV1::Committed { .. }
+            ));
+        }
+    });
+
+    let after = writer.telemetry_snapshot().transactions;
+    let commands = after.commands - before.commands;
+    let transactions = after.committed_transactions - before.committed_transactions;
+    assert_eq!(
+        commands,
+        u64::try_from(QUEUED_WRITES).unwrap() + 1,
+        "every submitted write must be accounted for as one command"
+    );
+    assert_eq!(
+        transactions, 2,
+        "the holder commits alone and the {QUEUED_WRITES} writes queued behind \
+         it must share one durable transaction, not open one each"
+    );
+    assert!(
+        commands > transactions,
+        "commands per durable transaction must exceed one; \
+         {commands} commands in {transactions} transactions is no batching at all"
+    );
+
+    let writer = match Arc::try_unwrap(writer) {
+        Ok(writer) => writer,
+        Err(_) => panic!("test submit handles must be joined"),
+    };
+    writer.shutdown_and_join().unwrap();
+}
+
 mod authority;
 mod backup;
 mod checkpoint;
