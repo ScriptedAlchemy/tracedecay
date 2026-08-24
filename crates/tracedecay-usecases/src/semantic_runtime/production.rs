@@ -467,7 +467,10 @@ impl ProductionSemanticRuntimeV1 {
 
     /// Enqueue one saved code generation. Model verification, ORT startup,
     /// changed-chunk embedding, and database publication remain background work.
-    pub fn schedule_saved_generation(&self, generation: &CodeIndexPublishedGenerationV1) -> bool {
+    pub fn schedule_saved_generation(
+        &self,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
+    ) -> bool {
         self.schedule_saved_generation_inner(generation, None)
     }
 
@@ -1427,7 +1430,7 @@ impl ProductionSemanticRuntimeV1 {
     #[hotpath::measure]
     fn schedule_saved_generation_fair(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
         lease: SemanticProjectionLeaseV1,
     ) -> bool {
         self.schedule_saved_generation_inner(generation, Some(lease))
@@ -1436,7 +1439,7 @@ impl ProductionSemanticRuntimeV1 {
     #[hotpath::measure]
     fn schedule_saved_generation_inner(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
         fair_lease: Option<SemanticProjectionLeaseV1>,
     ) -> bool {
         let projection = match LoadedSemanticArtifactV1::lifecycle_projection(
@@ -1453,7 +1456,7 @@ impl ProductionSemanticRuntimeV1 {
             Err(_) => {
                 return schedule_saved_code_generation(
                     &self.handle,
-                    generation,
+                    &generation,
                     || Err(SemanticRuntimeScheduleFailureV1::Artifact),
                     move || async move {
                         drop(fair_lease);
@@ -1495,7 +1498,7 @@ impl ProductionSemanticRuntimeV1 {
         // Projection publication is independent of the process cache. Without
         // an immutable prior-generation catalog input this is truthfully a
         // full rebuild; `handle.current()` is never a delta/base authority.
-        let request = match semantic_projection_request(generation, &projection, None) {
+        let request = match semantic_projection_request(&generation, &projection, None) {
             Ok(request) => request,
             Err(_) => return false,
         };
@@ -1550,7 +1553,7 @@ impl ProductionSemanticRuntimeV1 {
         let handles = Arc::new(ScheduledProjectionHandlesV1 {
             graph: Arc::clone(&self.graph),
             writer: Arc::clone(&self.vector_writer),
-            generation: Arc::new(generation.clone()),
+            generation,
             commit_state: Arc::new(tokio::sync::Mutex::new(BatchCommitStateV1::default())),
             lifecycle: Arc::clone(&self.lifecycle),
         });
@@ -3319,8 +3322,12 @@ pub fn project_semantic_application_status(
 }
 
 /// Hook invoked after a code generation publishes; must not block search.
+///
+/// The serving owner transfers a shared handle because one decoded generation
+/// can be much larger than its captured source. Semantic retention and queued
+/// projection must clone this `Arc`, never the immutable generation payload.
 pub type SavedCodeGenerationScheduleHookV1 =
-    Arc<dyn Fn(&CodeIndexPublishedGenerationV1) -> bool + Send + Sync>;
+    Arc<dyn Fn(Arc<CodeIndexPublishedGenerationV1>) -> bool + Send + Sync>;
 
 /// Owned authorities and identities captured by a saved-generation hook.
 pub struct SavedGenerationScheduleHookParametersV1 {
@@ -3371,10 +3378,9 @@ pub fn production_saved_generation_schedule_hook(
         }
         super::register_project_semantic_redundancy_generation(
             project_root.clone(),
-            generation.clone(),
+            Arc::clone(&generation),
         );
         let runtime = Arc::clone(&runtime);
-        let generation = generation.clone();
         let Ok(tokio) = tokio::runtime::Handle::try_current() else {
             return false;
         };
@@ -3417,7 +3423,7 @@ pub fn production_saved_generation_schedule_hook(
                         {
                             return;
                         }
-                        let _ = runtime.schedule_saved_generation_fair(&generation, lease);
+                        let _ = runtime.schedule_saved_generation_fair(generation, lease);
                     });
                 }),
             )

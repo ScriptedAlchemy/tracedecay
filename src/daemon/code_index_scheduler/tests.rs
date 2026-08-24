@@ -6351,7 +6351,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         },
     );
 
-    assert!(runtime.schedule_saved_generation(&latest.generation));
+    assert!(runtime.schedule_saved_generation(Arc::clone(&latest.generation)));
     latest
         .production_query_owners()
         .expect("ordinary lanes remain callable during Jina startup");

@@ -2990,17 +2990,23 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this exact generation as serving state.
     pub(super) fn schedule_semantic_generation(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
     ) -> bool {
         let Some(schedule) = self.semantic_schedule.as_ref() else {
             return false;
         };
-        match catch_unwind(AssertUnwindSafe(|| schedule(generation))) {
+        let generation_id = generation.manifest().generation_id.clone();
+        match catch_unwind(AssertUnwindSafe(|| {
+            hotpath::measure_block!(
+                "code_index.semantic_generation_handoff",
+                schedule(generation)
+            )
+        })) {
             Ok(scheduled) => scheduled,
             Err(_) => {
                 tracing::warn!(
                     event = "code_index_semantic_schedule_panicked",
-                    generation = %generation.manifest().generation_id,
+                    generation = %generation_id,
                     "code-index semantic scheduling panicked; the generation remains serving"
                 );
                 false

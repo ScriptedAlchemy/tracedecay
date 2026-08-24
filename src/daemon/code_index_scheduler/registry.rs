@@ -1741,7 +1741,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 *serving = Some(retained.clone());
                 swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
                 drop(serving);
-                let _ = scheduler.schedule_semantic_generation(retained.generation());
+                let _ = scheduler.schedule_semantic_generation(retained.generation_handle());
                 true
             } else {
                 false
@@ -2062,7 +2062,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
             {
-                let _ = scheduler.schedule_semantic_generation(latest.generation());
+                let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
             }
             Ok(())
         })
@@ -2576,7 +2576,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         // prior attempt may have lost bounded queue capacity,
                         // so an unchanged reconcile must offer the already-
                         // serving generation again without reinstalling it.
-                        let _ = scheduler.schedule_semantic_generation(latest.generation());
+                        let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
                         Ok::<_, CodeIndexSchedulerErrorV1>(())
                     })
                     .await;
