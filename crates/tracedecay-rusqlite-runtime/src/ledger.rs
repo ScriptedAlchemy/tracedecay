@@ -8,6 +8,7 @@ mod commit;
 mod error;
 mod idempotency;
 mod inbox;
+mod migrate;
 mod outbox;
 mod schema;
 mod sqlite;

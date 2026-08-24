@@ -1,7 +1,9 @@
 use rusqlite::{Row, params};
+use tracedecay_domain::UtcMicros;
 use tracedecay_store::{
-    CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1, RuntimeTransactionScopeV1,
-    StoreCommitReceiptV1, StoreIdempotencyKeyV1, StoreOperationIdV1, StoreRuntimeBindingV1,
+    CommandDigestV1, CommitSequenceV1, DurabilityClassV1, IdempotencyIdentityV1,
+    RuntimeTransactionScopeV1, StoreCommitReceiptV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
+    StoreRuntimeBindingV1,
 };
 
 use super::{
@@ -11,7 +13,7 @@ use super::{
 
 const IDEMPOTENCY_TABLE: &str = "td_runtime_writer_idempotency_v1";
 const SELECT_IDEMPOTENCY: &str = r#"
-SELECT request_digest, original_receipt_json, transaction_scope_json,
+SELECT request_digest, commit_sequence, transaction_scope_json,
        operation_id, durability_json, committed_at_micros
 FROM td_runtime_writer_idempotency_v1
 WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
@@ -20,7 +22,7 @@ WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
 const INSERT_IDEMPOTENCY: &str = r#"
 INSERT OR IGNORE INTO td_runtime_writer_idempotency_v1 (
     shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
-    original_receipt_json, transaction_scope_json, operation_id, durability_json,
+    commit_sequence, transaction_scope_json, operation_id, durability_json,
     committed_at_micros
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
 "#;
@@ -83,8 +85,8 @@ pub(super) fn insert(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
     receipt: &StoreCommitReceiptV1,
-    receipt_json: &str,
 ) -> Result<(), LedgerError> {
+    let commit_sequence = sqlite_u64(receipt.commit_sequence.0, "commit sequence")?;
     let changed = transaction.execute(
         INSERT_IDEMPOTENCY,
         params![
@@ -93,7 +95,7 @@ pub(super) fn insert(
             submission.authority_epoch_sql,
             submission.metadata.idempotency.key.as_str(),
             submission.metadata.idempotency.command_digest.as_str(),
-            receipt_json,
+            commit_sequence,
             &submission.transaction_scope_json,
             submission.metadata.operation_id.as_str(),
             &submission.durability_json,
@@ -133,6 +135,19 @@ fn load(
     Ok(Some(record))
 }
 
+/// Rebuilds the durable receipt from the row's own columns.
+///
+/// Six of the seven receipt fields are columns of this table. Four of them
+/// (shard, incarnation, authority epoch, idempotency key) form the primary key
+/// this row was just matched on, so they are the caller's own arguments by
+/// construction. The remaining `commit_sequence` is the one value the receipt
+/// ever carried that nothing else recorded, which is why it is now a column of
+/// its own rather than 587 bytes of re-encoded JSON per row.
+///
+/// The equality checks this used to run against the encoded receipt are gone
+/// because they are now unrepresentable: there is no second copy left to
+/// disagree. The cross-column checks that still compare independent values,
+/// the transaction scope against the binding and the durability, are kept.
 fn decode_row(
     row: &Row<'_>,
     binding: &StoreRuntimeBindingV1,
@@ -143,11 +158,7 @@ fn decode_row(
             table: IDEMPOTENCY_TABLE,
             field: "request_digest",
         })?;
-    let receipt: StoreCommitReceiptV1 = decode_json(
-        &row.get::<_, String>(1)?,
-        IDEMPOTENCY_TABLE,
-        "original_receipt_json",
-    )?;
+    let commit_sequence = decode_commit_sequence(row.get(1)?)?;
     let transaction_scope: RuntimeTransactionScopeV1 = decode_json(
         &row.get::<_, String>(2)?,
         IDEMPOTENCY_TABLE,
@@ -164,18 +175,21 @@ fn decode_row(
         "durability_json",
     )?;
     let committed_at_micros: i64 = row.get(5)?;
-    let receipt_binding = StoreRuntimeBindingV1::new(
-        receipt.shard_id.clone(),
-        receipt.incarnation,
-        receipt.authority_epoch,
-    );
+
+    let receipt = StoreCommitReceiptV1 {
+        operation_id,
+        idempotency: IdempotencyIdentityV1 {
+            key: key.clone(),
+            command_digest: request_digest.clone(),
+        },
+        shard_id: binding.shard_id.clone(),
+        incarnation: binding.incarnation,
+        authority_epoch: binding.authority_epoch,
+        commit_sequence,
+        committed_at: UtcMicros(committed_at_micros),
+    };
     if receipt.validate().is_err()
-        || receipt_binding != *binding
-        || receipt.idempotency.key != *key
-        || receipt.idempotency.command_digest != request_digest
-        || receipt.operation_id != operation_id
-        || receipt.committed_at.0 != committed_at_micros
-        || transaction_scope.compatibility.binding != receipt_binding
+        || transaction_scope.compatibility.binding != *binding
         || transaction_scope.compatibility.durability != durability
     {
         return Err(LedgerError::Corrupt {
@@ -189,4 +203,20 @@ fn decode_row(
         transaction_scope,
         durability,
     })
+}
+
+/// A sequence is only ever written from a validated positive `u64`, so anything
+/// else in this column is a corrupt store rather than a representable state.
+fn decode_commit_sequence(raw: i64) -> Result<CommitSequenceV1, LedgerError> {
+    let raw = u64::try_from(raw).map_err(|_| LedgerError::Corrupt {
+        table: IDEMPOTENCY_TABLE,
+        field: "commit_sequence",
+    })?;
+    if raw == 0 {
+        return Err(LedgerError::Corrupt {
+            table: IDEMPOTENCY_TABLE,
+            field: "commit_sequence",
+        });
+    }
+    Ok(CommitSequenceV1(raw))
 }

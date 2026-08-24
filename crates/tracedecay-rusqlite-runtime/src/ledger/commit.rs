@@ -6,7 +6,7 @@ use tracedecay_store::{
 
 use super::{
     LedgerDisposition, LedgerError, checkpoint, idempotency, inbox, outbox,
-    sqlite::{LedgerTransaction, Submission, encode_json},
+    sqlite::{LedgerTransaction, Submission},
 };
 
 enum RuntimeBookkeeping<'a> {
@@ -73,9 +73,8 @@ fn record_with_bookkeeping(
         commit_sequence: checkpoint.watermark.commit_sequence,
         committed_at: metadata.admitted_at,
     };
-    let receipt_json = encode_json(&receipt, "original_receipt_json")?;
     checkpoint::persist(transaction, &submission, &checkpoint, &receipt)?;
-    idempotency::insert(transaction, &submission, &receipt, &receipt_json)?;
+    idempotency::insert(transaction, &submission, &receipt)?;
     match bookkeeping {
         RuntimeBookkeeping::None => {}
         RuntimeBookkeeping::Outbox(entry) => {
