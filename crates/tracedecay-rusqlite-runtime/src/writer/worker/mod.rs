@@ -1162,7 +1162,7 @@ mod auxiliary_scheduling_tests {
         let mut operation_metadata = metadata(
             &format!("operation.batch-window.{index}"),
             &format!("key.batch-window.{index}"),
-            char::from(b'a' + u8::try_from(index).expect("fixture index fits in one byte")),
+            char::from(b'a' + u8::try_from(index % 26).expect("fixture letter fits in one byte")),
         );
         operation_metadata.priority = priority;
         let config = tracedecay_store::AdmissionConfigV1::default();
@@ -1304,6 +1304,76 @@ mod auxiliary_scheduling_tests {
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].items.len(), 2);
+    }
+
+    #[test]
+    fn scan_sized_compatible_queue_opens_one_execution_batch() {
+        const REQUESTS: usize = 256;
+        let enqueued_at = Instant::now();
+        let selected = (0..REQUESTS)
+            .map(|index| {
+                accepted_request(index, enqueued_at, OperationPriorityV1::Foreground, false)
+            })
+            .collect();
+        let mut config = tracedecay_store::AdmissionConfigV1::default();
+        config.foreground_batch.max_operations = 512;
+        config.foreground_batch.max_bytes = u64::MAX;
+
+        let batches = build_batches(selected, &config);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), REQUESTS);
+    }
+
+    #[test]
+    fn execution_batch_count_is_bounded_by_the_operation_budget() {
+        const REQUESTS: usize = 256;
+        const MAX_OPERATIONS: usize = 64;
+        let enqueued_at = Instant::now();
+        let selected = (0..REQUESTS)
+            .map(|index| {
+                accepted_request(index, enqueued_at, OperationPriorityV1::Foreground, false)
+            })
+            .collect();
+        let mut config = tracedecay_store::AdmissionConfigV1::default();
+        config.foreground_batch.max_operations = MAX_OPERATIONS as u32;
+        config
+            .validate()
+            .expect("valid operation-bounded batch policy");
+
+        let batches = build_batches(selected, &config);
+
+        assert_eq!(batches.len(), REQUESTS / MAX_OPERATIONS);
+        assert_eq!(
+            batches.iter().map(|batch| batch.items.len()).sum::<usize>(),
+            REQUESTS
+        );
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.items.len() <= MAX_OPERATIONS)
+        );
+    }
+
+    #[test]
+    fn isolated_request_still_opens_its_own_execution_batch() {
+        let enqueued_at = Instant::now();
+        let selected = (0..8)
+            .map(|index| {
+                accepted_request(
+                    index,
+                    enqueued_at,
+                    OperationPriorityV1::Foreground,
+                    index == 7,
+                )
+            })
+            .collect();
+
+        let batches = build_batches(selected, &tracedecay_store::AdmissionConfigV1::default());
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].items.len(), 7);
+        assert_eq!(batches[1].items.len(), 1);
     }
 
     #[test]
