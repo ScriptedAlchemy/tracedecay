@@ -36,6 +36,7 @@ run_smoke() {
   local work_dir="$1"
   local fixture="$2"
   local tools_a tools_b call_out res_out
+  local diagnostics_out affected_out test_map_out symbol_json impact_out node_id
   local failures=0
 
   inspect() {
@@ -97,6 +98,40 @@ run_smoke() {
     fail "tools/list is deterministic across runs"
   fi
 
+  symbol_json="$work_dir/find-exact-symbol.json"
+  impact_out="$work_dir/impact.json"
+  extract_exact_symbol_id() {
+    node - "$1" <<'NODE'
+const fs = require("fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+for (const content of response.content || []) {
+  if (content.type !== "text") continue;
+  try {
+    const parsed = JSON.parse(content.text);
+    const match = Array.isArray(parsed.matches) ? parsed.matches[0] : null;
+    if (match && typeof match.id === "string" && match.id) {
+      process.stdout.write(match.id);
+      process.exit(0);
+    }
+  } catch {}
+}
+process.exit(1);
+NODE
+  }
+  # Keep the production generation_rebuilding response typed and truthful.
+  # The smoke waits outside the product until the verified graph admits the
+  # fixture, then reuses the occurrence id for the impact assertion below.
+  node_id=""
+  for _ in $(seq 1 30); do
+    if inspect --method tools/call --tool-name tracedecay_find_exact_symbol --tool-arg name=main --tool-arg format=json >"$symbol_json" 2>/dev/null; then
+      node_id=$(extract_exact_symbol_id "$symbol_json") || true
+      if [[ -n ${node_id:-} ]]; then
+        break
+      fi
+    fi
+    sleep 1
+  done
+
   # 3. tools/call round-trip against the indexed fixture.
   call_out="$work_dir/call.json"
   if inspect --method tools/call --tool-name tracedecay_search --tool-arg query=main > "$call_out" 2>/dev/null &&
@@ -110,7 +145,6 @@ run_smoke() {
   fi
 
   # 4. Installed analysis tools execute through the official SDK client.
-  local diagnostics_out affected_out test_map_out symbol_json impact_out node_id
   diagnostics_out="$work_dir/diagnostics.json"
   if inspect --method tools/call --tool-name tracedecay_diagnostics >"$diagnostics_out" 2>/dev/null &&
     json_assert "$diagnostics_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
@@ -135,40 +169,6 @@ run_smoke() {
     fail "tools/call tracedecay_test_map returns typed evidence"
   fi
 
-  symbol_json="$work_dir/find-exact-symbol.json"
-  impact_out="$work_dir/impact.json"
-  extract_exact_symbol_id() {
-    node - "$1" <<'NODE'
-const fs = require("fs");
-const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-for (const content of response.content || []) {
-  if (content.type !== "text") continue;
-  try {
-    const parsed = JSON.parse(content.text);
-    const match = Array.isArray(parsed.matches) ? parsed.matches[0] : null;
-    if (match && typeof match.id === "string" && match.id) {
-      process.stdout.write(match.id);
-      process.exit(0);
-    }
-  } catch {}
-}
-process.exit(1);
-NODE
-  }
-  # Search races the verified graph and omits node_id when lexical results
-  # arrive first. find_exact_symbol waits for graph admission, then impact
-  # can use the occurrence id. Retry while the first generation is still
-  # sealing symbols into that graph.
-  node_id=""
-  for _ in $(seq 1 30); do
-    if inspect --method tools/call --tool-name tracedecay_find_exact_symbol --tool-arg name=main --tool-arg format=json >"$symbol_json" 2>/dev/null; then
-      node_id=$(extract_exact_symbol_id "$symbol_json") || true
-      if [[ -n ${node_id:-} ]]; then
-        break
-      fi
-    fi
-    sleep 1
-  done
   if [[ -n ${node_id:-} ]] &&
     inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>/dev/null &&
     json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
