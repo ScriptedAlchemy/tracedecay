@@ -162,6 +162,22 @@ fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
     }
 }
 
+#[test]
+fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
+    assert_eq!(
+        mcp_tool_hotpath_identity("tracedecay_search", false),
+        "tracedecay_search"
+    );
+    assert_eq!(
+        mcp_tool_hotpath_identity("attacker-controlled-unknown-name", false),
+        "unknown"
+    );
+    assert_eq!(
+        mcp_tool_hotpath_identity("another-unknown-name", true),
+        "unknown"
+    );
+}
+
 /// The MCP deadline horizon asks this predicate which reads walk git, so it
 /// must stay in step with the git dispatch family rather than a name list.
 #[test]
@@ -210,6 +226,12 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         // attached. Probing only the attached state let the deferred group
         // resolve to nothing at all without failing this test.
         for executor_available in [true, false] {
+            assert_eq!(
+                mcp_tool_hotpath_identity(&definition.name, executor_available),
+                definition.name,
+                "{} must retain exact bounded Hotpath identity",
+                definition.name
+            );
             let group = classify_mcp_tool_dispatch_group(&definition.name, executor_available)
                 .unwrap_or_else(|| {
                     panic!(

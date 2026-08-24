@@ -136,6 +136,7 @@ pub(super) async fn projectless_tools_call_response(
         .await
 }
 
+#[hotpath::measure(label = "mcp.tools_call.projectless")]
 async fn projectless_tools_call_response_with_connection(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
@@ -148,6 +149,21 @@ async fn projectless_tools_call_response_with_connection(
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
+    #[cfg(feature = "hotpath")]
+    {
+        let hotpath_tool_name = if matches!(
+            tool_name.as_str(),
+            "tracedecay_admin_project" | "tracedecay_hook_runtime" | "tracedecay_admin_cli"
+        )
+            || tracedecay_application::RetainedSurfaceOperation::from_tool_name(&tool_name)
+                .is_some()
+        {
+            tool_name.as_str()
+        } else {
+            "unknown"
+        };
+        hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
+    }
     if let Err(error) = store_administration.ensure_account_active().await {
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
