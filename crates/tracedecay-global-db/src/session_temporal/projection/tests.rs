@@ -542,7 +542,7 @@ async fn multi_output_projection_reuses_source_derivation_and_activates_shared_a
         counted.query_count(),
         batch.occurrences().len()
     );
-    drop(counted);
+    // `counted` holds no Drop impl, so dropping it only extends its borrows.
     drop(transaction);
 
     store

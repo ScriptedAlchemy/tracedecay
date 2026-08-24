@@ -1005,13 +1005,15 @@ mod recent_first_discovery_tests {
 
     #[test]
     fn indexed_replay_starts_at_the_acknowledged_btree_position() {
-        let mut index = CodexReplayIndex::default();
-        index.complete = true;
-        index.frontier = CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
-            high: 1,
-            low: 2,
-            files: 8192,
-        });
+        let mut index = CodexReplayIndex {
+            complete: true,
+            frontier: CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
+                high: 1,
+                low: 2,
+                files: 8192,
+            }),
+            ..Default::default()
+        };
         for value in 0..8192 {
             index.paths.insert(CodexIndexedPath {
                 root_order: 0,
@@ -1041,13 +1043,15 @@ mod recent_first_discovery_tests {
 
     #[test]
     fn indexed_replay_preserves_recent_sessions_before_archive() {
-        let mut index = CodexReplayIndex::default();
-        index.complete = true;
-        index.frontier = CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
-            high: 1,
-            low: 2,
-            files: 3,
-        });
+        let mut index = CodexReplayIndex {
+            complete: true,
+            frontier: CodexDiscoveryFrontier::complete(CodexCorpusEpoch {
+                high: 1,
+                low: 2,
+                files: 3,
+            }),
+            ..Default::default()
+        };
         let newest = CodexIndexedPath {
             root_order: 0,
             path: PathBuf::from("/sessions/2026/08/24/rollout-new.jsonl"),

@@ -1048,7 +1048,7 @@ mod tests {
         )
         .await
         .expect("session schema");
-        schema::ensure_lcm_schema(&*conn).await.expect("LCM schema");
+        schema::ensure_lcm_schema(&conn).await.expect("LCM schema");
         conn.execute(
             "INSERT INTO sessions(provider, session_id, project_key, project_path)
              VALUES ('cursor', 'session-a', '/p', '/p')",
