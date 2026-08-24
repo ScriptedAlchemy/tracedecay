@@ -1217,3 +1217,126 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
     client.await.expect("client task should finish");
     assert!(lifecycle.try_enter().is_none());
 }
+
+/// A panicking connection must not take down the daemon, wedge its peers, or
+/// strand the admission slot it was holding.
+///
+/// Both accept loops serve every client from a `JoinSet` and keep draining
+/// `join_next`, so one connection unwinding has to be contained at that task
+/// boundary. Two failure shapes are covered, because they unwind through
+/// different admission states:
+///
+/// * a connection that panics while it still holds its slot, and
+/// * a connection that panics *while parked* — `park_admission` has already
+///   surrendered the slot and will never reach its re-acquire, so the unwind
+///   must not double-release it or leave it unaccounted.
+///
+/// Asserted on task outcomes and permit counts, never on elapsed time.
+#[tokio::test]
+async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit() {
+    use super::super::{
+        DaemonClientAdmission, DaemonClientAdmissionClass, DaemonClientAdmissionOutcome,
+    };
+
+    const GENERAL_CAPACITY: usize = 4;
+    const PANICKING_CLIENTS: usize = 2;
+
+    let admission = DaemonClientAdmission::with_reserved_capacity(GENERAL_CAPACITY + 1, 1);
+    let baseline = admission.available_general_permits();
+    assert_eq!(baseline, GENERAL_CAPACITY);
+
+    let (barrier, _) = tokio::sync::watch::channel(false);
+    let mut clients: tokio::task::JoinSet<&'static str> = tokio::task::JoinSet::new();
+
+    for index in 0..GENERAL_CAPACITY {
+        let permit = match admission.try_admit() {
+            DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+            DaemonClientAdmissionOutcome::Saturated(response) => {
+                panic!("client rejected below capacity: {response:?}")
+            }
+        };
+        assert_eq!(permit.class(), DaemonClientAdmissionClass::General);
+        let mut lifted = barrier.subscribe();
+        clients.spawn(super::super::with_connection_admission(
+            permit,
+            async move {
+                // Client 0 unwinds immediately, still holding its slot.
+                assert!(index != 0, "connection task panicked holding its slot");
+                super::super::park_admission(async move {
+                    while !*lifted.borrow_and_update() {
+                        lifted.changed().await.expect("barrier sender retained");
+                    }
+                    // Client 1 unwinds from inside the park, after the slot was
+                    // surrendered and before it could be re-acquired.
+                    assert!(index != 1, "connection task panicked while parked");
+                })
+                .await;
+                "connection completed"
+            },
+        ));
+    }
+
+    // Every slot comes back while the peers are still parked: the panicking
+    // client released its permit on the way out rather than stranding it.
+    let returned = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while admission.available_general_permits() < GENERAL_CAPACITY {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        returned.is_ok(),
+        "a panicking connection stranded its admission slot: {} of {GENERAL_CAPACITY} free",
+        admission.available_general_permits()
+    );
+
+    barrier.send(true).expect("lift barrier");
+
+    let mut completed = 0usize;
+    let mut panicked = 0usize;
+    while let Some(joined) = clients.join_next().await {
+        match joined {
+            Ok(outcome) => {
+                assert_eq!(outcome, "connection completed");
+                completed += 1;
+            }
+            Err(error) => {
+                assert!(
+                    error.is_panic(),
+                    "a connection task ended for a reason other than its own panic: {error}"
+                );
+                panicked += 1;
+            }
+        }
+    }
+
+    // The accept loop observed each panic as a contained task outcome, and the
+    // peers of a panicking connection still ran to completion.
+    assert_eq!(
+        panicked, PANICKING_CLIENTS,
+        "the JoinSet must surface every panic as a contained task result"
+    );
+    assert_eq!(
+        completed,
+        GENERAL_CAPACITY - PANICKING_CLIENTS,
+        "a panicking connection wedged its peers"
+    );
+
+    // No permit leaks across either unwind path, so the daemon still admits.
+    assert_eq!(
+        admission.available_general_permits(),
+        baseline,
+        "admission permits leaked across a connection panic"
+    );
+    let next = match admission.try_admit() {
+        DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        DaemonClientAdmissionOutcome::Saturated(response) => {
+            panic!("the daemon stopped admitting clients after a panic: {response:?}")
+        }
+    };
+    assert_eq!(
+        next.class(),
+        DaemonClientAdmissionClass::General,
+        "recovered capacity must be general, not the reserved control lane"
+    );
+}
