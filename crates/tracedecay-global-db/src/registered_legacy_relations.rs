@@ -63,6 +63,7 @@ mod tests {
     };
 
     use super::TraceDecayError;
+    use crate::RegisteredGlobalDbOwnerV1;
 
     fn schema_snapshot(path: &Path) -> Vec<(String, String, String)> {
         let connection = rusqlite::Connection::open(path).expect("open schema snapshot");
@@ -82,7 +83,7 @@ mod tests {
 
     #[tokio::test]
     async fn installation_requires_typed_reset_without_mutating_legacy_profile_shape() {
-        for _ in [false, true] {
+        for daemon_attach in [false, true] {
             crate::register_test_schema_installer();
             let directory = TempDir::new().expect("temporary profile");
             let database_path = directory.path().join("sessions.db");
@@ -107,24 +108,34 @@ mod tests {
                 "legacy relation shape test runtime",
             )
             .expect("database authority");
-            // The runtime open itself configures the journal mode, so the
-            // untouched-shape contract is captured before the sealed schema
-            // installer rejects the retired relation authority.
-            let before_schema = schema_snapshot(&database_path);
-            let before_bytes = fs::read(&database_path).expect("legacy database bytes");
-            let before_len = fs::metadata(&database_path)
-                .expect("legacy database metadata")
-                .len();
-            let error = match Database::publish_registered_test_runtime_with_retirement_control(
+            let fixture = Database::publish_registered_test_runtime_with_retirement_control(
                 &database_path,
                 &authority,
                 TestDatabaseRuntimeMode::Existing,
                 TestDatabaseRuntimeScope::ProfileSessions,
             )
             .await
-            {
-                Ok(_) => panic!("sealed installer must reject legacy relation shape"),
-                Err(error) => error,
+            .expect("existing registered runtime");
+            let (database_owner, runtime, _retirement) = fixture.into_parts();
+            drop(runtime);
+            // The runtime open itself configures the journal mode, so capture
+            // the untouched shape after publication and before registered
+            // attach admission rejects the retired relation authority.
+            let before_schema = schema_snapshot(&database_path);
+            let before_bytes = fs::read(&database_path).expect("legacy database bytes");
+            let before_len = fs::metadata(&database_path)
+                .expect("legacy database metadata")
+                .len();
+            let error = if daemon_attach {
+                match RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database_owner).await {
+                    Ok(_) => panic!("daemon attach must reject legacy relation shape"),
+                    Err(error) => error,
+                }
+            } else {
+                match RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await {
+                    Ok(_) => panic!("attach must reject legacy relation shape"),
+                    Err(error) => error,
+                }
             };
 
             assert!(matches!(error, TraceDecayError::ResetRequired { .. }));
