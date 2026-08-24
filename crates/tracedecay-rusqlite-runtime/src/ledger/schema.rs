@@ -1,4 +1,4 @@
-use super::{LedgerError, sqlite::LedgerTransaction};
+use super::{LedgerError, migrate, sqlite::LedgerTransaction};
 
 const LEDGER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS td_runtime_writer_checkpoint_v1 (
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_idempotency_v1 (
     authority_epoch INTEGER NOT NULL CHECK (authority_epoch > 0),
     idempotency_key TEXT NOT NULL,
     request_digest TEXT NOT NULL,
-    original_receipt_json TEXT NOT NULL,
+    commit_sequence INTEGER NOT NULL CHECK (commit_sequence > 0),
     transaction_scope_json TEXT NOT NULL,
     operation_id TEXT NOT NULL,
     durability_json TEXT NOT NULL,
@@ -100,5 +100,9 @@ ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 
 pub(crate) fn initialize_schema(transaction: &impl LedgerTransaction) -> Result<(), LedgerError> {
     transaction.execute_batch(LEDGER_SCHEMA)?;
+    // `CREATE TABLE IF NOT EXISTS` is a no-op against a store that already
+    // holds the pre-narrowing idempotency shape, so the upgrade runs after it
+    // and in the same transaction.
+    migrate::upgrade_idempotency_shape(transaction)?;
     Ok(())
 }

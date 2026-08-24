@@ -75,7 +75,7 @@ fn binding_mismatches_are_typed_and_corrupt_replay_faults_closed() {
     database
         .connect()
         .execute(
-            "UPDATE td_runtime_writer_idempotency_v1 SET original_receipt_json = '{}'",
+            "UPDATE td_runtime_writer_idempotency_v1 SET transaction_scope_json = '{}'",
             [],
         )
         .unwrap();

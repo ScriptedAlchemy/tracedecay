@@ -85,7 +85,7 @@ fn malformed_canonical_json_fails_closed() {
     transaction.commit().unwrap();
     connection
         .execute(
-            "UPDATE td_runtime_writer_idempotency_v1 SET original_receipt_json = '{}'",
+            "UPDATE td_runtime_writer_idempotency_v1 SET transaction_scope_json = '{}'",
             [],
         )
         .unwrap();
