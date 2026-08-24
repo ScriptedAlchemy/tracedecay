@@ -5,7 +5,7 @@ use tracedecay_store::{
 };
 
 use super::{
-    LedgerDisposition, LedgerError, checkpoint, idempotency, inbox, outbox,
+    LedgerDisposition, LedgerError, checkpoint, idempotency, inbox, outbox, prune,
     sqlite::{LedgerTransaction, Submission, encode_json},
 };
 
@@ -75,6 +75,12 @@ fn record_with_bookkeeping(
     };
     let receipt_json = encode_json(&receipt, "original_receipt_json")?;
     checkpoint::persist(transaction, &submission, &checkpoint, &receipt)?;
+    // The persisted checkpoint now carries the new epoch, which is what makes
+    // the superseded records unreachable, so the prune reads it after persist.
+    // The record inserted below sits at the new epoch and is never eligible.
+    if checkpoint.supersedes_authority() {
+        prune::prune_superseded(transaction, &metadata.shard_id)?;
+    }
     idempotency::insert(transaction, &submission, &receipt, &receipt_json)?;
     match bookkeeping {
         RuntimeBookkeeping::None => {}
