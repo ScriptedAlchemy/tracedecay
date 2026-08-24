@@ -51,7 +51,13 @@ export type SettingsWriteGate =
 export interface WritableScopes {
   readonly project: SettingsWriteGate;
   readonly user: SettingsWriteGate;
+  readonly codeIndexWorkers: SettingsWriteGate;
 }
+
+const PROFILE_WORKER_WRITABILITY: ScopeWritability = {
+  state: 'writable',
+  target: 'your TraceDecay profile',
+};
 
 /**
  * Fold the two authorities into one gate.
@@ -84,16 +90,20 @@ export function SettingsEditorPanel({
   writable,
   writability,
   readUrl,
+  codeIndexWorkerReadUrl,
   projectPatchUrl,
   userPatchUrl,
+  codeIndexWorkerPatchUrl,
   onApplied,
 }: {
   payload: SettingsPayloadV1;
   writable: WritableScopes;
   writability: ScopeWritability;
   readUrl: string;
+  codeIndexWorkerReadUrl: string;
   projectPatchUrl: string;
   userPatchUrl: string;
+  codeIndexWorkerPatchUrl: string;
   onApplied: () => void;
 }) {
   const authority = useMemo(() => buildSettingsEditor(payload), [payload]);
@@ -103,8 +113,14 @@ export function SettingsEditorPanel({
     initialSettingsEditorState,
   );
   const routes = useMemo<SettingsRoutes>(
-    () => ({ readUrl, projectPatchUrl, userPatchUrl }),
-    [readUrl, projectPatchUrl, userPatchUrl],
+    () => ({
+      readUrl,
+      codeIndexWorkerReadUrl,
+      projectPatchUrl,
+      userPatchUrl,
+      codeIndexWorkerPatchUrl,
+    }),
+    [readUrl, codeIndexWorkerReadUrl, projectPatchUrl, userPatchUrl, codeIndexWorkerPatchUrl],
   );
 
   useEffect(() => {
@@ -136,10 +152,15 @@ export function SettingsEditorPanel({
     }
     if (inFlight.current === state.review.reviewId) return;
     inFlight.current = state.review.reviewId;
-    // The scope authority travels with the request, so what disabled the field
-    // set and what the write refuses on are the same reading rather than two
-    // that could be taken at different moments.
-    mutate({ ...settingsSubmission(state, routes), writability });
+    // Project and ordinary user writes use the current project gateway reading.
+    // The ProfileSessions worker preference is profile-global, so its request
+    // never inherits selected-project writability.
+    const submission = settingsSubmission(state, routes);
+    mutate({
+      ...submission,
+      writability:
+        submission.scope === 'code_index_workers' ? PROFILE_WORKER_WRITABILITY : writability,
+    });
   }, [state, routes, mutate, writability]);
 
   if (state.status === 'editor_unavailable') {
@@ -209,14 +230,27 @@ export function SettingsEditorPanel({
         />
         <UserSettingsFields
           values={state.draft.user}
+          codeIndexWorkers={state.draft.codeIndexWorkers}
           errors={errors}
           dirty={settingsScopeDirty(state, 'user')}
+          codeIndexWorkersDirty={settingsScopeDirty(state, 'code_index_workers')}
           writable={writable.user}
+          codeIndexWorkersWritable={writable.codeIndexWorkers}
           onChange={(values) => dispatch({ type: 'user_drafted', values })}
+          onCodeIndexWorkersChange={(values) =>
+            dispatch({ type: 'code_index_workers_drafted', values })
+          }
           onReview={() =>
             dispatch({
               type: 'review_requested',
               scope: 'user',
+              idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
+            })
+          }
+          onCodeIndexWorkersReview={() =>
+            dispatch({
+              type: 'review_requested',
+              scope: 'code_index_workers',
               idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
             })
           }

@@ -79,6 +79,13 @@ pub struct ResidentMemorySnapshotV1 {
     pub used_bytes: u64,
     pub limit_bytes: u64,
     pub charges: Vec<ResidentMemoryChargeV1>,
+    pub process_shared_charges: Vec<ProcessSharedMemoryChargeV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessSharedMemoryChargeV1 {
+    pub component: ResidentMemoryComponentIdV1,
+    pub bytes: u64,
 }
 
 impl ResidentMemorySnapshotV1 {
@@ -86,6 +93,13 @@ impl ResidentMemorySnapshotV1 {
         self.charges
             .iter()
             .find(|charge| charge.key == *key)
+            .map_or(0, |charge| charge.bytes)
+    }
+
+    pub fn process_shared_charge_for(&self, component: ResidentMemoryComponentIdV1) -> u64 {
+        self.process_shared_charges
+            .iter()
+            .find(|charge| charge.component == component)
             .map_or(0, |charge| charge.bytes)
     }
 }
@@ -109,6 +123,7 @@ struct ReclaimerEntryV1 {
 struct ResidentMemoryStateV1 {
     used_bytes: u64,
     charges: BTreeMap<ResidentMemoryKeyV1, u64>,
+    process_shared_charges: BTreeMap<ResidentMemoryComponentIdV1, u64>,
     reclaimers: BTreeMap<(u32, u64), Arc<ResidentMemoryReclaimerV1>>,
     next_reclaimer_sequence: u64,
 }
@@ -161,6 +176,35 @@ impl ProcessResidentMemoryV1 {
         Err(self.admission_failure(requested_bytes))
     }
 
+    /// Reserves one process-shared component without fabricating a project,
+    /// worktree, or code-generation owner. These reservations use the same
+    /// process ceiling and RAII release authority as project generations.
+    #[hotpath::measure]
+    pub fn reserve_process_shared(
+        self: &Arc<Self>,
+        component: ResidentMemoryComponentIdV1,
+        requested_bytes: NonZeroU64,
+    ) -> Result<ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        let mut state = self.lock_state();
+        let Some(next_used) = state.used_bytes.checked_add(requested_bytes.get()) else {
+            hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
+            return Err(self.admission_failure_from_used(state.used_bytes, requested_bytes));
+        };
+        if next_used > self.limit_bytes.get() {
+            hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
+            return Err(self.admission_failure_from_used(state.used_bytes, requested_bytes));
+        }
+        state.used_bytes = next_used;
+        *state.process_shared_charges.entry(component).or_default() += requested_bytes.get();
+        hotpath::gauge!("runtime_core.resident.reservations").inc(1.0);
+        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
+        Ok(ProcessSharedMemoryReservationV1 {
+            authority: Arc::clone(self),
+            component,
+            reserved_bytes: requested_bytes.get(),
+        })
+    }
+
     pub fn register_reclaimer(
         self: &Arc<Self>,
         priority: u32,
@@ -190,6 +234,14 @@ impl ProcessResidentMemoryV1 {
                 .iter()
                 .map(|(key, bytes)| ResidentMemoryChargeV1 {
                     key: key.clone(),
+                    bytes: *bytes,
+                })
+                .collect(),
+            process_shared_charges: state
+                .process_shared_charges
+                .iter()
+                .map(|(component, bytes)| ProcessSharedMemoryChargeV1 {
+                    component: *component,
                     bytes: *bytes,
                 })
                 .collect(),
@@ -253,8 +305,16 @@ impl ProcessResidentMemoryV1 {
 
     fn admission_failure(&self, requested_bytes: NonZeroU64) -> ResidentMemoryAdmissionFailureV1 {
         hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
+        self.admission_failure_from_used(self.lock_state().used_bytes, requested_bytes)
+    }
+
+    fn admission_failure_from_used(
+        &self,
+        used_bytes: u64,
+        requested_bytes: NonZeroU64,
+    ) -> ResidentMemoryAdmissionFailureV1 {
         ResidentMemoryAdmissionFailureV1 {
-            used_bytes: self.lock_state().used_bytes,
+            used_bytes,
             requested_bytes: requested_bytes.get(),
             limit_bytes: self.limit_bytes.get(),
         }
@@ -303,6 +363,50 @@ impl ProcessResidentMemoryV1 {
             }
         }
     }
+
+    fn shrink_process_shared(
+        &self,
+        component: ResidentMemoryComponentIdV1,
+        reserved_bytes: u64,
+        measured_bytes: u64,
+    ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
+        if measured_bytes > reserved_bytes {
+            return Err(ResidentMemoryAdjustmentFailureV1 {
+                reserved_bytes,
+                measured_bytes,
+            });
+        }
+        let released_bytes = reserved_bytes - measured_bytes;
+        if released_bytes == 0 {
+            return Ok(());
+        }
+        let mut state = self.lock_state();
+        state.used_bytes -= released_bytes;
+        if let Some(charge) = state.process_shared_charges.get_mut(&component) {
+            *charge -= released_bytes;
+            if *charge == 0 {
+                state.process_shared_charges.remove(&component);
+            }
+        }
+        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
+        Ok(())
+    }
+
+    fn release_process_shared(&self, component: ResidentMemoryComponentIdV1, reserved_bytes: u64) {
+        if reserved_bytes == 0 {
+            return;
+        }
+        let mut state = self.lock_state();
+        state.used_bytes -= reserved_bytes;
+        if let Some(charge) = state.process_shared_charges.get_mut(&component) {
+            *charge -= reserved_bytes;
+            if *charge == 0 {
+                state.process_shared_charges.remove(&component);
+            }
+        }
+        hotpath::gauge!("runtime_core.resident.reservations").dec(1.0);
+        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
+    }
 }
 
 pub struct ResidentMemoryReservationV1 {
@@ -344,6 +448,48 @@ impl ResidentMemoryReservationV1 {
 impl Drop for ResidentMemoryReservationV1 {
     fn drop(&mut self) {
         self.authority.release(&self.key, self.reserved_bytes);
+    }
+}
+
+pub struct ProcessSharedMemoryReservationV1 {
+    authority: Arc<ProcessResidentMemoryV1>,
+    component: ResidentMemoryComponentIdV1,
+    reserved_bytes: u64,
+}
+
+impl ProcessSharedMemoryReservationV1 {
+    pub const fn reserved_bytes(&self) -> u64 {
+        self.reserved_bytes
+    }
+
+    pub fn shrink_to(
+        &mut self,
+        measured_bytes: u64,
+    ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
+        self.authority.shrink_process_shared(
+            self.component,
+            self.reserved_bytes,
+            measured_bytes,
+        )?;
+        self.reserved_bytes = measured_bytes;
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ProcessSharedMemoryReservationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessSharedMemoryReservationV1")
+            .field("component", &self.component)
+            .field("reserved_bytes", &self.reserved_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ProcessSharedMemoryReservationV1 {
+    fn drop(&mut self) {
+        self.authority
+            .release_process_shared(self.component, self.reserved_bytes);
     }
 }
 

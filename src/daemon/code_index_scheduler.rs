@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
     io::{Read, Write},
+    num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
@@ -36,8 +37,9 @@ use tracedecay_private_fs::{
     framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryReservationV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    ResidentMemoryAdjustmentFailureV1, ResidentMemoryAdmissionFailureV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryReservationV1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -94,6 +96,7 @@ use crate::{
 
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
+const CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1: &str = "code-index-build-workers-v1";
 
 const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
@@ -1359,6 +1362,10 @@ struct CapturedCandidateV1 {
     captured: CodeIndexCapturedFileV1,
     receipt_id: SanitizationReceiptId,
     retained: Arc<[u8]>,
+    /// Charges both live source representations (interned `Arc` and production
+    /// input `Vec`) before the candidate can join a snapshot. The build copy's
+    /// half is released after production completes.
+    retained_reservation: Option<ResidentMemoryReservationV1>,
 }
 
 struct CapturedSnapshotV1 {
@@ -1371,6 +1378,9 @@ struct CapturedSnapshotV1 {
     /// snapshot's bytes so identical content in sibling worktrees can reuse
     /// them (physical sharing without identity aliasing).
     retained_bytes: Vec<Arc<[u8]>>,
+    /// Pointer-paired resident charges for `retained_bytes` plus their live
+    /// production-input copies. Empty sources need no nonzero reservation.
+    retained_reservations: Vec<ResidentMemoryReservationV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -2487,6 +2497,19 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     PublicationConflict(String),
     #[error("code-index ignored dependency admission refused: {0}")]
     IgnoredDependency(#[from] CodeIndexIgnoredDependencyRefusalV1),
+    #[error("code-index worker resident-memory admission refused: {0}")]
+    WorkerMemoryAdmission(#[from] ResidentMemoryAdmissionFailureV1),
+    #[error("code-index retained-source resident-memory admission refused: {0}")]
+    SnapshotMemoryAdmission(ResidentMemoryAdmissionFailureV1),
+    #[error("code-index retained-source resident-memory capacity is unavailable")]
+    SnapshotMemoryCapacityUnavailable,
+    #[error("code-index retained-source resident-memory adjustment failed: {0}")]
+    SnapshotMemoryAdjustment(ResidentMemoryAdjustmentFailureV1),
+    #[error("code-index worker plan refused: {0}")]
+    WorkerPlan(#[from] tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1),
+    #[cfg(not(test))]
+    #[error("code-index worker plan is not installed")]
+    WorkerPlanNotInstalled,
 }
 
 impl CodeIndexSchedulerErrorV1 {
@@ -2524,7 +2547,14 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::GraphActivationRefused(_)
             | Self::SemanticSchedule(_)
             | Self::PublicationConflict(_)
-            | Self::IgnoredDependency(_) => false,
+            | Self::IgnoredDependency(_)
+            | Self::WorkerMemoryAdmission(_)
+            | Self::SnapshotMemoryAdmission(_)
+            | Self::SnapshotMemoryCapacityUnavailable
+            | Self::SnapshotMemoryAdjustment(_)
+            | Self::WorkerPlan(_) => false,
+            #[cfg(not(test))]
+            Self::WorkerPlanNotInstalled => false,
         }
     }
 
@@ -2594,6 +2624,10 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
+    /// Holds the measured source-byte charges for
+    /// `retained_snapshot_bytes`; worker scratch is admitted separately only
+    /// after capture has completed.
+    _retained_snapshot_memory: Vec<ResidentMemoryReservationV1>,
     /// Process resident-memory authority artifact builds and readers reserve
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
@@ -2699,6 +2733,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             freshness_unknown,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
+            _retained_snapshot_memory: Vec::new(),
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
             )),
@@ -2727,6 +2762,106 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this scheduler's private standalone authority.
     pub(super) fn bind_resident_memory(&mut self, resident_memory: Arc<ProcessResidentMemoryV1>) {
         self.resident_memory = resident_memory;
+    }
+
+    /// Reserve the installed worker plan on the canonical process authority.
+    /// The returned RAII guard spans source capture and the complete production
+    /// build, releasing on success, typed failure, cancellation, or unwind.
+    fn reserve_worker_memory(
+        &self,
+    ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
+        self.ensure_worker_plan()?;
+        let workers = tracedecay_code_index::parallelism::indexing_workers();
+        let requested_bytes =
+            NonZeroU64::new(tracedecay_code_index::parallelism::worker_reservation_bytes(workers))
+                .ok_or_else(|| {
+                    CodeIndexSchedulerErrorV1::Identity(
+                        "code-index worker resident-memory reservation must be nonzero".to_owned(),
+                    )
+                })?;
+        let component = ResidentMemoryComponentIdV1::new(CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let generation_id = CodeGenerationId::new("code-index-worker-active")
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        self.resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id,
+                    component,
+                },
+                requested_bytes,
+            )
+            .map_err(CodeIndexSchedulerErrorV1::from)
+    }
+
+    fn reserve_snapshot_memory(
+        &self,
+        content_digest: &ContentDigest,
+        retained_bytes: usize,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexSchedulerErrorV1> {
+        let Some(requested_bytes) = u64::try_from(retained_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(NonZeroU64::new)
+        else {
+            if retained_bytes == 0 {
+                return Ok(None);
+            }
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index captured source charge exceeds u64".to_owned(),
+            ));
+        };
+        let component = ResidentMemoryComponentIdV1::new("code_index.snapshot.source_bytes.v1")
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let generation_id = CodeGenerationId::new(format!(
+            "code-index-snapshot-source.{}",
+            content_digest.as_str()
+        ))
+        .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        self.resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id,
+                    component,
+                },
+                requested_bytes,
+            )
+            .map(Some)
+            .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission)
+    }
+
+    fn finish_snapshot_build_memory(
+        reservations: &mut [ResidentMemoryReservationV1],
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        for reservation in reservations {
+            reservation
+                .shrink_to(reservation.reserved_bytes() / 2)
+                .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_worker_plan(&self) -> Result<(), CodeIndexSchedulerErrorV1> {
+        if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            let snapshot = self.resident_memory.snapshot();
+            tracedecay_code_index::parallelism::install_worker_plan(
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+                snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
+            )?;
+            Ok(())
+        }
+        #[cfg(not(test))]
+        {
+            Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
+        }
     }
 
     /// Replace the semantic `schedule_generation` hook on mount/remount. The hook
@@ -2944,6 +3079,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
+        self.ensure_worker_plan()?;
+        let _worker_memory = self.reserve_worker_memory()?;
         let _reconcile_guard = ReconcilePassGuard::enter(&self.reconcile_in_progress);
         // Re-resolve exact identity before indexing (tier-3 backstop). The
         // worktree must still be the same structural identity this scheduler is
@@ -2980,7 +3117,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .take();
             overflow_reconciled |= hints.overflow;
             let mut captured = self.capture_authoritative_snapshot(None)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             let active_generation = self
                 .publication
                 .load_active_shared()
@@ -3004,6 +3140,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 == Some(&captured.snapshot.content_identity)
                 && unchanged_source
             {
+                drop(std::mem::take(&mut captured.captured_files));
+                Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+                self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+                self._retained_snapshot_memory =
+                    std::mem::take(&mut captured.retained_reservations);
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(sampled_metadata, sampled_signature);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3047,6 +3188,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
+                    Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+                    self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+                    self._retained_snapshot_memory =
+                        std::mem::take(&mut captured.retained_reservations);
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(sampled_metadata, sampled_signature);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3056,6 +3201,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
+            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(sampled_metadata, sampled_signature);
 
@@ -3595,6 +3743,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // truthfully from gix. Deletions drop out of the present candidate set;
         // their tombstones flow through `changed_paths`.
         let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
+        let mut retained_reservations = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         if self.shutting_down.load(Ordering::Acquire) {
@@ -3623,6 +3772,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .map_err(|reason| match reason {
                     tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled => {
                         cancelled_code_index_reconcile()
+                    }
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable => {
+                        CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable
                     }
                     _ => CodeIndexSchedulerErrorV1::Git(format!(
                         "immutable HEAD-tree capture failed: {}",
@@ -3673,19 +3825,24 @@ impl CodeIndexWorktreeSchedulerV1 {
             candidates
                 .par_iter()
                 .map(|logical_path| {
-                    if self.shutting_down.load(Ordering::Acquire) {
-                        return Err(cancelled_code_index_reconcile());
-                    }
-                    ignored_dependencies::checkpoint_if_present(control)?;
-                    self.capture_admitted_candidate(
-                        &registry,
-                        logical_path,
-                        control,
-                        admitted_paths.contains(logical_path.as_str()),
-                    )
+                    crate::code_index::parallelism::with_background_cpu_permit(|| {
+                        if self.shutting_down.load(Ordering::Acquire) {
+                            return Err(cancelled_code_index_reconcile());
+                        }
+                        ignored_dependencies::checkpoint_if_present(control)?;
+                        self.capture_admitted_candidate(
+                            &registry,
+                            logical_path,
+                            control,
+                            admitted_paths.contains(logical_path.as_str()),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>()
-        });
+        })
+        .map_err(|error| {
+            CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(error))
+        })?;
 
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
@@ -3705,6 +3862,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
             };
             sanitization_receipts.insert(candidate.receipt_id);
+            if let Some(reservation) = candidate.retained_reservation {
+                retained_reservations.push(reservation);
+            }
             retained_bytes.push(candidate.retained);
             files.push(candidate.file);
             captured_files.push(candidate.captured);
@@ -3743,6 +3903,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
+            retained_reservations,
         })
     }
 }

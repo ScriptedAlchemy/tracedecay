@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -11,23 +11,28 @@ use tracedecay_store::{
     SessionTemporalDigestV1, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, storage, storage_message,
 };
+use super::super::rebuild::checkpoint_relation_rebuild_control;
 use super::super::relation_projection::reconstruct_logical_copy_relations;
 use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
 
 const MAX_RECEIPT_COPY_ENTITIES: usize = 100_000;
 
+#[hotpath::measure]
 pub async fn validate_final_projection_receipt(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     watermarks: &tracedecay_store::SessionFrozenWatermarksV1,
     relation_projection: &SessionRelationProjection,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    checkpoint_relation_rebuild_control(control)?;
     let generation_i64 = generation_i64(generation, super::super::query::ACTIVATE_OPERATION)?;
     let mut rows = conn
         .query(
@@ -133,7 +138,7 @@ pub async fn validate_final_projection_receipt(
         vec![],
         vec![],
     )?;
-    let actual = projection_coverage(conn, &batch).await?;
+    let actual = projection_coverage(conn, &batch, Some(control)).await?;
     if actual != expected {
         return Err(storage_message(
             super::super::query::ACTIVATE_OPERATION,
@@ -151,55 +156,70 @@ pub async fn validate_final_projection_receipt(
         session_id,
         generation_i64,
         watermarks.source_frontier(),
+        control,
     )
     .await?;
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) async fn validate_canonical_assertion_completeness(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: i64,
     source_frontier: u64,
+    control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    checkpoint_relation_rebuild_control(control)?;
     let mut rows = conn
         .query(
             "SELECT observation.observation_json, anchor.anchor_json
-             FROM observations AS observation
+             FROM session_temporal_observation_effects AS effect
+             JOIN observations AS observation
+               ON observation.observation_id = effect.observation_id
              JOIN observation_retrieval_anchors AS binding
                ON binding.observation_id = observation.observation_id
              JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
-             WHERE observation.sequence <= ?1
-             ORDER BY observation.sequence",
-            params![frontier_i64(
-                source_frontier,
-                super::super::query::ACTIVATE_OPERATION,
-            )?],
+             WHERE effect.session_id = ?1
+               AND effect.observation_sequence <= ?2
+               AND effect.output_count > 0
+             ORDER BY effect.observation_sequence",
+            params![
+                session_id.as_str(),
+                frontier_i64(source_frontier, super::super::query::ACTIVATE_OPERATION,)?,
+            ],
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    let mut required = Vec::new();
+    record_assertion_validation_probe();
+    let mut required = BTreeSet::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
     {
-        let observation: tracedecay_domain::DurableObservationV1 = serde_json::from_str(
-            &row.get::<String>(0)
+        checkpoint_relation_rebuild_control(control)?;
+        let observation_json = row
+            .get::<String>(0)
+            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+        let anchor_json = row
+            .get::<String>(1)
+            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+        record_assertion_history_row(
+            u64::try_from(observation_json.len().saturating_add(anchor_json.len()))
                 .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
-        )
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+        );
+        let observation: tracedecay_domain::DurableObservationV1 =
+            serde_json::from_str(&observation_json)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
         let Ok(envelope) = observation_envelope_from_payload(observation.payload()) else {
             continue;
         };
         if envelope.relations().session_id() != session_id {
             continue;
         }
-        let anchor: RetrievalAnchorRecord = serde_json::from_str(
-            &row.get::<String>(1)
-                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
-        )
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+        let anchor: RetrievalAnchorRecord = serde_json::from_str(&anchor_json)
+            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
         if anchor.owner() != observation.scope()
             || !anchor
                 .source_observations()
@@ -212,11 +232,11 @@ pub(super) async fn validate_canonical_assertion_completeness(
         }
         for lineage in anchor.source_anchors() {
             if let Some(kind) = assertion_kind_for_relation(lineage.relation()) {
-                required.push((
+                required.insert((
                     observation.observation_id().as_str().to_owned(),
                     anchor.anchor_id().as_str().to_owned(),
                     lineage.anchor_id().as_str().to_owned(),
-                    kind.as_str(),
+                    kind.as_str().to_owned(),
                     observation
                         .receipt()
                         .receipt()
@@ -229,56 +249,67 @@ pub(super) async fn validate_canonical_assertion_completeness(
     }
     drop(rows);
 
-    for (observation_id, subject_anchor_id, object_anchor_id, kind, receipt_id) in required {
-        let mut matches = conn
-            .query(
-                "SELECT COUNT(*)
-                 FROM session_assertions AS assertion
-                 JOIN session_occurrences AS subject
-                   ON subject.session_id = assertion.session_id
-                  AND subject.generation = assertion.generation
-                  AND subject.retrieval_anchor_id = assertion.subject_anchor_id
-                  AND subject.source_observation_id = ?5
-                 JOIN session_occurrences AS object
-                   ON object.session_id = assertion.session_id
-                  AND object.generation = assertion.generation
-                  AND object.retrieval_anchor_id = assertion.object_anchor_id
-                 WHERE assertion.session_id = ?1 AND assertion.generation = ?2
-                   AND assertion.assertion_kind = ?3
-                   AND assertion.subject_anchor_id = ?4
-                   AND assertion.object_anchor_id = ?6
-                   AND json_extract(assertion.evidence_json, '$.sanitization_receipt.receipt_id')
-                       = ?7",
-                params![
-                    session_id.as_str(),
-                    generation,
-                    kind,
-                    subject_anchor_id,
-                    observation_id,
-                    object_anchor_id,
-                    receipt_id,
-                ],
-            )
-            .await
+    let mut actual = BTreeSet::new();
+    let mut rows = conn
+        .query(
+            "SELECT subject.source_observation_id,
+                    assertion.subject_anchor_id, assertion.object_anchor_id,
+                    assertion.assertion_kind,
+                    json_extract(
+                        assertion.evidence_json,
+                        '$.sanitization_receipt.receipt_id'
+                    )
+             FROM session_assertions AS assertion
+             JOIN (
+                 SELECT DISTINCT session_id, generation,
+                                 retrieval_anchor_id, source_observation_id
+                 FROM session_occurrences
+                 WHERE session_id = ?1 AND generation = ?2
+             ) AS subject
+               ON subject.session_id = assertion.session_id
+              AND subject.generation = assertion.generation
+              AND subject.retrieval_anchor_id = assertion.subject_anchor_id
+             WHERE assertion.session_id = ?1 AND assertion.generation = ?2
+               AND EXISTS (
+                   SELECT 1
+                   FROM session_occurrences AS object
+                   WHERE object.session_id = assertion.session_id
+                     AND object.generation = assertion.generation
+                     AND object.retrieval_anchor_id = assertion.object_anchor_id
+               )",
+            params![session_id.as_str(), generation],
+        )
+        .await
+        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+    record_assertion_validation_probe();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
+    {
+        checkpoint_relation_rebuild_control(control)?;
+        let receipt_id = row
+            .get::<Option<String>>(4)
             .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        let count = matches
-            .next()
-            .await
-            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
-            .ok_or_else(|| {
-                storage_message(
-                    super::super::query::ACTIVATE_OPERATION,
-                    "canonical assertion completeness aggregate returned no row",
-                )
-            })?
-            .get::<i64>(0)
-            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        if count != 1 {
-            return Err(storage_message(
-                super::super::query::ACTIVATE_OPERATION,
-                "candidate omits canonical typed assertion lineage through the frozen frontier",
+        if let Some(receipt_id) = receipt_id {
+            actual.insert((
+                row.get::<String>(0)
+                    .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
+                row.get::<String>(1)
+                    .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
+                row.get::<String>(2)
+                    .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
+                row.get::<String>(3)
+                    .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
+                receipt_id,
             ));
         }
+    }
+    if !required.is_subset(&actual) {
+        return Err(storage_message(
+            super::super::query::ACTIVATE_OPERATION,
+            "candidate omits canonical typed assertion lineage through the frozen frontier",
+        ));
     }
     Ok(())
 }
@@ -605,7 +636,12 @@ pub(super) async fn digest_query_rows(
     conn: &impl Executor,
     sql: &str,
     batch: &SessionTemporalProjectionBatchV1,
+    control: Option<&ExecutionControl>,
 ) -> SessionStoreResult<(usize, String)> {
+    if let Some(control) = control {
+        checkpoint_relation_rebuild_control(control)?;
+    }
+    record_coverage_query_probe();
     let mut rows = conn
         .query(
             sql,
@@ -616,24 +652,45 @@ pub(super) async fn digest_query_rows(
         )
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let mut encoded = Vec::new();
+    let mut digest = Sha256::new();
+    let mut count = 0usize;
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?
     {
-        encoded.push(
-            row.get::<String>(0)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        if let Some(control) = control {
+            checkpoint_relation_rebuild_control(control)?;
+        }
+        let value = row
+            .get::<String>(0)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        record_coverage_row(
+            u64::try_from(value.len()).map_err(|error| storage(PERSIST_OPERATION, error))?,
         );
+        update_ordered_row_digest(&mut digest, count, value.as_bytes());
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| storage_message(PERSIST_OPERATION, "coverage row count overflow"))?;
     }
-    let digest = digest_bytes(encoded.join("\n").as_bytes());
-    Ok((encoded.len(), digest))
+    Ok((
+        count,
+        encode_tagged_lowercase_hex("sha256:", &digest.finalize()),
+    ))
 }
 
+fn update_ordered_row_digest(digest: &mut Sha256, prior_rows: usize, row: &[u8]) {
+    if prior_rows > 0 {
+        digest.update(b"\n");
+    }
+    digest.update(row);
+}
+
+#[hotpath::measure]
 pub(super) async fn projection_coverage(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
+    control: Option<&ExecutionControl>,
 ) -> SessionStoreResult<ProjectionCoverage> {
     let occurrences = digest_query_rows(
         conn,
@@ -647,6 +704,7 @@ pub(super) async fn projection_coverage(
          WHERE session_id = ?1 AND generation = ?2
          ORDER BY occurrence_id",
         batch,
+        control,
     )
     .await?;
     let dimensions = digest_query_rows(
@@ -663,19 +721,52 @@ pub(super) async fn projection_coverage(
             UNION ALL
             SELECT 'member:' || json_array(turn_id, occurrence_id, ordinal)
             FROM session_turn_members WHERE session_id = ?1 AND generation = ?2
+            UNION ALL
+            SELECT 'derived:' || json_array(
+                evidence_kind, evidence_id, retrieval_anchor_id, thread_id,
+                first_occurrence_id, last_occurrence_id, algorithm_version,
+                configuration_digest, member_count, member_digest, evidence_json
+            )
+            FROM session_derived_evidence
+            WHERE session_id = ?1 AND generation = ?2
+            UNION ALL
+            SELECT 'derived-member:' || json_array(
+                evidence_kind, evidence_id, ordinal, occurrence_id, member_role
+            )
+            FROM session_derived_evidence_members
+            WHERE session_id = ?1 AND generation = ?2
+            UNION ALL
+            SELECT 'derived-anchor:' || json_array(
+                anchor.anchor_id, anchor.anchor_json, anchor.owner_json,
+                anchor.projection_generation
+            )
+            FROM session_derived_evidence AS evidence
+            JOIN retrieval_anchors AS anchor
+              ON anchor.anchor_id = evidence.retrieval_anchor_id
+            WHERE evidence.session_id = ?1 AND evidence.generation = ?2
          ) ORDER BY encoded",
         batch,
+        control,
     )
     .await?;
+    if let Some(control) = control {
+        checkpoint_relation_rebuild_control(control)?;
+    }
+    let cancellation = control
+        .map(super::super::store::execution_control_graph_cancellation)
+        .unwrap_or_else(|| Arc::new(NeverCancelled));
     let copies = reconstruct_logical_copy_relations(
         conn,
         batch.session_id(),
         batch.generation(),
         MAX_RECEIPT_COPY_ENTITIES,
-        Arc::new(NeverCancelled),
+        cancellation,
     )
     .await
     .and_then(|copies| copy_identity_coverage(&copies))?;
+    if let Some(control) = control {
+        checkpoint_relation_rebuild_control(control)?;
+    }
     let assertions = digest_query_rows(
         conn,
         "SELECT json_array(assertion_id, assertion_kind, subject_anchor_id,
@@ -683,6 +774,7 @@ pub(super) async fn projection_coverage(
          FROM session_assertions
          WHERE session_id = ?1 AND generation = ?2 ORDER BY assertion_id",
         batch,
+        control,
     )
     .await?;
     let supersession = digest_query_rows(
@@ -692,6 +784,7 @@ pub(super) async fn projection_coverage(
          WHERE session_id = ?1 AND generation = ?2
          ORDER BY superseded_assertion_id, superseding_assertion_id",
         batch,
+        control,
     )
     .await?;
     let current = digest_query_rows(
@@ -701,6 +794,7 @@ pub(super) async fn projection_coverage(
          FROM session_current_entities
          WHERE session_id = ?1 AND generation = ?2 ORDER BY entity_kind, entity_id",
         batch,
+        control,
     )
     .await?;
     let fts = digest_query_rows(
@@ -711,6 +805,7 @@ pub(super) async fn projection_coverage(
          WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
          ORDER BY occurrence.occurrence_id",
         batch,
+        control,
     )
     .await?;
     Ok(ProjectionCoverage {
@@ -724,6 +819,40 @@ pub(super) async fn projection_coverage(
     })
 }
 
+#[inline(always)]
+fn record_assertion_validation_probe() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.activation.assertion_query_probes").inc(1_u64);
+}
+
+#[inline(always)]
+fn record_assertion_history_row(bytes: u64) {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("session_temporal.activation.history_rows").inc(1_u64);
+        hotpath::gauge!("session_temporal.activation.history_row_payload_bytes").inc(bytes);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = bytes;
+}
+
+#[inline(always)]
+fn record_coverage_query_probe() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.coverage.query_probes").inc(1_u64);
+}
+
+#[inline(always)]
+fn record_coverage_row(bytes: u64) {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("session_temporal.coverage.rows").inc(1_u64);
+        hotpath::gauge!("session_temporal.coverage.row_payload_bytes").inc(bytes);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = bytes;
+}
+
 fn copy_identity_coverage(copies: &[LogicalCopyRelation]) -> SessionStoreResult<(usize, String)> {
     let encoded = sorted_json(copies)?;
     Ok((encoded.len(), digest_bytes(encoded.join("\n").as_bytes())))
@@ -735,18 +864,23 @@ pub(super) async fn insert_projection_receipt(
     batch_digest: &str,
     coverage: &ProjectionCoverage,
     committed_at: i64,
+    baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<()> {
+    let (committed_item_count, committed_copy_count) =
+        projection_progress_counts(conn, batch, baseline).await?;
     conn.execute(
         "INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest,
             frozen_watermarks_json, source_through, projection_through,
+            batch_item_count, committed_item_count, committed_copy_count,
             occurrence_count, occurrence_digest, dimension_count, dimension_digest,
             copy_count, copy_digest, assertion_count, assertion_digest,
             supersession_count, supersession_digest, current_count, current_digest,
             fts_count, fts_digest, committed_at
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+            ?23, ?24, ?25
          )",
         params![
             batch.session_id().as_str(),
@@ -756,6 +890,11 @@ pub(super) async fn insert_projection_receipt(
             encode_watermarks(batch.watermarks(), PERSIST_OPERATION)?,
             frontier_i64(batch.source_through(), PERSIST_OPERATION)?,
             frontier_i64(batch.projection_through(), PERSIST_OPERATION)?,
+            i64::try_from(batch.item_count()).map_err(|error| storage(PERSIST_OPERATION, error))?,
+            i64::try_from(committed_item_count)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            i64::try_from(committed_copy_count)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
             i64::try_from(coverage.occurrences.0)
                 .map_err(|error| storage(PERSIST_OPERATION, error))?,
             coverage.occurrences.1.as_str(),
@@ -782,6 +921,70 @@ pub(super) async fn insert_projection_receipt(
     Ok(())
 }
 
+async fn projection_progress_counts(
+    conn: &impl Executor,
+    batch: &SessionTemporalProjectionBatchV1,
+    baseline: ProjectionProgressBaseline,
+) -> SessionStoreResult<(usize, usize)> {
+    let prior = if batch.batch_ordinal() == 0
+        && matches!(baseline, ProjectionProgressBaseline::SeededFromActive)
+    {
+        (batch.watermarks().active_generation(), None)
+    } else if batch.batch_ordinal() > 0 {
+        (
+            batch.generation(),
+            Some(batch.batch_ordinal().saturating_sub(1)),
+        )
+    } else {
+        return Ok((batch.item_count(), batch.copies().len()));
+    };
+    let (generation, ordinal) = prior;
+    let mut rows = conn
+        .query(
+            "SELECT committed_item_count, committed_copy_count
+             FROM session_temporal_projection_receipts
+             WHERE session_id = ?1 AND generation = ?2
+               AND (?3 IS NULL OR batch_ordinal = ?3)
+             ORDER BY batch_ordinal DESC LIMIT 1",
+            params![
+                batch.session_id().as_str(),
+                generation_i64(generation, PERSIST_OPERATION)?,
+                ordinal
+                    .map(|value| frontier_i64(value, PERSIST_OPERATION))
+                    .transpose()?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let (prior_items, prior_copies) = match rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        Some(row) => (
+            usize::try_from(
+                row.get::<i64>(0)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            )
+            .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            usize::try_from(
+                row.get::<i64>(1)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            )
+            .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        ),
+        None => (0, 0),
+    };
+    Ok((
+        prior_items
+            .checked_add(batch.item_count())
+            .ok_or_else(|| storage_message(PERSIST_OPERATION, "committed item count overflow"))?,
+        prior_copies
+            .checked_add(batch.copies().len())
+            .ok_or_else(|| storage_message(PERSIST_OPERATION, "committed copy count overflow"))?,
+    ))
+}
+
 #[derive(PartialEq, Eq)]
 pub(super) struct ProjectionCoverage {
     occurrences: (usize, String),
@@ -791,4 +994,35 @@ pub(super) struct ProjectionCoverage {
     supersession: (usize, String),
     current: (usize, String),
     fts: (usize, String),
+}
+
+pub(super) fn empty_projection_coverage() -> ProjectionCoverage {
+    let digest = digest_bytes(&[]);
+    ProjectionCoverage {
+        occurrences: (0, digest.clone()),
+        dimensions: (0, digest.clone()),
+        copies: (0, digest.clone()),
+        assertions: (0, digest.clone()),
+        supersession: (0, digest.clone()),
+        current: (0, digest.clone()),
+        fts: (0, digest),
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn streaming_row_digest_preserves_the_canonical_joined_bytes() {
+        let rows = [b"alpha".as_slice(), b"".as_slice(), b"omega".as_slice()];
+        let mut streaming = Sha256::new();
+        for (index, row) in rows.into_iter().enumerate() {
+            update_ordered_row_digest(&mut streaming, index, row);
+        }
+        assert_eq!(
+            encode_tagged_lowercase_hex("sha256:", &streaming.finalize()),
+            digest_bytes(b"alpha\n\nomega")
+        );
+    }
 }
