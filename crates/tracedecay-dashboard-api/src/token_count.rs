@@ -1,42 +1,43 @@
 //! Tokenizer-backed token counting for the Savings & Cost tab.
 //!
-//! Cost estimation has three quality tiers (best wins per message):
+//! Content-size estimation has two quality tiers:
 //!
-//! 1. **actual** — the transcript recorded real usage data.
-//! 2. **tokenized** — no usage data, but the stored text is counted with a
+//! 1. **tokenized** — stored text counted with a
 //!    real BPE tokenizer (tiktoken). Exact for OpenAI-family models
 //!    (`o200k_base` / `cl100k_base` per family); for other vendors
 //!    (Claude/Gemini have no public tokenizer) `o200k_base` serves as a
 //!    much-better-than-chars/4 approximation and is labeled as such.
-//! 3. **estimated** — the legacy `(len+3)/4` chars/4 heuristic, used when
+//! 2. **estimated** — the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
+//! Provider-reported billing usage comes exclusively from the canonical raw
+//! provider-usage projection. Message metadata is not an accounting fallback.
+//!
 //! Counting 15k+ stored messages per request would be far too slow, so
-//! counts are cached at two levels keyed by `(provider, message_id)` with a
-//! `text_len` guard: an in-process map on [`TokenCountCache`], persisted in
-//! the `dashboard_token_counts` sidecar table of the **global accounting
-//! DB** (dashboard scope — the session-store schema is never touched).
+//! counts are cached in process keyed by `(provider, message_id)` with a
+//! `text_len` guard. The cache is derived dashboard acceleration only; it
+//! never creates a dashboard-owned persistence authority.
 //! A background warm task runs at dashboard startup so the first paint of
 //! the Savings tab doesn't pay the initial counting cost.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
+use clru::CLruCache;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use super::util::{qmarks, query_rows};
-use super::{DashboardState, DashboardTokenCount};
+use super::DashboardState;
+use super::util::{query_rows, str_field};
+use tracedecay_runtime_core::db::build_qmark_placeholders;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
 
-/// Per-message provenance + token columns, derived once and reused by every
-/// savings aggregate. Usage fields accept both the Anthropic
-/// (`input_tokens`/`output_tokens`) and `OpenAI` (`prompt_tokens`/
-/// `completion_tokens`) transcript shapes; `json_valid` guards keep one
-/// malformed `metadata_json` row from failing the whole query.
+/// Per-message content-token columns, derived once and reused by every savings
+/// aggregate. Billing usage never enters this content-sizing projection.
 pub(super) const MESSAGE_TOKENS_CTE: &str = "
     SELECT provider,
            message_id,
@@ -45,21 +46,7 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
            timestamp,
            TRIM(COALESCE(model, '')) AS model,
            LENGTH(COALESCE(text, '')) AS msg_len,
-           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(COALESCE(json_extract(metadata_json, '$.usage.input_tokens'),
-                             json_extract(metadata_json, '$.usage.prompt_tokens')) AS INTEGER)
-           END AS usage_in,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(COALESCE(json_extract(metadata_json, '$.usage.output_tokens'),
-                             json_extract(metadata_json, '$.usage.completion_tokens')) AS INTEGER)
-           END AS usage_out,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(json_extract(metadata_json, '$.usage.cache_read_input_tokens') AS INTEGER)
-           END AS usage_cache_read,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
-           END AS usage_cache_write
+           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens
     FROM session_messages
     WHERE kind IS NULL OR kind NOT IN ('summary', 'tool_event', 'hook_event', 'reasoning')";
 
@@ -119,17 +106,17 @@ pub fn counting_available() -> bool {
 /// embedded vocabularies lazily, so the first call pays the init cost and
 /// builds without the feature never do.
 #[cfg(feature = "token-counting")]
-pub fn count_text_tokens(text: &str, model: &str) -> i64 {
+pub fn count_text_tokens(text: &str, model: &str) -> Option<i64> {
     let bpe = match encoder_for_model(model).name {
         CL100K => cl100k_base_singleton(),
         _ => o200k_base_singleton(),
     };
-    bpe.encode_ordinary(text).len() as i64
+    i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 
 #[cfg(not(feature = "token-counting"))]
-pub fn count_text_tokens(_text: &str, _model: &str) -> i64 {
-    0
+pub fn count_text_tokens(_text: &str, _model: &str) -> Option<i64> {
+    None
 }
 
 /// Legacy chars/4 estimate, matching the SQL `(LENGTH(text)+3)/4`.
@@ -143,37 +130,133 @@ struct CachedCount {
     tokens: i64,
 }
 
+/// Content-identity fingerprint of displayed message text: byte length plus
+/// a SHA-256 digest, so equal-length rewrites (e.g. redaction variants) do
+/// not reuse a stale count based on a short, non-cryptographic hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContentFingerprint {
+    len: usize,
+    digest: [u8; 32],
+}
+
+pub(crate) fn content_fingerprint(text: &str) -> ContentFingerprint {
+    ContentFingerprint {
+        len: text.len(),
+        digest: Sha256::digest(text.as_bytes()).into(),
+    }
+}
+
+/// Cached `o200k_base` count of one message's displayed content.
+#[derive(Debug, Clone, Copy)]
+struct DisplayedCount {
+    fingerprint: ContentFingerprint,
+    tokens: i64,
+}
+
+// Retain two maximum-sized timeline pages for each of the most recently used
+// providers. Older entries are derived data and can be recounted after eviction.
+const DISPLAYED_PROVIDER_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
+const DISPLAYED_MESSAGE_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4_095);
+
+type DisplayedMessageCache = CLruCache<String, DisplayedCount>;
+type DisplayedProviderCache = CLruCache<String, DisplayedMessageCache>;
+
+fn displayed_message_cache() -> DisplayedMessageCache {
+    CLruCache::new(DISPLAYED_MESSAGE_CACHE_CAPACITY)
+}
+
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
 /// built from.
 struct OverlayCache {
-    /// Cheap aggregate fingerprint of `session_messages` at build time.
-    /// Includes metadata/text/model lengths so usage backfills invalidate the
-    /// overlay even when they update existing rows in place.
+    /// Cheap aggregate fingerprint of `session_messages` at build time:
+    /// `(COUNT(*), MAX(rowid))`. Provider-accounting metadata is deliberately
+    /// excluded because it is not content-token evidence.
     fingerprint: OverlayFingerprint,
     overlay: Arc<Vec<MessageTokens>>,
 }
 
-type OverlayFingerprint = (i64, i64, u64);
+type OverlayFingerprint = (i64, i64);
 
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub struct TokenCountCache {
     map: Mutex<HashMap<(String, String), CachedCount>>,
-    hydrated: AtomicBool,
     /// Last built non-usage overlay; `/overview`, `/sessions`, and `/models`
     /// all need it, so without this every Savings-tab interaction re-ran the
     /// full `session_messages` scan + fold three times.
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
+    /// Displayed-content counts for the LCM render path, keyed by provider
+    /// then message id and guarded by a content fingerprint. Bounded LRU
+    /// levels prevent a long-lived dashboard from retaining every message it
+    /// has ever rendered. Two levels let a hit borrow the caller's `&str`
+    /// keys without allocating — every polled search/session/overview/timeline
+    /// message takes this path.
+    /// Kept apart from `map`: LCM counts canonically hydrated display
+    /// content with `o200k_base` specifically, while `map` counts stored
+    /// text with the model-mapped tokenizer, so entries are not
+    /// interchangeable.
+    lcm_display: Mutex<DisplayedProviderCache>,
 }
 
-#[allow(clippy::new_without_default)]
 impl TokenCountCache {
     pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
-            hydrated: AtomicBool::new(false),
             overlay: tokio::sync::Mutex::new(None),
+            lcm_display: Mutex::new(CLruCache::new(DISPLAYED_PROVIDER_CACHE_CAPACITY)),
         }
     }
+
+    /// Cached displayed-content count, or `None` when the content changed
+    /// or was never counted.
+    pub(crate) fn displayed_tokens(
+        &self,
+        provider: &str,
+        message_id: &str,
+        fingerprint: ContentFingerprint,
+    ) -> Option<i64> {
+        let mut map = self
+            .lcm_display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.get_mut(provider)
+            .and_then(|inner| inner.get(message_id))
+            .filter(|cached| cached.fingerprint == fingerprint)
+            .map(|cached| cached.tokens)
+    }
+
+    pub(crate) fn store_displayed_tokens(
+        &self,
+        provider: &str,
+        message_id: &str,
+        fingerprint: ContentFingerprint,
+        tokens: i64,
+    ) {
+        let mut map = self
+            .lcm_display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let provider_cache = map.put_or_modify(
+            provider.to_owned(),
+            |_, ()| displayed_message_cache(),
+            |_, _, ()| {},
+            (),
+        );
+        provider_cache.put(
+            message_id.to_owned(),
+            DisplayedCount {
+                fingerprint,
+                tokens,
+            },
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ComputedTokenCount {
+    provider: String,
+    message_id: String,
+    text_len: i64,
+    token_count: i64,
 }
 
 /// One stored message without transcript usage data, carrying its
@@ -192,13 +275,6 @@ pub struct MessageTokens {
     pub tokenized: bool,
 }
 
-fn row_str(row: &Value, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// Builds the non-usage overlay: every stored message lacking transcript
 /// usage data, with cached-or-computed token counts. Returns `None` when no
 /// session store is being served (callers fall back to the SQL estimates).
@@ -208,17 +284,18 @@ fn row_str(row: &Value, key: &str) -> String {
 /// lock is held across a rebuild so the three savings endpoints firing
 /// concurrently share one scan instead of racing three.
 pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<MessageTokens>>> {
-    let conn = state.lcm_conn.as_ref()?;
+    let db = state.lcm_db.as_deref()?;
+    let conn = db.read_connection();
 
-    let fingerprint = overlay_fingerprint(conn).await?;
+    let fingerprint = overlay_fingerprint(&conn).await?;
     let mut cached = state.token_counts.overlay.lock().await;
-    if let Some(existing) = cached.as_ref() {
-        if existing.fingerprint == fingerprint {
-            return Some(existing.overlay.clone());
-        }
+    if let Some(existing) = cached.as_ref()
+        && existing.fingerprint == fingerprint
+    {
+        return Some(existing.overlay.clone());
     }
 
-    let overlay = Arc::new(build_overlay(state, conn).await?);
+    let overlay = Arc::new(build_overlay(state, &conn).await?);
     *cached = Some(OverlayCache {
         fingerprint,
         overlay: overlay.clone(),
@@ -227,45 +304,32 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
 }
 
 /// Aggregate fingerprint of `session_messages` — see [`OverlayCache`].
-async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<OverlayFingerprint> {
+async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
-        "SELECT rowid, provider, message_id, model, metadata_json, LENGTH(text) AS text_len
-         FROM session_messages ORDER BY rowid",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS max_rowid
+         FROM session_messages",
         (),
     )
     .await
     .ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut max_rowid = 0_i64;
-    for row in &rows {
-        let rowid = row.get("rowid").and_then(Value::as_i64).unwrap_or(0);
-        max_rowid = max_rowid.max(rowid);
-        rowid.hash(&mut hasher);
-        row_str(row, "provider").hash(&mut hasher);
-        row_str(row, "message_id").hash(&mut hasher);
-        row_str(row, "model").hash(&mut hasher);
-        row_str(row, "metadata_json").hash(&mut hasher);
-        row.get("text_len")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .hash(&mut hasher);
-    }
-    Some((rows.len() as i64, max_rowid, hasher.finish()))
+    let row = rows.first()?;
+    Some((
+        row.get("n").and_then(Value::as_i64).unwrap_or(0),
+        row.get("max_rowid").and_then(Value::as_i64).unwrap_or(0),
+    ))
 }
 
 async fn build_overlay(
     state: &DashboardState,
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<Vec<MessageTokens>> {
     // Metadata only — text never leaves SQLite unless a count is missing.
     let sql = format!(
         "SELECT provider, message_id, session_id, role, timestamp, model, msg_len
-         FROM ({MESSAGE_TOKENS_CTE}) WHERE usage_in IS NULL AND usage_out IS NULL"
+         FROM ({MESSAGE_TOKENS_CTE})"
     );
     let rows = query_rows(conn, &sql, ()).await.ok()?;
-
-    hydrate_cache(state).await;
 
     // Resolve cache hits and collect misses without holding the lock
     // across any await point.
@@ -277,13 +341,13 @@ async fn build_overlay(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for row in &rows {
-            let provider = row_str(row, "provider");
-            let message_id = row_str(row, "message_id");
+            let provider = str_field(row, "provider");
+            let message_id = str_field(row, "message_id");
             let len = row.get("msg_len").and_then(Value::as_i64).unwrap_or(0);
-            let key = (provider, message_id);
+            let key = (provider.to_owned(), message_id.to_owned());
             let stale = map.get(&key).is_none_or(|c| c.text_len != len);
             if stale && counting_available() && len > 0 {
-                misses.push((key.0, key.1, row_str(row, "model"), len));
+                misses.push((key.0, key.1, str_field(row, "model").to_owned(), len));
             }
         }
     }
@@ -300,17 +364,17 @@ async fn build_overlay(
     let overlay = rows
         .iter()
         .map(|row| {
-            let provider = row_str(row, "provider");
-            let message_id = row_str(row, "message_id");
+            let provider = str_field(row, "provider");
+            let message_id = str_field(row, "message_id");
             let len = row.get("msg_len").and_then(Value::as_i64).unwrap_or(0);
             let cached = map
-                .get(&(provider.clone(), message_id))
+                .get(&(provider.to_owned(), message_id.to_owned()))
                 .filter(|c| c.text_len == len);
             MessageTokens {
-                provider,
-                session_id: row_str(row, "session_id"),
-                model: row_str(row, "model"),
-                role: row_str(row, "role"),
+                provider: provider.to_owned(),
+                session_id: str_field(row, "session_id").to_owned(),
+                model: str_field(row, "model").to_owned(),
+                role: str_field(row, "role").to_owned(),
                 timestamp: row.get("timestamp").and_then(Value::as_i64),
                 tokens: cached.map_or_else(|| chars_estimate(len), |c| c.tokens),
                 tokenized: cached.is_some(),
@@ -320,36 +384,8 @@ async fn build_overlay(
     Some(overlay)
 }
 
-/// One-time hydrate of the in-memory map from the sidecar table.
-async fn hydrate_cache(state: &DashboardState) {
-    if state.token_counts.hydrated.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let Some(gdb) = state.accounting_store.as_deref() else {
-        return;
-    };
-    if !gdb.ensure_token_count_cache().await {
-        return;
-    }
-    let persisted = gdb.load_token_counts(state.lcm_db_path.clone()).await;
-    let mut map = state
-        .token_counts
-        .map
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for row in persisted {
-        map.insert(
-            (row.provider, row.message_id),
-            CachedCount {
-                text_len: row.text_len,
-                tokens: row.token_count,
-            },
-        );
-    }
-}
-
 /// Fetches the text of `misses` in per-provider chunks, counts off the async
-/// runtime, then updates both cache levels.
+/// runtime, then updates the process-local derived cache.
 ///
 /// Chunks are keyed `(provider, message_id)` so the lookup can use the
 /// table's composite primary key — a `message_id IN (…)` filter alone cannot,
@@ -357,38 +393,41 @@ async fn hydrate_cache(state: &DashboardState) {
 /// first warm paid ~75 full scans).
 async fn count_and_store(
     state: &DashboardState,
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     mut misses: Vec<(String, String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
-    let mut computed: Vec<DashboardTokenCount> = Vec::with_capacity(misses.len());
+    let mut computed: Vec<ComputedTokenCount> = Vec::with_capacity(misses.len());
 
     misses.sort_by(|a, b| a.0.cmp(&b.0));
     for chunk in misses
         .chunk_by(|a, b| a.0 == b.0)
         .flat_map(|group| group.chunks(CHUNK))
     {
-        let placeholders = qmarks(chunk.len());
+        let placeholders = build_qmark_placeholders(chunk.len());
         let sql = format!(
             "SELECT provider, message_id, COALESCE(text, '') AS text
              FROM session_messages WHERE provider = ? AND message_id IN ({placeholders})"
         );
-        let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
-        params.push(libsql::Value::Text(chunk[0].0.clone()));
+        let mut params: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
+        params.push(DbValue::Text(chunk[0].0.clone()));
         params.extend(
             chunk
                 .iter()
-                .map(|(_, message_id, _, _)| libsql::Value::Text(message_id.clone())),
+                .map(|(_, message_id, _, _)| DbValue::Text(message_id.clone())),
         );
-        let Ok(rows) = query_rows(conn, &sql, libsql::params_from_iter(params)).await else {
+        let Ok(rows) = query_rows(conn, &sql, params_from_iter(params)).await else {
             continue;
         };
         let mut texts: HashMap<(String, String), String> = rows
             .iter()
             .map(|row| {
                 (
-                    (row_str(row, "provider"), row_str(row, "message_id")),
-                    row_str(row, "text"),
+                    (
+                        str_field(row, "provider").to_owned(),
+                        str_field(row, "message_id").to_owned(),
+                    ),
+                    str_field(row, "text").to_owned(),
                 )
             })
             .collect();
@@ -414,15 +453,14 @@ async fn count_and_store(
         let counted = tokio::task::spawn_blocking(move || {
             batch
                 .into_iter()
-                .map(
-                    |(provider, message_id, model, len, text)| DashboardTokenCount {
-                        token_count: count_text_tokens(&text, &model),
-                        encoder: encoder_for_model(&model).name.to_string(),
+                .filter_map(|(provider, message_id, model, len, text)| {
+                    count_text_tokens(&text, &model).map(|token_count| ComputedTokenCount {
+                        token_count,
                         provider,
                         message_id,
                         text_len: len,
-                    },
-                )
+                    })
+                })
                 .collect::<Vec<_>>()
         })
         .await
@@ -432,10 +470,6 @@ async fn count_and_store(
 
     if computed.is_empty() {
         return;
-    }
-    if let Some(gdb) = state.accounting_store.as_deref() {
-        gdb.save_token_counts(state.lcm_db_path.clone(), computed.clone())
-            .await;
     }
     let mut map = state
         .token_counts
@@ -466,6 +500,96 @@ pub fn spawn_warm(state: DashboardState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_conn() -> (
+        tempfile::TempDir,
+        tracedecay_runtime_core::db::engine::TestConnection,
+    ) {
+        let dir = tempfile::tempdir().expect("create token-count test directory");
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &dir.path().join("sessions.db"),
+        );
+        (dir, conn)
+    }
+
+    #[test]
+    fn display_cache_is_guarded_by_content_fingerprint() {
+        let cache = TokenCountCache::new();
+        let fingerprint = content_fingerprint("hello");
+        // Hits are looked up with `&str` keys borrowed from caller-owned
+        // data — the hit path must never require freshly owned Strings.
+        let composed = "codex m1".to_owned();
+        let (provider, message_id) = composed.split_once(' ').expect("two borrowed keys");
+        assert_eq!(
+            cache.displayed_tokens(provider, message_id, fingerprint),
+            None
+        );
+        cache.store_displayed_tokens(provider, message_id, fingerprint, 7);
+        assert_eq!(
+            cache.displayed_tokens(provider, message_id, fingerprint),
+            Some(7)
+        );
+        assert_eq!(cache.displayed_tokens(provider, "m2", fingerprint), None);
+        assert_eq!(
+            cache.displayed_tokens("claude", message_id, fingerprint),
+            None
+        );
+        // Same-length rewrites must invalidate: length alone is not content
+        // identity.
+        assert_ne!(content_fingerprint("hell0"), fingerprint);
+        assert_eq!(
+            cache.displayed_tokens(provider, message_id, content_fingerprint("hell0")),
+            None
+        );
+    }
+
+    #[test]
+    fn display_cache_evicts_least_recent_entries_at_both_identity_levels() {
+        let cache = TokenCountCache::new();
+        let fingerprint = content_fingerprint("content");
+
+        for index in 0..=DISPLAYED_MESSAGE_CACHE_CAPACITY.get() {
+            cache.store_displayed_tokens(
+                "codex",
+                &format!("message.{index}"),
+                fingerprint,
+                index as i64,
+            );
+        }
+        assert_eq!(
+            cache.displayed_tokens("codex", "message.0", fingerprint),
+            None
+        );
+        assert_eq!(
+            cache.displayed_tokens(
+                "codex",
+                &format!("message.{}", DISPLAYED_MESSAGE_CACHE_CAPACITY.get()),
+                fingerprint,
+            ),
+            Some(DISPLAYED_MESSAGE_CACHE_CAPACITY.get() as i64),
+        );
+
+        for index in 0..=DISPLAYED_PROVIDER_CACHE_CAPACITY.get() {
+            cache.store_displayed_tokens(
+                &format!("provider.{index}"),
+                "message",
+                fingerprint,
+                index as i64,
+            );
+        }
+        assert_eq!(
+            cache.displayed_tokens("provider.0", "message", fingerprint),
+            None,
+        );
+        assert_eq!(
+            cache.displayed_tokens(
+                &format!("provider.{}", DISPLAYED_PROVIDER_CACHE_CAPACITY.get()),
+                "message",
+                fingerprint,
+            ),
+            Some(DISPLAYED_PROVIDER_CACHE_CAPACITY.get() as i64),
+        );
+    }
 
     #[test]
     fn openai_families_are_exact() {
@@ -516,7 +640,7 @@ mod tests {
     #[test]
     fn bpe_counts_diverge_from_chars4() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let bpe = count_text_tokens(text, "gpt-5");
+        let bpe = count_text_tokens(text, "gpt-5").expect("token counting is compiled in");
         assert!(bpe > 0);
         // Code-heavy text tokenizes denser than chars/4 predicts; the exact
         // value is vocabulary-dependent, so only sanity-bound it.
@@ -527,21 +651,20 @@ mod tests {
     #[test]
     fn bpe_counts_use_cl100k_for_legacy_models() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let cl = count_text_tokens(text, "gpt-4");
+        let cl = count_text_tokens(text, "gpt-4").expect("token counting is compiled in");
         assert!(cl > 0);
         assert!(cl <= text.len() as i64);
     }
 
+    #[cfg(not(feature = "token-counting"))]
+    #[test]
+    fn a_compiled_out_tokenizer_is_unavailable_instead_of_zero() {
+        assert_eq!(count_text_tokens("visible content", ""), None);
+    }
+
     #[tokio::test]
-    async fn overlay_fingerprint_changes_when_metadata_is_backfilled() {
-        let db = match libsql::Builder::new_local(":memory:").build().await {
-            Ok(db) => db,
-            Err(err) => panic!("failed to build in-memory database: {err}"),
-        };
-        let conn = match db.connect() {
-            Ok(conn) => conn,
-            Err(err) => panic!("failed to connect to in-memory database: {err}"),
-        };
+    async fn provider_usage_metadata_neither_suppresses_content_counts_nor_invalidates_cache() {
+        let (_dir, conn) = test_conn();
         if let Err(err) = conn
             .execute_batch(
             "CREATE TABLE session_messages (
@@ -567,7 +690,7 @@ mod tests {
             panic!("failed to seed session_messages: {err}");
         }
 
-        let Some(before) = overlay_fingerprint(&conn).await else {
+        let Some(before) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist");
         };
         if let Err(err) = conn
@@ -581,15 +704,18 @@ mod tests {
         {
             panic!("failed to backfill metadata usage: {err}");
         }
-        let Some(after) = overlay_fingerprint(&conn).await else {
+        let Some(after) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after backfill");
         };
 
         assert_eq!(before.0, after.0, "row count should be unchanged");
         assert_eq!(before.1, after.1, "max rowid should be unchanged");
-        assert_ne!(before, after, "metadata backfill must invalidate overlay");
+        assert_eq!(
+            before, after,
+            "provider accounting metadata is not a content-token authority"
+        );
 
-        let Some(first_backfill) = overlay_fingerprint(&conn).await else {
+        let Some(first_backfill) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after first backfill");
         };
         if let Err(err) = conn
@@ -603,7 +729,7 @@ mod tests {
         {
             panic!("failed to replace metadata usage: {err}");
         }
-        let Some(second_backfill) = overlay_fingerprint(&conn).await else {
+        let Some(second_backfill) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after second backfill");
         };
 
@@ -620,19 +746,29 @@ mod tests {
             "{\"usage\":{\"input_tokens\":9,\"output_tokens\":8}}".len(),
             "regression fixture must keep metadata string length stable"
         );
-        assert_ne!(
+        assert_eq!(
             first_backfill, second_backfill,
-            "same-length metadata edits must invalidate overlay"
+            "provider accounting metadata never participates in the content cache"
+        );
+
+        let sql = format!("SELECT * FROM ({MESSAGE_TOKENS_CTE})");
+        let rows = query_rows(&*conn, &sql, ()).await.expect("token rows");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            [
+                "usage_in",
+                "usage_out",
+                "usage_cache_read",
+                "usage_cache_write"
+            ]
+            .iter()
+            .all(|field| rows[0].get(field).is_none())
         );
     }
 
     #[tokio::test]
     async fn derived_kinds_are_excluded_from_token_cte() {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .expect("build in-memory database");
-        let conn = db.connect().expect("connect in-memory database");
+        let (_dir, conn) = test_conn();
         conn.execute_batch(
             "CREATE TABLE session_messages (
                 provider TEXT NOT NULL,

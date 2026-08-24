@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +21,61 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
+  # Single source of truth for the fork/base-branch guard: heavy jobs run on
+  # pushes, on PRs from this repository, and on fork PRs that target an
+  # integration branch. Guarded jobs `needs:`-check this job's output instead
+  # of each repeating the expression, so the branch list lives in one place.
+  scope-gate:
+    name: Scope gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-heavy: ${{ steps.decide.outputs.run-heavy }}
+    steps:
+      - name: Decide whether guarded jobs run
+        id: decide
+        run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
+
+  pr-dogfood:
+    name: PR checkout dogfood
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr-dogfood
+          cache-on-failure: true
+
+      - name: Build checked-out TraceDecay CLI
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+
+      - name: Test dogfood output validation
+        run: python3 scripts/test-check-pr-dogfood-output.py
+
+      - name: Initialize checkout and exercise CLI tools
+        run: scripts/ci-pr-dogfood-smoke.sh
+        env:
+          TRACEDECAY_BIN: target/debug/tracedecay
+          TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
@@ -90,21 +145,35 @@ jobs:
       - name: Test release version drift guard
         run: bash tests/release_drift_check_test.sh
 
-      - name: Test release workflow contract
-        run: bash tests/release_workflow_contract_test.sh
+      # The workflow-contract pin scripts were replaced by the safety-guard
+      # assertions (f3b065545) and the dogfood surface was retired (b73a8a396);
+      # this job keeps the guards that protect the shipped release flow.
+      - name: Check release safety guards
+        run: bash tests/release_safety_test.sh
 
       - name: Test GitHub release installer
         run: bash tests/install_script_test.sh
 
-      - name: Test local dogfood command contract
-        run: bash tests/dogfood_command_test.sh
+      # These two sat unwired: they are the tests for
+      # `scripts/check-release-pr-integrity.sh` and
+      # `scripts/check-dashboard-bundle.py`, both of which CI does run. So the
+      # guards were enforced while the tests proving the guards work were not,
+      # which is the shape that let a `test-transport` target rot until it
+      # stopped compiling. Three of the five `tests/*_test.sh` gates were wired;
+      # these are the other two.
+      - name: Test release PR integrity guard
+        run: bash tests/release_pr_integrity_test.sh
+
+      - name: Test dashboard bundle check
+        run: bash tests/dashboard_bundle_check_test.sh
 
       - name: Check release version drift
         run: scripts/check-release-drift.sh
 
   test:
     name: Test ${{ matrix.name }}
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -116,7 +185,15 @@ jobs:
             runner: '"macos-14"'
 
     steps:
+      # Full history: the search-quality workload fixture pins a
+      # `source_repository_commit`, and `validate_source_bindings` resolves that
+      # object out of this checkout to prove the checked-in corpus really is the
+      # product source at that commit. A depth-1 checkout carries only the tip,
+      # so every candidate_output/report test fails with "resolve fixture source
+      # commit: An object with id ... could not be found".
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -131,9 +208,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -147,33 +224,47 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked
 
+      # Compile-only gate for the features this lane does not enable. Both are
+      # otherwise built for the first time at release (`--all-features`), so
+      # anything that breaks them merges green and is discovered at tag time.
+      # That is not hypothetical: `tests/mcp_suite/support.rs` called
+      # `fs::create_dir_all` without importing `std::fs`, which made ten
+      # `required-features = ["test-transport"]` targets unbuildable, and
+      # nothing reported it.
+      #
+      # `check --all-targets` rather than `nextest run`: the point is that the
+      # code still compiles, and the acceptance suites behind `test-transport`
+      # spawn daemons, so running them here would change this lane's cost and
+      # flakiness profile. Enable them as a real test lane separately once
+      # they are confirmed green.
+      - name: Check feature-gated surfaces compile
+        run: |
+          cargo check --workspace --all-targets --features test-transport --locked
+          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
+
+      - name: Upload ${{ matrix.name }} nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.name }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
   windows-build:
     name: Build Windows tests
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    # Full-workspace `nextest archive` on hosted windows-latest has been
+    # dying at exactly 30m with no failed step. 45 leaves headroom for a
+    # cold cache without hiding a hung linker.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
       - name: Tune Windows runner for build I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the compiler's many short-lived
-          # object/incremental files; hosted runners are elevated, so turn it
-          # off and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
+        uses: ./.github/actions/tune-windows-runner
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -223,34 +314,17 @@ jobs:
       matrix:
         partition: [1, 2, 3, 4, 5]
     steps:
+      # Full history for the same reason as the Linux/macOS test job: the
+      # shards run the workspace suite remapped onto this checkout, so the
+      # pinned search-quality fixture commit must be resolvable here too.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Tune Windows runner for test I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the many short-lived SQLite/tempdir
-          # files these tests create; hosted runners are elevated, so turn it off
-          # and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
-          # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
-          # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
-          # the nextest test processes follows.
-          $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
-          New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
-          "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        uses: ./.github/actions/tune-windows-runner
+        with:
+          redirect-temp: "true"
 
       - uses: actions/setup-node@v4
         with:
@@ -261,10 +335,20 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
+
+      # The architecture tests exec `cargo metadata` at runtime, and they run
+      # concurrently under nextest: without the pinned toolchain installed,
+      # each test process's rustup shim races to self-install it and the
+      # concurrent downloads corrupt each other's partial files. Install the
+      # rust-toolchain.toml pin serially up front.
+      - name: Install pinned toolchain
         shell: pwsh
         run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
+          rustup toolchain install
+          rustup show active-toolchain
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -331,8 +415,8 @@ jobs:
 
   windows-test:
     name: Test Windows
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: windows-test-shard
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: [windows-test-shard, scope-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Check Windows shards
@@ -345,7 +429,8 @@ jobs:
 
   clippy:
     name: Clippy
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -364,9 +449,57 @@ jobs:
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Check lean build
+        run: cargo check -p tracedecay --no-default-features --locked
+
+  # Additive visibility lint. Not a required check yet — introduce Hawk, then
+  # promote once the workspace is clean under `-D warnings`.
+  hawk:
+    name: Hawk
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      # renovate: datasource=github-releases depName=astral-sh/hawk
+      HAWK_VERSION: 0.1.12
+      RUSTUP_MAX_RETRIES: 10
+      TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/hawk"
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1
+
+      - name: Install Hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+
+      - name: Seed dashboard app-dist for the root build script
+        run: |
+          set -euo pipefail
+          mkdir -p dashboard/app-dist
+          printf '%s\n' '{"allFiles":["index.html"]}' > dashboard/app-dist/asset-manifest.json
+          printf '%s\n' '<!doctype html><title>hawk</title>' > dashboard/app-dist/index.html
+
+      - name: Hawk
+        run: cargo +1.97.1 hawk check --target-dir target/hawk -D warnings
+
   fmt:
     name: Format
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -377,21 +510,10 @@ jobs:
 
   dashboard:
     name: Dashboard
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      DASHBOARD_DIST_FILES: >-
-        shell/dist/shell.js
-        shell/dist/shell.css
-        holographic/dist/index.js
-        holographic/dist/style.css
-        lcm/dist/index.js
-        lcm/dist/style.css
-        graph/dist/index.js
-        graph/dist/style.css
-        savings/dist/index.js
-        savings/dist/style.css
     steps:
       - uses: actions/checkout@v7
 
@@ -413,29 +535,27 @@ jobs:
         working-directory: dashboard
         run: npm test
 
+      # The dashboard is one rsbuild app emitting `app-dist/` (the legacy
+      # shell/holographic/lcm/graph/savings bundle split no longer exists), so
+      # the bundle validator is the artifact authority and the determinism
+      # check hashes whatever the build actually produced.
       - name: Verify embedded dist artifacts
         working-directory: dashboard
         run: |
           set -euo pipefail
-          for f in $DASHBOARD_DIST_FILES; do
-            if [ ! -s "$f" ]; then
-              echo "missing or empty dist artifact: $f" >&2
-              exit 1
-            fi
-          done
-          # shellcheck disable=SC2086
-          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
+          python3 ../scripts/check-dashboard-bundle.py app-dist
+          (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
           npm run build
-          sha256sum -c /tmp/dashboard-dist.sha
+          (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -447,7 +567,44 @@ jobs:
           cache-on-failure: true
 
       - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
+        run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
+
+  # WCAG 2.2 AA is an acceptance criterion, so the accessibility scans run in
+  # CI rather than only on a developer's machine. Both harnesses exit nonzero
+  # on an axe violation, an uncaught page error, or a failed state assertion —
+  # a clean scan of a falsified reading is not a pass.
+  #
+  # Non-blocking by owner decision 2026-07-31: axe findings stay visible in
+  # the run summary but no longer gate the branch. Zero-axe remains a release
+  # acceptance criterion checked before release, not per push.
+  # NOTHING may declare `needs: dashboard-accessibility`.
+  dashboard-accessibility:
+    name: Dashboard accessibility
+    # `needs:` keeps this job from reporting a second red when the real fault
+    # is that the dashboard bundle never built or its unit tests failed.
+    needs: [dashboard, scope-gate]
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # Locally axe:audit takes ~3.3 min and axe:explorer ~1.3 min, and each one
+    # runs its OWN full `rsbuild build` (see dashboard/e2e/axe-harness.ts). At
+    # ~3x for a 2-core runner rendering 2 themes x 3 widths that is ~14 min,
+    # plus ~3 min for the Chromium and system-dependency install and ~1 min
+    # for npm ci. 30 leaves headroom for a slow runner while still cutting off
+    # a hung browser or wedged static server.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
 
       - name: Cache Playwright browsers
         uses: actions/cache@v6
@@ -461,43 +618,18 @@ jobs:
         working-directory: dashboard
         run: npx playwright install --with-deps chromium
 
-      - name: Prebuild dashboard binary for smoke
-        run: cargo build --bin tracedecay --locked
-
-      - name: Run dashboard smoke (empty LCM)
+      - name: Accessibility scan (workspaces)
         working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          attempts=0
-          max_attempts=3
-          until [ "$attempts" -ge "$max_attempts" ]; do
-            attempts=$((attempts + 1))
-            echo "Smoke attempt ${attempts}/${max_attempts}..."
-            if npm run smoke -- --expect-lcm=empty; then
-              exit 0
-            fi
-            if [ "$attempts" -lt "$max_attempts" ]; then
-              sleep 10
-            fi
-          done
-          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
-          exit 1
+        run: npm run axe:audit
 
-      - name: Run dashboard mobile smoke
+      - name: Accessibility scan (Explorer)
         working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          npm run smoke:mobile -- --expect-lcm=empty
+        run: npm run axe:explorer
 
   hermes-integration:
     name: Hermes integration (stock)
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -514,9 +646,9 @@ jobs:
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
@@ -525,7 +657,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build tracedecay binary
-        run: cargo build --bin tracedecay --locked
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
@@ -553,3 +685,48 @@ jobs:
           TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
           HERMES_UPSTREAM_DIR: ${{ runner.temp }}/hermes-upstream
         run: scripts/hermes_stock_integration.sh
+
+  host-stock-integration:
+    name: Claude Code + OpenCode integration (stock)
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Stock host pins — the installed bundle must keep working against these
+      # exact host releases. Bump deliberately after rerunning
+      # scripts/claude_stock_integration.sh and
+      # scripts/opencode_stock_integration.sh against the new versions locally.
+      CLAUDE_CODE_VERSION: 2.1.224
+      OPENCODE_VERSION: 1.18.4
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-host-stock-integration-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Build tracedecay binary
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+
+      - name: Install stock Claude Code and OpenCode at pinned versions
+        run: |
+          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          claude --version
+          opencode --version
+
+      - name: Run stock Claude Code integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/claude_stock_integration.sh
+
+      - name: Run stock OpenCode integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/opencode_stock_integration.sh

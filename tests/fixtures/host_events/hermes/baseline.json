@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "provider": "hermes",
+  "cases": [
+    {
+      "state": "supported", "admission_provider": "hermes",
+      "request": {"agent": "hermes", "event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}, "receipt": {"turn_id": "turn.host-fixture", "status": "completed", "transcript_watermark": "watermark.host-fixture"}},
+      "admission": {"status": "supported", "retryable": false},
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
+    },
+    {
+      "state": "degraded", "admission_provider": "hermes",
+      "request": {"agent": "hermes", "event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}, "receipt": {"turn_id": "turn.host-fixture", "status": "completed", "transcript_watermark": "watermark.host-fixture"}},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "spool_record_too_large"},
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
+    },
+    {
+      "state": "unavailable", "admission_provider": "hermes",
+      "request": {"agent": "hermes", "event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}, "receipt": {"turn_id": "turn.host-fixture", "status": "completed", "transcript_watermark": "watermark.host-fixture"}},
+      "admission": {"status": "unavailable", "retryable": false, "reason_code": "project_authority_unbound"},
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
+    },
+    {
+      "state": "unknown", "admission_provider": "hermes-future",
+      "request": {"agent": "hermes", "event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}, "receipt": {"turn_id": "turn.host-fixture", "status": "completed", "transcript_watermark": "watermark.host-fixture"}},
+      "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
+    }
+  ]
+}

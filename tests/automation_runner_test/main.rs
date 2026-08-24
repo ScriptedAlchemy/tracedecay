@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated automation test suite.
 //!
 //! Merges the former automation_backend_test, automation_config_test,
@@ -26,4 +25,3 @@ mod scheduler;
 mod session_reflector;
 mod skill_writer;
 mod skill_writer_consolidation;
-mod user_scope;

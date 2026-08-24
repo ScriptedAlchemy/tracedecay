@@ -1,4 +1,4 @@
-use tracedecay_sessions::runtime::lcm::security::{
+use tracedecay_sessions::lcm::security::{
     heartbeat_noise_reason, ignore_message_reason, pattern_matches, quarantine_reason,
     should_externalize,
 };
@@ -115,7 +115,6 @@ fn classifies_repetitive_assistant_output_for_quarantine() {
         None
     );
 }
-
 #[test]
 fn heartbeat_noise_is_diagnostic_only() {
     assert_eq!(

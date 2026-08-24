@@ -1,6 +1,38 @@
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::RustExtractor;
 use tracedecay_domain::*;
+use tree_sitter::Parser;
+
+#[test]
+fn test_rust_cfg_attribute_in_struct_pattern_field() {
+    let source = r#"
+struct Context {
+    live: bool,
+    test_runtime: bool,
+}
+
+fn destructure(context: Context) {
+    let Context {
+        live,
+        #[cfg(test)]
+        test_runtime,
+    } = context;
+    let _ = (live, test_runtime);
+}
+"#;
+    let mut parser = Parser::new();
+    parser
+        .set_language(
+            &tracedecay_code_extraction::ts_provider::language("rust")
+                .expect("bundled Rust grammar"),
+        )
+        .expect("configure Rust parser");
+    let tree = parser.parse(source, None).expect("parse Rust source");
+    assert!(
+        !tree.root_node().has_error(),
+        "the Rust grammar must accept attributes on struct-pattern fields"
+    );
+}
 
 #[test]
 fn test_rust_file_node_is_root() {
@@ -218,7 +250,6 @@ impl Rect {
     );
     assert!(methods.iter().any(|m| m.name == "new"));
     assert!(methods.iter().any(|m| m.name == "area"));
-    // Contains edges from impl to methods
     assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
 }
 
@@ -303,7 +334,6 @@ pub mod inner {
         .collect();
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].name, "inner");
-    // The function inside the module should be extracted too
     let fns: Vec<_> = result
         .nodes
         .iter()
@@ -332,7 +362,6 @@ mod tests {
     let result = extractor.extract("src/lib.rs", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    // The tests module should exist.
     let modules: Vec<_> = result
         .nodes
         .iter()
@@ -528,7 +557,6 @@ impl Greet for Bot {
         .filter(|n| n.kind == NodeKind::Impl)
         .collect();
     assert_eq!(impls.len(), 1);
-    // The impl should reference the trait
     assert!(
         result
             .unresolved_refs
@@ -582,28 +610,24 @@ pub struct Config {
 
     let annot_names: Vec<&str> = annots.iter().map(|a| a.name.as_str()).collect();
 
-    // #[test] on my_test
     assert!(
         annot_names.contains(&"test"),
         "expected 'test' annotation, got: {:?}",
         annot_names
     );
 
-    // #[cfg(test)] on guarded_fn
     assert!(
         annot_names.contains(&"cfg"),
         "expected 'cfg' annotation, got: {:?}",
         annot_names
     );
 
-    // #[allow(dead_code)] on guarded_fn
     assert!(
         annot_names.contains(&"allow"),
         "expected 'allow' annotation, got: {:?}",
         annot_names
     );
 
-    // #[inline] on fast_add
     assert!(
         annot_names.contains(&"inline"),
         "expected 'inline' annotation, got: {:?}",
@@ -624,7 +648,6 @@ pub struct Config {
         annot_names
     );
 
-    // Verify Annotates edges exist
     let annotates_edges: Vec<_> = result
         .edges
         .iter()
@@ -640,7 +663,6 @@ pub struct Config {
         "each AnnotationUsage should have an Annotates edge"
     );
 
-    // Verify Annotates unresolved refs exist
     let annotates_refs: Vec<_> = result
         .unresolved_refs
         .iter()

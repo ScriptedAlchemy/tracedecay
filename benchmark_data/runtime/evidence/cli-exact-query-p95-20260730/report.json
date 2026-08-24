@@ -1,0 +1,114 @@
+{
+  "binaries": {
+    "baseline_sha256": "81484427366af40e09de3939626d9d71a126bf9e9648caef4f7ff6f96549998d",
+    "treatment_sha256": "4e06349a71afac8e1f25f927ae1196f3f38649704e1e1c9a22ab13f2ee19578a"
+  },
+  "comparison": {
+    "advisory_findings": [],
+    "decision": "descriptive_only",
+    "evidence": {
+      "evidence_class": "distribution",
+      "sample_count": 20
+    },
+    "hard_failures": [],
+    "identity": {
+      "baseline_candidate_id": "81484427366af40e",
+      "capture_id": "paired-d223230dbc074a3f8702651c76bc837f",
+      "concurrency": 1,
+      "crate_id": "tracedecay",
+      "journey_id": "code-retrieval",
+      "platform": "linux-x86_64",
+      "run_id": "paired-d223230dbc074a3f8702651c76bc837f",
+      "shard": "integrated-0",
+      "state": "cold",
+      "storage_mode": "isolated-sqlite",
+      "surface": "cli",
+      "temperature": "cold",
+      "treatment_candidate_id": "4e06349a71afac8e",
+      "workload_id": "exact-symbol"
+    },
+    "informational": true,
+    "machine_comparable": true,
+    "paired": {
+      "baseline_mean": 2194681888.35,
+      "change": "no_material_change",
+      "log_ratio_confidence_interval": [
+        -0.008635743352775177,
+        0.06412106491629181
+      ],
+      "mean_log_ratio": 0.02652582291523544,
+      "pair_count": 40,
+      "ratio": 1.0268807639742363,
+      "treatment_mean": 2259855790.275
+    }
+  },
+  "evidence_class": "repeated_raw_samples",
+  "fixture": {
+    "id": "runtime-v2-final",
+    "input_sha256": "80e81b62256384d434d31ea30770d3b1f091065984b9651e45c65d98d45bc582",
+    "same_input": true
+  },
+  "outcome": {
+    "digest_match": true,
+    "error_count": 0,
+    "process_leak_count": 0
+  },
+  "policy": {
+    "journey_margins": {
+      "p50_regression_margin_pct": 15,
+      "p95_regression_margin_pct": 20,
+      "resource_regression_margin_pct": 20
+    },
+    "journey_policy_id": "runtime-journey-margins-v1",
+    "journey_policy_sha256": "6db22e48d7e45a6cc751baaf1ae40e67905aafb5b315157f646a94cf57695d45",
+    "latency_mode": "advisory",
+    "policy_id": "runtime-acceptance-v1",
+    "policy_sha256": "7c74637ac91439e8d04870d322c7e9c9d1d4dc926958c01c475c3c7f37651878"
+  },
+  "report_id": "paired-d223230dbc074a3f8702651c76bc837f",
+  "samples_sha256": "784c33b75f1ba965f83aa9b296a0bd4f25e60e5cf76268534779af626805e5a8",
+  "schedule": "ABBA",
+  "schema_version": 1,
+  "variants": {
+    "baseline": {
+      "latency_ns": {
+        "p50": {
+          "available": true,
+          "minimum_samples": 2,
+          "value": 2115124637
+        },
+        "p95": {
+          "available": true,
+          "minimum_samples": 40,
+          "value": 2482649896
+        },
+        "p99": {
+          "available": false,
+          "minimum_samples": 100,
+          "value": null
+        }
+      },
+      "sample_count": 40
+    },
+    "treatment": {
+      "latency_ns": {
+        "p50": {
+          "available": true,
+          "minimum_samples": 2,
+          "value": 2162199047
+        },
+        "p95": {
+          "available": true,
+          "minimum_samples": 40,
+          "value": 2601120103
+        },
+        "p99": {
+          "available": false,
+          "minimum_samples": 100,
+          "value": null
+        }
+      },
+      "sample_count": 40
+    }
+  }
+}

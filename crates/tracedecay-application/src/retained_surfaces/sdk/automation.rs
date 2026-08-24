@@ -1,0 +1,439 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::{ManifestDigest, RunId, UtcMicros, canonical_sha256};
+
+use super::{LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1};
+use crate::{ApplicationContractError, RequestId};
+
+const MAX_AUTOMATION_REVIEW_LIMIT: u32 = 1_000;
+pub const DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT: u32 = 24;
+pub const DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS: u32 = 720_000;
+const MAX_AUTOMATION_EVIDENCE_LIMIT: u32 = 50;
+const MAX_AUTOMATION_RECENT_SESSION_LIMIT: u32 = 10;
+const AUTOMATION_RUN_REQUEST_DIGEST_DOMAIN: &str = "tracedecay.automation-run.request-identity.v1";
+
+/// Closed public launcher for the automatic Memory Curator.
+///
+/// Run identity, task selection, operations, proposals, approval, and apply
+/// authority are deliberately absent and rejected by `deny_unknown_fields`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FactStoreCurateRequestV1 {
+    #[serde(default = "default_fact_store_curate_review_limit")]
+    #[schemars(range(min = 1, max = 1_000))]
+    pub fact_review_limit: u32,
+    #[serde(default = "default_fact_store_curate_min_confidence_millionths")]
+    #[schemars(range(min = 0, max = 1_000_000))]
+    pub min_confidence_millionths: u32,
+}
+
+impl Default for FactStoreCurateRequestV1 {
+    fn default() -> Self {
+        Self {
+            fact_review_limit: DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT,
+            min_confidence_millionths: DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS,
+        }
+    }
+}
+
+impl FactStoreCurateRequestV1 {
+    pub fn validate(&self) -> bool {
+        (1..=MAX_AUTOMATION_REVIEW_LIMIT).contains(&self.fact_review_limit)
+            && self.min_confidence_millionths <= 1_000_000
+    }
+
+    /// Project the bounds-only launcher plus its transport replay identity into
+    /// the exact durable automation admission used by the daemon.
+    pub fn automation_request(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<AutomationRunRequestV1, ApplicationContractError> {
+        let request = AutomationRunRequestV1 {
+            run_id: RunId::new(request_id.as_str().to_owned())?,
+            task: AutomationTaskRequestV1::MemoryCurator(MemoryCuratorRunInputV1 {
+                fact_review_limit: self.fact_review_limit,
+                min_confidence_millionths: self.min_confidence_millionths,
+            }),
+        };
+        if request.validate() {
+            Ok(request)
+        } else {
+            Err(ApplicationContractError::Inconsistent {
+                field: "fact store curate request",
+            })
+        }
+    }
+}
+
+const fn default_fact_store_curate_review_limit() -> u32 {
+    DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT
+}
+
+const fn default_fact_store_curate_min_confidence_millionths() -> u32 {
+    DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS
+}
+
+/// Automation capability selected after one registered application admission.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationTaskV1 {
+    MemoryCurator,
+    SessionReflector,
+    SkillWriter,
+    CombinedReview,
+    UserJob,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryCuratorRunInputV1 {
+    pub fact_review_limit: u32,
+    pub min_confidence_millionths: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReflectorRunInputV1 {
+    pub provider: String,
+    pub query: String,
+    pub scope: LcmSearchScopeV1,
+    pub session_id: Option<String>,
+    pub include_summaries: bool,
+    pub evidence_limit: u32,
+    pub include_recent_sessions: bool,
+    pub recent_sessions_limit: u32,
+    pub sort: LcmGrepSortV1,
+    pub source: Option<String>,
+    pub role: Option<LcmRoleV1>,
+    pub start_time: Option<UtcMicros>,
+    pub end_time: Option<UtcMicros>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillWriterRunInputV1 {
+    pub provider: String,
+    pub query: String,
+    pub evidence_limit: u32,
+    pub include_recent_sessions: bool,
+    pub recent_sessions_limit: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CombinedReviewRunInputV1 {
+    pub session_reflector: SessionReflectorRunInputV1,
+    pub skill_writer: SkillWriterRunInputV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserJobRunInputV1 {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    content = "options",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AutomationTaskRequestV1 {
+    MemoryCurator(MemoryCuratorRunInputV1),
+    SessionReflector(SessionReflectorRunInputV1),
+    SkillWriter(SkillWriterRunInputV1),
+    CombinedReview(CombinedReviewRunInputV1),
+    UserJob(UserJobRunInputV1),
+}
+
+impl AutomationTaskRequestV1 {
+    pub const fn task(&self) -> AutomationTaskV1 {
+        match self {
+            Self::MemoryCurator(_) => AutomationTaskV1::MemoryCurator,
+            Self::SessionReflector(_) => AutomationTaskV1::SessionReflector,
+            Self::SkillWriter(_) => AutomationTaskV1::SkillWriter,
+            Self::CombinedReview(_) => AutomationTaskV1::CombinedReview,
+            Self::UserJob(_) => AutomationTaskV1::UserJob,
+        }
+    }
+
+    fn validate(&self) -> bool {
+        match self {
+            Self::MemoryCurator(options) => {
+                (1..=MAX_AUTOMATION_REVIEW_LIMIT).contains(&options.fact_review_limit)
+                    && options.min_confidence_millionths <= 1_000_000
+            }
+            Self::SessionReflector(options) => valid_reflector_options(options),
+            Self::SkillWriter(options) => valid_skill_writer_options(options),
+            Self::CombinedReview(options) => {
+                valid_reflector_options(&options.session_reflector)
+                    && valid_skill_writer_options(&options.skill_writer)
+            }
+            Self::UserJob(options) => valid_text(&options.job_id),
+        }
+    }
+
+    pub fn expected_external_task_key(&self) -> Option<String> {
+        match self {
+            Self::SkillWriter(_) | Self::CombinedReview(_) => Some("skill_writer".to_owned()),
+            Self::UserJob(options) => Some(format!("user_job:{}", options.job_id)),
+            Self::MemoryCurator(_) | Self::SessionReflector(_) => None,
+        }
+    }
+}
+
+/// Canonical input to one durable automation run.
+///
+/// Trigger, actor, configuration and input digests are derived by the
+/// registered application authority. The tagged task prevents a caller from
+/// pairing one task identity with another task's options.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationRunRequestV1 {
+    pub run_id: RunId,
+    pub task: AutomationTaskRequestV1,
+}
+
+impl AutomationRunRequestV1 {
+    pub const fn task_kind(&self) -> AutomationTaskV1 {
+        self.task.task()
+    }
+
+    pub fn validate(&self) -> bool {
+        self.run_id.validate().is_ok() && self.task.validate()
+    }
+
+    pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
+        if !self.validate() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "automation run request",
+            });
+        }
+        Ok(canonical_sha256(&(
+            AUTOMATION_RUN_REQUEST_DIGEST_DOMAIN,
+            &self.task,
+        ))?)
+    }
+}
+
+fn valid_skill_writer_options(options: &SkillWriterRunInputV1) -> bool {
+    valid_text(&options.provider)
+        && valid_text(&options.query)
+        && (1..=MAX_AUTOMATION_EVIDENCE_LIMIT).contains(&options.evidence_limit)
+        && (1..=MAX_AUTOMATION_RECENT_SESSION_LIMIT).contains(&options.recent_sessions_limit)
+}
+
+fn valid_reflector_options(options: &SessionReflectorRunInputV1) -> bool {
+    valid_text(&options.provider)
+        && valid_text(&options.query)
+        && (1..=MAX_AUTOMATION_EVIDENCE_LIMIT).contains(&options.evidence_limit)
+        && (1..=MAX_AUTOMATION_RECENT_SESSION_LIMIT).contains(&options.recent_sessions_limit)
+        && options.session_id.as_deref().is_none_or(valid_text)
+        && options.source.as_deref().is_none_or(valid_text)
+        && options
+            .start_time
+            .zip(options.end_time)
+            .is_none_or(|(start, end)| start.0 <= end.0)
+}
+
+fn valid_text(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.len() <= 4_096 && !value.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{AutomationRunRequestV1, AutomationTaskV1, FactStoreCurateRequestV1};
+
+    #[test]
+    fn public_curator_launcher_accepts_only_bounds() {
+        let request =
+            serde_json::from_value::<FactStoreCurateRequestV1>(json!({})).expect("default bounds");
+        assert!(request.validate());
+        for field in [
+            "run_id",
+            "task",
+            "operations",
+            "proposal_id",
+            "approve",
+            "reject",
+            "apply",
+        ] {
+            let mut value = serde_json::Map::new();
+            value.insert(field.to_owned(), serde_json::Value::Bool(true));
+            assert!(
+                serde_json::from_value::<FactStoreCurateRequestV1>(serde_json::Value::Object(
+                    value
+                ),)
+                .is_err(),
+                "{field} must remain daemon-owned"
+            );
+        }
+        for invalid in [
+            json!({"fact_review_limit": 0}),
+            json!({"fact_review_limit": 1_001}),
+            json!({"min_confidence_millionths": 1_000_001}),
+        ] {
+            let request = serde_json::from_value::<FactStoreCurateRequestV1>(invalid)
+                .expect("structurally valid bounds");
+            assert!(!request.validate());
+        }
+    }
+
+    #[test]
+    fn public_curator_projects_transport_identity_into_the_durable_admission() {
+        let request = FactStoreCurateRequestV1::default();
+        let request_id = crate::RequestId::new("request.sdk.curate").expect("request id");
+        let admission = request
+            .automation_request(&request_id)
+            .expect("curator admission");
+        assert_eq!(admission.run_id.as_str(), request_id.as_str());
+        assert_eq!(admission.task_kind(), AutomationTaskV1::MemoryCurator);
+        assert!(admission.validate());
+    }
+
+    fn reflector_request() -> serde_json::Value {
+        json!({
+            "run_id": "run.memory.test",
+            "task": {
+                "kind": "session_reflector",
+                "options": {
+                "provider": "codex",
+                "query": "canonical memory evidence",
+                "scope": "all",
+                "session_id": null,
+                "include_summaries": true,
+                "evidence_limit": 10,
+                "include_recent_sessions": true,
+                "recent_sessions_limit": 3,
+                "sort": "recency",
+                "source": null,
+                "role": null,
+                "start_time": null,
+                    "end_time": null
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn request_is_task_tagged_and_rejects_approval_or_proposal_fields() {
+        let request = serde_json::from_value::<AutomationRunRequestV1>(reflector_request())
+            .expect("canonical automation request");
+        assert_eq!(request.task_kind(), AutomationTaskV1::SessionReflector);
+        assert!(request.validate());
+
+        for field in ["input", "input_digest", "approved", "proposal_id"] {
+            let mut invalid = reflector_request();
+            invalid[field] = json!("caller-controlled");
+            assert!(serde_json::from_value::<AutomationRunRequestV1>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn task_options_are_closed_and_bounded() {
+        let mut wrong_task_options = reflector_request();
+        wrong_task_options["task"]["options"] = json!({
+            "fact_review_limit": 24,
+            "min_confidence_millionths": 720000
+        });
+        assert!(serde_json::from_value::<AutomationRunRequestV1>(wrong_task_options).is_err());
+
+        let mut proposal_nested = reflector_request();
+        proposal_nested["task"]["options"]["proposal_id"] = json!("proposal.legacy");
+        assert!(serde_json::from_value::<AutomationRunRequestV1>(proposal_nested).is_err());
+
+        let mut unbounded = reflector_request();
+        unbounded["task"]["options"]["evidence_limit"] = json!(51);
+        let unbounded = serde_json::from_value::<AutomationRunRequestV1>(unbounded)
+            .expect("typed but semantically unbounded request");
+        assert!(!unbounded.validate());
+    }
+
+    #[test]
+    fn cross_task_options_remain_closed() {
+        let mut cross_authority = reflector_request();
+        cross_authority["task"]["options"]["skill_writer"] = json!({
+            "provider": "codex",
+            "query": "skill evidence",
+            "evidence_limit": 10,
+            "include_recent_sessions": true,
+            "recent_sessions_limit": 3
+        });
+        assert!(serde_json::from_value::<AutomationRunRequestV1>(cross_authority).is_err());
+
+        let combined = json!({
+            "run_id": "run.memory.combined",
+            "task": {
+                "kind": "combined_review",
+                "options": {"session_reflector": reflector_request()["task"]["options"]}
+            }
+        });
+        assert!(serde_json::from_value::<AutomationRunRequestV1>(combined).is_err());
+    }
+
+    #[test]
+    fn every_registered_task_has_one_closed_request_shape() {
+        let task = |kind, options| {
+            json!({
+                "run_id": format!("run.{kind}.test"),
+                "task": { "kind": kind, "options": options }
+            })
+        };
+        let reflector = reflector_request()["task"]["options"].clone();
+        let skill = json!({
+            "provider": "codex",
+            "query": "bounded skill evidence",
+            "evidence_limit": 10,
+            "include_recent_sessions": true,
+            "recent_sessions_limit": 3
+        });
+        for request in [
+            task(
+                "memory_curator",
+                json!({
+                    "fact_review_limit": 24,
+                    "min_confidence_millionths": 720000
+                }),
+            ),
+            task("session_reflector", reflector.clone()),
+            task("skill_writer", skill.clone()),
+            task(
+                "combined_review",
+                json!({ "session_reflector": reflector, "skill_writer": skill }),
+            ),
+            task("user_job", json!({ "job_id": "nightly-summary" })),
+        ] {
+            let request = serde_json::from_value::<AutomationRunRequestV1>(request)
+                .expect("registered automation request shape");
+            assert!(request.validate());
+        }
+    }
+
+    #[test]
+    fn request_digest_and_external_key_bind_the_full_typed_admission() {
+        let first = serde_json::from_value::<AutomationRunRequestV1>(reflector_request())
+            .expect("reflector request");
+        let mut changed_wire = reflector_request();
+        changed_wire["task"]["options"]["query"] = json!("different evidence");
+        let changed = serde_json::from_value::<AutomationRunRequestV1>(changed_wire)
+            .expect("changed reflector request");
+        assert_ne!(
+            first.input_digest().expect("first digest"),
+            changed.input_digest().expect("changed digest")
+        );
+
+        let user_job = serde_json::from_value::<AutomationRunRequestV1>(json!({
+            "run_id":"run.user-job.test",
+            "task":{"kind":"user_job","options":{"job_id":"nightly"}}
+        }))
+        .expect("user-job request");
+        assert_eq!(
+            user_job.task.expected_external_task_key().as_deref(),
+            Some("user_job:nightly")
+        );
+    }
+}

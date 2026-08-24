@@ -7,6 +7,103 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
+use super::queries::GraphQueryManager;
+use super::scc::tarjan_scc;
+use tracedecay_runtime_core::errors::Result;
+
+#[derive(Clone, Debug)]
+pub struct VerifiedHealthSnapshotV1 {
+    pub quality_signal: u32,
+    pub files_analyzed: usize,
+    pub acyclicity: f64,
+    pub depth: f64,
+    pub equality: f64,
+    pub redundancy: f64,
+    pub modularity: f64,
+    pub coverage_discipline: f64,
+    pub gini: f64,
+    pub edges_in_cycles: usize,
+    pub total_edges: usize,
+    pub max_chain: usize,
+    pub ideal_chain: usize,
+    pub complexity_files: usize,
+    pub modularity_components: usize,
+    pub dead_count: usize,
+    pub total_fns: usize,
+    pub skip_coverage_count: usize,
+}
+
+pub async fn compute_verified_health_snapshot(
+    graph: &GraphQueryManager<'_>,
+    path_prefix: Option<&str>,
+) -> Result<VerifiedHealthSnapshotV1> {
+    let adjacency = graph.build_file_adjacency(path_prefix).await?;
+    let files_analyzed = adjacency.len();
+    let total_edges = adjacency.values().map(HashSet::len).sum();
+    let (acyclicity, edges_in_cycles) = acyclicity_score(&adjacency);
+    let depth_result = dependency_depth(&adjacency, 1);
+    let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
+    let aggregates = graph.health_file_aggregates(path_prefix).await?;
+    let complexity_values = aggregates
+        .iter()
+        .map(|aggregate| aggregate.complexity)
+        .collect::<Vec<_>>();
+    let complexity_files = complexity_values.len();
+    let total_fns = aggregates
+        .iter()
+        .map(|aggregate| aggregate.function_methods)
+        .sum::<usize>();
+    let skip_coverage_count = aggregates
+        .iter()
+        .map(|aggregate| aggregate.skipped_function_methods)
+        .sum::<usize>();
+    let dead_count = aggregates
+        .iter()
+        .map(|aggregate| aggregate.dead_function_methods)
+        .sum::<usize>();
+    let gini = gini_coefficient(&complexity_values);
+    let equality = (1.0 - gini).clamp(0.0, 1.0);
+    let redundancy = if total_fns == 0 {
+        1.0
+    } else {
+        (1.0 - dead_count as f64 / total_fns as f64).clamp(0.0, 1.0)
+    };
+    let (modularity, modularity_components) = modularity_score(&adjacency);
+    let coverage_discipline = if total_fns == 0 {
+        1.0
+    } else {
+        (1.0 - skip_coverage_count as f64 / total_fns as f64).clamp(0.0, 1.0)
+    };
+    let quality_signal = compute_composite_health(&HealthDimensions {
+        acyclicity,
+        depth,
+        equality,
+        redundancy,
+        modularity,
+        coverage_discipline,
+    });
+    Ok(VerifiedHealthSnapshotV1 {
+        quality_signal,
+        files_analyzed,
+        acyclicity,
+        depth,
+        equality,
+        redundancy,
+        modularity,
+        coverage_discipline,
+        gini,
+        edges_in_cycles,
+        total_edges,
+        max_chain: depth_result.max_depth,
+        ideal_chain: depth_result.ideal_depth,
+        complexity_files,
+        modularity_components,
+        dead_count,
+        total_fns,
+        skip_coverage_count,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Task 2: Gini Coefficient
 // ---------------------------------------------------------------------------
@@ -59,93 +156,6 @@ pub fn gini_label(gini: f64) -> &'static str {
 // Task 3: Tarjan's SCC / Acyclicity Score
 // ---------------------------------------------------------------------------
 
-struct TarjanState<'a> {
-    adj: &'a HashMap<String, HashSet<String>>,
-    index_counter: usize,
-    stack: Vec<String>,
-    on_stack: HashSet<String>,
-    index: HashMap<String, usize>,
-    lowlink: HashMap<String, usize>,
-    sccs: Vec<Vec<String>>,
-}
-
-impl<'a> TarjanState<'a> {
-    fn new(adj: &'a HashMap<String, HashSet<String>>) -> Self {
-        TarjanState {
-            adj,
-            index_counter: 0,
-            stack: Vec::new(),
-            on_stack: HashSet::new(),
-            index: HashMap::new(),
-            lowlink: HashMap::new(),
-            sccs: Vec::new(),
-        }
-    }
-
-    fn strongconnect(&mut self, v: &str) {
-        let v = v.to_string();
-        self.index.insert(v.clone(), self.index_counter);
-        self.lowlink.insert(v.clone(), self.index_counter);
-        self.index_counter += 1;
-        self.stack.push(v.clone());
-        self.on_stack.insert(v.clone());
-
-        // Collect neighbors first to avoid borrow conflicts
-        let neighbors: Vec<String> = self
-            .adj
-            .get(&v)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-
-        for w in neighbors {
-            if !self.index.contains_key(&w) {
-                self.strongconnect(&w.clone());
-                let w_low = self.lowlink[&w];
-                let v_low = self.lowlink[&v];
-                self.lowlink.insert(v.clone(), v_low.min(w_low));
-            } else if self.on_stack.contains(&w) {
-                let w_idx = self.index[&w];
-                let v_low = self.lowlink[&v];
-                self.lowlink.insert(v.clone(), v_low.min(w_idx));
-            }
-        }
-
-        // If v is a root node, pop the stack and generate an SCC
-        if self.lowlink[&v] == self.index[&v] {
-            let mut scc = Vec::new();
-            while let Some(w) = self.stack.pop() {
-                self.on_stack.remove(&w);
-                let is_v = w == v;
-                scc.push(w);
-                if is_v {
-                    break;
-                }
-            }
-            self.sccs.push(scc);
-        }
-    }
-}
-
-/// Runs Tarjan's SCC algorithm on the adjacency map.
-/// Returns a list of strongly connected components (each is a list of node IDs).
-fn tarjan_scc(adj: &HashMap<String, HashSet<String>>) -> Vec<Vec<String>> {
-    let mut state = TarjanState::new(adj);
-
-    // Collect all nodes (both keys and targets) so isolated nodes are included
-    let mut all_nodes: HashSet<String> = adj.keys().cloned().collect();
-    for targets in adj.values() {
-        all_nodes.extend(targets.iter().cloned());
-    }
-
-    for node in all_nodes {
-        if !state.index.contains_key(&node) {
-            state.strongconnect(&node);
-        }
-    }
-
-    state.sccs
-}
-
 /// Computes the acyclicity score for a directed graph.
 /// Uses Tarjan's SCC algorithm. Score = 1.0 - (`edges_in_nontrivial_SCCs` / `total_edges`).
 /// Returns (score, `number_of_edges_in_cycles`).
@@ -158,13 +168,7 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
         return (1.0, 0);
     }
 
-    // Build a plain HashMap for tarjan_scc (which uses default hasher)
-    let plain_adj: HashMap<String, HashSet<String>> = adj
-        .iter()
-        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-        .collect();
-
-    let sccs = tarjan_scc(&plain_adj);
+    let sccs = tarjan_scc(adj);
 
     // Build a set of nodes in nontrivial SCCs (size > 1)
     let mut in_cycle: HashSet<&str> = HashSet::new();
@@ -199,6 +203,9 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
 /// A chain entry representing a file and the longest dependency chain reaching it.
 pub struct DepthChain {
     pub file: String,
+    /// Every file in this chain entry's strongly connected component. Files in
+    /// one SCC share the same collapsed-DAG depth.
+    pub scc_files: Vec<String>,
     pub depth: usize,
     pub chain: Vec<String>,
 }
@@ -238,14 +245,8 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         (file_count as f64).log2().ceil() as usize
     };
 
-    // Build a plain HashMap for tarjan_scc
-    let plain_adj: HashMap<String, HashSet<String>> = adj
-        .iter()
-        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-        .collect();
-
     // Step 1: Run Tarjan's SCC, map each node to its SCC index
-    let sccs = tarjan_scc(&plain_adj);
+    let sccs = tarjan_scc(adj);
     let mut node_to_scc: HashMap<String, usize> = HashMap::new();
     for (idx, scc) in sccs.iter().enumerate() {
         for node in scc {
@@ -331,16 +332,18 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
             // Map SCC indices back to representative file names
             let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
 
-            let representative = sccs[scc_idx][0].clone();
+            let mut scc_files = sccs[scc_idx].clone();
+            scc_files.sort();
+            let representative = scc_files[0].clone();
             results.push(DepthChain {
                 file: representative,
+                scc_files,
                 depth,
                 chain,
             });
         }
     }
 
-    // Sort by depth descending for convenience
     results.sort_by_key(|ch| std::cmp::Reverse(ch.depth));
 
     DepthResult {
@@ -348,6 +351,86 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         ideal_depth,
         chains: results,
     }
+}
+
+/// One directory cluster in the Design Structure Matrix ordering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DsmCluster {
+    pub directory: String,
+    pub file_count: usize,
+    pub internal_edges: usize,
+    pub outgoing_edges: usize,
+    pub incoming_edges: usize,
+}
+
+impl DsmCluster {
+    #[must_use]
+    pub const fn boundary_edges(&self) -> usize {
+        self.outgoing_edges + self.incoming_edges
+    }
+}
+
+/// Groups the file adjacency by parent directory and orders clusters by
+/// cross-boundary coupling, then cluster size. This is the shared authority for
+/// both the MCP DSM tool and dashboard graph strata.
+pub fn dsm_clusters<AdjHasher, EdgeHasher>(
+    adj: &HashMap<String, HashSet<String, EdgeHasher>, AdjHasher>,
+) -> Vec<DsmCluster>
+where
+    AdjHasher: BuildHasher,
+    EdgeHasher: BuildHasher,
+{
+    let mut dir_to_files: HashMap<String, Vec<String>> = HashMap::new();
+    for file in adj.keys() {
+        let directory = file
+            .rfind('/')
+            .map_or_else(|| ".".to_string(), |index| file[..index].to_string());
+        dir_to_files
+            .entry(directory)
+            .or_default()
+            .push(file.clone());
+    }
+
+    let mut clusters: Vec<DsmCluster> = dir_to_files
+        .into_iter()
+        .map(|(directory, files)| {
+            let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+            let mut internal_edges = 0;
+            let mut outgoing_edges = 0;
+            let mut incoming_edges = 0;
+            for file in &files {
+                if let Some(targets) = adj.get(file) {
+                    for target in targets {
+                        if file_set.contains(target.as_str()) {
+                            internal_edges += 1;
+                        } else {
+                            outgoing_edges += 1;
+                        }
+                    }
+                }
+                for (source, targets) in adj {
+                    if !file_set.contains(source.as_str()) && targets.contains(file) {
+                        incoming_edges += 1;
+                    }
+                }
+            }
+            DsmCluster {
+                directory,
+                file_count: files.len(),
+                internal_edges,
+                outgoing_edges,
+                incoming_edges,
+            }
+        })
+        .collect();
+    clusters.sort_by(|left, right| {
+        right
+            .boundary_edges()
+            .cmp(&left.boundary_edges())
+            .then_with(|| right.file_count.cmp(&left.file_count))
+            .then_with(|| left.directory.cmp(&right.directory))
+    });
+    clusters
 }
 
 /// Score = min(1.0, ideal\_depth / max\_depth). Shallower is better.

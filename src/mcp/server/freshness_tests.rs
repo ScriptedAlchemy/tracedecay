@@ -1,13 +1,49 @@
 use super::{
-    DatabaseOwnerReconciler, McpServer, StalenessBannerInputs, format_index_age_phrase,
-    staleness_banner,
+    DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, tool_error_response,
 };
 use crate::config::PinnedUserDataDir;
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+
+struct FreshnessRuntime {
+    registry: DaemonSessionRuntimeRegistryV1,
+    _scope: crate::db::DaemonDatabaseScope,
+}
+
+impl FreshnessRuntime {
+    async fn open(profile_root: &std::path::Path) -> Self {
+        std::fs::create_dir_all(profile_root).expect("freshness profile root");
+        crate::storage::set_private_dir_permissions(profile_root)
+            .expect("restrict freshness profile root");
+        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+            .expect("freshness profile identity");
+        let scope = crate::db::enter_daemon_database_scope(
+            identity.profile_root(),
+            1,
+            "host-admission-test-runtime",
+        )
+        .expect("freshness daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("freshness session runtime registry");
+        Self {
+            registry,
+            _scope: scope,
+        }
+    }
+
+    async fn profile_database(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.registry
+            .profile_database()
+            .await
+            .expect("registered freshness profile database")
+    }
+}
 
 fn git(root: &std::path::Path, args: &[&str]) {
     let ok = std::process::Command::new(crate::git::git_program())
@@ -20,7 +56,12 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(ok, "git {args:?} failed");
 }
 
-async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
+struct FreshnessFixtureAuthority {
+    _pin: PinnedUserDataDir,
+    _runtime: Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+}
+
+async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -32,14 +73,26 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "initial"]);
-    let cg = TraceDecay::init(root).await.expect("init");
-    cg.index_all().await.expect("index");
-    (cg, dir, pin)
+    let (cg, runtime) =
+        TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-freshness")
+            .await
+            .expect("init");
+    (
+        cg,
+        dir,
+        FreshnessFixtureAuthority {
+            _pin: pin,
+            _runtime: runtime,
+        },
+    )
 }
 
+/// Serve-old/await-new: the request that notices the drift answers on the
+/// snapshot it already had, and the reopen (plus its owner reconcile) lands
+/// behind it.
 #[tokio::test]
-async fn branch_drift_reconciles_database_owner_before_returning() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
+async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
+    let (cg, dir, fixture_authority) = init_indexed_repo().await;
     let root = dir.path();
     cg.checkpoint().await.unwrap();
     let layout = cg.store_layout().clone();
@@ -57,7 +110,11 @@ async fn branch_drift_reconciles_database_owner_before_returning() {
 
     git(root, &["checkout", "-q", "-b", "feature"]);
     git(root, &["checkout", "-q", "main"]);
-    let main = TraceDecay::open(root).await.unwrap();
+    let main = fixture_authority
+        ._runtime
+        .open_project_graph_for_test(root, crate::tracedecay::TraceDecayOpenOptions::default())
+        .await
+        .unwrap();
     let observed = Arc::new(Mutex::new(Vec::new()));
     let callback: DatabaseOwnerReconciler = {
         let observed = Arc::clone(&observed);
@@ -68,94 +125,37 @@ async fn branch_drift_reconciles_database_owner_before_returning() {
             })
         })
     };
-    let server =
-        McpServer::new_with_dbs_and_reconcilers(main, None, None, None, true, None, Some(callback))
-            .await;
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(main, None).with_database_owner_reconciler(callback),
+    )
+    .await;
 
     git(root, &["checkout", "-q", "feature"]);
-    let fresh = server.reopen_if_branch_drifted().await;
+    let before = server.branch_reopens_completed();
+    let served = server.reopen_if_branch_drifted().await;
 
+    // The caller is answered on the pre-drift snapshot: it never waits for the
+    // full DB open the reopen performs.
+    assert_eq!(
+        served.serving_branch(),
+        Some("main"),
+        "the drifting request must serve the last complete snapshot"
+    );
+    assert!(
+        observed.lock().unwrap().is_empty(),
+        "the owner reconcile must not run inside the request"
+    );
+
+    assert!(
+        server
+            .wait_for_branch_reopen(before, std::time::Duration::from_secs(30))
+            .await,
+        "the detached reopen must land"
+    );
+    let fresh = server.reopen_if_branch_drifted().await;
     assert_eq!(fresh.serving_branch(), Some("feature"));
     assert_eq!(observed.lock().unwrap().as_slice(), &[fresh.db_path()]);
     server.shutdown().await;
-}
-
-// ---- D7 pure-logic banner tests (test c) --------------------------
-
-#[test]
-fn format_index_age_phrase_preserves_shape() {
-    // 2h 5m
-    assert_eq!(format_index_age_phrase(2 * 3600 + 5 * 60), "2h 5m");
-    // 1d 3h
-    assert_eq!(format_index_age_phrase(27 * 3600), "1d 3h");
-}
-
-#[test]
-fn banner_says_refresh_in_progress_when_auto_sync_on() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("refresh in progress"), "{banner}");
-    assert!(!banner.contains("tracedecay sync"), "{banner}");
-    assert!(!banner.starts_with("WARNING"), "{banner}");
-}
-
-#[test]
-fn banner_says_scheduled_when_auto_sync_on_and_idle() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("refresh scheduled"), "{banner}");
-    assert!(!banner.contains("tracedecay sync"), "{banner}");
-}
-
-#[test]
-fn banner_suppressed_shortly_after_refresh() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: true,
-    });
-    assert!(banner.is_none(), "expected no banner, got {banner:?}");
-}
-
-#[test]
-fn banner_instructs_manual_sync_only_on_fallback_store() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: true,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.starts_with("WARNING"), "{banner}");
-    assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
-}
-
-#[test]
-fn banner_instructs_manual_sync_when_auto_sync_disabled() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: false,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
 }
 
 // ---- D1: startup catch-up runs exactly once (test b) --------------
@@ -166,7 +166,7 @@ async fn startup_catch_up_spawned_once_per_server() {
     let server = McpServer::new(cg, None).await;
     // The D1 spawn should have claimed the one-shot flag.
     assert!(
-        server.startup_catch_up_started.load(Ordering::Acquire),
+        server.startup_catch_up.dispatch_claimed(),
         "startup catch-up should have been dispatched by new_with_dbs"
     );
     assert!(
@@ -177,30 +177,108 @@ async fn startup_catch_up_spawned_once_per_server() {
     );
     assert!(server.startup_catch_up_done());
 
-    // The one-shot flag is already claimed; a hypothetical second
-    // new_with_dbs-style dispatch would be refused by the same
-    // compare_exchange. Assert the flag can't be re-claimed.
+    // The claim is one-shot for the life of the server: a hypothetical
+    // second new_with_dbs-style dispatch is refused even now that the
+    // machine has settled.
     assert!(
-        server
-            .startup_catch_up_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err(),
-        "startup catch-up flag must stay claimed (runs at most once)"
+        !server.startup_catch_up.try_claim_dispatch(),
+        "startup catch-up dispatch must stay claimed (runs at most once)"
     );
+    // The refused claim must not have dragged the settled machine back into
+    // a pending phase.
+    assert!(server.startup_catch_up_done());
+}
+
+/// A dispatched catch-up must never read as settled before it runs. This is
+/// the ordering hazard the old default-`true` completion flags carried: the
+/// dispatch site had to pre-clear them in a separate store, and any waiter
+/// that landed in between observed a false "ready".
+#[tokio::test]
+async fn a_claimed_dispatch_is_never_observed_as_settled() {
+    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+
+    let machine = StartupCatchUpMachineV1::default();
+    // Undispatched machines are ready: nothing will ever run.
+    assert!(machine.settled_for_test());
+
+    assert!(machine.try_claim_dispatch());
+    assert!(machine.dispatch_claimed());
+    // Claiming dispatch is itself the transition into `Syncing`.
+    assert!(!machine.settled_for_test());
+
+    machine.settle_for_test();
+    assert!(machine.settled_for_test());
+}
+
+/// Shutdown must leave the startup sync readable as settled.
+#[tokio::test]
+async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
+    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+
+    let machine = StartupCatchUpMachineV1::default();
+    assert!(machine.try_claim_dispatch());
+    machine.mark_cancelled_for_test();
+    assert!(machine.settled_for_test());
+
+    // A late in-flight task settling after shutdown cannot resurrect it.
+    machine.settle_for_test();
+    assert!(machine.settled_for_test());
+    assert!(!machine.try_claim_dispatch());
+}
+
+#[tokio::test]
+async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db() {
+    let (cg, dir, _pin) = init_indexed_repo().await;
+    let profile_root = crate::config::user_data_dir().expect("configured profile root");
+    let override_root = dir.path().join("registry-override");
+    let runtime = FreshnessRuntime::open(&override_root).await;
+    let registry = runtime.profile_database().await;
+
+    let server = McpServer::new_with_dbs(cg, None, None, Some(registry), true).await;
+
+    assert_eq!(server.profile_root.as_deref(), Some(profile_root.as_path()));
+    assert_ne!(
+        server.profile_root.as_deref(),
+        server
+            .registry_db
+            .as_deref()
+            .and_then(|db| db.db_path().parent())
+    );
+}
+
+#[test]
+fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
+    let error = crate::errors::TraceDecayError::hook_runtime_with_status(
+        "observation_cursor_conflict",
+        true,
+        "Claude observation store operation failed",
+        tracedecay_usecases::host_admission::HostAdmissionStatus::Backpressured.as_wire(),
+    );
+
+    let response = tool_error_response(serde_json::json!(7), "tracedecay_hook_runtime", &error);
+    let data = response.error.unwrap().data.unwrap();
+
+    assert_eq!(data["reason_code"], "observation_cursor_conflict");
+    assert_eq!(data["retryable"], true);
+    assert_eq!(data["detail"], "Claude observation store operation failed");
+    // The authority's own status survives to the JSON-RPC boundary instead of
+    // being re-derived there from the reason code.
+    assert_eq!(data["status"], "backpressured");
 }
 
 // ---- ledger settle is bounded when a recorder task wedges ---------
 
-// A dedicated multi-thread runtime keeps the timer driver off the same worker
-// that runs the server's startup catch-up sync, so the bound is honored
-// promptly regardless of machine load.
+// A dedicated multi-thread runtime keeps the timer driver off the worker that
+// parks the wedged ledger write, so the bound is honored promptly regardless
+// of machine load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
     let (cg, _dir, _pin) = init_indexed_repo().await;
-    let mut config = crate::config::load_config(cg.project_root()).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(cg.project_root(), &config).expect("disable unrelated catch-up");
-    let server = McpServer::new(cg, None).await;
+    // Startup catch-up is unrelated to ledger settlement; keep its admission
+    // work out of the bound being measured.
+    let mut context = McpServerConstructionContext::direct(cg, None);
+    context.startup_catch_up_enabled = false;
+    let server = McpServer::new_with_context(context).await;
 
     // Inject a never-completing observed ledger write via the same accounting
     // the production path uses. Without a bound, awaiting settlement would hang
@@ -229,10 +307,11 @@ async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
 async fn read_refresh_is_non_blocking_and_single_flighted() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    let mut config = crate::config::load_config(&root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&root, &config).expect("save config");
-    let server = McpServer::new(cg, None).await;
+    // Startup catch-up drives the same background-refresh boundary this test
+    // times; disable it so the explicit read refresh is the only claimant.
+    let mut context = McpServerConstructionContext::direct(cg, None);
+    context.startup_catch_up_enabled = false;
+    let server = McpServer::new_with_context(context).await;
     // Reset the read cooldown so the next spawn is eligible regardless of
     // any startup timing.
     server
@@ -254,7 +333,7 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // Assert it does not block by bounding the call duration well under a
     // real sync (~hundreds of ms); the spawn does the work off-thread.
     let start = std::time::Instant::now();
-    server.maybe_spawn_read_refresh(&cg_snapshot);
+    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_millis(100),
@@ -275,7 +354,7 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // spawned. We verify by confirming the stamp does not change to a new
     // value on a back-to-back call within the cooldown window.
     let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
-    server.maybe_spawn_read_refresh(&cg_snapshot);
+    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
     let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
     assert_eq!(
         stamp_after_first, stamp_after_second,

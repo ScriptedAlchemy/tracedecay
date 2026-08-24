@@ -1,30 +1,25 @@
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(not(test), deny(clippy::expect_used))]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::wildcard_imports)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::single_match)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::redundant_closure)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::format_push_string)]
+#![deny(unsafe_code)]
 
-//! Transcript-capture timestamp parsing primitives.
+pub mod claude;
+pub mod codex;
+mod content;
+pub mod cursor;
+pub mod cursor_composer;
+pub mod kimi;
+pub mod kiro;
+pub mod opencode;
+mod parse;
+mod timestamp;
+pub mod vibe;
 
-pub mod timestamp;
-
-pub use timestamp::*;
+pub use parse::{
+    ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
+    ParseLimits, ParsedClaudeRecordV1, ParsedObservationRecordV1, ParsedPolicyLimitViolation,
+    PreparedObservationRecordV1, normalize_prepared_observation_record_v1, parse_claude_record_v1,
+    parse_normalized_observation_record_v1, parse_observation_record_v1,
+    prepare_observation_record_v1,
+};
+pub use timestamp::{
+    normalize_timestamp_secs, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
+    parse_yyyy_mm_dd_utc_start,
+};

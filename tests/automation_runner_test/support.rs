@@ -1,44 +1,374 @@
 #![allow(dead_code, unused_imports)]
 
+mod fixtures;
+
+pub(crate) use fixtures::{
+    SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_open_options, init_project,
+    read_artifact, seed_duplicate_facts, seed_session_message_in_db,
+};
+#[cfg(feature = "test-transport")]
+pub(crate) use fixtures::{
+    project_session_runtime, seed_search_underuse_session_evidence, seed_session_activity,
+    seed_session_evidence,
+};
+
 pub(crate) use std::fs;
 pub(crate) use std::path::Path;
+pub(crate) use std::sync::Arc;
+use std::sync::Mutex;
+pub(crate) use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
-pub(crate) use tracedecay::automation::backend::{
+pub(crate) use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
+pub(crate) use tracedecay_agent_hosts::automation::automatic_facts::{
+    AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
+    record_session_automatic_facts,
+};
+pub(crate) use tracedecay_agent_hosts::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
-pub(crate) use tracedecay::automation::config::{
+pub(crate) use tracedecay_agent_hosts::automation::config::{
     AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
     AutomationTaskSet,
 };
-pub(crate) use tracedecay::automation::fact_proposals::{
-    FactProposalState, apply_fact_proposal, list_fact_proposals,
-};
-pub(crate) use tracedecay::automation::managed_skills::{
+pub(crate) use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, approve_managed_skill, create_managed_skill_draft, load_managed_skill,
+    ManagedSupportFile, create_managed_skill, load_managed_skill,
 };
-pub(crate) use tracedecay::automation::run_ledger::{
+pub(crate) use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     load_run_records, read_run_artifact_payload,
 };
-pub(crate) use tracedecay::automation::runner::{
-    CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-    run_combined_review_with_backend, run_memory_curator_with_backend,
-    run_session_reflector_with_backend, run_skill_writer_with_backend,
+pub(crate) use tracedecay_agent_hosts::automation::runner::{
+    AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,
+    AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
+    CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+    SkillWriterAutomationOptions, run_skill_writer_with_backend_and_retrieval,
 };
-pub(crate) use tracedecay::errors::TraceDecayError;
-pub(crate) use tracedecay::global_db::GlobalDb;
-pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
-pub(crate) use tracedecay::sessions::lcm::{LcmGrepSort, LcmScope};
-pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+pub(crate) use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
+pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
+pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) fn test_automation_run_control(interrupted: Arc<AtomicBool>) -> AutomationRunControl {
+    let observed = Arc::clone(&interrupted);
+    AutomationRunControl::from_interrupted(Arc::new(move || observed.load(Ordering::Acquire)))
+}
+
+pub(crate) struct FixtureAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+}
+
+impl FixtureAutomationSessionRetrieval {
+    pub(crate) fn new(_cg: &TraceDecay) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("session-reflect-1").unwrap(),
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move {
+            let provider = query.provider().unwrap_or("cursor").to_string();
+            let session_id = match query.retrieval_scope() {
+                tracedecay_usecases::session::SessionRetrievalScope::Session(session_id) => {
+                    session_id.as_str().to_string()
+                }
+                tracedecay_usecases::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
+                    "session-reflect-1".to_string()
+                }
+            };
+            let message_id = if session_id == "project-reflect-1" {
+                "project-reflect-1-message-001"
+            } else {
+                "session-reflect-1-message-001"
+            };
+            AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+                items: vec![AutomationTemporalEvidenceItem {
+                    anchor_id: "fixture-anchor-1".to_string(),
+                    stable_id: "fixture-stable-1".to_string(),
+                    provider,
+                    session_id,
+                    message_id: Some(message_id.to_string()),
+                    source_id: Some("fixture-occurrence-1".to_string()),
+                    store_id: Some(1),
+                    role: Some("user".to_string()),
+                    ordinal: Some(1),
+                    session_total_messages: Some(1),
+                    knowledge_at_micros: 1_715_000_000_000_000,
+                    normalized_score_micros: 1_000_000,
+                    snippet: json!({
+                        "provider": query.provider().unwrap_or("cursor"),
+                        "ordinal": 1,
+                        "session_total_messages": 1,
+                        "store_id": 1,
+                        "text": query.query(),
+                        "tool_names": "bash",
+                        "metadata_json": "{\"cmd\":\"rg automation src\"}",
+                    })
+                    .to_string(),
+                }],
+            })
+        })
+    }
+}
+
+pub(crate) struct StaticAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    item: AutomationTemporalEvidenceItem,
+}
+
+impl StaticAutomationSessionRetrieval {
+    pub(crate) fn message(session_id: &str, message_id: &str, text: &str) -> Self {
+        Self::message_for_provider("cursor", session_id, message_id, text)
+    }
+
+    pub(crate) fn message_for_provider(
+        provider: &str,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Self {
+        Self {
+            anchor_session_id: SessionId::new(session_id).unwrap(),
+            item: AutomationTemporalEvidenceItem {
+                anchor_id: "static-anchor".to_string(),
+                stable_id: "static-stable".to_string(),
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                message_id: Some(message_id.to_string()),
+                source_id: Some("static-occurrence".to_string()),
+                store_id: Some(1),
+                role: Some("user".to_string()),
+                ordinal: Some(1),
+                session_total_messages: Some(1),
+                knowledge_at_micros: 1_715_000_001_000_000,
+                normalized_score_micros: 1_000_000,
+                snippet: text.to_string(),
+            },
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move {
+            AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                items: vec![self.item.clone()],
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+            })
+        })
+    }
+}
+
+pub(crate) struct RejectedAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    reason: &'static str,
+}
+
+pub(crate) struct EmptyAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+}
+
+impl EmptyAutomationSessionRetrieval {
+    pub(crate) fn new() -> Self {
+        Self {
+            anchor_session_id: SessionId::new("empty-automation-fixture").unwrap(),
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for EmptyAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        _query: tracedecay_usecases::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
+    }
+}
+
+impl RejectedAutomationSessionRetrieval {
+    pub(crate) fn new(reason: &'static str) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("rejected-automation-fixture").unwrap(),
+            reason,
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
+    }
+}
+
+pub(crate) async fn run_session_reflector_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+) -> Result<
+    tracedecay_agent_hosts::automation::runner::SessionReflectorAutomationRun,
+    AutomationRunError,
+> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        cg,
+        config,
+        run_control,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
+    )
+    .await
+}
+
+pub(crate) async fn run_skill_writer_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+) -> Result<tracedecay_agent_hosts::automation::runner::SkillWriterAutomationRun, AutomationRunError>
+{
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
+    )
+    .await
+}
+
+pub(crate) async fn run_combined_review_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    backend: &dyn AgentTaskBackend,
+    options: CombinedReviewAutomationOptions,
+) -> tracedecay::errors::Result<CombinedReviewDispatch> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
+        run_control,
+    )
+    .await
+}
+
+pub(crate) async fn run_memory_curator_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    backend: &dyn AgentTaskBackend,
+    options: MemoryCuratorAutomationOptions,
+) -> Result<
+    tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun,
+    AutomationRunError,
+> {
+    tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        options,
+        run_control,
+    )
+    .await
+}
+
+pub(crate) fn test_configuration_revision() -> ConfigurationRevisionId {
+    ConfigurationRevisionId::new("config.automation-test.v1").expect("configuration revision")
+}
+
+pub(crate) fn project_memory_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("initialized test project has an authoritative project id");
+    tracedecay_domain::FactOwnerV1::Project {
+        project_id: tracedecay_domain::ProjectId::new(project_id)
+            .expect("initialized test project id is valid"),
+    }
+}
 
 pub(crate) struct JsonBackend {
     calls: AtomicUsize,
@@ -68,24 +398,27 @@ impl AgentTaskBackend for JsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::MemoryCurator);
         assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
         assert!(
-            request.prompt.contains("TraceDecay memory curation review"),
+            request.prompt.contains("canonical current facts"),
             "runner should build a task prompt from the curation messages"
         );
         assert_eq!(
             request.context["llm_review"]["status"],
             json!("needs_llm_review")
         );
+        assert_eq!(request.context["apply"], json!(true));
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: self.model.clone(),
+            provider: self.model.as_ref().map(|_| "fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -100,7 +433,50 @@ pub(crate) struct SessionJsonBackend {
 pub(crate) struct SkillJsonBackend {
     calls: AtomicUsize,
     output: Value,
-    expected_activation_policy: &'static str,
+}
+
+pub(crate) struct SequentialJsonBackend {
+    calls: AtomicUsize,
+    outputs: Mutex<std::collections::VecDeque<Value>>,
+}
+
+impl SequentialJsonBackend {
+    pub(crate) fn new(outputs: Vec<Value>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            outputs: Mutex::new(outputs.into()),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for SequentialJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let output = self
+            .outputs
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("sequential backend output");
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: output.to_string(),
+            output_json: Some(output),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
 }
 
 pub(crate) struct SkillTextBackend {
@@ -126,17 +502,9 @@ pub(crate) struct MalformedTextBackend {
 
 impl SkillJsonBackend {
     pub(crate) fn new(output: Value) -> Self {
-        Self::with_activation_policy(output, "pending_approval_only")
-    }
-
-    pub(crate) fn with_activation_policy(
-        output: Value,
-        expected_activation_policy: &'static str,
-    ) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             output,
-            expected_activation_policy,
         }
     }
 
@@ -149,15 +517,16 @@ impl AgentTaskBackend for SkillJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         assert!(request.prompt.contains("managed skill creates or updates"));
-        assert_eq!(request.context["apply"], json!(false));
+        assert_eq!(request.context["apply"], json!(true));
         assert_eq!(
             request.context["activation_policy"],
-            json!(self.expected_activation_policy)
+            json!("validate_then_activate")
         );
         assert!(
             request.context["skill_writer_evidence"]["hits"]
@@ -208,6 +577,7 @@ impl AgentTaskBackend for SkillJsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -227,7 +597,8 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
@@ -260,6 +631,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
             output_text: json!({"skills": []}).to_string(),
             output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -270,7 +642,8 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let families = request.context["skill_writer_evidence"]["underused_tool_families"]
@@ -299,47 +672,17 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
             output_text: json!({"skills": []}).to_string(),
             output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
     }
 }
 
-pub(crate) struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
+pub(crate) use crate::common::EnvVarGuard;
 
-impl EnvVarGuard {
-    pub(crate) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
-
-/// Pins `TRACEDECAY_GLOBAL_DB` at the test project's already-created session
-/// store for the guard's lifetime. Skill-writer evidence building calls
-/// `GlobalDb::open()`, which would otherwise create (or contend on) the
-/// shared per-user global DB — a full schema creation that dominates these
-/// fixtures on Windows CI, where many test processes share one home. The
-/// session store uses the same schema and these tests never rely on
-/// pre-existing global-DB contents, so reusing it keeps the open cheap and
-/// fully isolated. Callers must hold [`ENV_LOCK`] while the guard is alive.
+/// Pins the profile database override at the test project's isolated session
+/// store. Callers must hold [`ENV_LOCK`] while the guard is alive.
 pub(crate) fn isolate_global_db(cg: &TraceDecay) -> EnvVarGuard {
     EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &cg.store_layout().sessions_db_path)
 }
@@ -362,12 +705,11 @@ impl AgentTaskBackend for FailingBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
-        Err(TraceDecayError::Config {
-            message: self.message.to_string(),
-        })
+        Err(tracedecay_automation::backend::AgentTaskError::from_backend_message(self.message))
     }
 }
 
@@ -375,7 +717,8 @@ impl AgentTaskBackend for SkillTextBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         Ok(AgentTaskResponse {
@@ -384,6 +727,7 @@ impl AgentTaskBackend for SkillTextBackend {
             output_text: self.output.to_string(),
             output_json: None,
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -408,7 +752,8 @@ impl AgentTaskBackend for MalformedTextBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
         let (task_key, prompt_version, required_property) = match self.task {
@@ -427,6 +772,7 @@ impl AgentTaskBackend for MalformedTextBackend {
             output_text: self.output.to_string(),
             output_json: None,
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -450,8 +796,9 @@ impl AgentTaskBackend for SessionJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
             request,
@@ -459,8 +806,16 @@ impl AgentTaskBackend for SessionJsonBackend {
             "session_reflector:v2",
             "facts",
         );
-        assert!(request.prompt.contains("durable memory facts"));
-        assert_eq!(request.context["apply"], json!(false));
+        if call_index == 0 {
+            assert!(request.prompt.contains("durable memory facts"));
+        } else {
+            assert!(
+                request
+                    .prompt
+                    .contains("Repair the previous session fact JSON")
+            );
+        }
+        assert_eq!(request.context["apply"], json!(true));
         assert!(
             request.context["session_reflection_evidence"]["hits"]
                 .as_array()
@@ -472,6 +827,7 @@ impl AgentTaskBackend for SessionJsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -500,7 +856,8 @@ impl AgentTaskBackend for CombinedJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::CombinedReview);
         assert_eq!(request.contract.task_key, "combined_review");
@@ -513,7 +870,10 @@ impl AgentTaskBackend for CombinedJsonBackend {
         // The combined prompt must compose both per-task prompts.
         assert!(request.prompt.contains("durable memory facts"));
         assert!(request.prompt.contains("managed skill creates or updates"));
-        assert_eq!(request.context["apply"], json!(false));
+        // The agentic curation cutover removed the human-approval gate:
+        // combined review dispatches with apply=true and terminal effects
+        // commit automatically (e76d8c237, 17dbee838, ed3775692).
+        assert_eq!(request.context["apply"], json!(true));
         assert!(request.context["activation_policy"].is_string());
         assert!(
             request.context["session_reflection_evidence"]["hits"]
@@ -531,6 +891,7 @@ impl AgentTaskBackend for CombinedJsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -543,7 +904,8 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
             request,
@@ -584,6 +946,7 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
             output_text: json!({"facts": []}).to_string(),
             output_json: Some(json!({"facts": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -617,7 +980,8 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
             request,
@@ -627,7 +991,10 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
         );
         let evidence = &request.context["session_reflection_evidence"];
         assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
-        assert_eq!(evidence["hits"], json!([]));
+        assert_eq!(
+            evidence["hits"][0]["message_id"],
+            json!(self.expected_message_id)
+        );
         let slices = &evidence["recent_session_slices"];
         assert_eq!(slices["mode"], json!("recent_sessions"));
         assert_eq!(slices["session_selection"], json!("recent_activity"));
@@ -652,6 +1019,7 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -676,12 +1044,16 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let evidence = &request.context["skill_writer_evidence"];
         assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
-        assert_eq!(evidence["hits"], json!([]));
+        assert_eq!(
+            evidence["hits"][0]["session_id"],
+            json!(self.expected_session_id)
+        );
         let slices = &evidence["recent_session_slices"];
         assert_eq!(slices["mode"], json!("recent_sessions"));
         assert_eq!(slices["session_selection"], json!("recent_activity"));
@@ -698,6 +1070,7 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
             output_text: json!({"skills": []}).to_string(),
             output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -765,217 +1138,6 @@ pub(crate) fn assert_noop_fallback_record(
             .as_deref()
             .is_some_and(|error| error.contains("executable"))
     );
-}
-
-pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
-    fs::create_dir_all(project_root.join("src")).unwrap();
-    fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    TraceDecay::init(project_root).await.unwrap()
-}
-
-pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
-    seed_session_message_in_db(
-        &db,
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "session-reflect-1",
-            message_id: "session-reflect-1-message-001",
-            role: "user",
-            timestamp: 1_715_000_001,
-            text: "Remember TraceDecay automation should manage durable session reflection facts directly.",
-            source: None,
-        },
-    )
-    .await;
-}
-
-pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
-    let session = SessionRecord {
-        provider: "cursor".to_string(),
-        session_id: "skill-writer-underuse".to_string(),
-        project_key: cg.project_root().display().to_string(),
-        project_path: cg.project_root().display().to_string(),
-        title: Some("Skill writer underuse fixture".to_string()),
-        started_at: Some(1_715_000_120),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    assert!(db.upsert_session(&session).await);
-    let message = SessionMessageRecord {
-        provider: "cursor".to_string(),
-        message_id: "skill-writer-underuse-message-001".to_string(),
-        session_id: "skill-writer-underuse".to_string(),
-        role: "assistant".to_string(),
-        timestamp: Some(1_715_000_121),
-        ordinal: 1,
-        text: "Repeated automation workflow used shell search with  rg automation src  before drafting a skill.".to_string(),
-        kind: Some("message".to_string()),
-        model: None,
-        tool_names: Some("bash".to_string()),
-        source_path: None,
-        source_offset: None,
-        metadata_json: Some(json!({ "cmd": "rg automation src" }).to_string()),
-    };
-    assert!(db.upsert_session_message(&message).await);
-}
-
-/// Seeds one session message at `timestamp` so the scheduler observes LCM
-/// session activity at that instant.
-pub(crate) async fn seed_session_activity(cg: &TraceDecay, timestamp: i64) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
-    seed_session_message_in_db(
-        &db,
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "activity-fixture",
-            message_id: &format!("activity-fixture-message-{timestamp}"),
-            role: "user",
-            timestamp,
-            // Matches the default session_reflector and skill_writer grep
-            // queries so evidence-driven runs see this message as a hit.
-            text: "Remember this repeated workflow correction: prefer the skill tool pattern.",
-            source: None,
-        },
-    )
-    .await;
-}
-
-pub(crate) struct SeedSessionMessage<'a> {
-    pub(crate) provider: &'a str,
-    pub(crate) session_id: &'a str,
-    pub(crate) message_id: &'a str,
-    pub(crate) role: &'a str,
-    pub(crate) timestamp: i64,
-    pub(crate) text: &'a str,
-    pub(crate) source: Option<&'a str>,
-}
-
-pub(crate) async fn seed_session_message_in_db(
-    db: &GlobalDb,
-    project_root: &Path,
-    seed: SeedSessionMessage<'_>,
-) {
-    let session = SessionRecord {
-        provider: seed.provider.to_string(),
-        session_id: seed.session_id.to_string(),
-        project_key: project_root.display().to_string(),
-        project_path: project_root.display().to_string(),
-        title: Some("Session reflection fixture".to_string()),
-        started_at: Some(seed.timestamp.saturating_sub(1)),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    assert!(db.upsert_session(&session).await);
-    let message = SessionMessageRecord {
-        provider: seed.provider.to_string(),
-        message_id: seed.message_id.to_string(),
-        session_id: seed.session_id.to_string(),
-        role: seed.role.to_string(),
-        timestamp: Some(seed.timestamp),
-        ordinal: 1,
-        text: seed.text.to_string(),
-        kind: Some("message".to_string()),
-        model: None,
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: seed
-            .source
-            .map(|source| json!({ "source": source }).to_string()),
-    };
-    assert!(db.upsert_session_message(&message).await);
-}
-
-pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) {
-    let conn = cg.db().conn();
-    let vec_a = HolographicEncoder::serialize(&[0.20, 0.35, 0.50]).unwrap();
-    let vec_b = HolographicEncoder::serialize(&[0.21, 0.34, 0.49]).unwrap();
-    for (fact_id, content, vector, trust_score) in [
-        (
-            101_i64,
-            "Cache invalidation policy must be explicit",
-            vec_a,
-            0.97_f64,
-        ),
-        (
-            102_i64,
-            "Cache invalidation policy must stay explicit",
-            vec_b,
-            0.95_f64,
-        ),
-    ] {
-        conn.execute(
-            "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count,
-                 created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim, access_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            libsql::params![
-                fact_id,
-                content,
-                "project",
-                "[\"cache\",\"policy\"]",
-                trust_score,
-                0_i64,
-                0_i64,
-                1_700_000_000_i64 + fact_id,
-                1_700_000_100_i64 + fact_id,
-                libsql::Value::Blob(vector),
-                "amari_fhrr",
-                HolographicEncoder::DIMENSIONS as i64,
-                0_i64,
-            ],
-        )
-        .await
-        .unwrap();
-    }
-}
-
-pub(crate) async fn fact_exists(cg: &TraceDecay, fact_id: i64) -> bool {
-    let conn = cg.db().conn();
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM memory_facts WHERE fact_id = ?1 LIMIT 1",
-            libsql::params![fact_id],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().is_some()
-}
-
-pub(crate) async fn read_artifact(
-    cg: &TraceDecay,
-    run_id: &str,
-    record: &AutomationRunLedgerRecord,
-    kind: &str,
-) -> Value {
-    let artifact = record
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == kind)
-        .unwrap_or_else(|| panic!("missing {kind} artifact"));
-    read_run_artifact_payload(&cg.store_layout().dashboard_root, run_id, artifact)
-        .await
-        .unwrap()
 }
 
 /// Standalone automation config with only the skill writer task enabled on a
@@ -1065,6 +1227,7 @@ pub(crate) fn scheduler_record_for(
         task,
         task_key: Some(test_task_key(task).to_string()),
         backend: "codex_app_server".to_string(),
+        backend_identity: None,
         host_mode: Some("standalone".to_string()),
         prompt_version: Some(test_prompt_version(task).to_string()),
         response_schema: None,
@@ -1085,14 +1248,16 @@ pub(crate) fn scheduler_record_for(
         error: None,
         error_classification: None,
         error_retryable: None,
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
         fallback_status: None,
         report_ref: None,
         artifacts: Vec::new(),
         started_at: (completed_at - 1).to_string(),
         completed_at: completed_at.to_string(),
+        completed_at_micros: Some(completed_at.saturating_mul(1_000_000)),
     }
 }
-
 pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator",

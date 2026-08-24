@@ -4,27 +4,36 @@
 //! without querying `.tracedecay` databases directly. Reuses the same
 //! durable-analytics service functions the `tracedecay analytics
 //! diagnostics` CLI and dashboard analytics API use
-//! ([`crate::global_db::GlobalDb::query_analytics_tool_counts`],
-//! [`crate::global_db::GlobalDb::query_analytics_hint_counts`],
+//! ([`crate::global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
+//! [`crate::global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
 //! [`crate::dashboard::analytics_api::hint_summary_from_counts`],
-//! [`crate::automation::run_ledger::load_run_records`]) rather than
+//! [`tracedecay_agent_hosts::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tracedecay_application::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_application::{
+    CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
+};
+use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
+use tracedecay_store::{FactReadControl, StoreShardScopeV1};
+use tracedecay_usecases::memory::MemoryApplication;
 
-use crate::automation::run_ledger::load_run_records;
+use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsToolCounts, GlobalDb};
+use crate::global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
+use crate::store::DatabaseFactStore;
 use crate::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
+use tracedecay_agent_hosts::automation::run_ledger::load_run_records;
 
 use super::super::{ToolResult, renderers};
-use super::memory::open_target_memory_db;
-use super::support::{project_registry_context, tool_json_with_md};
+use super::support::tool_json_with_md;
 
 /// Bound on how many automation run-ledger rows a single call will scan.
 const AUTOMATION_RECORD_LIMIT: usize = 200;
@@ -55,6 +64,7 @@ const NAVIGATION_TOOLS: &[&str] = &[
     "status",
     "active_project",
     "storage_status",
+    "remote_status",
     "project_list",
     "project_search",
     "project_context",
@@ -85,6 +95,7 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "circular",
     "hotspots",
     "unused_imports",
+    "unmounted_files",
     "rank",
     "largest",
     "coupling",
@@ -108,8 +119,6 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "dsm",
 ];
 const SESSION_TOOLS: &[&str] = &[
-    "session_start",
-    "session_end",
     "message_search",
     "sessions_for",
     "workflows",
@@ -120,11 +129,21 @@ const SESSION_TOOLS: &[&str] = &[
     "lcm_describe",
     "lcm_expand",
     "lcm_expand_query",
-    "lcm_preflight",
-    "lcm_compress",
-    "lcm_session_boundary",
 ];
-const MEMORY_TOOLS: &[&str] = &["memory_status", "fact_store", "fact_feedback"];
+const MEMORY_TOOLS: &[&str] = &[
+    "memory_status",
+    "fact_feedback",
+    "fact_store_add",
+    "fact_store_search",
+    "fact_store_probe",
+    "fact_store_related",
+    "fact_store_reason",
+    "fact_store_contradict",
+    "fact_store_get",
+    "fact_store_update",
+    "fact_store_remove",
+    "fact_store_list",
+];
 const EDIT_TOOLS: &[&str] = &[
     "str_replace",
     "multi_str_replace",
@@ -153,9 +172,9 @@ const TIERS: &[(&str, &[&str])] = &[
     ("admin", ADMIN_TOOLS),
 ];
 
-fn config_error(message: impl Into<String>) -> TraceDecayError {
+fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
-        message: message.into(),
+        message: message.to_string(),
     }
 }
 
@@ -172,6 +191,34 @@ fn tool_tier(tool_name: &str) -> &'static str {
         }
     }
     "other"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_tier;
+
+    #[test]
+    fn exact_fact_store_routes_remain_in_the_memory_tier() {
+        for route in [
+            "add",
+            "search",
+            "probe",
+            "related",
+            "reason",
+            "contradict",
+            "get",
+            "update",
+            "remove",
+            "list",
+        ] {
+            assert_eq!(
+                tool_tier(&format!("tracedecay_fact_store_{route}")),
+                "memory"
+            );
+        }
+        assert_eq!(tool_tier("tracedecay_fact_store"), "other");
+        assert_eq!(tool_tier("tracedecay_fact_store_unknown"), "other");
+    }
 }
 
 #[derive(Default)]
@@ -219,97 +266,55 @@ struct ResolvedScope {
     /// facts/automation sections regardless of `scope`).
     root: PathBuf,
     display_root: String,
+    project_id: ProjectId,
 }
 
-async fn resolve_scope(
-    cg: &TraceDecay,
-    args: &Value,
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
-    all_projects: bool,
-) -> Result<ResolvedScope> {
-    let context = project_registry_context(
-        args,
-        &["project_path"],
-        global_db,
-        allow_default_registry_fallback,
-    )
-    .await?;
-    let (project_root, project_display) = match &context {
-        // Resolving the selector through the registry's project_aliases join
-        // (rather than trusting the raw selector path verbatim) keeps
-        // per-project matching correct across worktrees/aliases of the same
-        // logical project.
-        Some(ctx) => (
-            PathBuf::from(&ctx.project.canonical_root),
-            ctx.project.display_root.clone(),
-        ),
-        None => (
-            cg.project_root().to_path_buf(),
-            cg.project_root().to_string_lossy().to_string(),
-        ),
+async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
+    let FactOwnerV1::Project { project_id } = cg.project_memory_owner().map_err(config_error)?
+    else {
+        return Err(config_error("active analytics target is not a project"));
     };
+    let project_root = cg.project_root().to_path_buf();
+    let project_display = cg.project_root().to_string_lossy().to_string();
     let filter = if all_projects {
         None
     } else {
-        Some(GlobalDb::canonical_project_key(&project_root))
+        Some(RegisteredGlobalDb::canonical_project_key(&project_root))
     };
     Ok(ResolvedScope {
         filter,
         root: project_root,
         display_root: project_display,
+        project_id,
     })
 }
 
-async fn resolved_global_db(
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
-) -> Result<Option<GlobalDb>> {
-    if global_db.is_some() {
-        return Ok(None);
-    }
-    if !allow_default_registry_fallback {
-        return Err(config_error(
-            "client global analytics store is unavailable for tracedecay_analytics",
-        ));
-    }
-    let owned = GlobalDb::open().await.ok_or_else(|| {
-        config_error("could not open tracedecay user-level global DB; run tracedecay init first")
-    })?;
-    Ok(Some(owned))
-}
-
-/// Handles `tracedecay_analytics` tool calls.
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
+    analytics_db: Option<&RegisteredGlobalDb>,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    application_deadline: Deadline,
+    application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
+    let read_control = FactReadControl::new(Arc::new(move || {
+        application_cancellation.is_cancelled() || application_deadline.is_elapsed_at(now_micros())
+    }));
     let all_projects = parse_scope(&args)?;
     let window_days = parse_window_days(&args);
     let section = parse_section(&args)?;
 
-    let owned_db = resolved_global_db(global_db, allow_default_registry_fallback).await?;
-    let gdb = global_db.or(owned_db.as_ref()).ok_or_else(|| {
-        config_error("tracedecay_analytics could not resolve a global analytics DB")
+    let gdb = analytics_db.ok_or_else(|| {
+        config_error("registered global analytics store is unavailable for tracedecay_analytics")
     })?;
 
-    let scope = resolve_scope(
-        cg,
-        &args,
-        global_db,
-        allow_default_registry_fallback,
-        all_projects,
-    )
-    .await?;
+    let scope = resolve_scope(cg, all_projects).await?;
 
     let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
     let event_count = gdb
         .count_analytics_events(scope.filter.as_deref(), since)
         .await
         .map_err(config_error)?;
-
     let mut value = json!({
         "status": "ok",
         "scope": if all_projects { "all" } else { "project" },
@@ -321,13 +326,55 @@ pub(super) async fn handle_analytics(
         "event_count_truncated": false,
     });
 
+    if section.is_none() {
+        let observatory = tracedecay_usecases::observability::observatory_read_model(
+            gdb,
+            scope.filter.as_deref(),
+            since,
+        )
+        .await;
+        let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
+            .map_err(config_error)?;
+        let provider_scope = if all_projects {
+            None
+        } else {
+            project_sessions.and_then(|sessions| {
+                let StoreShardScopeV1::ProjectSessions { project_id } =
+                    &sessions.binding().shard_id.scope
+                else {
+                    return None;
+                };
+                (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str()))
+                    .then(|| ObservationScopeV1::Project {
+                        project_id: project_id.clone(),
+                    })
+            })
+        };
+        let provider_usage_db = if all_projects { None } else { project_sessions };
+        let costs = tracedecay_usecases::observability::costs_read_model(
+            gdb,
+            provider_usage_db,
+            provider_scope.as_ref(),
+            scope.filter.as_deref(),
+            since,
+        )
+        .await;
+        let costs =
+            tracedecay_usecases::observability::costs_mcp_value(&costs).map_err(config_error)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
+        object.insert("observatory".to_string(), observatory);
+        object.insert("costs".to_string(), costs);
+    }
+
     if wants_section(section, "tools") {
         let counts = gdb
             .query_analytics_tool_counts(scope.filter.as_deref(), since)
             .await
             .map_err(config_error)?;
         if let Some(object) = value.as_object_mut() {
-            object.insert("tools".to_string(), tools_section(&counts));
+            object.insert("tools".to_string(), tools_section(&counts)?);
         }
     }
     if wants_section(section, "hints") {
@@ -335,25 +382,13 @@ pub(super) async fn handle_analytics(
             .query_analytics_hint_counts(scope.filter.as_deref(), since)
             .await
             .map_err(config_error)?;
-        let dashboard_counts = counts
-            .iter()
-            .map(
-                |count| crate::dashboard::analytics_api::DashboardHintCount {
-                    category: count.category.clone(),
-                    emitted: count.emitted,
-                    followed: count.followed,
-                    ignored: count.ignored,
-                    suppressed: count.suppressed,
-                },
-            )
-            .collect::<Vec<_>>();
-        let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&dashboard_counts);
+        let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&counts);
         if let Some(object) = value.as_object_mut() {
             object.insert("hints".to_string(), hints);
         }
     }
     if wants_section(section, "facts") {
-        let facts = facts_section(cg, &args, global_db, allow_default_registry_fallback).await;
+        let facts = facts_section(cg, &scope, &read_control).await;
         if let Some(object) = value.as_object_mut() {
             object.insert("facts".to_string(), facts);
         }
@@ -370,7 +405,7 @@ pub(super) async fn handle_analytics(
     }))
 }
 
-fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
+fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for row in rows {
         let counts = per_tool.entry(row.tool_name.clone()).or_default();
@@ -411,6 +446,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
         .collect();
 
     let defined: Vec<String> = crate::mcp::tools::get_tool_definitions()
+        .map_err(config_error)?
         .into_iter()
         .map(|definition| definition.name)
         .collect();
@@ -423,7 +459,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
     let zero_call_sample: Vec<&String> =
         zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
 
-    json!({
+    Ok(json!({
         "available": !rows.is_empty(),
         "tiers": tiers,
         "top_tools": top_tools,
@@ -434,65 +470,78 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
             "sample": zero_call_sample,
             "sample_truncated": zero_call_count > zero_call_sample.len(),
         },
-    })
+    }))
 }
 
 async fn facts_section(
     cg: &TraceDecay,
-    args: &Value,
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
+    scope: &ResolvedScope,
+    read_control: &FactReadControl,
 ) -> Value {
-    let target =
-        match open_target_memory_db(cg, args, global_db, allow_default_registry_fallback).await {
-            Ok(target) => target,
-            Err(err) => {
-                return json!({
-                    "available": false,
-                    "reason": err.to_string(),
-                });
-            }
-        };
-    let query = target
-        .conn()
-        .query(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(retrieval_count), 0),
-                    COALESCE(SUM(CASE WHEN retrieval_count > 0 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(helpful_count), 0),
-                    COALESCE(SUM(unhelpful_count), 0),
-                    COALESCE(SUM(CASE WHEN helpful_count > 0 OR unhelpful_count > 0 THEN 1 ELSE 0 END), 0)
-             FROM memory_facts",
-            (),
-        )
-        .await;
-    let mut rows = match query {
-        Ok(rows) => rows,
-        Err(err) => {
+    let admitted_owner = match cg.project_memory_owner() {
+        Ok(FactOwnerV1::Project { project_id }) => project_id,
+        Ok(FactOwnerV1::Profile) | Err(_) => {
             return json!({
                 "available": false,
-                "reason": format!("fact-store funnel query failed: {err}"),
-                "project_root": target.project_root.display().to_string(),
+                "reason": "active analytics target has no project memory owner",
             });
         }
     };
-    let Ok(Some(row)) = rows.next().await else {
-        return json!({
-            "available": false,
-            "reason": "fact-store funnel query returned no rows",
-            "project_root": target.project_root.display().to_string(),
-        });
+    let selector = (scope.project_id != admitted_owner).then(|| RetainedProjectSelectorV1 {
+        project_id: scope.project_id.clone(),
+    });
+    let target = match open_project_retained_memory_target(
+        cg,
+        cg.project_root(),
+        &admitted_owner,
+        Some(MemoryScopeV1::Project),
+        selector.as_ref(),
+        MemoryTargetAccessV1::Read,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(err) => {
+            let problem = retained_surface_execution_problem(err);
+            return json!({
+                "available": false,
+                "reason": problem.canonical_code(),
+            });
+        }
     };
-    let get_i64 = |index: i32| row.get::<i64>(index).unwrap_or(0);
+    let memory = match MemoryApplication::new(
+        target.owner().clone(),
+        DatabaseFactStore::new(target.database()),
+    ) {
+        Ok(memory) => memory,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("fact-store funnel unavailable: {err}"),
+                "project_root": scope.root.display().to_string(),
+            });
+        }
+    };
+    let status = match memory.project_memory_status(read_control).await {
+        Ok(status) => status,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("fact-store funnel unavailable: {err}"),
+                "project_root": scope.root.display().to_string(),
+            });
+        }
+    };
+    let funnel = status.feedback_funnel();
     json!({
         "available": true,
-        "project_root": target.project_root.display().to_string(),
-        "facts": get_i64(0),
-        "retrievals": get_i64(1),
-        "facts_retrieved": get_i64(2),
-        "helpful_feedback": get_i64(3),
-        "unhelpful_feedback": get_i64(4),
-        "facts_rated": get_i64(5),
+        "project_root": scope.root.display().to_string(),
+        "facts": status.fact_count(),
+        "retrievals": funnel.retrieval_count_total(),
+        "facts_retrieved": funnel.retrieved_fact_count(),
+        "helpful_feedback": status.helpful_count(),
+        "unhelpful_feedback": status.unhelpful_count(),
+        "facts_rated": funnel.rated_fact_count(),
     })
 }
 
@@ -520,10 +569,10 @@ async fn automation_section(project_root: &Path, since: i64) -> Value {
     let mut in_window = 0usize;
     let mut by_job: BTreeMap<String, BTreeMap<&'static str, i64>> = BTreeMap::new();
     for record in &records {
-        if let Some(started_at) = parse_rfc3339_timestamp(&record.started_at) {
-            if started_at < since {
-                continue;
-            }
+        if let Some(started_at) = parse_rfc3339_timestamp(&record.started_at)
+            && started_at < since
+        {
+            continue;
         }
         in_window += 1;
         let job = serde_json::to_value(record.task)

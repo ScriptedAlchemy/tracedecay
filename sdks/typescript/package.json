@@ -1,0 +1,61 @@
+{
+  "name": "@tracedecay/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Generated TraceDecay API contracts with a strict lifecycle client.",
+  "author": "ScriptedAlchemy",
+  "license": "MIT",
+  "homepage": "https://github.com/ScriptedAlchemy/tracedecay/tree/master/sdks/typescript#readme",
+  "keywords": [
+    "ai-agents",
+    "code-intelligence",
+    "mcp",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ScriptedAlchemy/tracedecay.git",
+    "directory": "sdks/typescript"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rslib build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --exclude test/installed-package.test.ts",
+    "test:installed": "vitest run test/installed-package.test.ts",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run test:installed",
+    "pack": "npm pack --dry-run --ignore-scripts"
+  },
+  "devDependencies": {
+    "@rslib/core": "^0.23.2",
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  }
+}

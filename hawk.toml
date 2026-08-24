@@ -1,0 +1,39 @@
+# Closed-world visibility audit for the shipped TraceDecay binary.
+# Workspace libraries are internal unless a finding is an intentional
+# external SDK surface or generated binding.
+
+[[production]]
+package = "tracedecay"
+bin = "tracedecay"
+reason = "shipped CLI, daemon, MCP, and dashboard binary"
+
+# Restrict rustdoc to crates that actually contain rustdoc examples. Full
+# workspace `cargo test --doc` rebuilds every library as rustdoc.
+
+[[doctest]]
+package = "tracedecay-application"
+
+[[doctest]]
+package = "tracedecay-code-index"
+
+[[doctest]]
+package = "tracedecay-domain"
+
+[[doctest]]
+package = "tracedecay-sessions"
+
+[[doctest]]
+package = "tracedecay-store"
+
+# Build-script output lives under Cargo OUT_DIR, so file selectors cannot
+# name a stable workspace-relative path. Exclude the include! target modules.
+
+[[exclude]]
+crate = "tracedecay_agent_hosts"
+module = "agents::plugin_bundle::plugin_bundle_generated"
+reason = "build-script generated OUT_DIR plugin bundle manifests"
+
+[[exclude]]
+crate = "tracedecay"
+module = "dashboard::assets::app_manifest"
+reason = "build-script generated OUT_DIR dashboard asset manifest"

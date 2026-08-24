@@ -31,10 +31,10 @@ fn find_on_path(tool: &str) -> Option<PathBuf> {
 fn common_tool_paths(tool: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            candidates.push(parent.join(tool));
-        }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        candidates.push(parent.join(tool));
     }
 
     if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {

@@ -3,28 +3,33 @@
 //! Handles registration of the tracedecay MCP server in Vibe's
 //! `~/.vibe/config.toml` as a `[[mcp_servers]]` entry with stdio transport,
 //! and prompt rules via `~/.vibe/prompts/cli.md`.
+//!
+//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
+//! policy is CLI-first, so this config write needs a justification. Vibe's
+//! `vibe mcp add` is genuinely non-interactive and `vibe mcp remove <name>`
+//! exists — but `add` is **remote-transport only** (`--url`, `--transport`,
+//! `--header`, `--api-key-*`). It has no `--command`/`--args`, so a local
+//! stdio server, which is exactly what `tracedecay serve` is, has no
+//! representation on that command line; Mistral's own documentation registers
+//! stdio servers by editing `config.toml`. Adopting `remove` alone would leave
+//! the lifecycle half-driven, with the registration created by one authority
+//! and destroyed by another. This is the closest host to adoptable: a single
+//! stdio `add` flag would flip the verdict outright. See
+//! <https://github.com/mistralai/mistral-vibe/blob/main/README.md> and
+//! <https://docs.mistral.ai/vibe/code/cli/mcp-servers>.
 
-use std::io::Write;
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 
-use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext};
+use super::{AgentIntegration, DoctorCounters, HealthcheckContext};
 
-/// Mistral Vibe agent.
 pub struct VibeIntegration;
 
-/// Returns the Vibe home directory.
 /// Respects `VIBE_HOME` only when it falls under `home` (so tests with
 /// temp-dir homes are not polluted by the real user's environment).
 fn vibe_home(home: &Path) -> std::path::PathBuf {
-    if let Ok(vibe) = std::env::var("VIBE_HOME") {
-        let vibe_path = std::path::PathBuf::from(&vibe);
-        if vibe_path.starts_with(home) {
-            return vibe_path;
-        }
-    }
-    home.join(".vibe")
+    super::host_home_override(home, "VIBE_HOME", ".vibe")
 }
 
 fn vibe_config_path(home: &Path) -> std::path::PathBuf {
@@ -35,15 +40,8 @@ fn vibe_prompt_path(home: &Path) -> std::path::PathBuf {
     vibe_home(home).join("prompts/cli.md")
 }
 
-use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
-
 /// The TOML marker that identifies a tracedecay MCP server entry.
 const TOML_MARKER: &str = "name = \"tracedecay\"";
-
-/// Vibe-only closing paragraph appended after the shared rules text.
-const VIBE_EXTRA_PARAGRAPHS: &[&str] = &["When a tracedecay tool result contains a \
-     `tracedecay_metrics:` line, report the savings to the user (e.g. \"TraceDecay'd ~N \
-     tokens\"). Never silently omit this."];
 
 impl AgentIntegration for VibeIntegration {
     fn name(&self) -> &'static str {
@@ -54,69 +52,8 @@ impl AgentIntegration for VibeIntegration {
         "vibe"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let vibe_dir = vibe_home(&ctx.home);
-        std::fs::create_dir_all(&vibe_dir).ok();
-
-        let config_path = vibe_config_path(&ctx.home);
-        install_mcp_server(&config_path, &ctx.tracedecay_bin)?;
-
-        let prompt_dir = vibe_dir.join("prompts");
-        std::fs::create_dir_all(&prompt_dir).ok();
-        let prompt_path = vibe_prompt_path(&ctx.home);
-        install_prompt_rules(&prompt_path)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &prompt_path,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Vibe session — tracedecay tools are now available");
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let vibe_dir = project_path.join(".vibe");
-        let config_path = vibe_dir.join("config.toml");
-        let prompt_path = vibe_dir.join("prompts/cli.md");
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [config_path.as_path(), prompt_path.as_path()],
-        )?;
-        std::fs::create_dir_all(&vibe_dir).ok();
-        std::fs::create_dir_all(vibe_dir.join("prompts")).ok();
-
-        install_mcp_server(&config_path, &ctx.tracedecay_bin)?;
-        install_prompt_rules(&prompt_path)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &prompt_path,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let config_path = vibe_config_path(&ctx.home);
-        uninstall_mcp_server(&config_path);
-        let prompt_path = vibe_prompt_path(&ctx.home);
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &prompt_path,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-        uninstall_prompt_rules(&prompt_path);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Mistral Vibe.");
-        eprintln!("Start a new Vibe session for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -185,165 +122,6 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Install helpers
-// ---------------------------------------------------------------------------
-
-/// Append a `[[mcp_servers]]` entry for tracedecay to `config.toml` (idempotent).
-fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let existing = if config_path.exists() {
-        std::fs::read_to_string(config_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    if existing.contains(TOML_MARKER) {
-        eprintln!(
-            "  tracedecay MCP server already registered in {}, skipping",
-            config_path.display()
-        );
-        return Ok(());
-    }
-
-    let block = format!(
-        "\n[[mcp_servers]]\n\
-         name = \"tracedecay\"\n\
-         transport = \"stdio\"\n\
-         command = \"{tracedecay_bin}\"\n\
-         args = [\"serve\"]\n"
-    );
-
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config_path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", config_path.display()),
-        })?;
-    f.write_all(block.as_bytes())
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to write {}: {e}", config_path.display()),
-        })?;
-
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
-    Ok(())
-}
-
-/// Install-or-refresh prompt rules in the Vibe system prompt.
-fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
-    let block = super::prompt_rules::standard_prompt_rules(
-        PROMPT_RULE_MARKER,
-        &PromptRulesOptions {
-            extra_paragraphs: VIBE_EXTRA_PARAGRAPHS,
-        },
-    );
-    super::prompt_rules::reconcile_prompt_rules(prompt_path, PROMPT_RULE_MARKER, &block)
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-/// Remove the tracedecay `[[mcp_servers]]` block from `config.toml`.
-fn uninstall_mcp_server(config_path: &Path) {
-    if !config_path.exists() {
-        eprintln!("  {} not found, skipping", config_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
-        return;
-    };
-
-    if !contents.contains(TOML_MARKER) {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return;
-    }
-
-    // Remove the [[mcp_servers]] block that contains name = "tracedecay".
-    // Strategy: split into lines, find the block, remove it.
-    let lines: Vec<&str> = contents.lines().collect();
-    let mut result: Vec<&str> = Vec::new();
-    let mut skip = false;
-
-    for line in &lines {
-        if line.trim() == "[[mcp_servers]]" {
-            // Peek ahead to see if this block is the tracedecay one.
-            // We'll collect the block and decide whether to keep it.
-            skip = false;
-        }
-
-        if skip {
-            // If we hit a new section header, stop skipping.
-            let trimmed = line.trim();
-            if trimmed.starts_with("[[") || (trimmed.starts_with('[') && !trimmed.starts_with("[["))
-            {
-                skip = false;
-            } else {
-                continue;
-            }
-        }
-
-        if line.contains(TOML_MARKER) {
-            // This line is inside the tracedecay block — remove it and
-            // the preceding [[mcp_servers]] header.
-            // Pop the header we already pushed.
-            while let Some(last) = result.last() {
-                if last.trim() == "[[mcp_servers]]" {
-                    result.pop();
-                    break;
-                }
-                // Pop blank lines between header and this line
-                if last.trim().is_empty() {
-                    result.pop();
-                } else {
-                    break;
-                }
-            }
-            skip = true;
-            continue;
-        }
-
-        result.push(line);
-    }
-
-    // Trim trailing blank lines
-    while result.last().is_some_and(|l| l.trim().is_empty()) {
-        result.pop();
-    }
-
-    let new_contents = if result.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", result.join("\n"))
-    };
-
-    if new_contents.trim().is_empty() {
-        std::fs::remove_file(config_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            config_path.display()
-        );
-    } else {
-        std::fs::write(config_path, &new_contents).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
-    }
-}
-
-/// Remove tracedecay rules from the Vibe system prompt.
-fn uninstall_prompt_rules(prompt_path: &Path) {
-    super::prompt_rules::remove_prompt_rules(prompt_path, PROMPT_RULE_MARKER);
-}
-
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
@@ -358,32 +136,45 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
         return;
     }
 
-    let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
-    if contents.contains(TOML_MARKER) {
-        dc.pass(&format!(
-            "MCP server registered in {}",
+    let Ok(config) = super::load_toml_file(&config_path) else {
+        dc.fail(&format!("could not parse {}", config_path.display()));
+        return;
+    };
+    let registered = config
+        .get("mcp_servers")
+        .and_then(toml::Value::as_array)
+        .and_then(|servers| {
+            servers.iter().find(|server| {
+                server.get("name").and_then(toml::Value::as_str) == Some("tracedecay")
+            })
+        })
+        .and_then(|server| server.get("command"))
+        .and_then(toml::Value::as_str);
+    let Some(expected) = super::which_tracedecay() else {
+        dc.fail("could not resolve the active tracedecay binary for Vibe");
+        return;
+    };
+    match registered {
+        Some(command) if command == expected => dc.pass(&format!(
+            "MCP server registered with the current binary in {}",
             config_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
+        )),
+        Some(command) => dc.fail(&format!(
+            "MCP server in {} uses stale command `{command}`; expected `{expected}` — run `tracedecay install --agent vibe`",
+            config_path.display()
+        )),
+        None => dc.fail(&format!(
             "MCP server NOT registered in {} — run `tracedecay install --agent vibe`",
             config_path.display()
-        ));
+        )),
     }
 }
 
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
-    let prompt_path = vibe_prompt_path(home);
-    if prompt_path.exists() {
-        let has_rules = std::fs::read_to_string(&prompt_path)
-            .unwrap_or_default()
-            .contains("tracedecay");
-        if has_rules {
-            dc.pass("Vibe prompt contains tracedecay rules");
-        } else {
-            dc.fail("Vibe prompt missing tracedecay rules — run `tracedecay install --agent vibe`");
-        }
-    } else {
-        dc.warn("Vibe prompt does not exist");
-    }
+    super::doctor_check_prompt_contains_tracedecay(
+        dc,
+        &vibe_prompt_path(home),
+        "Vibe prompt",
+        "vibe",
+    );
 }

@@ -48,6 +48,72 @@ def assert_tool_dispatch_success(raw):
     return outer
 
 
+def _as_payload(value):
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _retryable_retained_pressure(value):
+    """True when a just-opened or saturated retained route asks the caller to retry."""
+    payload = _as_payload(value)
+    if payload is None:
+        return False
+    problem = payload.get("problem")
+    if not isinstance(problem, dict):
+        return False
+    code = str(problem.get("code") or "")
+    return problem.get("retryable") is True and code.startswith("application.retained.")
+
+
+def call_when_ready(dispatch, *, timeout_seconds=15):
+    """Retry a dispatch while retained authority is mounting or briefly saturated."""
+    deadline = time.time() + timeout_seconds
+    result = dispatch()
+    while _retryable_retained_pressure(result) and time.time() < deadline:
+        time.sleep(0.25)
+        result = dispatch()
+    return result
+
+
+def assert_tool_dispatch_success_when_ready(dispatch, *, timeout_seconds=15):
+    """Retry a just-opened project's first write while retained authority mounts."""
+    return assert_tool_dispatch_success(
+        call_when_ready(dispatch, timeout_seconds=timeout_seconds)
+    )
+
+
+def assert_lcm_status_argv(argv, project_root):
+    """Validate the canonical CLI route used by the stock context engine."""
+    assert len(argv) >= 6, argv
+    assert argv[1] == "tool", argv
+    name_index = 2
+    if argv[name_index] == "--project":
+        assert len(argv) >= 8, argv
+        assert os.path.realpath(argv[name_index + 1]) == os.path.realpath(project_root), argv
+        name_index += 2
+    else:
+        raise AssertionError(f"lcm status must carry the project route: {argv!r}")
+    assert argv[name_index] == "tracedecay_lcm_status", argv
+    assert argv[name_index + 1 : name_index + 3] == ["--json", "--args"], argv
+    assert len(argv) == name_index + 4, argv
+    return argv[-1]
+
+
+def assert_decoded_result(payload, *required_fields):
+    """Require a host-facing result, rather than an application transport envelope."""
+    assert isinstance(payload, dict), payload
+    assert "error" not in payload, payload
+    assert "contract" not in payload and "outcome" not in payload, payload
+    for field in required_fields:
+        assert field in payload, (field, payload)
+    return payload
+
+
 def main():
     hermes_home = os.path.join(os.environ["HOME"], ".hermes")
     project_root = os.getcwd()
@@ -109,6 +175,7 @@ def main():
     # memory.provider is tracedecay here, so the provider-owned fact trio
     # must not register as direct duplicates.
     assert "tracedecay_fact_store" not in registered, sorted(registered)
+    assert not any(name.startswith("tracedecay_fact_store_") for name in registered), sorted(registered)
     assert "tracedecay_fact_feedback" not in registered, sorted(registered)
     assert "tracedecay_memory_status" not in registered, sorted(registered)
     ok(
@@ -217,8 +284,25 @@ def main():
     assert engine.should_compress_preflight([], current_tokens=1000) is False
     ok("should_compress_preflight honors the bool ABC contract")
 
-    status = engine.status()
-    assert isinstance(status, dict) and "error" not in status, status
+    lcm_status_argv = []
+    real_subprocess_run = plugin.tools.subprocess.run
+    try:
+        def capture_lcm_status_argv(argv, *args, **kwargs):
+            lcm_status_argv.append(argv)
+            return real_subprocess_run(argv, *args, **kwargs)
+
+        plugin.tools.subprocess.run = capture_lcm_status_argv
+        status = engine.status()
+    finally:
+        plugin.tools.subprocess.run = real_subprocess_run
+    assert lcm_status_argv, "context engine did not invoke tracedecay_lcm_status"
+    status_payload = json.loads(assert_lcm_status_argv(lcm_status_argv[-1], project_root))
+    assert status_payload == {
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "format": "json",
+    }, status_payload
+    assert_decoded_result(status, "status")
     if status.get("status") == "not_ingested":
         assert status.get("store_exists") is False, status
         ok("lcm_status dispatch round-trips", "not_ingested before compress")
@@ -230,14 +314,24 @@ def main():
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi there"},
     ]
-    compressed = engine.compress(messages, current_tokens=50)
-    # Host ABC contract: compress() returns a MESSAGE LIST the host adopts
-    # as the live transcript; the raw tracedecay result stays on the engine.
+    compressed = engine.compress(list(messages), current_tokens=50)
+    # Host ABC contract: compress() returns a MESSAGE LIST the host adopts as
+    # the live transcript. Hermes exposes no authentic raw-compression
+    # protocol, so the daemon-owned LCM authority reports host raw compaction
+    # as a typed unavailable capability and the transcript passes through
+    # unchanged (the transcript itself still ingests through the daemon).
     assert isinstance(compressed, list), type(compressed)
-    assert all(isinstance(m, dict) and m.get("role") for m in compressed), compressed
+    assert compressed == messages, compressed
     result = engine.last_compress_result
-    assert isinstance(result, dict) and result.get("status") == "ok", result
-    ok("compress returns a message list offline", f"status={result.get('status')}")
+    assert isinstance(result, dict) and result == {
+        "status": "unavailable",
+        "reason": "host_raw_compression_unavailable",
+        "semantic_error": True,
+    }, result
+    ok(
+        "compress returns the unchanged transcript with typed unavailability",
+        f"reason={result.get('reason')}",
+    )
 
     # 3. Memory provider: stock discovers providers via plugins/memory and the
     #    memory.provider config key (the general PluginContext has no
@@ -261,8 +355,8 @@ def main():
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
 
-    # Legacy fixed-action names still dispatch even though they no longer
-    # cost schema footprint.
+    # The shipped fixed-action compatibility wire still dispatches through the
+    # canonical fact-store contract without expanding the public schema.
     assert_tool_dispatch_success(
         provider.handle_tool_call(
             "fact_add",
@@ -274,17 +368,47 @@ def main():
         )
     )
     found = plugin.call_tracedecay_json(
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_search",
         {
-            "action": "search",
             "query": "stock hermes integration",
             "limit": 1,
             "format": "json",
         },
         project_root=project_root,
     )
-    assert found.get("count", 0) >= 1, found
+    assert_decoded_result(found, "hits", "owner")
+    assert len(found.get("hits") or []) >= 1, found
     ok("memory fact add/search round-trips through the binary")
+
+    # Passive-ingest / recall hooks (sync_turn, queue_prefetch, on_memory_write)
+    # run before a second project is opened. Opening project-two saturates the
+    # retained LCM authority long enough that grep cannot admit work.
+    assert provider.prefetch("stock hermes integration") == ""
+    provider.queue_prefetch("stock hermes integration")
+    deadline = time.time() + 15
+    prefetched = ""
+    while time.time() < deadline and not prefetched:
+        prefetched = provider.prefetch("stock hermes integration")
+        time.sleep(0.1)
+    assert "stock hermes integration" in prefetched, prefetched
+    ok("queue_prefetch recalls stored facts for the next prefetch")
+    provider.on_memory_write(
+        "add", "memory", "stock on-memory-write mirror fact", {"session_id": "s"}
+    )
+    mirrored = call_when_ready(
+        lambda: plugin.call_tracedecay_json(
+            "tracedecay_fact_store_search",
+            {
+                "query": "on-memory-write mirror",
+                "limit": 1,
+                "format": "json",
+            },
+            project_root=project_root,
+        )
+    )
+    assert_decoded_result(mirrored, "hits", "owner")
+    assert len(mirrored.get("hits") or []) >= 1, mirrored
+    ok("on_memory_write mirrors built-in memory writes")
 
     # A second Hermes session rooted in another registered project must get a
     # distinct provider instance and fact shard. This is the gateway/Desktop
@@ -294,6 +418,22 @@ def main():
     os.makedirs(other_project, exist_ok=True)
     with open(os.path.join(other_project, "README.md"), "w", encoding="utf-8") as handle:
         handle.write("# project two\n")
+    subprocess.run(["git", "init", "-q"], cwd=other_project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=other_project, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=ci@tracedecay",
+            "-c",
+            "user.name=ci",
+            "commit",
+            "-qm",
+            "init",
+        ],
+        cwd=other_project,
+        check=True,
+    )
     init_result = subprocess.run(
         [loaded.module.tools.TRACEDECAY_BIN, "init"],
         cwd=other_project,
@@ -312,22 +452,24 @@ def main():
         other_provider.project_root,
     )
     isolation_marker = "stock hermes project two isolated"
-    assert_tool_dispatch_success(
-        other_provider.handle_tool_call(
+    assert_tool_dispatch_success_when_ready(
+        lambda: other_provider.handle_tool_call(
             "fact_add",
             {"content": isolation_marker, "fact_type": "decision", "format": "json"},
         )
     )
     first_project_result = plugin.call_tracedecay_json(
-        "tracedecay_fact_store",
-        {"action": "list", "limit": 200, "format": "json"},
+        "tracedecay_fact_store_list",
+        {"limit": 200, "format": "json"},
         project_root=project_root,
     )
     second_project_result = plugin.call_tracedecay_json(
-        "tracedecay_fact_store",
-        {"action": "list", "limit": 200, "format": "json"},
+        "tracedecay_fact_store_list",
+        {"limit": 200, "format": "json"},
         project_root=other_project,
     )
+    assert_decoded_result(first_project_result, "facts", "owner")
+    assert_decoded_result(second_project_result, "facts", "owner")
     first_contents = {
         item.get("fact", item).get("content") for item in first_project_result.get("facts", [])
     }
@@ -338,60 +480,60 @@ def main():
     assert isolation_marker in second_contents, second_project_result
     ok("memory facts remain isolated between Hermes session projects")
 
-    # Passive-ingest / recall hooks (sync_turn, queue_prefetch, on_memory_write).
-    # prefetch() is the fast inline half: recall happens in queue_prefetch's
-    # background thread and is consumed on the next turn.
-    assert provider.prefetch("stock hermes integration") == ""
-    provider.queue_prefetch("stock hermes integration")
-    deadline = time.time() + 15
-    prefetched = ""
-    while time.time() < deadline and not prefetched:
-        prefetched = provider.prefetch("stock hermes integration")
-        time.sleep(0.1)
-    assert "stock hermes integration" in prefetched, prefetched
-    ok("queue_prefetch recalls stored facts for the next prefetch")
-    provider.sync_turn(
-        "hello", "hi there", session_id="stock-check-session", messages=messages
-    )
-    grep = plugin.call_tracedecay_json(
-        "tracedecay_lcm_grep",
-        {
-            "provider": "hermes",
-            "session_id": "stock-check-session",
-            "query": "hello",
-            "scope": "all",
-        },
-        project_root=project_root,
-    )
-    assert isinstance(grep, dict) and "error" not in grep, grep
-    ok("sync_turn ingests the turn into the LCM raw store")
-    provider.on_memory_write(
-        "add", "memory", "stock on-memory-write mirror fact", {"session_id": "s"}
-    )
-    mirrored = plugin.call_tracedecay_json(
-        "tracedecay_fact_store",
-        {
-            "action": "search",
-            "query": "on-memory-write mirror",
-            "limit": 1,
-            "format": "json",
-        },
-        project_root=project_root,
-    )
-    assert mirrored.get("count", 0) >= 1, mirrored
-    ok("on_memory_write mirrors built-in memory writes")
-
     # 4. Graph tool dispatch through generated tools.py against the real cwd,
     #    never the Hermes plugin/config directory.
     graph_status = plugin.call_tracedecay_json("tracedecay_status", {})
-    assert graph_status.get("file_count", 0) >= 1, graph_status
-    assert graph_status.get("node_count", 0) >= 1, graph_status
+    assert_decoded_result(graph_status, "project_root", "code_index_freshness")
+    assert os.path.realpath(graph_status["project_root"]) == os.path.realpath(
+        project_root
+    ), graph_status
+    freshness = graph_status.get("code_index_freshness") or {}
+    assert freshness.get("status") in ("current", "warming"), graph_status
     ok(
         "graph tool dispatch round-trips against the working project",
-        f"files={graph_status.get('file_count')} nodes={graph_status.get('node_count')}",
+        f"freshness={freshness.get('status')}",
     )
+    command_status = plugin._tracedecay_status(hermes_home=hermes_home)
+    assert isinstance(command_status, str) and command_status.startswith(
+        "tracedecay status:\n"
+    ), command_status
+    assert "project:" in command_status, command_status
+    ok("registered /tracedecay_status command renders the mounted graph result")
     assert project_root != hermes_home
     ok("Hermes home does not select the TraceDecay project", project_root)
+
+    provider.sync_turn(
+        "hello", "hi there", session_id="stock-check-session", messages=messages
+    )
+    ingest_deadline = time.time() + 30
+    ingest_status = engine.status()
+    while time.time() < ingest_deadline and (
+        not isinstance(ingest_status, dict)
+        or ingest_status.get("status") in (None, "not_ingested")
+        or _retryable_retained_pressure(ingest_status)
+    ):
+        time.sleep(0.25)
+        ingest_status = engine.status()
+    assert isinstance(ingest_status, dict), ingest_status
+    assert ingest_status.get("status") not in (None, "not_ingested"), ingest_status
+    grep = call_when_ready(
+        lambda: plugin.call_tracedecay_json(
+            "tracedecay_lcm_grep",
+            {
+                "provider": "hermes",
+                "session_id": "stock-check-session",
+                "query": "hello",
+                "scope": "all",
+            },
+            project_root=project_root,
+        ),
+        timeout_seconds=30,
+    )
+    assert_decoded_result(grep, "status", "hits", "provider", "query")
+    assert grep["provider"] == "hermes", grep
+    assert grep["query"] == "hello", grep
+    assert isinstance(grep["hits"], list), grep
+    ok("sync_turn ingests the turn into the LCM raw store")
 
     print(f"1..{PASS}")
     print(f"stock hermes integration: all {PASS} checks passed")

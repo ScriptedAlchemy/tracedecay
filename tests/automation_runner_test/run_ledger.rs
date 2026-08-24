@@ -1,11 +1,11 @@
 use tempfile::tempdir;
 use tokio::sync::Barrier;
 
-use tracedecay::automation::backend::AgentTaskKind;
-use tracedecay::automation::run_ledger::{
+use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
+use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, find_run_record, load_run_records, read_run_artifact_payload,
-    run_artifact_path, run_ledger_path, write_run_artifact,
+    append_run_record, canonical_record_completion_micros, find_run_record, load_run_records,
+    read_run_artifact_payload, run_artifact_path, run_ledger_path, write_run_artifact,
 };
 
 fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecord {
@@ -16,6 +16,7 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         task: AgentTaskKind::MemoryCurator,
         task_key: Some("memory_curator".to_string()),
         backend: "fake".to_string(),
+        backend_identity: None,
         host_mode: Some("standalone".to_string()),
         prompt_version: Some("memory_curator:v1".to_string()),
         response_schema: None,
@@ -36,11 +37,14 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         error: None,
         error_classification: None,
         error_retryable: None,
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
         fallback_status: None,
         report_ref: None,
         artifacts: Vec::new(),
-        started_at: "2026-06-24T05:00:00Z".to_string(),
-        completed_at: "2026-06-24T05:00:01Z".to_string(),
+        started_at: "1782277200".to_string(),
+        completed_at: "1782277201".to_string(),
+        completed_at_micros: Some(1_782_277_201_000_000),
     }
 }
 
@@ -195,7 +199,7 @@ async fn run_ledger_limit_and_malformed_lines_are_handled() {
 }
 
 #[tokio::test]
-async fn run_ledger_loads_legacy_records_without_new_optional_fields() {
+async fn run_ledger_loads_records_without_optional_fields() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     let legacy = serde_json::json!({
@@ -225,8 +229,94 @@ async fn run_ledger_loads_legacy_records_without_new_optional_fields() {
     assert_eq!(loaded[0].host_mode, None);
     assert_eq!(loaded[0].input_hash, None);
     assert_eq!(loaded[0].applied_ops, None);
+    assert_eq!(loaded[0].completed_at_micros, None);
     assert_eq!(loaded[0].fallback_status, None);
     assert!(loaded[0].artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn run_ledger_loads_legacy_rfc3339_with_consistent_micros() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let legacy = serde_json::json!({
+        "schema_version": 1,
+        "run_id": "legacy-micros-run",
+        "trigger": "manual_cli",
+        "task": "memory_curator",
+        "backend": "codex_app_server",
+        "status": "succeeded",
+        "accepted_count": 1,
+        "rejected_count": 0,
+        "started_at": "2026-06-24T05:00:00Z",
+        "completed_at": "2026-06-24T05:00:01Z",
+        "completed_at_micros": 1_782_277_201_000_000_i64
+    });
+    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
+        .await
+        .unwrap();
+
+    let loaded = load_run_records(&dashboard_root, 10).await.unwrap();
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].run_id, "legacy-micros-run");
+    assert_eq!(loaded[0].completed_at_micros, Some(1_782_277_201_000_000));
+}
+
+#[tokio::test]
+async fn run_ledger_rejects_legacy_rfc3339_with_subsecond_micros() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let legacy = serde_json::json!({
+        "schema_version": 1,
+        "run_id": "legacy-contradiction",
+        "trigger": "manual_cli",
+        "task": "memory_curator",
+        "backend": "codex_app_server",
+        "status": "succeeded",
+        "accepted_count": 1,
+        "rejected_count": 0,
+        "started_at": "2026-06-24T05:00:00Z",
+        "completed_at": "2026-06-24T05:00:01Z",
+        "completed_at_micros": 1_782_277_201_000_001_i64
+    });
+    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
+        .await
+        .unwrap();
+
+    assert!(load_run_records(&dashboard_root, 10).await.is_err());
+}
+
+#[test]
+fn run_ledger_normalizes_exact_legacy_rfc3339_fractional_micros() {
+    let mut legacy = record("legacy-fraction", AutomationRunStatus::Succeeded);
+    legacy.schema_version = 1;
+    legacy.completed_at = "2026-06-24T05:00:01.123456Z".to_string();
+    legacy.completed_at_micros = None;
+    let expected = 1_782_277_201_123_456_i64;
+
+    assert_eq!(
+        canonical_record_completion_micros(&legacy).unwrap(),
+        expected
+    );
+
+    legacy.completed_at_micros = Some(expected);
+    assert_eq!(
+        canonical_record_completion_micros(&legacy).unwrap(),
+        expected
+    );
+    legacy.completed_at_micros = Some(expected + 1);
+    assert!(canonical_record_completion_micros(&legacy).is_err());
+
+    legacy.completed_at = "2026-06-24T05:00:01.123456000Z".to_string();
+    legacy.completed_at_micros = Some(expected);
+    assert_eq!(
+        canonical_record_completion_micros(&legacy).unwrap(),
+        expected
+    );
+    legacy.completed_at = "2026-06-24T05:00:01.123456001Z".to_string();
+    assert!(canonical_record_completion_micros(&legacy).is_err());
 }
 
 #[tokio::test]
@@ -300,10 +390,7 @@ async fn run_artifacts_read_only_from_matching_run_directory() {
     let err = read_run_artifact_payload(&dashboard_root, "artifact_run_1", &wrong_run_artifact)
         .await
         .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("does not match run 'artifact_run_1'")
-    );
+    assert!(err.to_string().contains("canonical path"));
 }
 
 #[tokio::test]

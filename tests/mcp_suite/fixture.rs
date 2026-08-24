@@ -3,17 +3,16 @@
 //! nextest runs every test in its own process, so per-process caches cannot
 //! amortize the fixed cost of `TraceDecay::init` (graph-DB schema creation,
 //! global-DB schema creation) that almost every test in this suite pays.
-//! This module builds a fully initialized — and, for `setup_project`, fully
-//! indexed — store **once per target directory** on disk, and every test
-//! process seeds its own isolated copy from that template instead of
-//! re-running schema creation and indexing. Schema creation is the dominant
-//! per-test fixed cost on Windows CI.
+//! This module builds a fully initialized store **once per target directory**
+//! on disk, and every test process seeds its own isolated copy from that
+//! template instead of re-running schema creation. Schema creation is the
+//! dominant per-test fixed cost on Windows CI. Code-index publication belongs
+//! to the production daemon composition and is never pre-seeded here.
 //!
 //! The graph DB only stores project-root-relative paths, so a copied store is
 //! location-independent; the two files that embed absolute paths
 //! (`config.json` `root_dir` and `store_manifest.json`) are rewritten after
-//! copying. Source-file mtimes are preserved so staleness checks see the
-//! copied project exactly as the template indexer left it.
+//! copying.
 //!
 //! Every entry point falls back to the real `TraceDecay::init` path when the
 //! template cannot be built or the seeded store cannot be opened, so tests
@@ -23,25 +22,26 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay::errors::Result as TdResult;
-use tracedecay::storage::{default_profile_project_id, default_profile_root};
+use tracedecay::storage::{PrivateStoreIo, default_profile_project_id, default_profile_root};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::GLOBAL_DB_ENV;
 
 /// Bump when the template layout or fixture sources change, so stale
 /// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v2";
+const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v6";
 
 const EMPTY_FLAVOR: &str = "empty";
-const INDEXED_FLAVOR: &str = "indexed";
 
 static TEMPLATE_ROOT: OnceCell<Option<PathBuf>> = OnceCell::const_new();
 
-/// Writes the shared `setup_project` fixture sources: cross-file calls,
+/// Writes the shared production-composition fixture sources: cross-file calls,
 /// structs, impls, a test file, and doc comments.
+#[cfg(feature = "test-transport")]
 pub fn write_indexed_fixture_sources(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -92,14 +92,12 @@ fn test_helper() { assert!(!helper().is_empty()); }
 /// initialized (schema-complete, empty) store from the on-disk template and
 /// opens it. Falls back to the real init when seeding is not possible.
 pub async fn init_project_from_template(project_root: &Path) -> TdResult<TraceDecay> {
-    if let Some(template) = template_root().await {
-        if let Some(targets) = SeedTargets::from_env() {
-            if seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok() {
-                if let Ok(cg) = TraceDecay::open(project_root).await {
-                    return Ok(cg);
-                }
-            }
-        }
+    if let Some(template) = template_root().await
+        && let Some(targets) = SeedTargets::from_env()
+        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
+        && let Ok(cg) = TraceDecay::open(project_root).await
+    {
+        return Ok(cg);
     }
     TraceDecay::init(project_root).await
 }
@@ -112,26 +110,12 @@ pub async fn init_project_from_template_with_options(
 ) -> TdResult<TraceDecay> {
     if let (Some(template), Some(targets)) =
         (template_root().await, SeedTargets::from_options(&options))
+        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
+        && let Ok(cg) = TraceDecay::open_with_options(project_root, options.clone()).await
     {
-        if seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok() {
-            if let Ok(cg) = TraceDecay::open_with_options(project_root, options.clone()).await {
-                return Ok(cg);
-            }
-        }
+        return Ok(cg);
     }
     TraceDecay::init_with_options(project_root, options).await
-}
-
-/// Seeds the fully indexed `setup_project` fixture (sources + graph data)
-/// into `project_root` and opens it. Returns `None` when the template is
-/// unavailable so the caller can run the real init+index path.
-pub async fn open_indexed_project_from_template(project_root: &Path) -> Option<TraceDecay> {
-    let template = template_root().await?;
-    let targets = SeedTargets::from_env()?;
-    let flavor = template.join(INDEXED_FLAVOR);
-    copy_tree(&flavor.join("project"), project_root).ok()?;
-    seed_store(&flavor, project_root, &targets).ok()?;
-    TraceDecay::open(project_root).await.ok()
 }
 
 struct SeedTargets {
@@ -143,8 +127,7 @@ impl SeedTargets {
     fn from_env() -> Option<Self> {
         let profile_root = default_profile_root().ok()?;
         let global_db_path = std::env::var_os(GLOBAL_DB_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| profile_root.join("global.db"));
+            .map_or_else(|| profile_root.join("global.db"), PathBuf::from);
         Some(Self {
             profile_root,
             global_db_path,
@@ -182,6 +165,10 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
             "store data dir already exists",
         ));
     }
+    // The profile root and store data dirs are owner-private in production;
+    // seed them through the same private-store authority so fail-closed
+    // permission validation accepts the template copy under any umask.
+    PrivateStoreIo::create_dir_all(&data_dest)?;
     copy_tree(&src_data, &data_dest)?;
 
     rewrite_json(&data_dest.join("config.json"), |config| {
@@ -195,7 +182,7 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
 
     if !targets.global_db_path.exists() {
         if let Some(parent) = targets.global_db_path.parent() {
-            fs::create_dir_all(parent)?;
+            PrivateStoreIo::create_dir_all(parent)?;
         }
         copy_db_files(&src_home.join("global.db"), &targets.global_db_path)?;
     }
@@ -275,32 +262,26 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     let scratch = tempfile::TempDir::new()?;
     let scratch_root = scratch.path().canonicalize()?;
 
-    for (flavor, indexed) in [(EMPTY_FLAVOR, false), (INDEXED_FLAVOR, true)] {
-        let root = scratch_root.join(flavor);
-        let project = root.join("project");
-        fs::create_dir_all(&project)?;
-        if indexed {
-            write_indexed_fixture_sources(&project);
-        }
+    let root = scratch_root.join(EMPTY_FLAVOR);
+    let project = root.join("project");
+    fs::create_dir_all(&project)?;
 
-        let profile_root = root.join("home/.tracedecay");
-        let global_db_path = profile_root.join("global.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile_root.clone()),
-            global_db_path: Some(global_db_path.clone()),
-        };
-        let cg = TraceDecay::init_with_options(&project, options)
-            .await
-            .map_err(io_other)?;
-        if indexed {
-            cg.index_all().await.map_err(io_other)?;
-        }
-        cg.checkpoint().await.map_err(io_other)?;
-        cg.close();
+    let profile_root = root.join("home/.tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(global_db_path.clone()),
+    };
+    let cg = TraceDecay::init_with_options(&project, options)
+        .await
+        .map_err(io_other)?;
+    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    cg.checkpoint().await.map_err(io_other)?;
+    cg.close();
 
-        purge_global_registry(&global_db_path).await?;
-        copy_tree(&root, &dest.join(flavor))?;
-    }
+    purge_configuration(&sessions_db_path)?;
+    purge_global_registry(&global_db_path).await?;
+    copy_tree(&root, &dest.join(EMPTY_FLAVOR))?;
 
     fs::write(dest.join("READY"), b"ok")?;
     Ok(())
@@ -310,11 +291,8 @@ async fn build_template(dest: &Path) -> io::Result<()> {
 /// DB so seeded copies start with a schema-complete but empty registry;
 /// each test's `TraceDecay::open` re-registers its own project cleanly.
 async fn purge_global_registry(global_db_path: &Path) -> io::Result<()> {
-    let db = libsql::Builder::new_local(global_db_path)
-        .build()
-        .await
-        .map_err(io_other)?;
-    let conn = db.connect().map_err(io_other)?;
+    let conn = Connection::open(global_db_path).map_err(io_other)?;
+    purge_configuration_rows(&conn)?;
     conn.execute_batch(
         "DELETE FROM store_artifacts;
          DELETE FROM graph_scopes;
@@ -324,8 +302,73 @@ async fn purge_global_registry(global_db_path: &Path) -> io::Result<()> {
          DELETE FROM projects;
          PRAGMA wal_checkpoint(TRUNCATE);",
     )
-    .await
     .map_err(io_other)?;
+    Ok(())
+}
+
+fn purge_configuration(database_path: &Path) -> io::Result<()> {
+    let conn = Connection::open(database_path).map_err(io_other)?;
+    purge_configuration_rows(&conn)?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(io_other)
+}
+
+fn purge_configuration_rows(conn: &Connection) -> io::Result<()> {
+    // Append-only enforcement triggers block the DELETEs below, so drop them
+    // for the purge and recreate them verbatim afterwards: production opens
+    // the seeded store fail-closed against the exact final schema object set,
+    // triggers included.
+    let configuration_triggers = {
+        let mut statement = conn
+            .prepare(
+                "SELECT name, sql FROM sqlite_master
+                 WHERE type = 'trigger' AND tbl_name LIKE 'configuration_%'",
+            )
+            .map_err(io_other)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(io_other)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_other)?
+    };
+    for (trigger, _) in &configuration_triggers {
+        let quoted = trigger.replace('"', "\"\"");
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS \"{quoted}\";"))
+            .map_err(io_other)?;
+    }
+    // Enumerate the live configuration tables instead of hand-maintaining a
+    // list; a hard-coded inventory silently breaks the template build every
+    // time the configuration schema adds, drops, or renames a table.
+    let configuration_tables = {
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name LIKE 'configuration_%'",
+            )
+            .map_err(io_other)?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(io_other)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_other)?
+    };
+    let mut purge = String::from("PRAGMA foreign_keys = OFF;\n");
+    for table in configuration_tables {
+        // The singleton format marker is schema, not state: production
+        // refuses to open a store whose marker row is missing.
+        if table == "configuration_format" {
+            continue;
+        }
+        let quoted = table.replace('"', "\"\"");
+        purge.push_str(&format!("DELETE FROM \"{quoted}\";\n"));
+    }
+    purge.push_str("PRAGMA foreign_keys = ON;");
+    conn.execute_batch(&purge).map_err(io_other)?;
+    for (_, sql) in &configuration_triggers {
+        conn.execute_batch(sql).map_err(io_other)?;
+    }
     Ok(())
 }
 
@@ -342,9 +385,7 @@ fn sole_subdir(dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// Recursively copies `src` into `dest`, preserving file mtimes so the
-/// staleness pipeline sees copied sources exactly as the template indexed
-/// them.
+/// Recursively copies `src` into `dest`, preserving file mtimes.
 fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {

@@ -1,13 +1,15 @@
 #[test]
-fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
+fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     let home = TempDir::new().expect("temp home");
     let project = TempDir::new().expect("temp project");
     let home_path = common::canonical_existing_path(home.path());
     let project_path = common::canonical_existing_path(project.path());
     let profile_root = home_path.join(".tracedecay");
     let socket_path = common::daemon_socket_path(&home_path);
-    let mut daemon = spawn_daemon(&home_path, &socket_path);
-    let db_path = init_project(&home_path, &project_path, &socket_path);
+    let daemon_stderr_path = home_path.join("daemon.stderr.log");
+    let daemon_stderr = std::fs::File::create(&daemon_stderr_path).expect("create daemon stderr");
+    let mut daemon = spawn_daemon_with_stderr(&home_path, &socket_path, daemon_stderr);
+    let profile_db_path = init_project(&home_path, &project_path, &socket_path);
 
     let mut clients = (0..CLIENT_COUNT)
         .map(|ordinal| McpProxy::spawn(&home_path, &project_path, &socket_path, ordinal))
@@ -18,14 +20,14 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
         for client in &clients {
             assert_eq!(
                 sqlite_handles(client.pid(), &profile_root),
-                Vec::<PathBuf>::new(),
+                Vec::<std::path::PathBuf>::new(),
                 "MCP proxy must not own any profile SQLite handle"
             );
         }
         let daemon_handles = sqlite_handles(daemon.id(), &profile_root);
         assert!(
-            daemon_handles.iter().any(|path| path == &db_path),
-            "daemon must own the graph DB; handles: {daemon_handles:?}"
+            daemon_handles.iter().any(|path| path == &profile_db_path),
+            "daemon must own the canonical profile database; handles: {daemon_handles:?}"
         );
     }
     let authority_before = daemon_authority_record(&home_path);
@@ -46,7 +48,7 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
         "profile authority must publish a nonzero epoch"
     );
 
-    let db_identity = file_identity(&db_path).expect("graph DB identity");
+    let db_identity = file_identity(&profile_db_path).expect("profile database identity");
     let hook_event = json!({
         "hook_event_name": "afterFileEdit",
         "file_path": project_path.join("src/lib.rs"),
@@ -82,7 +84,6 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
                 let mut tool = ChildGuard::new(
                     common::tracedecay_command_with_home(home_path)
                         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-                        .env_remove(SQLITE_UNSAFE_FAST_ENV)
                         .current_dir(project_path)
                         .args([
                             "tool",
@@ -115,7 +116,6 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
                 let mut hook = ChildGuard::new(
                     common::tracedecay_command_with_home(home_path)
                         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-                        .env_remove(SQLITE_UNSAFE_FAST_ENV)
                         .arg("hook-cursor-after-file-edit")
                         .current_dir(project_path)
                         .stdin(Stdio::piped())
@@ -142,16 +142,16 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
 
     let doctor = common::tracedecay_command_with_home(&home_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .arg("doctor")
+        .args(["--agent", "claude"])
         .current_dir(&project_path)
         .output()
         .expect("run doctor probe");
     assert_command_success("brokered doctor", &doctor);
     assert_eq!(
-        file_identity(&db_path),
+        file_identity(&profile_db_path),
         Some(db_identity),
-        "client probes replaced graph DB inode"
+        "client probes replaced the profile database inode"
     );
     assert_eq!(
         daemon_authority_record(&home_path),
@@ -162,9 +162,14 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
     for client in &clients {
         assert_eq!(
             sqlite_handles(client.pid(), &profile_root),
-            Vec::<PathBuf>::new(),
+            Vec::<std::path::PathBuf>::new(),
             "MCP proxy retained a profile SQLite handle after its request"
         );
     }
     stop_child(&mut daemon);
+    let daemon_stderr = std::fs::read_to_string(&daemon_stderr_path).expect("read daemon stderr");
+    assert!(
+        !daemon_stderr.contains("database is locked"),
+        "daemon encountered SQLite writer contention:\n{daemon_stderr}"
+    );
 }

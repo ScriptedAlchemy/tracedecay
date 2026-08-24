@@ -1,14 +1,21 @@
 #![allow(dead_code)]
 
+pub mod fixture;
+
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
+use std::io::Read;
 #[cfg(not(windows))]
 use std::io::Write;
 use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -17,29 +24,60 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::db::{Database, DatabaseAuthority};
-use tracedecay::global_db::GlobalDb;
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionScope};
+
+/// Host-installer source and template assets that live in
+/// `crates/tracedecay-agent-hosts`. Tests assert over the *source* of the
+/// generated guidance, so every suite must read the same authority; keeping the
+/// `include_str!` sites here means one edit repoints them all after a move.
+pub mod host_sources {
+    pub const HERMES_PLUGIN_INIT_PY: &str = include_str!(
+        "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
+    );
+    pub const HERMES_SKILL_MD: &str =
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md");
+}
 
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
+static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
+/// Installs the canonical registered global/session schema installer into the
+/// kernel's fail-closed port before any integration fixture opens a `Database`.
+///
+/// The kernel's `Database::publish_test_runtime` initialises a profile shard
+/// through `tracedecay_runtime_core::ports::registered_schema`, which fails
+/// closed until the root registers the real schema. The daemon does this in
+/// production; suites reuse the identical installer from `tracedecay-global-db`
+/// (a `test-helpers` dev-dependency). The port keeps the first registration, so
+/// calling this at every fixture entry point is safe and idempotent.
+pub fn register_test_schema_installer() {
+    tracedecay_global_db::register_test_schema_installer();
+}
+
 pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
-    Database::initialize(path, &authority).await
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize).await
 }
 
 pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
-    Database::open(path, &authority).await
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
 }
 
 pub async fn open_test_database_read_only(
     path: &Path,
 ) -> tracedecay::errors::Result<(Database, bool)> {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
-    Database::open_read_only(path, &authority).await
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::ReadOnly).await
 }
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
@@ -120,7 +158,7 @@ pub struct IsolatedEnv {
     // be declared last. Dropping it first would let the next waiting test
     // install its own isolated env, only for `storage`'s restore to clobber it.
     storage: TraceDecayStorageEnvGuard,
-    _dir: TempDir,
+    dir: TempDir,
     _env_lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -138,7 +176,7 @@ impl IsolatedEnv {
         (
             Self {
                 storage,
-                _dir: dir,
+                dir,
                 _env_lock: env_lock,
             },
             project,
@@ -159,6 +197,13 @@ impl IsolatedEnv {
 
     pub fn home(&self) -> &Path {
         self.storage.home()
+    }
+
+    /// The throwaway directory holding the isolated home and every checkout, so
+    /// a fixture can place siblings of its project (a bare `origin`, a linked
+    /// worktree) inside the same disposable tree.
+    pub fn scratch(&self) -> &Path {
+        self.dir.path()
     }
 }
 
@@ -195,6 +240,20 @@ impl TraceDecayStorageEnvGuard {
     pub fn set(home: impl AsRef<Path>) -> Self {
         let home = canonicalize_test_dir(home.as_ref());
         let profile_root = canonicalize_test_dir(&home.join(".tracedecay"));
+        // The profile identity authority fail-closes on any profile root that
+        // is not 0700, and this guard pre-creates the directory under the
+        // process umask (production creates it 0700 itself).
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&profile_root, fs::Permissions::from_mode(0o700)).unwrap_or_else(
+                |err| {
+                    panic!(
+                        "failed to restrict test profile root '{}': {err}",
+                        profile_root.display()
+                    )
+                },
+            );
+        }
         let global_db_path = canonicalize_test_db_path(&profile_root.join("global.db"));
 
         Self {
@@ -257,7 +316,7 @@ impl AgentEnvLock {
     }
 }
 
-fn canonicalize_test_dir(path: &Path) -> PathBuf {
+pub fn canonicalize_test_dir(path: &Path) -> PathBuf {
     fs::create_dir_all(path).unwrap_or_else(|err| {
         panic!(
             "failed to create test directory '{}': {err}",
@@ -272,10 +331,19 @@ fn canonicalize_test_dir(path: &Path) -> PathBuf {
     })
 }
 
-fn canonicalize_test_db_path(path: &Path) -> PathBuf {
+pub fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path
         .parent()
         .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    // The DB parent doubles as the profile store root; create it through the
+    // owner-private authority so production fail-closed permission
+    // validation accepts a root the fixture created first (any umask).
+    PrivateStoreIo::create_dir_all(parent).unwrap_or_else(|err| {
+        panic!(
+            "failed to create private test directory '{}': {err}",
+            parent.display()
+        )
+    });
     canonicalize_test_dir(parent).join(
         path.file_name()
             .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
@@ -348,8 +416,6 @@ fn write_executable_atomically(path: &Path, contents: &[u8]) -> std::io::Result<
 
 #[cfg(unix)]
 fn make_executable_file(file: &File) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     let mut permissions = file.metadata()?.permissions();
     permissions.set_mode(0o755);
     file.set_permissions(permissions)
@@ -419,7 +485,7 @@ pub fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
 pub fn create_runtime() -> tokio::runtime::Runtime {
     match tokio::runtime::Builder::new_multi_thread()
         // Dashboard tests issue synchronous ureq calls while the in-process
-        // server and libsql handlers use this same runtime. Two workers can
+        // server and database handlers use this same runtime. Two workers can
         // deadlock under load (one blocked in ureq, one awaiting DB work).
         .worker_threads(4)
         .enable_all()
@@ -453,20 +519,169 @@ pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-pub struct DaemonProcess {
+/// Reaps a spawned test child on every exit path.
+///
+/// Tests that expect a graceful exit can wait explicitly; if they return or
+/// panic while the child is still running, `Drop` force-stops and reaps it.
+pub struct TestChildProcess {
     child: Child,
 }
 
-impl DaemonProcess {
+/// Daemon-specific name retained for test fixtures that keep a daemon alive.
+pub type DaemonProcess = TestChildProcess;
+
+impl TestChildProcess {
+    pub fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn stdin_mut(&mut self) -> Option<&mut std::process::ChildStdin> {
+        self.child.stdin.as_mut()
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(Some(status));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Closes stdin, drains both output pipes concurrently, and reaps the
+    /// child. Keeping ownership in the guard lets `Drop` recover from a wait
+    /// error without leaking the process.
+    pub fn wait_with_output(&mut self, timeout: Duration) -> std::io::Result<Output> {
+        drop(self.child.stdin.take());
+        let stdout = self.child.stdout.take();
+        let stderr = self.child.stderr.take();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            if let Some(mut stdout) = stdout {
+                stdout.read_to_end(&mut output)?;
+            }
+            Ok::<_, std::io::Error>(output)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            if let Some(mut stderr) = stderr {
+                stderr.read_to_end(&mut output)?;
+            }
+            Ok::<_, std::io::Error>(output)
+        });
+
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match self.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() >= deadline => {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("child did not exit within {timeout:?}"),
+                    ));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(error) => break Err(error),
+            }
+        };
+        if status.is_err() {
+            self.kill_and_wait()?;
+        }
+
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| std::io::Error::other("stdout reader thread panicked"))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| std::io::Error::other("stderr reader thread panicked"))?;
+        Ok(Output {
+            status: status?,
+            stdout: stdout?,
+            stderr: stderr?,
+        })
+    }
+
     fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        matches!(self.try_wait(), Ok(None))
+    }
+
+    /// Force-stops the daemon and reaps its process before returning.
+    ///
+    /// `Child::kill` maps to `SIGKILL` on Unix and the platform termination
+    /// primitive elsewhere, keeping fault-injection tests portable.
+    pub fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
+        terminate_and_reap(&mut self.child)
+    }
+
+    fn drain_stderr(&mut self) {
+        let Some(mut stderr) = self.child.stderr.take() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            if let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG")
+                && let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            {
+                let _ = std::io::copy(&mut stderr, &mut file);
+                return;
+            }
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        });
     }
 }
 
-impl Drop for DaemonProcess {
+impl Drop for TestChildProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = terminate_and_reap(&mut self.child);
+    }
+}
+
+/// PID-directed stop: survives `process_group(0)` / `setsid` detachment.
+fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
+    if let Ok(Some(status)) = child.try_wait() {
+        return Ok(status);
+    }
+
+    if let Err(kill_err) = child.kill() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(kill_err);
+    }
+
+    child.wait()
+}
+
+/// Detach a test child from the test process group.
+///
+/// Nextest (and other harness timeouts) signal the test's process group.
+/// Spawned `tracedecay daemon run` children inherit that group unless they
+/// call `setpgid`, so a group SIGTERM becomes a clean daemon exit (status 0
+/// via `run_foreground_unix`) mid-test. `TestChildProcess::kill_and_wait` and
+/// `Drop` still target the PID, so the harness reaps the daemon when the
+/// test ends.
+fn detach_from_test_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
     }
 }
 
@@ -478,12 +693,82 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"));
+    detach_from_test_process_group(command);
+}
+
+pub fn tracedecay_bin() -> PathBuf {
+    let binary = std::env::var_os("TRACEDECAY_TEST_BIN")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_tracedecay").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            let test_executable =
+                std::env::current_exe().expect("test executable path should resolve");
+            let profile_dir = test_executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("integration test should run from a Cargo profile directory");
+            profile_dir.join(format!("tracedecay{}", std::env::consts::EXE_SUFFIX))
+        });
+    assert!(
+        binary.is_file(),
+        "workspace tracedecay binary is missing at {}; build it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",
+        binary.display()
+    );
+
+    let output = Command::new(&binary)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {} --version: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "{} --version exited with {}",
+        binary.display(),
+        output.status
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let expected = format!("tracedecay {}", tracedecay::version::build_version());
+    assert_eq!(
+        actual,
+        expected,
+        "{} is not the CLI built from the current checkout; rebuild it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",
+        binary.display()
+    );
+    binary
 }
 
 pub fn tracedecay_command_with_home(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);
     command
+}
+
+/// Starts the isolated test daemon if needed, then builds a `tracedecay init` command.
+///
+/// CLI project initialization requires the daemon-owned code-index scheduler.
+/// Suites that must prove daemon absence should keep using
+/// [`tracedecay_command_with_home`] without this helper.
+pub fn tracedecay_init_command_with_home(home: &Path) -> Command {
+    ensure_tracedecay_daemon(home);
+    let mut command = tracedecay_command_with_home(home);
+    command.arg("init");
+    command
+}
+
+/// Runs `tracedecay init` against `project` after starting the isolated test daemon.
+pub fn initialize_tracedecay_cli_project(home: &Path, project: &Path) {
+    let output = tracedecay_init_command_with_home(home)
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay init should run");
+    assert!(
+        output.status.success(),
+        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 thread_local! {
@@ -491,50 +776,83 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Stops the managed daemon for `home` and removes its connection artifacts.
+///
+/// Scripted-daemon suites init through the real daemon, then need connection
+/// authority to fall back to their explicit socket; a live managed daemon (or
+/// its stale authority record) would otherwise outrank the scripted endpoint.
+#[allow(dead_code)] // Consumed per-binary; not every suite retires the daemon.
+pub fn stop_managed_daemon(home: &Path) {
+    let home = canonical_existing_path(home);
+    drop(take_managed_daemon(&home));
+    let profile_root = home.join(".tracedecay");
+    let _ = std::fs::remove_file(daemon_authority_path(&profile_root));
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(daemon_socket_path(&home));
+    }
+}
+
+fn take_managed_daemon(home: &Path) -> Option<DaemonProcess> {
+    TEST_DAEMONS.with(|daemons| {
+        let mut daemons = daemons.borrow_mut();
+        daemons.retain(|existing_home, daemon| existing_home == home && daemon.is_running());
+        daemons.remove(home)
+    })
+}
+
+fn daemon_is_connectable(home: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(daemon_socket_path(home)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let authority_path =
+            daemon_authority_path(&canonical_existing_path(home).join(".tracedecay"));
+        std::fs::read(&authority_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|record| {
+                (record["endpoint"]["kind"] == "loopback")
+                    .then(|| record["endpoint"]["address"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+            .is_some_and(|address| TcpStream::connect(address).is_ok())
+    }
+}
+
 /// Keeps one managed daemon alive for the current test thread and profile.
 ///
 /// Nextest runs each test in its own process, while the standard test harness
 /// runs each test on a dedicated thread. Thread-local ownership therefore
 /// keeps command factories concise without leaking daemon children across
-/// otherwise unrelated tests.
+/// otherwise unrelated tests. An already-connectable socket (an explicitly
+/// spawned daemon) is left in place so spawn-then-init journeys keep working.
 pub fn ensure_tracedecay_daemon(home: &Path) {
     let home = canonical_existing_path(home);
+    if daemon_is_connectable(&home) {
+        return;
+    }
     TEST_DAEMONS.with(|daemons| {
         let mut daemons = daemons.borrow_mut();
         daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
         daemons
             .entry(home.clone())
-            .or_insert_with(|| spawn_tracedecay_daemon(&home));
+            .or_insert_with(|| spawn_tracedecay_daemon_process(&home, |_| {}));
     });
 }
 
 /// Resolves the `git` executable to an absolute path exactly once per process.
 ///
-/// Under heavy parallel test load (nextest spawns one process per test, each
-/// spawning several `git` subprocesses), a bare `Command::new("git")` PATH
-/// lookup can transiently fail the spawn with `ENOENT` ("No such file or
-/// directory") even though git is installed. Resolving to an absolute path up
-/// front — with an optional `GIT` env override — removes the per-spawn PATH
-/// walk and makes the lookup deterministic.
+/// This delegates to the same cached authority the product spawns through, so
+/// tests and production resolve one program. Under heavy parallel test load
+/// (nextest spawns one process per test, each spawning several `git`
+/// subprocesses) a bare `Command::new("git")` PATH lookup can transiently fail
+/// the spawn with `ENOENT` even though git is installed; resolving to an
+/// absolute path up front removes the per-spawn PATH walk.
 pub fn git_program() -> std::ffi::OsString {
-    use std::sync::OnceLock;
-    static GIT: OnceLock<std::ffi::OsString> = OnceLock::new();
-    GIT.get_or_init(|| {
-        if let Some(explicit) = std::env::var_os("GIT") {
-            return explicit;
-        }
-        let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
-        if let Some(paths) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&paths) {
-                let candidate = dir.join(exe_name);
-                if candidate.is_file() {
-                    return candidate.into_os_string();
-                }
-            }
-        }
-        std::ffi::OsString::from("git")
-    })
-    .clone()
+    tracedecay::git::git_program().to_os_string()
 }
 
 #[cfg(unix)]
@@ -542,12 +860,52 @@ pub fn daemon_socket_path(home: &Path) -> PathBuf {
     canonical_existing_path(home).join(".tracedecay/daemon.sock")
 }
 
+pub fn daemon_authority_path(profile_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        profile_root
+            .join("daemon-authority")
+            .join("daemon-authority.json")
+    }
+    #[cfg(not(windows))]
+    {
+        profile_root.join("daemon-authority.json")
+    }
+}
+
 pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
+    let home = canonical_existing_path(home);
+    if let Some(daemon) = take_managed_daemon(&home) {
+        return daemon;
+    }
+    spawn_tracedecay_daemon_process(&home, |_| {})
+}
+
+/// Spawns a test daemon after applying caller-supplied command customization.
+///
+/// The callback runs after the standard test environment, arguments, working
+/// directory, and stdio have been installed, so fault tests can override or
+/// extend them without duplicating daemon startup and readiness handling.
+/// A daemon previously started by [`ensure_tracedecay_daemon`] is stopped first
+/// so the customized process can bind the same isolated socket.
+pub fn spawn_tracedecay_daemon_with(
+    home: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> DaemonProcess {
+    let home = canonical_existing_path(home);
+    drop(take_managed_daemon(&home));
+    spawn_tracedecay_daemon_process(&home, configure)
+}
+
+fn spawn_tracedecay_daemon_process(
+    home: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> DaemonProcess {
     let profile_root = canonical_existing_path(home).join(".tracedecay");
-    std::fs::create_dir_all(&profile_root).expect("daemon profile should be created");
+    PrivateStoreIo::create_dir_all(&profile_root).expect("daemon profile should be created");
     #[cfg(unix)]
     let socket_path = daemon_socket_path(home);
-    let authority_path = profile_root.join("daemon-authority.json");
+    let authority_path = daemon_authority_path(&profile_root);
     #[cfg(not(unix))]
     let portable_daemon_connectable = || {
         std::fs::read(&authority_path)
@@ -573,42 +931,57 @@ pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
         authority_path.display()
     );
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);
-    let child = command
+    command
         .args(["daemon", "run"])
         .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
         .current_dir(home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("tracedecay daemon should start");
-    let mut daemon = DaemonProcess { child };
+        .stderr(Stdio::piped());
+    configure(&mut command);
+    detach_from_test_process_group(&mut command);
+    let child = command.spawn().expect("tracedecay daemon should start");
+    let mut daemon = DaemonProcess::new(child);
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        #[cfg(unix)]
-        let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
-        #[cfg(not(unix))]
-        let ready = portable_daemon_connectable();
-        if ready {
-            return daemon;
-        }
-        if let Some(status) = daemon
-            .child
-            .try_wait()
-            .expect("daemon status should be readable")
-        {
-            panic!("tracedecay daemon exited before accepting connections: {status}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for daemon authority at {}",
-            authority_path.display()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    poll_until(
+        deadline,
+        Duration::from_millis(25),
+        || {
+            #[cfg(unix)]
+            let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+            #[cfg(not(unix))]
+            let ready = portable_daemon_connectable();
+            if ready {
+                return Some(());
+            }
+            if let Some(status) = daemon
+                .child
+                .try_wait()
+                .expect("daemon status should be readable")
+            {
+                let mut stderr = String::new();
+                if let Some(mut child_stderr) = daemon.child.stderr.take() {
+                    let _ = child_stderr.read_to_string(&mut stderr);
+                }
+                panic!(
+                    "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
+                    stderr.trim()
+                );
+            }
+            None
+        },
+        || {
+            format!(
+                "timed out waiting for daemon authority at {}",
+                authority_path.display()
+            )
+        },
+    );
+    daemon.drain_stderr();
+    daemon
 }
 
 pub fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16, Value) {
@@ -676,6 +1049,30 @@ pub fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
     response_to_json(response)
 }
 
+/// Polls `condition` until it returns `Some(value)` or `deadline` passes,
+/// sleeping `interval` between unsuccessful attempts. Panics with the
+/// message produced by `describe` if the deadline elapses first.
+///
+/// This is the canonical shape for the "compute state, check it, sleep and
+/// retry, assert on timeout" idiom used throughout the integration suites.
+/// Callers that need a fixed cadence between samples (rather than an
+/// immediate first check) can perform the delay inside `condition` itself
+/// and pass `Duration::ZERO` as `interval`.
+pub fn poll_until<T>(
+    deadline: Instant,
+    interval: Duration,
+    mut condition: impl FnMut() -> Option<T>,
+    describe: impl Fn() -> String,
+) -> T {
+    loop {
+        if let Some(value) = condition() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "{}", describe());
+        std::thread::sleep(interval);
+    }
+}
+
 pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
     let probe = format!("{base_url}/api/capabilities");
     // Poll until the server both accepts the connection AND returns a real
@@ -701,45 +1098,308 @@ pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
 }
 
 pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tracedecay").join("sessions.db")
+    tracedecay_sessions::runtime::user_sessions_db_path(&tmp.path().join(".tracedecay"))
 }
 
 pub fn isolated_global_db_path(tmp: &TempDir) -> std::path::PathBuf {
     tmp.path().join(".tracedecay").join("global.db")
 }
 
-pub async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_lcm_db_path(tmp);
-    if !db_path.exists() {
-        seed_lcm_db_from_template(&db_path).await;
-        return GlobalDb::open_at_assuming_schema(&db_path)
-            .await
-            .expect("session db open");
-    }
-    GlobalDb::open_at(&db_path).await.expect("session db open")
+/// Opaque retained profile-session runtime for integration fixtures.
+///
+/// Callers get typed operations only; the registered database handle and
+/// physical path remain owned by the daemon-style session registry.
+pub struct LcmTestRuntime {
+    runtime: HostAdmissionTestRuntimeV1,
 }
 
-/// Writes an empty `GlobalDb`-schema store at `db_path` from the cached
+impl LcmTestRuntime {
+    async fn open(profile_root: &Path) -> Self {
+        Self {
+            runtime: HostAdmissionTestRuntimeV1::profile(profile_root)
+                .await
+                .expect("registered LCM test runtime"),
+        }
+    }
+
+    pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.runtime
+            .upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        self.runtime
+            .upsert_session_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
+        self.runtime
+            .lcm_load_raw_message_for_test(provider, message_id)
+            .await
+    }
+
+    pub async fn lcm_insert_summary_node(
+        &self,
+        draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime
+            .lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
+            .await
+    }
+
+    pub async fn lcm_update_lifecycle(
+        &self,
+        update: tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime
+            .lcm_update_lifecycle_for_test(HostAdmissionScope::Profile, update)
+            .await
+    }
+
+    pub async fn lcm_lifecycle_state(
+        &self,
+        provider: &str,
+        conversation_id: &str,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime
+            .lcm_lifecycle_state_for_test(provider, conversation_id)
+            .await
+    }
+
+    pub async fn lcm_preflight(
+        &self,
+        request: tracedecay_sessions::runtime::lcm::LcmPreflightRequest,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmPreflightResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_preflight_for_test(request).await
+    }
+
+    pub async fn lcm_compress(
+        &self,
+        request: tracedecay_sessions::runtime::lcm::LcmCompressionRequest,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmCompressionResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_compress_for_test(request).await
+    }
+
+    pub async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmStatus,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_status_for_test(provider, session_id).await
+    }
+
+    pub async fn lcm_load_session(
+        &self,
+        request: tracedecay_sessions::runtime::lcm::LcmLoadSessionRequest,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmLoadSessionPage,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_load_session_for_test(request).await
+    }
+
+    pub async fn lcm_grep(
+        &self,
+        request: tracedecay_sessions::runtime::lcm::LcmGrepRequest,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmGrepOutcome,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_grep_for_test(request).await
+    }
+
+    pub async fn lcm_expand(
+        &self,
+        request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_expand_for_test(request).await
+    }
+
+    pub async fn lcm_expand_summary_node(
+        &self,
+        provider: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSummaryExpansion,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime
+            .lcm_expand_summary_node_for_test(provider, session_id, node_id)
+            .await
+    }
+
+    pub async fn lcm_session_boundary(
+        &self,
+        request: tracedecay_sessions::runtime::lcm::LcmSessionBoundaryRequest,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSessionBoundaryResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime.lcm_session_boundary_for_test(request).await
+    }
+
+    pub async fn replace_lcm_summary_source_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        node_id: &str,
+        source_node_id: &str,
+    ) -> tracedecay::errors::Result<()> {
+        self.runtime
+            .replace_lcm_summary_source_for_test(scope, node_id, source_node_id)
+            .await
+    }
+
+    pub fn lcm_store(&self) -> LcmTestStore<'_> {
+        LcmTestStore {
+            runtime: &self.runtime,
+        }
+    }
+
+    pub fn observation_store(
+        &self,
+    ) -> Result<tracedecay::store::GlobalDbObservationStore, HostAdmissionOutcome> {
+        self.runtime.observation_store(HostAdmissionScope::Profile)
+    }
+
+    pub fn session_temporal_store(
+        &self,
+    ) -> Result<tracedecay::store::GlobalDbSessionTemporalStore<'_>, HostAdmissionOutcome> {
+        self.runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+    }
+}
+
+pub struct LcmTestStore<'runtime> {
+    runtime: &'runtime HostAdmissionTestRuntimeV1,
+}
+
+impl LcmTestStore<'_> {
+    pub async fn ingest_raw_message(
+        &self,
+        message: &SessionMessageRecord,
+    ) -> Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
+        self.runtime
+            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+    }
+
+    pub async fn lcm_expand_payload(
+        &self,
+        provider: &str,
+        session_id: &str,
+        payload_ref: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
+        self.runtime
+            .lcm_expand_for_test(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+                    payload_ref: payload_ref.to_string(),
+                },
+                content_slice: Some(tracedecay_sessions::runtime::lcm::LcmContentSlice {
+                    offset,
+                    limit,
+                }),
+                source_offset: 0,
+                source_limit: None,
+            })
+            .await
+    }
+}
+
+pub async fn open_lcm_db(tmp: &TempDir) -> LcmTestRuntime {
+    let profile_root = tmp.path().join(".tracedecay");
+    let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+    if !db_path.exists() {
+        seed_lcm_db_from_template(&db_path).await;
+    }
+    LcmTestRuntime::open(&profile_root).await
+}
+
+/// Writes an empty registered-global-schema store at `db_path` from the cached
 /// per-process template, so later opens (fixture seeding, dashboard server
 /// startup) find an existing DB and skip the full schema creation — a large
 /// fixed cost on Windows. The first call in a process pays one real schema
 /// creation to build the template; every further store is a file copy.
 pub async fn write_empty_global_db_schema(db_path: &Path) {
-    seed_lcm_db_from_template(db_path).await;
+    let bytes = if db_path.file_name() == Some(OsStr::new("global.db")) {
+        empty_global_db_template().await
+    } else {
+        empty_lcm_db_template().await
+    };
+    seed_database_from_template(db_path, bytes, "global").await;
+
+    // Seeding creates the parent directory under the process umask, and that
+    // parent is the caller's profile root. `load_or_create_pinned` only chmods
+    // a root it created itself, so pre-seeding silently skips the 0700
+    // restriction and `validate_private_profile_root` then fail-closes with
+    // "profile identity root ... must have permissions 0700". This is the same
+    // compensation `TraceDecayStorageEnvGuard::set` already applies for the
+    // same reason; the seeding path needs it too.
+    #[cfg(unix)]
+    if let Some(profile_root) = db_path.parent() {
+        fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap_or_else(
+            |err| {
+                panic!(
+                    "failed to restrict seeded test profile root '{}': {err}",
+                    profile_root.display()
+                )
+            },
+        );
+    }
 }
 
 async fn seed_lcm_db_from_template(db_path: &Path) {
+    seed_database_from_template(db_path, empty_lcm_db_template().await, "LCM").await;
+}
+
+async fn seed_database_from_template(db_path: &Path, bytes: &[u8], label: &str) {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|err| {
             panic!(
-                "failed to create LCM test DB directory '{}': {err}",
+                "failed to create {label} test DB directory '{}': {err}",
                 parent.display()
             )
         });
     }
-    fs::write(db_path, empty_lcm_db_template().await).unwrap_or_else(|err| {
+    fs::write(db_path, bytes).unwrap_or_else(|err| {
         panic!(
-            "failed to write LCM test DB template '{}': {err}",
+            "failed to write {label} test DB template '{}': {err}",
             db_path.display()
         )
     });
@@ -754,16 +1414,29 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
     let bytes = EMPTY_GRAPH_DB_TEMPLATE
         .get_or_init(|| async {
             let tmp = tempdir_or_panic();
-            let template_path = tmp.path().join("template-graph.db");
-            let (db, _) = initialize_test_database(&template_path)
+            let init_path = tmp.path().join("template-graph-init.db");
+            let snapshot_path = tmp.path().join("template-graph.db");
+            let (db, _) = initialize_test_database(&init_path)
                 .await
                 .expect("template graph db initialize");
-            db.checkpoint().await.expect("template graph db checkpoint");
             db.close();
-            fs::read(&template_path).unwrap_or_else(|err| {
+            // The registered runtime's bounded `checkpoint` can leave a fresh
+            // schema in the WAL, so a bare file read would capture an empty (v0)
+            // database. `VACUUM INTO` writes a transactionally consistent
+            // standalone copy of the closed fixture.
+            let template_source =
+                rusqlite::Connection::open(&init_path).expect("open template graph db");
+            template_source
+                .execute(
+                    "VACUUM INTO ?1",
+                    [snapshot_path.to_str().expect("utf-8 template path")],
+                )
+                .expect("template graph db snapshot");
+            drop(template_source);
+            fs::read(&snapshot_path).unwrap_or_else(|err| {
                 panic!(
                     "failed to read graph test DB template '{}': {err}",
-                    template_path.display()
+                    snapshot_path.display()
                 )
             })
         })
@@ -792,16 +1465,44 @@ async fn empty_lcm_db_template() -> &'static [u8] {
     EMPTY_LCM_DB_TEMPLATE
         .get_or_init(|| async {
             let tmp = tempdir_or_panic();
-            let db_path = isolated_lcm_db_path(&tmp);
-            let db = GlobalDb::open_at(&db_path)
+            let profile_root = tmp.path().join(".tracedecay");
+            let snapshot_path = tmp.path().join("template-session.db");
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
                 .await
-                .expect("template session db open");
-            db.checkpoint().await;
-            db.close();
-            fs::read(&db_path).unwrap_or_else(|err| {
+                .expect("template session runtime open");
+            runtime
+                .snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
+                .await
+                .expect("template session database snapshot");
+            drop(runtime);
+            fs::read(&snapshot_path).unwrap_or_else(|err| {
                 panic!(
                     "failed to read LCM test DB template '{}': {err}",
-                    db_path.display()
+                    snapshot_path.display()
+                )
+            })
+        })
+        .await
+}
+
+async fn empty_global_db_template() -> &'static [u8] {
+    EMPTY_GLOBAL_DB_TEMPLATE
+        .get_or_init(|| async {
+            let tmp = tempdir_or_panic();
+            let profile_root = tmp.path().join(".tracedecay");
+            let snapshot_path = tmp.path().join("template-global.db");
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .expect("template global runtime open");
+            runtime
+                .snapshot_profile_database_for_test(&snapshot_path)
+                .await
+                .expect("template global database snapshot");
+            drop(runtime);
+            fs::read(&snapshot_path).unwrap_or_else(|err| {
+                panic!(
+                    "failed to read global test DB template '{}': {err}",
+                    snapshot_path.display()
                 )
             })
         })
@@ -877,71 +1578,93 @@ pub fn global_session(provider: &str, session_id: &str, project_key: &str) -> Se
     )
 }
 
-/// The shared `SessionMessageRecord` builder every test fixture routes
-/// through. `timestamp`/`model` are explicit because the dashboard fixtures
-/// vary them; the convenience wrappers below fill the common defaults.
-#[allow(clippy::too_many_arguments)]
-pub fn message_record_at(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    role: &str,
+/// Builder for the shared `SessionMessageRecord` fixture.
+pub struct MessageRecordBuilder<'a> {
+    provider: &'a str,
+    message_id: &'a str,
+    session_id: &'a str,
+    role: &'a str,
     ordinal: i64,
+    text: &'a str,
+    kind: &'a str,
     timestamp: Option<i64>,
-    text: &str,
-    kind: &str,
-    model: Option<&str>,
-    tool_names: Option<&str>,
-    source_path: Option<&str>,
+    model: Option<&'a str>,
+    tool_names: Option<&'a str>,
+    source_path: Option<&'a str>,
     source_offset: Option<i64>,
-    metadata_json: Option<&str>,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp,
-        ordinal,
-        text: text.to_string(),
-        kind: Some(kind.to_string()),
-        model: model.map(str::to_string),
-        tool_names: tool_names.map(str::to_string),
-        source_path: source_path.map(str::to_string),
-        source_offset,
-        metadata_json: metadata_json.map(str::to_string),
-    }
+    metadata_json: Option<&'a str>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn message_record(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    role: &str,
-    ordinal: i64,
-    text: &str,
-    kind: &str,
-    tool_names: Option<&str>,
-    source_path: Option<&str>,
-    source_offset: Option<i64>,
-    metadata_json: Option<&str>,
-) -> SessionMessageRecord {
-    message_record_at(
-        provider,
-        message_id,
-        session_id,
-        role,
-        ordinal,
-        Some(1_715_000_030),
-        text,
-        kind,
-        Some("test-model"),
-        tool_names,
-        source_path,
-        source_offset,
-        metadata_json,
-    )
+impl<'a> MessageRecordBuilder<'a> {
+    pub fn new(
+        provider: &'a str,
+        message_id: &'a str,
+        session_id: &'a str,
+        role: &'a str,
+        ordinal: i64,
+        text: &'a str,
+        kind: &'a str,
+    ) -> Self {
+        Self {
+            provider,
+            message_id,
+            session_id,
+            role,
+            ordinal,
+            text,
+            kind,
+            timestamp: Some(1_715_000_030),
+            model: Some("test-model"),
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp: Option<i64>) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+
+    pub fn with_model(mut self, model: Option<&'a str>) -> Self {
+        self.model = model;
+        self
+    }
+
+    pub fn with_tool_names(mut self, tool_names: Option<&'a str>) -> Self {
+        self.tool_names = tool_names;
+        self
+    }
+
+    pub fn with_source(mut self, source_path: Option<&'a str>, source_offset: Option<i64>) -> Self {
+        self.source_path = source_path;
+        self.source_offset = source_offset;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata_json: Option<&'a str>) -> Self {
+        self.metadata_json = metadata_json;
+        self
+    }
+
+    pub fn build(self) -> SessionMessageRecord {
+        SessionMessageRecord {
+            provider: self.provider.to_string(),
+            message_id: self.message_id.to_string(),
+            session_id: self.session_id.to_string(),
+            role: self.role.to_string(),
+            timestamp: self.timestamp,
+            ordinal: self.ordinal,
+            text: self.text.to_string(),
+            kind: Some(self.kind.to_string()),
+            model: self.model.map(str::to_string),
+            tool_names: self.tool_names.map(str::to_string),
+            source_path: self.source_path.map(str::to_string),
+            source_offset: self.source_offset,
+            metadata_json: self.metadata_json.map(str::to_string),
+        }
+    }
 }
 
 pub fn lcm_payload_message(
@@ -951,7 +1674,7 @@ pub fn lcm_payload_message(
     role: &str,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -959,11 +1682,8 @@ pub fn lcm_payload_message(
         1,
         text,
         "tool_result",
-        None,
-        None,
-        None,
-        None,
     )
+    .build()
 }
 
 pub fn lcm_dag_message(
@@ -973,7 +1693,7 @@ pub fn lcm_dag_message(
     ordinal: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    let mut message = message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -981,13 +1701,9 @@ pub fn lcm_dag_message(
         ordinal,
         text,
         "message",
-        None,
-        None,
-        None,
-        None,
-    );
-    message.timestamp = Some(1_715_000_000 + ordinal);
-    message
+    )
+    .with_timestamp(Some(1_715_000_000 + ordinal))
+    .build()
 }
 
 pub fn lcm_raw_message(
@@ -996,7 +1712,7 @@ pub fn lcm_raw_message(
     session_id: &str,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -1004,11 +1720,9 @@ pub fn lcm_raw_message(
         1,
         text,
         "message",
-        None,
-        Some("/tmp/project/transcript.jsonl"),
-        Some(42),
-        None,
     )
+    .with_source(Some("/tmp/project/transcript.jsonl"), Some(42))
+    .build()
 }
 
 pub fn global_message(
@@ -1017,7 +1731,7 @@ pub fn global_message(
     session_id: &str,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -1025,11 +1739,11 @@ pub fn global_message(
         1,
         text,
         "message",
-        Some("tracedecay_context,tracedecay_search"),
-        Some("/tmp/project/transcript.jsonl"),
-        Some(42),
-        Some(r#"{"finish_reason":"stop"}"#),
     )
+    .with_tool_names(Some("tracedecay_context,tracedecay_search"))
+    .with_source(Some("/tmp/project/transcript.jsonl"), Some(42))
+    .with_metadata(Some(r#"{"finish_reason":"stop"}"#))
+    .build()
 }
 
 /// Minimal PyYAML stand-in covering only the YAML subset the generated

@@ -14,10 +14,10 @@
 //!
 //! Detection is best-effort: when git is unavailable or the path isn't a
 //! repo, it reports "no mismatch" and callers carry on unchanged.
-//!
-//! Ported from `codegraph/src/sync/worktree.ts` (#312).
 
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 /// A mismatch between the caller's git working tree and the resolved
 /// tracedecay index root.
@@ -33,7 +33,6 @@ pub struct WorktreeIndexMismatch {
 /// Paired git identity used by hot paths that need both the per-worktree root
 /// and repository-wide common directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
 pub struct GitRepoIdentity {
     pub worktree_root: PathBuf,
     pub common_dir: PathBuf,
@@ -45,7 +44,6 @@ pub struct GitRepoIdentity {
 /// to persist a transcript cursor must retry later rather than treating it as
 /// the definitive absence of a repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
 pub enum GitRepoIdentityOutcome {
     Resolved(GitRepoIdentity),
     NotFound,
@@ -54,11 +52,11 @@ pub enum GitRepoIdentityOutcome {
 
 /// Resolve both halves of a repository identity with one cheap git subprocess.
 ///
-/// `gix::discover` can open and scan every pack index in a large repository.
-/// Session ingestion only needs these two paths, which `rev-parse` returns
-/// without opening the object database. If git is unavailable or rejects the
-/// path, one gix discovery preserves the previous fail-open behavior.
-#[doc(hidden)]
+/// In-process discovery can open and scan every pack index in a large
+/// repository. Session ingestion only needs these two paths, which `rev-parse`
+/// returns without opening the object database. If git is unavailable or
+/// rejects the path, one authority discovery preserves the previous fail-open
+/// behavior.
 pub fn git_repo_identity(dir: &Path) -> Option<GitRepoIdentity> {
     match git_repo_identity_outcome(dir) {
         GitRepoIdentityOutcome::Resolved(identity) => Some(identity),
@@ -66,7 +64,6 @@ pub fn git_repo_identity(dir: &Path) -> Option<GitRepoIdentity> {
     }
 }
 
-#[doc(hidden)]
 pub fn git_repo_identity_outcome(dir: &Path) -> GitRepoIdentityOutcome {
     if !git_may_resolve_repo(dir) {
         return GitRepoIdentityOutcome::NotFound;
@@ -74,17 +71,17 @@ pub fn git_repo_identity_outcome(dir: &Path) -> GitRepoIdentityOutcome {
     resolve_git_identity_outcome_with(
         dir,
         || crate::git::git_capture_at(dir, &["rev-parse", "--show-toplevel", "--git-common-dir"]),
-        || git_repo_identity_from_gix(dir),
+        || git_repo_identity_from_authority(dir),
     )
 }
 
 fn resolve_git_identity_outcome_with(
     dir: &Path,
     cli_output: impl FnOnce() -> crate::git::GitCaptureAtResult,
-    gix_fallback: impl FnOnce() -> Option<GitRepoIdentity>,
+    authority_fallback: impl FnOnce() -> Option<GitRepoIdentity>,
 ) -> GitRepoIdentityOutcome {
     let fallback = || {
-        gix_fallback().map_or(
+        authority_fallback().map_or(
             GitRepoIdentityOutcome::NotFound,
             GitRepoIdentityOutcome::Resolved,
         )
@@ -122,40 +119,38 @@ fn git_repo_identity_from_cli_output(dir: &Path, output: &str) -> Option<GitRepo
     })
 }
 
-fn git_repo_identity_from_gix(dir: &Path) -> Option<GitRepoIdentity> {
-    let repo = gix::discover(dir).ok()?;
-    let worktree_root = realpath(repo.workdir()?)?;
-    let common_dir = repo.common_dir().to_path_buf();
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        dir.join(common_dir)
-    };
+fn git_repo_identity_from_authority(dir: &Path) -> Option<GitRepoIdentity> {
+    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
+    // A discovered bare repository (no workdir) matches `--show-toplevel`
+    // failing: the path has no worktree identity.
+    let worktree_root = repository.worktree_root()?.to_path_buf();
     Some(GitRepoIdentity {
         worktree_root,
-        common_dir: common_dir.canonicalize().unwrap_or(common_dir),
+        common_dir: repository.common_dir().to_path_buf(),
     })
 }
 
 /// Absolute, symlink-resolved toplevel of the git working tree that `dir`
-/// belongs to, or `None` when `dir` isn't inside a git repo (or `git` is
-/// missing on PATH).
+/// belongs to, or `None` when `dir` isn't inside a readable repository.
 ///
 /// `git rev-parse --show-toplevel` returns the per-worktree root: the main
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    // gix discovery walks up the same way `git rev-parse` does but without
-    // a subprocess spawn. A discovered bare repo (no workdir) matches
-    // `--show-toplevel` failing.
-    if let Ok(repo) = gix::discover(dir) {
-        return realpath(repo.workdir()?);
-    }
-    if !git_may_resolve_repo(dir) {
-        return None;
-    }
-    let trimmed = crate::git::git_capture(dir, &["rev-parse", "--show-toplevel"])?;
-    realpath(Path::new(&trimmed))
+    crate::git_repository::GitRepositoryAuthority::discover(dir)
+        .ok()?
+        .worktree_root()
+        .map(Path::to_path_buf)
+}
+
+/// Discovers a worktree root without invoking Git.
+///
+/// Bounded and cancellable callers use this authority so discovery cannot
+/// escape their subprocess deadline through [`git_worktree_root`]'s
+/// command-line fallback.
+pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
+    let repo = gix::discover(dir).ok()?;
+    realpath(repo.workdir()?)
 }
 
 /// Absolute, symlink-resolved path to the repository's git common directory.
@@ -163,41 +158,63 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    if let Ok(repo) = gix::discover(dir) {
-        let common_dir = repo.common_dir().to_path_buf();
-        let resolved = if common_dir.is_absolute() {
-            common_dir
-        } else {
-            dir.join(common_dir)
-        };
-        return Some(resolved.canonicalize().unwrap_or(resolved));
-    }
-    if !git_may_resolve_repo(dir) {
-        return None;
-    }
-    let raw = crate::git::git_capture(dir, &["rev-parse", "--git-common-dir"])?;
-    let common_dir = PathBuf::from(raw);
-    let resolved = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        dir.join(common_dir)
-    };
-    Some(resolved.canonicalize().unwrap_or(resolved))
+    crate::git_repository::GitRepositoryAuthority::discover(dir)
+        .ok()
+        .map(|repository| repository.common_dir().to_path_buf())
 }
 
-pub fn is_detached_linked_worktree(dir: &Path) -> bool {
-    let Ok(repo) = gix::discover(dir) else {
-        return false;
-    };
-    let git_dir = repo
-        .git_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.git_dir().to_path_buf());
-    let common_dir = repo
-        .common_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
-    git_dir != common_dir && crate::branch::current_branch(dir).is_none()
+/// The checkout that owns `dir`'s **repository** identity, or `None` when
+/// `dir` already owns it.
+///
+/// Every linked worktree of a repository shares one git common directory and
+/// is therefore one project. Attachment is irrelevant here: whether a worktree
+/// has a branch checked out decides which *graph scope* serves it, not which
+/// repository it belongs to. Keying identity off the worktree path instead
+/// mints a second store for a repository that already has one.
+///
+/// Returns `None` — meaning "this path is its own identity" — when `dir` is
+/// the primary checkout, is not a worktree root at all (a package directory
+/// inside a monorepo is its own project), is outside git, or has a repository
+/// shape whose primary checkout cannot be derived safely.
+pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
+    let worktree_root = git_worktree_root(dir)?;
+    // Only a worktree ROOT inherits repository identity. Without this check a
+    // subdirectory indexed as its own project would be absorbed into the
+    // enclosing repository's store.
+    if worktree_root != realpath(dir)? {
+        return None;
+    }
+    let common_dir = git_common_dir(dir)?;
+    crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
+}
+
+pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
+    git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
+}
+
+pub(crate) fn is_detached_linked_worktree(dir: &Path) -> bool {
+    is_linked_worktree(dir) && crate::branch::current_branch(dir).is_none()
+}
+
+/// Stable internal graph scope for a detached linked worktree.
+///
+/// Detached worktrees share repository identity and the mutable project store
+/// with the primary checkout, but retain an exact graph provenance scope so
+/// indexing branchless files cannot replace another checkout's generation.
+pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
+    if !is_detached_linked_worktree(dir) {
+        return None;
+    }
+    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
+    let git_dir = repository.git_dir();
+    let common_dir = repository.common_dir();
+    let identity = git_dir.strip_prefix(common_dir).unwrap_or(git_dir);
+    let mut hasher = Sha256::new();
+    hasher.update(crate::os_str_bytes::native_os_str_bytes(
+        identity.as_os_str(),
+    ));
+    let digest = hex::encode(hasher.finalize());
+    Some(format!("detached-worktree/{}", &digest[..16]))
 }
 
 /// Cheap pre-flight for the `git` subprocess fallbacks in this crate: `git`
@@ -222,7 +239,7 @@ pub fn git_may_resolve_repo(dir: &Path) -> bool {
 ///     directory that merely happens to contain a data dir), which
 ///     keeps non-git and monorepo-subdir layouts from producing false
 ///     warnings.
-pub fn detect_worktree_index_mismatch(
+pub(crate) fn detect_worktree_index_mismatch(
     start_path: &Path,
     index_root: &Path,
 ) -> Option<WorktreeIndexMismatch> {
@@ -242,6 +259,20 @@ pub fn detect_worktree_index_mismatch(
         worktree_root,
         index_root: resolved_index_root,
     })
+}
+
+/// Detect a borrowed index for the client scope represented by a daemon-held
+/// project. The daemon process's own current directory is unrelated to the
+/// client and must never participate in this decision.
+pub fn detect_scoped_worktree_index_mismatch(
+    index_root: &Path,
+    scope_prefix: Option<&str>,
+) -> Option<WorktreeIndexMismatch> {
+    let start_path = scope_prefix.map_or_else(
+        || index_root.to_path_buf(),
+        |prefix| index_root.join(prefix),
+    );
+    detect_worktree_index_mismatch(&start_path, index_root)
 }
 
 /// Verbose multi-line warning for `tracedecay status` and similar contexts
@@ -274,8 +305,8 @@ pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
 }
 
 /// Resolve symlinks where possible so tmp/realpath quirks don't break
-/// equality checks. Falls back to a plain `absolutize` when canonicalize
-/// fails (e.g. directory was deleted between rev-parse and the fs call).
+/// equality checks. `None` when canonicalize fails (e.g. directory was
+/// deleted between rev-parse and the fs call); callers choose the fallback.
 fn realpath(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
 }
@@ -283,14 +314,16 @@ fn realpath(p: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 fn git_command() -> std::process::Command {
     let mut command = std::process::Command::new("git");
-    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+    let paths: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
     #[cfg(not(windows))]
-    {
+    let paths = {
+        let mut paths = paths;
         paths.push(PathBuf::from("/usr/bin"));
         paths.push(PathBuf::from("/bin"));
-    }
+        paths
+    };
     if let Ok(path) = std::env::join_paths(paths) {
         command.env("PATH", path);
     }
@@ -336,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_cli_identity_resolves_relative_common_dir_without_gix() {
+    fn paired_cli_identity_resolves_relative_common_dir_without_discovery() {
         let tmp = tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let nested = worktree.join("src/deep");
@@ -348,7 +381,7 @@ mod tests {
         let outcome = resolve_git_identity_outcome_with(
             &nested,
             || crate::git::GitCaptureAtResult::Captured(output),
-            || panic!("valid CLI identity must short-circuit gix discovery"),
+            || panic!("valid CLI identity must short-circuit in-process discovery"),
         );
         let GitRepoIdentityOutcome::Resolved(identity) = outcome else {
             panic!("paired CLI identity should resolve");
@@ -365,12 +398,12 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_cli_identity_does_not_fallback_to_gix() {
+    fn timed_out_cli_identity_does_not_fallback_to_discovery() {
         let tmp = tempdir().unwrap();
         let outcome = resolve_git_identity_outcome_with(
             tmp.path(),
             || crate::git::GitCaptureAtResult::TimedOut,
-            || panic!("timed-out CLI identity must not fall through to gix"),
+            || panic!("timed-out CLI identity must not fall through to in-process discovery"),
         );
         assert_eq!(outcome, GitRepoIdentityOutcome::Unknown);
     }
@@ -452,6 +485,86 @@ mod tests {
             std::fs::canonicalize(&worktree).unwrap()
         );
         assert_eq!(mismatch.index_root, std::fs::canonicalize(&main).unwrap());
+        assert!(
+            detached_worktree_graph_scope(&worktree)
+                .is_some_and(|scope| scope.starts_with("detached-worktree/"))
+        );
+    }
+
+    #[test]
+    fn gix_resolves_the_linked_worktree_specific_branch() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = tmp.path().join("feature");
+        run_git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            crate::branch::current_branch(&worktree).as_deref(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn scoped_detection_uses_the_client_scope_instead_of_process_cwd() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = main.join(".worktrees").join("feature");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            &main,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        assert!(detect_scoped_worktree_index_mismatch(&main, None).is_none());
+        let mismatch = detect_scoped_worktree_index_mismatch(&main, Some(".worktrees/feature"))
+            .expect("nested client worktree must be compared with the main index");
+        assert_eq!(
+            mismatch.worktree_root,
+            std::fs::canonicalize(&worktree).unwrap()
+        );
     }
 
     #[test]

@@ -1,71 +1,55 @@
-//! User-defined scheduled jobs (Hermes cron parity, audit R9).
-//!
-//! A job is a stored prompt with a schedule (including standard 5-field cron
-//! expressions), optional attached managed skills whose bodies are prepended
-//! as context, an optional pre-run shell command (gated behind the
-//! `allow_job_commands` config flag, off by default), and a delivery target
-//! (local file or webhook). Jobs execute through the same
-//! [`AgentTaskBackend`] path as the fixed self-improvement tasks, record
-//! runs in the shared run ledger under task key `user_job:<id>`, and write
-//! the standard artifact chain.
-//!
-//! Safety: the backend response is treated purely as content to deliver.
-//! No job-management surface is exposed to the model, so a job cannot
-//! schedule or mutate other jobs, and context gathered from skills or the
-//! pre-run command is framed as untrusted data in the prompt.
-
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 
-use super::artifacts::{sha256_json, write_improvement_artifacts};
+use super::artifacts::{sha256_bytes, sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
-    classify_agent_task_error_message, run_agent_task_with_retry,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
+    BackendRetryPolicy, classify_agent_task_error_message, run_agent_task_with_retry_report,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::job_webhook;
-use super::lifecycle::generated_run_id;
+use super::lifecycle::{
+    AutomationRunLedgerPublication, AutomationRunSettlementGuard, RetainedAutomationRun,
+    generated_run_id,
+};
 use super::managed_skills::{ManagedSkillState, load_managed_skill};
 use super::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
-    load_run_records,
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationRunStatus,
+    AutomationTrigger, append_or_reuse_scheduler_diagnostic, append_run_record,
+    latest_record_by_canonical_completion, load_run_ledger_task_summary,
 };
 use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
 use super::text::truncate_chars_for_prompt;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
+pub(crate) mod effect_receipt;
+
 const JOBS_FILENAME: &str = "automation_jobs.json";
 const JOBS_SCHEMA_VERSION: u32 = 1;
-/// Default delivery directory, relative to the project's dashboard root
-/// (`.tracedecay/dashboard/job-output/`).
 pub const JOB_OUTPUT_DIR: &str = "job-output";
 const JOB_COMMAND_TIMEOUT_SECS: u64 = 30;
 const JOB_COMMAND_OUTPUT_CAP_CHARS: usize = 16 * 1024;
 const JOB_SKILL_BODY_CAP_CHARS: usize = 4_000;
-const JOB_LEDGER_LOOKBACK: usize = 200;
 const DEFAULT_JOB_FAILURE_COOLDOWN_SECS: u64 = 300;
 const DEFAULT_JOB_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
 const WEBHOOK_TIMEOUT_SECS: u64 = 10;
 
-/// Where a job's backend output is delivered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum JobDelivery {
-    /// Write the output to a file under the dashboard root. `path` is an
-    /// optional relative path; the default is
-    /// `job-output/<job_id>/<run_id>.md`.
     File {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
-    /// POST a JSON payload (`job_id`, `name`, `run_id`, `content`, `model`,
-    /// `completed_at`) to the URL.
-    Webhook { url: String },
+    Webhook {
+        url: String,
+    },
 }
 
 impl Default for JobDelivery {
@@ -134,6 +118,18 @@ pub struct UserJobRunOptions {
     /// Project root used as cwd for optional pre-run commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_root: Option<PathBuf>,
+    /// Latest scheduler-effectful terminal run_id visible in the ledger
+    /// snapshot the caller minted `run_id` from. Scheduler-triggered runs that
+    /// record a diagnostic (currently the lock-contention skip) must scan back
+    /// to this anchor rather than to one re-derived from a later read, or a
+    /// concurrently committed terminal can shrink the anti-duplicate window
+    /// below an already-appended row carrying the same derived identity. See
+    /// `scheduler_gate::evaluate_and_record_scheduler_skip` for the invariant.
+    /// `None` means "no anchor known" and scans the full ledger, which is
+    /// always a safe superset; non-scheduler triggers never reach the
+    /// diagnostic path at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_anchor_run_id: Option<String>,
 }
 
 impl Default for UserJobRunOptions {
@@ -143,6 +139,7 @@ impl Default for UserJobRunOptions {
             run_id: None,
             profile_root: None,
             project_root: None,
+            occurrence_anchor_run_id: None,
         }
     }
 }
@@ -154,6 +151,8 @@ pub struct UserJobAutomationRun {
     pub ledger_record: AutomationRunLedgerRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_response: Option<AgentTaskResponse>,
+    #[serde(skip)]
+    pub committed_receipt: Option<super::AutomationCommittedReceipt>,
 }
 
 pub fn jobs_path(dashboard_root: &Path) -> PathBuf {
@@ -166,6 +165,20 @@ pub fn job_task_key(job_id: &str) -> String {
 
 fn job_lock_key(job_id: &str) -> String {
     format!("user_job_{job_id}")
+}
+
+pub(super) async fn try_acquire_job_task_lock(
+    dashboard_root: &Path,
+    job_id: &str,
+    now_secs: i64,
+) -> Result<Option<AutomationTaskLock>> {
+    AutomationTaskLock::try_acquire_keyed(
+        dashboard_root,
+        &job_lock_key(job_id),
+        Some(DEFAULT_JOB_STALE_LOCK_SECS),
+        now_secs,
+    )
+    .await
 }
 
 pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
@@ -181,9 +194,11 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
             for (index, entry) in file.jobs.into_iter().enumerate() {
                 match serde_json::from_value::<AutomationJob>(entry) {
                     Ok(job) => loaded.push(job),
-                    Err(e) => eprintln!(
-                        "[tracedecay] skipped corrupt automation job entry {index} in '{}': {e}",
-                        path.display()
+                    Err(error) => tracing::warn!(
+                        index,
+                        path = %path.display(),
+                        %error,
+                        "skipped corrupt automation job entry"
                     ),
                 }
             }
@@ -237,7 +252,10 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
     if job.prompt.trim().is_empty() {
         return job_error("job prompt must not be empty");
     }
-    let schedule = parse_schedule(job.schedule.as_deref())?;
+    let schedule =
+        parse_schedule(job.schedule.as_deref()).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
     if schedule == AutomationSchedule::ConfiguredInterval && job.interval_secs.is_none() {
         return job_error("job interval_secs is required when schedule is interval");
     }
@@ -247,10 +265,10 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
     if matches!(job.cooldown_secs, Some(0)) {
         return job_error("job cooldown_secs must be greater than zero");
     }
-    if let Some(command) = &job.pre_run_command {
-        if command.trim().is_empty() {
-            return job_error("job pre_run_command must not be empty when set");
-        }
+    if let Some(command) = &job.pre_run_command
+        && command.trim().is_empty()
+    {
+        return job_error("job pre_run_command must not be empty when set");
     }
     for skill_id in &job.skill_ids {
         if skill_id.trim().is_empty() {
@@ -345,26 +363,36 @@ pub fn job_schedule_decision(
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
 ) -> Option<&'static str> {
+    match checked_job_schedule_decision(job, records, now_secs) {
+        Ok(decision) => decision,
+        Err(_) => Some("scheduler_history_invalid"),
+    }
+}
+
+fn checked_job_schedule_decision(
+    job: &AutomationJob,
+    records: &[AutomationRunLedgerRecord],
+    now_secs: i64,
+) -> Result<Option<&'static str>> {
     if !job.enabled {
-        return Some("user_job_disabled");
+        return Ok(Some("user_job_disabled"));
     }
     let Ok(schedule) = parse_schedule(job.schedule.as_deref()) else {
-        return Some("scheduler_schedule_invalid");
+        return Ok(Some("scheduler_schedule_invalid"));
     };
     let (interval_secs, cron) = match schedule {
-        AutomationSchedule::Manual => return Some("scheduler_schedule_manual"),
+        AutomationSchedule::Manual => return Ok(Some("scheduler_schedule_manual")),
         AutomationSchedule::ConfiguredInterval => (job.interval_secs, None),
         AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
         AutomationSchedule::Cron(cron) => (None, Some(cron)),
     };
     if interval_secs.is_none() && cron.is_none() {
-        return Some("scheduler_schedule_manual");
+        return Ok(Some("scheduler_schedule_manual"));
     }
 
     let task_key = job_task_key(&job.id);
-    let last = latest_terminal_job_record(records, &task_key, Some(AutomationTrigger::Scheduler));
-    if let Some(record) = last {
-        let completed_at = record.completed_at.parse::<i64>().unwrap_or(0);
+    let last = latest_terminal_job_record(records, &task_key, Some(AutomationTrigger::Scheduler))?;
+    if let Some((record, completed_at)) = last {
         if record.status == AutomationRunStatus::Failed {
             let disposition = super::backend::agent_task_failure_disposition(
                 record.error_classification,
@@ -372,50 +400,47 @@ pub fn job_schedule_decision(
                 record.error.as_deref(),
             );
             if disposition.is_non_retryable() {
-                return Some("scheduler_non_retryable_failure");
+                return Ok(Some("scheduler_non_retryable_failure"));
             }
             let cooldown = job
                 .cooldown_secs
                 .unwrap_or(DEFAULT_JOB_FAILURE_COOLDOWN_SECS);
             if elapsed_secs(completed_at, now_secs) < cooldown {
-                return Some("scheduler_cooldown_active");
+                return Ok(Some("scheduler_cooldown_active"));
             }
-            return None;
+            return Ok(None);
         }
-        if let Some(interval_secs) = interval_secs {
-            if elapsed_secs(completed_at, now_secs) < interval_secs {
-                return Some("scheduler_interval_not_elapsed");
-            }
+        if let Some(interval_secs) = interval_secs
+            && elapsed_secs(completed_at, now_secs) < interval_secs
+        {
+            return Ok(Some("scheduler_interval_not_elapsed"));
         }
-        if let Some(cron) = cron {
-            if !cron_is_due(&cron, Some(completed_at), now_secs) {
-                return Some("scheduler_cron_not_due");
-            }
+        if let Some(cron) = cron
+            && !cron_is_due(&cron, Some(completed_at), now_secs)
+        {
+            return Ok(Some("scheduler_cron_not_due"));
         }
-    } else if let Some(cron) = cron {
-        if !cron_is_due(&cron, None, now_secs) {
-            return Some("scheduler_cron_not_due");
-        }
+    } else if let Some(cron) = cron
+        && !cron_is_due(&cron, None, now_secs)
+    {
+        return Ok(Some("scheduler_cron_not_due"));
     }
-    None
+    Ok(None)
 }
 
 fn latest_terminal_job_record<'a>(
     records: &'a [AutomationRunLedgerRecord],
     task_key: &str,
     trigger: Option<AutomationTrigger>,
-) -> Option<&'a AutomationRunLedgerRecord> {
-    records
-        .iter()
-        .filter(|record| {
-            record.task_key.as_deref() == Some(task_key)
-                && trigger.is_none_or(|trigger| record.trigger == trigger)
-                && matches!(
-                    record.status,
-                    AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
-                )
-        })
-        .max_by_key(|record| record.completed_at.parse::<i64>().unwrap_or(0))
+) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
+    latest_record_by_canonical_completion(records.iter().filter(|record| {
+        record.task_key.as_deref() == Some(task_key)
+            && trigger.is_none_or(|trigger| record.trigger == trigger)
+            && matches!(
+                record.status,
+                AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
+            )
+    }))
 }
 
 fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
@@ -428,22 +453,69 @@ fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
 /// Executes one user job through the automation backend, delivering its
 /// output and recording the run in the shared ledger under
 /// `user_job:<job_id>`.
+#[hotpath::measure(label = "automation_run_user_job")]
 pub async fn run_user_job_with_backend(
     dashboard_root: &Path,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     job: &AutomationJob,
     options: UserJobRunOptions,
-) -> Result<UserJobAutomationRun> {
+) -> super::AutomationRunResult<UserJobAutomationRun> {
+    run_user_job_with_backend_publication(
+        dashboard_root,
+        config,
+        backend,
+        job,
+        options,
+        AutomationRunLedgerPublication::Immediate,
+        None,
+    )
+    .await
+}
+
+pub async fn run_user_job_with_backend_for_retained_settlement(
+    dashboard_root: &Path,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    job: &AutomationJob,
+    options: UserJobRunOptions,
+) -> RetainedAutomationRun<UserJobAutomationRun> {
+    let settlement_guard = AutomationRunSettlementGuard::new();
+    let result = run_user_job_with_backend_publication(
+        dashboard_root,
+        config,
+        backend,
+        job,
+        options,
+        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+        Some(&settlement_guard),
+    )
+    .await;
+    RetainedAutomationRun::new(result, settlement_guard)
+}
+
+async fn run_user_job_with_backend_publication(
+    dashboard_root: &Path,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    job: &AutomationJob,
+    options: UserJobRunOptions,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&AutomationRunSettlementGuard>,
+) -> super::AutomationRunResult<UserJobAutomationRun> {
+    let _run = super::scheduler_metrics::RunningGuard::enter();
+    let _duration = super::scheduler_metrics::DurationGuard::run();
     validate_job(job)?;
     let UserJobRunOptions {
         trigger,
         run_id,
         profile_root,
         project_root,
+        occurrence_anchor_run_id,
     } = options;
     let run_id = run_id.unwrap_or_else(|| generated_run_id("user_job"));
     let started_at = current_timestamp().to_string();
+    super::run_ledger::current_timestamp_micros()?;
     let ctx = JobRunContext {
         dashboard_root,
         config,
@@ -451,52 +523,79 @@ pub async fn run_user_job_with_backend(
         run_id: &run_id,
         trigger,
         started_at: &started_at,
+        ledger_publication,
     };
-
     if let Some(reason) = config_skip_reason(config) {
-        return ctx.skipped(reason, None).await;
+        return ctx.skipped(reason, None).await.map_err(Into::into);
     }
 
-    let scheduler_records = if trigger == AutomationTrigger::Scheduler {
-        Some(load_run_records(dashboard_root, JOB_LEDGER_LOOKBACK).await?)
-    } else {
-        None
-    };
     let now_secs = current_timestamp();
-    let Some(_lock) = AutomationTaskLock::try_acquire_keyed(
-        dashboard_root,
-        &job_lock_key(&job.id),
-        Some(DEFAULT_JOB_STALE_LOCK_SECS),
-        now_secs,
-    )
-    .await?
+    let Some(task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, now_secs).await?
     else {
         let reason = if trigger == AutomationTrigger::Scheduler {
             "scheduler_lock_active"
         } else {
             "job_lock_active"
         };
-        return ctx.skipped(reason, scheduler_records.as_deref()).await;
+        if trigger == AutomationTrigger::Scheduler {
+            // The diagnostic identity is derived from `run_id`, which the
+            // caller minted against `occurrence_anchor_run_id`'s snapshot.
+            // Re-loading a summary here to derive a fresher anchor would race
+            // a concurrently committed terminal and bound the anti-duplicate
+            // scan below a row that already carries this identity.
+            return scheduler_gate::record_scheduler_lock_skip(
+                dashboard_root,
+                config,
+                job,
+                &run_id,
+                &started_at,
+                occurrence_anchor_run_id.as_deref(),
+            )
+            .await
+            .map_err(Into::into);
+        }
+        return ctx.skipped(reason, None).await.map_err(Into::into);
+    };
+    let _run_lock = if let Some(settlement_guard) = settlement_guard {
+        settlement_guard.retain_task_lock(task_lock)?;
+        None
+    } else {
+        Some(task_lock)
     };
 
-    if trigger == AutomationTrigger::Scheduler {
+    let scheduler_summary = if trigger == AutomationTrigger::Scheduler {
+        Some(
+            load_run_ledger_task_summary(
+                dashboard_root,
+                AgentTaskKind::UserJob,
+                &job_task_key(&job.id),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(scheduler_summary) = scheduler_summary.as_ref() {
         let now_secs = current_timestamp();
-        let decision = job_schedule_decision(
-            job,
-            scheduler_records.as_deref().unwrap_or_default(),
-            now_secs,
-        );
+        let decision = job_schedule_decision(job, scheduler_summary.records(), now_secs);
         if let Some(reason) = decision {
-            return ctx.skipped(reason, scheduler_records.as_deref()).await;
+            return ctx
+                .skipped(reason, Some(scheduler_summary))
+                .await
+                .map_err(Into::into);
         }
     } else if !job.enabled {
-        return ctx.skipped("user_job_disabled", None).await;
+        return ctx
+            .skipped("user_job_disabled", None)
+            .await
+            .map_err(Into::into);
     }
 
     if job.pre_run_command.is_some() && !config.allow_job_commands {
         return ctx
-            .skipped("job_commands_disabled", scheduler_records.as_deref())
-            .await;
+            .skipped("job_commands_disabled", scheduler_summary.as_ref())
+            .await
+            .map_err(Into::into);
     }
 
     let profile_root = match profile_root {
@@ -511,7 +610,12 @@ pub async fn run_user_job_with_backend(
             Ok(output) => Some(output),
             Err(err) => {
                 let record = ctx
-                    .append_failed(None, format!("job pre-run command failed: {err}"), None)
+                    .append_failed(
+                        None,
+                        format!("job pre-run command failed: {err}"),
+                        None,
+                        None,
+                    )
                     .await?;
                 return Ok(failed_run(record));
             }
@@ -523,7 +627,7 @@ pub async fn run_user_job_with_backend(
     let context = json!({
         "job_id": job.id,
         "job_name": job.name,
-        "delivery": job.delivery,
+        "delivery": effect_receipt::delivery_context(dashboard_root, job, &run_id)?,
         "attached_skills": attached_skills,
         "missing_skills": missing_skills,
         "pre_run_command": job.pre_run_command,
@@ -543,38 +647,52 @@ pub async fn run_user_job_with_backend(
     let input_hash = Some(request.input_hash.clone());
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
-        Ok(response) => response,
-        Err(err) => {
-            let record = ctx.append_failed(input_hash, err.to_string(), None).await?;
-            return Ok(failed_run(record));
-        }
-    };
+    let mut retry_report = AgentTaskRetryReport::default();
+    let response =
+        match run_agent_task_with_retry_report(backend, &request, &retry_policy, &mut retry_report)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let record = ctx
+                    .append_failed(input_hash, err.to_string(), None, Some(&retry_report))
+                    .await?;
+                return Ok(failed_run(record));
+            }
+        };
 
-    let delivery_report = match deliver_job_output(dashboard_root, job, &run_id, &response).await {
-        Ok(report) => report,
-        Err(err) => {
-            let record = ctx
-                .append_failed(
-                    input_hash,
-                    format!("job delivery failed: {err}"),
-                    response.model.clone(),
-                )
-                .await?;
-            return Ok(failed_run(record));
-        }
-    };
+    let delivered_content_digest = sha256_bytes(response.output_text.as_bytes());
+    let delivery = effect_receipt::deliver_job_output(
+        dashboard_root,
+        job,
+        &run_id,
+        &delivered_content_digest,
+        &response,
+    )
+    .await?;
+    let task_key = job_task_key(&job.id);
+    let committed_receipt =
+        delivery.committed_receipt(&run_id, &task_key, &delivered_content_digest);
+    let completed_at_micros = effect_receipt::after_delivery(
+        super::run_ledger::current_timestamp_micros(),
+        &run_id,
+        committed_receipt.clone(),
+        "User job output was delivered, but its exact completion time could not be recorded; reconcile the delivery receipt before another run.",
+    )?;
+    let delivery_report = delivery.report();
 
-    let mut record = ctx.base_record(AutomationRunStatus::Succeeded, None);
+    let mut record = ctx.base_record_at(AutomationRunStatus::Succeeded, None, completed_at_micros);
     record.model = response.model.clone();
     record.input_hash = input_hash;
-    record.output_hash = Some(sha256_json(&json!(response.output_text)));
+    record.output_hash = Some(sha256_json(&json!(response.output_text))?);
+    record.backend_attempt_count = retry_report.attempt_count();
+    record.backend_attempts = retry_report.attempts().to_vec();
     record.validation_report = Some(json!({
         "status": "delivered",
         "delivery": delivery_report,
         "content_chars": response.output_text.chars().count(),
     }));
-    record.artifacts = write_improvement_artifacts(
+    let artifacts = write_improvement_artifacts(
         dashboard_root,
         &run_id,
         AgentTaskKind::UserJob,
@@ -582,8 +700,19 @@ pub async fn run_user_job_with_backend(
         &response,
         &record,
     )
-    .await?;
-    append_run_record(dashboard_root, &record).await?;
+    .await;
+    record.artifacts = effect_receipt::after_delivery(
+        artifacts,
+        &run_id,
+        committed_receipt.clone(),
+        "User job output was delivered, but its automation artifact could not be published; reconcile the delivery receipt before another run.",
+    )?;
+    effect_receipt::after_delivery(
+        ctx.publish_terminal(&record).await,
+        &run_id,
+        committed_receipt.clone(),
+        "User job output was delivered, but its automation terminal could not be published; reconcile the delivery receipt before another run.",
+    )?;
 
     let report = json!({
         "status": "delivered",
@@ -598,12 +727,13 @@ pub async fn run_user_job_with_backend(
         report,
         ledger_record: record,
         backend_response: Some(response),
+        committed_receipt: Some(committed_receipt),
     })
 }
 
 fn config_skip_reason(config: &AutomationConfig) -> Option<&'static str> {
     if !config.enabled {
-        return Some("automation_disabled");
+        return Some(AUTOMATION_DISABLED);
     }
     if config.host_mode == AutomationHostMode::DelegatedHost {
         return Some("delegated_host_mode");
@@ -621,6 +751,7 @@ struct JobRunContext<'a> {
     run_id: &'a str,
     trigger: AutomationTrigger,
     started_at: &'a str,
+    ledger_publication: AutomationRunLedgerPublication,
 }
 
 impl JobRunContext<'_> {
@@ -628,8 +759,18 @@ impl JobRunContext<'_> {
         &self,
         status: AutomationRunStatus,
         error: Option<String>,
+    ) -> Result<AutomationRunLedgerRecord> {
+        let completed_at_micros = super::run_ledger::current_timestamp_micros()?;
+        Ok(self.base_record_at(status, error, completed_at_micros))
+    }
+
+    fn base_record_at(
+        &self,
+        status: AutomationRunStatus,
+        error: Option<String>,
+        completed_at_micros: i64,
     ) -> AutomationRunLedgerRecord {
-        let completed_at = current_timestamp().to_string();
+        let completed_at = (completed_at_micros / 1_000_000).to_string();
         let error_classification = if status == AutomationRunStatus::Failed {
             error.as_deref().map(classify_agent_task_error_message)
         } else {
@@ -642,6 +783,7 @@ impl JobRunContext<'_> {
             task: AgentTaskKind::UserJob,
             task_key: Some(job_task_key(&self.job.id)),
             backend: self.config.backend.as_str().to_string(),
+            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(
                 super::backend::prompt_version(AgentTaskKind::UserJob).to_string(),
@@ -670,6 +812,8 @@ impl JobRunContext<'_> {
             error_classification,
             error_retryable: error_classification
                 .map(super::backend::AgentTaskFailureClass::is_retryable),
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
             report_ref: Some(json!({
                 "dashboard_jobs": "/api/automation/jobs",
                 "job_id": self.job.id,
@@ -678,31 +822,35 @@ impl JobRunContext<'_> {
             artifacts: Vec::new(),
             started_at: self.started_at.to_string(),
             completed_at,
+            completed_at_micros: Some(completed_at_micros),
         }
     }
 
     async fn skipped(
         &self,
         reason: &'static str,
-        records: Option<&[AutomationRunLedgerRecord]>,
+        summary: Option<&AutomationRunLedgerTaskSummary>,
     ) -> Result<UserJobAutomationRun> {
-        let record = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_string()));
+        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_string()))?;
         // Mirror the fixed-task ledger dedup: scheduler ticks re-evaluate
         // every job, so a standing skip is persisted only once.
-        let is_repeat = self.trigger == AutomationTrigger::Scheduler
-            && records.is_some_and(|records| {
-                records
-                    .iter()
-                    .find(|prior| prior.task_key.as_deref() == Some(&job_task_key(&self.job.id)))
-                    .is_some_and(|prior| {
-                        prior.trigger == AutomationTrigger::Scheduler
-                            && prior.status == AutomationRunStatus::Skipped
-                            && prior.error.as_deref() == Some(reason)
-                    })
-            });
-        if !is_repeat {
-            append_run_record(self.dashboard_root, &record).await?;
-        }
+        let repeated = (self.ledger_publication == AutomationRunLedgerPublication::Immediate
+            && self.trigger == AutomationTrigger::Scheduler)
+            .then(|| {
+                summary?.latest_logical_activity().filter(|prior| {
+                    prior.task_key.as_deref() == Some(&job_task_key(&self.job.id))
+                        && prior.trigger == AutomationTrigger::Scheduler
+                        && prior.status == AutomationRunStatus::Skipped
+                        && prior.error.as_deref() == Some(reason)
+                })
+            })
+            .flatten();
+        let record = if let Some(repeated) = repeated {
+            repeated.clone()
+        } else {
+            self.publish_terminal(&candidate).await?;
+            candidate
+        };
         let report = json!({
             "status": "skipped",
             "reason": reason,
@@ -710,10 +858,42 @@ impl JobRunContext<'_> {
             "job_id": self.job.id,
         });
         Ok(UserJobAutomationRun {
-            run_id: self.run_id.to_string(),
+            run_id: record.run_id.clone(),
             report,
             ledger_record: record,
             backend_response: None,
+            committed_receipt: None,
+        })
+    }
+
+    /// `effectful_anchor_run_id` must come from the same ledger snapshot that
+    /// minted `self.run_id`'s occurrence identity — never from a summary
+    /// loaded at append time. See
+    /// `scheduler_gate::evaluate_and_record_scheduler_skip` for why a fresher
+    /// anchor can silently duplicate this diagnostic.
+    async fn scheduler_diagnostic_skipped(
+        &self,
+        reason: &'static str,
+        effectful_anchor_run_id: Option<&str>,
+    ) -> Result<UserJobAutomationRun> {
+        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_owned()))?;
+        let record = append_or_reuse_scheduler_diagnostic(
+            self.dashboard_root,
+            &candidate,
+            effectful_anchor_run_id,
+        )
+        .await?;
+        Ok(UserJobAutomationRun {
+            run_id: record.run_id.clone(),
+            report: json!({
+                "status": "skipped",
+                "reason": reason,
+                "task": job_task_key(&self.job.id),
+                "job_id": self.job.id,
+            }),
+            ledger_record: record,
+            backend_response: None,
+            committed_receipt: None,
         })
     }
 
@@ -722,14 +902,28 @@ impl JobRunContext<'_> {
         input_hash: Option<String>,
         error: String,
         model: Option<String>,
+        retry_report: Option<&AgentTaskRetryReport>,
     ) -> Result<AutomationRunLedgerRecord> {
-        let mut record = self.base_record(AutomationRunStatus::Failed, Some(error));
+        let mut record = self.base_record(AutomationRunStatus::Failed, Some(error))?;
         record.input_hash = input_hash;
+        if let Some(retry_report) = retry_report {
+            record.backend_attempt_count = retry_report.attempt_count();
+            record.backend_attempts = retry_report.attempts().to_vec();
+        }
         if model.is_some() {
             record.model = model;
         }
-        append_run_record(self.dashboard_root, &record).await?;
+        self.publish_terminal(&record).await?;
         Ok(record)
+    }
+
+    async fn publish_terminal(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
+        match self.ledger_publication {
+            AutomationRunLedgerPublication::Immediate => {
+                append_run_record(self.dashboard_root, record).await
+            }
+            AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
+        }
     }
 }
 
@@ -745,6 +939,7 @@ fn failed_run(record: AutomationRunLedgerRecord) -> UserJobAutomationRun {
         report,
         ledger_record: record,
         backend_response: None,
+        committed_receipt: None,
     }
 }
 
@@ -846,75 +1041,6 @@ async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Resu
     ))
 }
 
-async fn deliver_job_output(
-    dashboard_root: &Path,
-    job: &AutomationJob,
-    run_id: &str,
-    response: &AgentTaskResponse,
-) -> Result<Value> {
-    match &job.delivery {
-        JobDelivery::File { path } => {
-            let target = match path {
-                Some(relative) => {
-                    validate_relative_output_path(relative)?;
-                    dashboard_root.join(relative)
-                }
-                None => dashboard_root
-                    .join(JOB_OUTPUT_DIR)
-                    .join(&job.id)
-                    .join(format!("{run_id}.md")),
-            };
-            if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| TraceDecayError::Config {
-                        message: format!(
-                            "failed to create job output directory '{}': {e}",
-                            parent.display()
-                        ),
-                    })?;
-            }
-            tokio::fs::write(&target, response.output_text.as_bytes())
-                .await
-                .map_err(|e| TraceDecayError::Config {
-                    message: format!("failed to write job output '{}': {e}", target.display()),
-                })?;
-            Ok(json!({
-                "mode": "file",
-                "path": target.display().to_string(),
-            }))
-        }
-        JobDelivery::Webhook { url } => {
-            let payload = json!({
-                "job_id": job.id,
-                "name": job.name,
-                "run_id": run_id,
-                "content": response.output_text,
-                "model": response.model,
-                "completed_at": current_timestamp(),
-            });
-            let report_url = url.clone();
-            let post_url = url.clone();
-            let status = tokio::task::spawn_blocking(move || {
-                job_webhook::post_json_url(
-                    &post_url,
-                    &payload,
-                    Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
-                )
-            })
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("webhook task failed: {e}"),
-            })??;
-            Ok(json!({
-                "mode": "webhook",
-                "url": report_url,
-                "status": status,
-            }))
-        }
-    }
-}
-
 fn job_error<T>(message: &str) -> Result<T> {
     Err(TraceDecayError::Config {
         message: message.to_string(),
@@ -923,62 +1049,10 @@ fn job_error<T>(message: &str) -> Result<T> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod scheduler_config_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path();
-        tokio::fs::write(jobs_path(root), b"{ this is not valid json")
-            .await
-            .unwrap();
-
-        // A corrupt jobs file must be an error, not a silent `false` that would
-        // permanently disable the scheduler loop with reason=not_configured.
-        let err = jobs_configured_for_scheduler(root)
-            .await
-            .expect_err("corrupt jobs file must surface an error");
-        assert!(
-            err.to_string().contains("failed to parse automation jobs"),
-            "error should carry the parse cause: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_jobs_file_reports_no_work_without_error() {
-        let temp = tempfile::TempDir::new().unwrap();
-        assert!(!jobs_configured_for_scheduler(temp.path()).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn valid_schedulable_job_reports_work_and_recovers_after_corruption() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path();
-        let job = json!({
-            "schema_version": JOBS_SCHEMA_VERSION,
-            "jobs": [{
-                "id": "nightly",
-                "name": "Nightly summary",
-                "enabled": true,
-                "schedule": "hourly",
-                "prompt": "summarize",
-                "delivery": { "mode": "file" }
-            }]
-        });
-        tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
-            .await
-            .unwrap();
-        assert!(jobs_configured_for_scheduler(root).await.unwrap());
-
-        // Corruption surfaces as an error; restoring a valid file recovers.
-        tokio::fs::write(jobs_path(root), b"nonsense")
-            .await
-            .unwrap();
-        assert!(jobs_configured_for_scheduler(root).await.is_err());
-        tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
-            .await
-            .unwrap();
-        assert!(jobs_configured_for_scheduler(root).await.unwrap());
-    }
-}
+#[path = "jobs/scheduler_config_tests.rs"]
+mod scheduler_config_tests;
+#[path = "jobs/scheduler_gate.rs"]
+mod scheduler_gate;
+pub use scheduler_gate::evaluate_and_record_scheduler_skip;
+#[cfg(test)]
+use scheduler_gate::latest_effectful_scheduler_job_record;

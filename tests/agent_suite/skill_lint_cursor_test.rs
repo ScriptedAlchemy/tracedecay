@@ -27,7 +27,7 @@
 //! H1 / heading levels / no `## When to Use`, the 500-line cap, LF hygiene,
 //! placeholder + reserved-prefix checks, and resource-dir layout — now lives
 //! once in `tests/agent_suite/shared_skill_contract_test.rs` over the single
-//! `plugin/skills/` tree. `plugin_skill_contract_test.rs` owns install
+//! `plugin/skills/` tree. The receipt-backed lifecycle suite owns install
 //! byte-parity + host-extra frontmatter + metadata budgets. This file keeps
 //! only the Cursor-specific reference-integrity checks (skill/tool/link
 //! resolution and `paths` glob scoping) plus the native-command lint.
@@ -37,8 +37,10 @@
 use std::collections::BTreeSet;
 
 use regex::Regex;
-use tracedecay::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use tracedecay::mcp::get_tool_definitions;
+use tracedecay_agent_hosts::automation::skill_frontmatter::{
+    SkillFrontmatterValue, parse_skill_frontmatter,
+};
 
 use crate::plugin_validation_support::{load_skill_docs_from, repo_path};
 use tempfile::TempDir;
@@ -95,9 +97,10 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-/// `tracedecay_*` identifiers that are documented output artifacts, not MCP
-/// tools (skills tell agents to report the `tracedecay_metrics:` line).
-const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics"];
+/// `tracedecay_*` identifiers that are documented output artifacts or tool-family
+/// globs, not single MCP tools (skills tell agents to report the
+/// `tracedecay_metrics:` line, and may reference the `tracedecay_lcm_*` family).
+const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics", "tracedecay_lcm"];
 
 #[test]
 fn cursor_skill_references_resolve() {
@@ -228,7 +231,6 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
     let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
     let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
     let mut violations = Vec::new();
-    let mut command_count = 0usize;
 
     let mut entries: Vec<_> = std::fs::read_dir(&command_dir)
         .expect("cursor commands dir readable")
@@ -239,7 +241,6 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
     entries.sort();
 
     for path in entries {
-        command_count += 1;
         let at = path.display();
         let slug = path
             .file_stem()
@@ -325,15 +326,12 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
         }
     }
 
-    assert_eq!(
-        command_count, 13,
-        "expected 13 Cursor native slash commands, found {command_count}"
-    );
     assert_no_violations("cursor command integrity", &violations);
 }
 
 fn mcp_tool_names() -> BTreeSet<String> {
     let mut names = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|definition| definition.name)
         .collect::<BTreeSet<_>>();

@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "provider": "opencode",
+  "capture": {
+    "support": "native",
+    "host_version": "1.18.4",
+    "plugin_package": "@opencode-ai/plugin",
+    "plugin_package_version": "1.15.13",
+    "captured_at": "2026-07-21",
+    "method": "temporary_global_local_plugin",
+    "plugin_scope": "~/.config/opencode/plugins/",
+    "sandbox": "<PROJECT_ROOT>",
+    "lsp_event_capture": {
+      "host_version": "1.18.4",
+      "plugin_package_version": "1.18.4",
+      "captured_at": "2026-07-26",
+      "raw_event_sha256": "f317df0ff4973cdfe156436002e8b52ae9dd154bc02a28dab47c1e57bc5e84c4"
+    }
+  },
+  "sources": [
+    {
+      "kind": "live_provider_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/opencode/README.md",
+      "command": "opencode run --dir <PROJECT_ROOT> --agent <AGENT> --format json <PROMPT>"
+    },
+    {
+      "kind": "official_documentation",
+      "url": "https://opencode.ai/docs/plugins/",
+      "sections": ["Events", "Send notifications"]
+    },
+    {
+      "kind": "installed_type_definition",
+      "url": "https://www.npmjs.com/package/@opencode-ai/plugin/v/1.15.13",
+      "package": "@opencode-ai/plugin@1.15.13",
+      "type": "Hooks"
+    },
+    {
+      "kind": "installed_type_definition",
+      "url": "https://www.npmjs.com/package/@opencode-ai/plugin/v/1.18.4",
+      "package": "@opencode-ai/plugin@1.18.4",
+      "type": "EventLspUpdated"
+    }
+  ],
+  "events": [
+    {
+      "identity": "saved_edit",
+      "family": "saved_edit",
+      "support": "native",
+      "channel": "event",
+      "request": {
+        "id": "<EVENT_ID>",
+        "type": "file.edited",
+        "properties": {
+          "file": "<PROJECT_ROOT>/capture-target.txt"
+        }
+      }
+    },
+    {
+      "identity": "post_tool_use",
+      "family": "saved_edit",
+      "support": "native",
+      "channel": "tool.execute.after",
+      "request": {
+        "input": {
+          "tool": "apply_patch",
+          "sessionID": "<SESSION_ID>",
+          "callID": "<CALL_ID>",
+          "args": {
+            "patchText": "<REDACTED_PATCH>"
+          }
+        },
+        "output": {
+          "title": "<REDACTED_RESULT>",
+          "metadata": {
+            "diff": "<REDACTED_DIFF>",
+            "files": [
+              {
+                "filePath": "<PROJECT_ROOT>/capture-target.txt",
+                "relativePath": "capture-target.txt",
+                "type": "add",
+                "patch": "<REDACTED_PATCH>",
+                "additions": 1,
+                "deletions": 0
+              }
+            ],
+            "diagnostics": {},
+            "truncated": false
+          },
+          "output": "<REDACTED_RESULT>"
+        }
+      }
+    },
+    {
+      "identity": "idle_status",
+      "family": "session_boundary",
+      "support": "native",
+      "channel": "event",
+      "request": {
+        "id": "<EVENT_ID>",
+        "type": "session.status",
+        "properties": {
+          "sessionID": "<SESSION_ID>",
+          "status": {
+            "type": "idle"
+          }
+        }
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "native",
+      "channel": "event",
+      "request": {
+        "id": "<EVENT_ID>",
+        "type": "session.idle",
+        "properties": {
+          "sessionID": "<SESSION_ID>"
+        }
+      }
+    },
+    {
+      "identity": "lsp_updated",
+      "family": "lsp_update",
+      "support": "native",
+      "channel": "event",
+      "request": {
+        "id": "<EVENT_ID>",
+        "type": "lsp.updated",
+        "properties": {}
+      }
+    }
+  ]
+}

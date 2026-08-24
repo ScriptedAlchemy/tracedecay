@@ -1,19 +1,33 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
-use tracedecay::sessions::claude::ClaudeSource;
-use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::git_correlation::{
+#[cfg(all(unix, not(target_os = "macos")))]
+use tracedecay::global_db::ParseOffset;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::storage::PrivateStoreIo;
+use tracedecay_domain::{
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1,
+};
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::claude::ClaudeSource;
+use tracedecay_sessions::runtime::git_correlation::{
     CommitEvidence, CommitRelation, GitRefFilter, SessionsForQuery, SpanOverlapKind,
 };
-use tracedecay::sessions::source::ingest_source;
+#[cfg(all(unix, not(target_os = "macos")))]
+use tracedecay_sessions::runtime::source::TranscriptSource;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+use crate::restart_atomicity::{
+    durable_table_count, ingest_global_sources_for_provider, mark_test_project,
+    open_project_session_db, try_ingest_source,
+};
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, run_git, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
 /// recorded `cwd` is `project`.
-fn write_claude_transcript(
+pub(super) fn write_claude_transcript(
     home: &std::path::Path,
     project: &std::path::Path,
     session: &str,
@@ -75,6 +89,125 @@ fn write_claude_rows(home: &std::path::Path, session: &str, rows: &[serde_json::
     .unwrap();
 }
 
+// macOS filesystems reject invalid UTF-8 path components with EILSEQ.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".claude/projects/-non-utf8");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(OsString::from_vec(b"session-\xff.jsonl".to_vec()));
+    let row = serde_json::json!({
+        "type": "user",
+        "cwd": project,
+        "sessionId": "native-session-id",
+        "uuid": "native-path-row",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "user", "content": "Native path evidence"}
+    });
+    std::fs::write(&path, format!("{row}\n")).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
+    assert_eq!(stats.messages_upserted, 1);
+
+    let cursor_key = source.cursor_key(&path).durable_text();
+    let offset = db
+        .get_parse_offset(&cursor_key)
+        .await
+        .expect("lossless cursor key persisted");
+    assert_eq!(offset.byte_offset, std::fs::metadata(&path).unwrap().len());
+    assert_eq!(
+        db.get_parse_offset(&path.to_string_lossy()).await,
+        None,
+        "lossy path aliases are not persisted"
+    );
+
+    drop(db);
+    let reopened = open_project_session_db(&project).await.unwrap();
+    let replay = try_ingest_source(&reopened, &source, &project, None)
+        .await
+        .unwrap();
+    assert_eq!(replay, Default::default());
+    assert_eq!(
+        reopened.get_parse_offset(&cursor_key).await,
+        Some(offset),
+        "canonical cursor survives restart"
+    );
+}
+
+// macOS filesystems reject invalid UTF-8 path components with EILSEQ.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn claude_non_utf8_cursor_key_ignores_lossy_path_alias() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".claude/projects/-non-utf8-migration");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(OsString::from_vec(b"session-\xfe.jsonl".to_vec()));
+    let row = |uuid: &str, content: &str| {
+        serde_json::json!({
+            "type": "user",
+            "cwd": project,
+            "sessionId": "native-migration-session",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": content}
+        })
+    };
+    let prefix = format!("{}\n", row("legacy-row", "Already ingested legacy row"));
+    let suffix = format!("{}\n", row("new-row", "New native path evidence"));
+    std::fs::write(&path, format!("{prefix}{suffix}")).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let legacy_key = path.to_string_lossy().into_owned();
+    db.runtime()
+        .set_project_parse_offset_for_test(
+            &legacy_key,
+            ParseOffset {
+                byte_offset: prefix.len() as u64,
+                mtime: 0,
+                file_id: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+    let source = ClaudeSource::with_home(&home);
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
+    assert_eq!(stats.messages_upserted, 2);
+    assert!(
+        db.get_session_message("claude", "legacy-row")
+            .await
+            .is_some()
+    );
+    assert!(db.get_session_message("claude", "new-row").await.is_some());
+
+    let final_offset = std::fs::metadata(&path).unwrap().len();
+    let durable_key = source.cursor_key(&path).durable_text();
+    assert_eq!(
+        db.get_parse_offset(&durable_key).await.unwrap().byte_offset,
+        final_offset
+    );
+    assert_eq!(
+        db.get_parse_offset(&legacy_key).await.unwrap().byte_offset,
+        prefix.len() as u64,
+        "lossy path aliases are neither read nor advanced"
+    );
+}
+
 #[tokio::test]
 async fn claude_user_scope_excludes_registered_project_rows() {
     let tmp = TempDir::new().unwrap();
@@ -85,7 +218,7 @@ async fn claude_user_scope_excludes_registered_project_rows() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&registered).unwrap();
     std::fs::create_dir_all(&general).unwrap();
-    std::fs::create_dir_all(&profile).unwrap();
+    PrivateStoreIo::create_dir_all(&profile).unwrap();
 
     write_claude_rows(
         &home,
@@ -118,41 +251,76 @@ async fn claude_user_scope_excludes_registered_project_rows() {
         })],
     );
 
-    let db = GlobalDb::open_at(&profile.join("user-sessions.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let source = ClaudeSource::with_home(&home).for_user_scope(None, vec![registered.clone()]);
+    let stats = runtime
+        .ingest_profile_transcript_source_for_test(&source, &profile, None)
         .await
         .unwrap();
-    let source = ClaudeSource::with_home(&home).for_user_scope(None, vec![registered.clone()]);
-    let stats = ingest_source(&db, &source, &profile, None).await;
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 2);
     assert_eq!(
-        db.get_session("claude", "mixed-session")
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "claude", "mixed-session")
             .await
+            .unwrap()
             .unwrap()
             .project_path,
         "user"
     );
     assert!(
-        db.search_session_messages("claude", None, "registered project secret", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "registered project secret",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty(),
         "registered-project evidence must never enter user-sessions.db"
     );
     assert_eq!(
-        db.search_session_messages("claude", None, "preference", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "preference",
+                10,
+            )
             .await
+            .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        db.search_session_messages("claude", None, "locationless", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "locationless",
+                10,
+            )
             .await
+            .unwrap()
             .len(),
         1
     );
     assert!(
-        db.search_session_messages("claude", None, "registered session fallback", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "registered session fallback",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty(),
         "rows without cwd inherit the registered session cwd"
     );
@@ -165,7 +333,7 @@ async fn claude_user_scope_live_filter_only_ingests_requested_session() {
     let general = tmp.path().join("general-chat");
     let profile = tmp.path().join("profile");
     std::fs::create_dir_all(&general).unwrap();
-    std::fs::create_dir_all(&profile).unwrap();
+    PrivateStoreIo::create_dir_all(&profile).unwrap();
     for (session, content) in [("wanted", "wanted evidence"), ("other", "other evidence")] {
         write_claude_rows(
             &home,
@@ -177,15 +345,28 @@ async fn claude_user_scope_live_filter_only_ingests_requested_session() {
             })],
         );
     }
-    let db = GlobalDb::open_at(&profile.join("user-sessions.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let source = ClaudeSource::with_home(&home).for_user_scope(Some("wanted".into()), vec![]);
+    let stats = runtime
+        .ingest_profile_transcript_source_for_test(&source, &profile, None)
         .await
         .unwrap();
-    let source = ClaudeSource::with_home(&home).for_user_scope(Some("wanted".into()), vec![]);
-    let stats = ingest_source(&db, &source, &profile, None).await;
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
-    assert!(db.get_session("claude", "wanted").await.is_some());
-    assert!(db.get_session("claude", "other").await.is_none());
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "claude", "wanted")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "claude", "other")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn write_claude_subagent_transcript(
@@ -231,7 +412,9 @@ async fn claude_transcript_populates_searchable_messages() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
     assert_eq!(stats.sessions_upserted, 1);
 
@@ -266,8 +449,9 @@ async fn claude_transcript_populates_searchable_messages() {
             .any(|hit| hit.message.timestamp == Some(1_767_225_605))
     );
 
-    // Anthropic-style `message.usage` counters land in metadata under the
-    // keys the savings dashboard reads; non-counter fields are dropped.
+    // Anthropic-style `message.usage` counters belong to the immutable
+    // provider-usage observation family now; conversational metadata carries
+    // location evidence only.
     let assistant = results
         .iter()
         .find(|hit| hit.message.role == "assistant")
@@ -281,11 +465,7 @@ async fn claude_transcript_populates_searchable_messages() {
         Some("transcript_record")
     );
     assert!(metadata.get("claude_git_branch").is_none());
-    assert_eq!(metadata["usage"]["input_tokens"], 1200);
-    assert_eq!(metadata["usage"]["output_tokens"], 340);
-    assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
-    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
-    assert!(metadata["usage"].get("service_tier").is_none());
+    assert!(metadata.get("usage").is_none());
     let user = results
         .iter()
         .find(|hit| hit.message.role == "user")
@@ -308,17 +488,63 @@ async fn claude_transcript_populates_searchable_messages() {
         Some("transcript_session")
     );
 
-    let expected_content = serde_json::json!([
-        {"type": "text", "text": "The billing pipeline regression is fixed."},
-        {"type": "tool_use", "name": "tracedecay_context", "input": {}}
-    ]);
+    // Privacy contract: Message facts carry only authored text. Tool use is a
+    // typed ToolInvocation fact / tool_events metadata, never searchable JSON.
     let raw = db
         .lcm_load_raw_message("claude", "msg_claude_1")
         .await
-        .expect("structured Claude content should be in raw LCM storage");
+        .expect("authored Claude content should be in raw LCM storage");
+    assert_eq!(raw.content, "The billing pipeline regression is fixed.");
+}
+
+/// Anthropic-style `message.usage` counters land in the immutable
+/// provider-usage observation family through the canonical observation route,
+/// with exact native evidence: the message's own model, per-message delta
+/// semantics, cache-write from `cache_creation_input_tokens`, and unmeasured
+/// counters typed-absent. Non-counter fields (`service_tier`) never survive.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn claude_usage_counters_land_in_provider_usage_observations() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    write_claude_transcript(&home, &project, "claude-usage-observations");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Claude)).await;
+
+    let observations = db.provider_usage_observations("claude").await;
+    assert_eq!(observations.len(), 1);
+    let observation = &observations[0];
+    assert_eq!(observation.session_id.as_str(), "claude-usage-observations");
+    assert_eq!(observation.native_kind, "assistant");
+    assert_eq!(observation.native_field, "message.usage");
+    assert_eq!(observation.native_scope, ProviderUsageScopeV1::Message);
     assert_eq!(
-        raw.content,
-        serde_json::to_string(&expected_content).unwrap()
+        observation.counter_semantics,
+        ProviderUsageCounterSemanticsV1::Delta
+    );
+    assert_eq!(
+        observation.model,
+        ProviderUsageModelV1::Known {
+            model: "claude-opus-4-8".to_owned(),
+        }
+    );
+    assert_eq!(
+        observation.counters,
+        ProviderUsageCountersV1::Known {
+            input_tokens: Some(1200),
+            output_tokens: Some(340),
+            cache_read_tokens: Some(8000),
+            cache_write_tokens: Some(500),
+            reasoning_tokens: None,
+            total_tokens: None,
+        }
     );
 }
 
@@ -368,7 +594,7 @@ fn write_claude_transcript_with_thinking(
 }
 
 #[tokio::test]
-async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
+async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     init_git_repo(&project);
@@ -377,11 +603,14 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    // user message + assistant message + the reasoning row = 3 rows.
-    let stats = ingest_source(&db, &source, &project, None).await;
+    // Two provider-authored visible messages project as ordinary rows. The
+    // plaintext thinking block remains a separately typed reasoning row.
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
-    let results = db
+    let reasoning_results = db
         .search_session_messages(
             "claude",
             Some(project.to_string_lossy().as_ref()),
@@ -389,33 +618,17 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
             10,
         )
         .await;
-    let reasoning = results
-        .iter()
-        .find(|hit| hit.message.kind.as_deref() == Some("reasoning"))
-        .expect("thinking should surface as a reasoning row");
-    assert_eq!(
-        results
+    assert_eq!(reasoning_results.len(), 1);
+    assert!(
+        reasoning_results
             .iter()
-            .filter(|hit| hit.message.text.contains("Reasoning breadcrumb"))
-            .count(),
-        1,
-        "thinking text must exist only in the reasoning row"
+            .all(|hit| hit.message.kind.as_deref() == Some("reasoning"))
     );
-    assert_eq!(reasoning.message.message_id, "msg_thinking_1:thinking");
-    assert_eq!(reasoning.message.role, "assistant");
-    assert_eq!(reasoning.message.model.as_deref(), Some("claude-opus-4-8"));
-    assert_eq!(
-        reasoning.message.text,
-        "Reasoning breadcrumb about the parser."
+    assert!(
+        reasoning_results
+            .iter()
+            .all(|hit| hit.message.kind.as_deref() != Some("message"))
     );
-    // The encrypted block never contributes plaintext to the reasoning row.
-    assert!(!reasoning.message.text.contains("ENCRYPTED"));
-    let metadata: serde_json::Value =
-        serde_json::from_str(reasoning.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["source"], "claude_thinking");
-    assert_eq!(metadata["parent_message_id"], "msg_thinking_1");
-    assert_eq!(metadata["thinking_blocks"], 1);
-    assert_eq!(metadata["redacted_thinking_blocks"], 1);
 
     let visible_results = db
         .search_session_messages(
@@ -428,16 +641,9 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
     let message = visible_results
         .iter()
         .find(|hit| hit.message.kind.as_deref() == Some("message"))
-        .expect("assistant message row should coexist with its reasoning row");
+        .expect("assistant authored message row");
     assert_eq!(message.message.message_id, "msg_thinking_1");
-    assert!(!message.message.text.contains("Reasoning breadcrumb"));
-    assert!(
-        !message
-            .message
-            .text
-            .contains("ENCRYPTED_SHOULD_NEVER_INDEX")
-    );
-    assert!(message.message.text.contains("src/lib.rs"));
+    assert_eq!(message.message.text, "Traced it.");
     assert_eq!(message.message.tool_names.as_deref(), Some("Read"));
     let redacted_results = db
         .search_session_messages(
@@ -460,7 +666,9 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
 
     // Re-ingesting the unchanged transcript is a no-op: the reasoning row's
     // stable `:thinking` id keeps the insert idempotent.
-    let second = ingest_source(&db, &source, &project, None).await;
+    let second = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(second.messages_upserted, 0);
 }
 
@@ -473,10 +681,14 @@ async fn claude_transcript_ingest_is_incremental() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let first = ingest_source(&db, &source, &project, None).await;
+    let first = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(first.messages_upserted, 2);
     // Re-ingesting the unchanged file is a no-op.
-    let second = ingest_source(&db, &source, &project, None).await;
+    let second = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(second.messages_upserted, 0);
 
     // Appending one line ingests only that line.
@@ -499,7 +711,9 @@ async fn claude_transcript_ingest_is_incremental() {
     .unwrap();
     drop(f);
 
-    let third = ingest_source(&db, &source, &project, None).await;
+    let third = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(third.messages_upserted, 1);
 }
 
@@ -515,7 +729,9 @@ async fn claude_transcript_for_other_project_is_skipped() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(
         stats.messages_upserted, 0,
         "a transcript whose cwd is a different project must be skipped"
@@ -576,7 +792,9 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
 
     let source = ClaudeSource::with_home(&home);
     let db_a = open_project_session_db(&project_a).await.unwrap();
-    let stats_a = ingest_source(&db_a, &source, &project_a, None).await;
+    let stats_a = try_ingest_source(&db_a, &source, &project_a, None)
+        .await
+        .unwrap();
     assert_eq!(stats_a.messages_upserted, 1);
     let hits_a = db_a
         .search_session_messages("claude", None, "worktree marker", 10)
@@ -591,9 +809,12 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
         metadata_a["claude_message_location_provenance"].as_str(),
         Some("transcript_record")
     );
+    drop(db_a);
 
     let db_b = open_project_session_db(&project_b).await.unwrap();
-    let stats_b = ingest_source(&db_b, &source, &project_b, None).await;
+    let stats_b = try_ingest_source(&db_b, &source, &project_b, None)
+        .await
+        .unwrap();
     assert_eq!(stats_b.messages_upserted, 1);
     let hits_b = db_b
         .search_session_messages("claude", None, "worktree marker", 10)
@@ -623,7 +844,9 @@ async fn claude_missing_projects_dir_is_silent_noop() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 0);
     assert_eq!(stats.messages_upserted, 0);
 }
@@ -682,7 +905,9 @@ async fn claude_tool_use_and_results_populate_tool_event_metadata() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // No new rows beyond the normal two message rows: tool events are metadata
     // on the existing assistant/user rows, not separate rows.
     assert_eq!(stats.messages_upserted, 2);
@@ -695,7 +920,16 @@ async fn claude_tool_use_and_results_populate_tool_event_metadata() {
     let assistant = &results[0];
     assert_eq!(assistant.message.kind.as_deref(), Some("message"));
     assert_eq!(assistant.message.tool_names.as_deref(), Some("Bash"));
-    assert!(assistant.message.text.contains("tool_use"));
+    assert!(
+        assistant
+            .message
+            .text
+            .contains("Running a shell command to list files.")
+    );
+    assert!(
+        !assistant.message.text.contains("tool_use"),
+        "tool_use must stay typed facts/metadata, not searchable message text"
+    );
     let assistant_metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
     let tool_events = assistant_metadata["tool_events"]
@@ -792,7 +1026,9 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // The routine system record produces no row; only the user message and
     // one hook-event row are ingested.
     assert_eq!(stats.messages_upserted, 2);
@@ -813,14 +1049,10 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
     assert_eq!(metadata["source"], "claude_system_record");
     assert!(metadata.get("hook_count").is_some());
 
-    // The capped hook preview stays reversible: the row points back at the exact
-    // transcript JSONL line so full fidelity is recoverable from the source.
-    assert!(
-        hit.message
-            .source_path
-            .as_deref()
-            .is_some_and(|path| path.ends_with("claude-hook-sess.jsonl"))
-    );
+    // Durable message identity does not leak an absolute checkout/cache path.
+    let source_path = hit.message.source_path.as_deref().unwrap();
+    assert!(source_path.starts_with("tracedecay-claude-observation-source-v1-sha256-"));
+    assert!(!source_path.contains(tmp.path().to_string_lossy().as_ref()));
     assert!(hit.message.source_offset.is_some());
 
     let routine = db
@@ -842,7 +1074,9 @@ async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 3);
 
@@ -860,8 +1094,8 @@ async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].session.session_id, "agent-worker");
 
-    // Regression: a plain session with no PR links, edits, or subagent facts
-    // must not gain any of the new session-metadata keys.
+    // A plain session with no PR links, edits, or subagent facts must not
+    // gain any of the new session-metadata keys.
     let session = db
         .get_session("claude", "parent-claude")
         .await
@@ -927,7 +1161,9 @@ async fn claude_pr_link_record_becomes_marker_row_and_session_summary() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // The user turn plus a dedicated pr_link marker row.
     assert_eq!(stats.messages_upserted, 2);
 
@@ -1009,7 +1245,9 @@ async fn claude_assistant_attribution_fields_land_in_metadata() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let assistant = db
@@ -1076,7 +1314,9 @@ async fn claude_tool_use_result_edited_files_populate_metadata_and_summary() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let edit = db
@@ -1150,7 +1390,9 @@ async fn claude_compact_boundary_record_becomes_marker_row() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let marker = db
@@ -1201,7 +1443,9 @@ async fn claude_model_refusal_fallback_record_becomes_marker_row() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let marker = db
@@ -1280,7 +1524,9 @@ async fn claude_subagent_meta_json_enriches_draft() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
 
     let child = db
@@ -1314,7 +1560,9 @@ async fn claude_workflow_nested_subagent_links_to_parent_not_orphan() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // Parent session plus the workflow-nested subagent (not an orphan third).
     assert_eq!(stats.sessions_upserted, 2);
 
@@ -1401,7 +1649,9 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let message = db
@@ -1418,7 +1668,8 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
     assert_eq!(metadata["produced_commit_kind"], "committed");
 
     let hits = db
-        .git_sessions_for(&SessionsForQuery {
+        .runtime()
+        .project_git_sessions_for_test(&SessionsForQuery {
             git_ref: GitRefFilter::Commit(sha[..8].to_string()),
             since: None,
             until: None,
@@ -1435,7 +1686,8 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
         Some("commit-result-1")
     );
     let branch_hits = db
-        .git_sessions_for(&SessionsForQuery {
+        .runtime()
+        .project_git_sessions_for_test(&SessionsForQuery {
             git_ref: GitRefFilter::Branch("main".to_string()),
             since: None,
             until: None,
@@ -1446,4 +1698,74 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
     assert_eq!(branch_hits.len(), 1);
     assert_eq!(branch_hits[0].session_id, "claude-commit");
     assert_eq!(branch_hits[0].sources, vec!["ingest".to_string()]);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let path = write_claude_transcript(&home, &project, "claude-obs-conflict");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Claude))
+            .await
+            .messages_upserted,
+        2
+    );
+    assert!(durable_table_count(&db, "observations").await >= 1);
+    let original = db
+        .search_session_messages("claude", None, "fixed", 10)
+        .await;
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0].message.message_id, "msg_claude_1");
+    let original_text = original[0].message.text.clone();
+    drop(db);
+
+    // Same parser-evidenced message.id with different content is a conflicting
+    // V1 output identity. The observation itself has a distinct byte range, but
+    // projection must fail closed and preserve the first durable message row.
+    let conflicting = serde_json::json!({
+        "type": "assistant",
+        "cwd": project,
+        "sessionId": "claude-obs-conflict",
+        "uuid": "u2",
+        "timestamp": "2026-01-01T00:00:06.000Z",
+        "message": {
+            "id": "msg_claude_1",
+            "role": "assistant",
+            "content": "Conflicting Claude overwrite attempt."
+        }
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{conflicting}"
+    )
+    .unwrap();
+
+    let again = open_project_session_db(&project).await.unwrap();
+    let _ =
+        ingest_global_sources_for_provider(&again, &project, Some(SessionProvider::Claude)).await;
+    let replayed = again
+        .search_session_messages("claude", None, "fixed", 10)
+        .await;
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].message.message_id, "msg_claude_1");
+    assert_eq!(replayed[0].message.text, original_text);
+    assert!(
+        again
+            .search_session_messages("claude", None, "overwrite", 10)
+            .await
+            .is_empty()
+    );
 }

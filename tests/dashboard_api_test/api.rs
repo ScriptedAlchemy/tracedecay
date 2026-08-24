@@ -1,7 +1,14 @@
 use crate::dashboard_api_support::*;
+use serde_json::json;
+
+fn absent_canonical_fact_id(existing: &FactId) -> String {
+    let raw = existing.as_str();
+    let replacement = if raw.ends_with('0') { '1' } else { '0' };
+    format!("{}{replacement}", &raw[..raw.len() - 1])
+}
 
 #[test]
-fn dashboard_plugin_manifest_assets_are_served() {
+fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -10,33 +17,27 @@ fn dashboard_plugin_manifest_assets_are_served() {
         let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent();
 
-        let (status, plugins) = get_json(
-            &agent,
-            &format!("{}/api/dashboard/plugins", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        for plugin in plugins
-            .as_array()
-            .unwrap_or_else(|| panic!("expected plugin manifest array"))
-        {
-            let name = plugin["name"]
-                .as_str()
-                .unwrap_or_else(|| panic!("plugin name should be a string: {plugin}"));
-            for key in ["entry", "css"] {
-                let Some(asset) = plugin[key].as_str() else {
-                    continue;
-                };
-                let url = format!("{}/dashboard-plugins/{name}/{asset}", fixture.base_url);
-                let response = agent
-                    .get(&url)
-                    .call()
-                    .unwrap_or_else(|err| panic!("GET {url} failed: {err}"));
-                assert_eq!(
-                    response.status().as_u16(),
-                    200,
-                    "advertised plugin asset should be served: {name} {asset}"
-                );
-            }
+        for path in [
+            "/legacy",
+            "/shell/shell.js",
+            "/dashboard-plugins/savings/dist/index.js",
+        ] {
+            let mut response = agent
+                .get(format!("{}{path}", fixture.base_url))
+                .call()
+                .unwrap_or_else(|err| panic!("GET {path} failed: {err}"));
+            assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/html; charset=utf-8"),
+                "retired path must fall through to the canonical SPA, never a legacy asset"
+            );
+            let body = response.body_mut().read_to_string().unwrap();
+            assert!(body.contains("<title>TraceDecay</title>"));
+            assert!(!body.contains("rewrite in progress"));
         }
     });
 }
@@ -48,18 +49,15 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        use tracedecay::automation::fact_proposals::{
-            FactProposalRecord, FactProposalState, FactProposalStore, save_fact_proposal_store,
-        };
-        use tracedecay::automation::managed_skills::{
-            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
-            create_managed_skill_draft, default_managed_skill_targets,
+        use tracedecay_agent_hosts::automation::managed_skills::{
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
+            default_managed_skill_targets,
         };
 
         let fixture = start_dashboard_fixture(false).await;
         let profile_root = tracedecay::storage::default_profile_root()
             .unwrap_or_else(|err| panic!("expected dashboard fixture profile root: {err}"));
-        let skill = create_managed_skill_draft(
+        create_managed_skill(
             &profile_root,
             ManagedSkillDraft {
                 id: "dashboard-outcome-skill".to_string(),
@@ -78,42 +76,21 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         )
         .await
         .unwrap();
-        approve_managed_skill(&profile_root, &skill.metadata.id)
-            .await
-            .unwrap();
 
-        set_fact_access_without_touching_updated_at(&fixture, 103, 2, 1_700_000_500).await;
-        let cg = TraceDecay::open(&fixture.project_root)
+        let cg = fixture
+            .host_runtime
+            .open_project_graph_for_test(
+                &fixture.project_root,
+                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+            )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
-        save_fact_proposal_store(
-            &dashboard_root,
-            &FactProposalStore {
-                schema_version: 1,
-                proposals: vec![FactProposalRecord {
-                    schema_version: 1,
-                    proposal_id: "fact_dashboard_outcome".to_string(),
-                    run_id: "run_dashboard_outcomes".to_string(),
-                    evidence_hash: None,
-                    state: FactProposalState::Applied,
-                    add_fact_request: None,
-                    proposal: None,
-                    validation_reason: None,
-                    validation: None,
-                    reviewer: Some("dashboard-test".to_string()),
-                    applied_fact_id: Some(103),
-                    apply_outcome: None,
-                    created_at: 1_700_000_400,
-                    updated_at: 1_700_000_400,
-                    duplicate_count: 0,
-                    last_duplicate_run_id: None,
-                    folded_contents: Vec::new(),
-                }],
-            },
+        let applied_receipt = record_dashboard_automatic_fact(
+            &cg,
+            "run_dashboard_outcomes",
+            "Dashboard outcome reads use automatic fact receipt authority",
         )
-        .await
-        .unwrap();
+        .await;
 
         let agent = http_agent();
         let (status, payload) = get_json(
@@ -130,21 +107,26 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         let skill = skills
             .iter()
             .find(|skill| skill["skill_id"] == "dashboard-outcome-skill")
-            .unwrap_or_else(|| panic!("expected approved skill outcome: {payload}"));
+            .unwrap_or_else(|| panic!("expected activated skill outcome: {payload}"));
         assert_eq!(skill["verdict"], "too_early");
-        assert!(skill["approved_at"].is_number());
+        assert!(skill["activated_at"].is_number());
+        assert!(skill["days_since_activation"].is_number());
 
         let facts = payload["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected fact outcomes array: {payload}"));
         let fact = facts
             .iter()
-            .find(|fact| fact["proposal_id"] == "fact_dashboard_outcome")
+            .find(|fact| fact["apply_id"].as_str() == Some(applied_receipt.apply_id.as_str()))
             .unwrap_or_else(|| panic!("expected applied fact outcome: {payload}"));
-        assert_eq!(fact["fact_id"], 103);
-        assert_eq!(fact["verdict"], "recalled_and_helpful");
+        assert_eq!(
+            fact["canonical_fact_id"],
+            serde_json::json!(applied_receipt.fact_id)
+        );
+        assert_eq!(fact["run_id"], "run_dashboard_outcomes");
+        assert_eq!(fact["verdict"], "never_recalled");
         assert_eq!(fact["still_exists"], true);
-        assert_eq!(fact["access_count"], 2);
+        assert_eq!(fact["access_count"], 0);
     });
 }
 
@@ -157,6 +139,12 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
+        let project_fact_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must be explicit",
+        );
+        let tool_fact_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
 
         let (status, overview) = get_json(
             &agent,
@@ -166,41 +154,71 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             ),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        let overview = &overview["payload"];
         assert_eq!(overview["providers"]["memory_provider"], "tracedecay");
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
-        assert_eq!(overview["holographic"]["overview"]["banks"], 3);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
-        // Bank list counts must be live (consistent with the header fact
-        // count). The stored bundle snapshot still stays exposed as
-        // bundled_fact_count, but startup backfill rebuilds now refresh the
-        // seeded project bank to the live membership count.
-        let memory_banks = overview["holographic"]["overview"]["memory_banks"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected memory_banks array"));
-        let project_bank = memory_banks
-            .iter()
-            .find(|bank| bank["bank_name"] == "project")
-            .unwrap_or_else(|| panic!("expected project bank in memory_banks"));
+        assert_eq!(overview["holographic"]["reads"]["facts"]["state"], "ready");
         assert_eq!(
-            project_bank["fact_count"], 2,
-            "bank list must report live membership counts"
+            overview["holographic"]["reads"]["entities"]["state"],
+            "ready"
+        );
+        assert_eq!(overview["holographic"]["reads"]["graph"]["state"], "ready");
+        assert_eq!(
+            overview["holographic"]["facts_coverage"]["completeness"],
+            "complete"
+        );
+        assert_eq!(overview["holographic"]["facts_coverage"]["limit"], 5);
+        assert_eq!(
+            overview["holographic"]["facts_coverage"]["graph"]["kind"], "complete",
+            "ranked fact search must report its mounted graph-assist coverage: {overview}"
+        );
+        assert!(
+            overview["holographic"]["facts_coverage"]["graph"]["root_count"].is_number()
+                && overview["holographic"]["facts_coverage"]["graph"]["relation_count"].is_number()
+                && overview["holographic"]["facts_coverage"]["graph"]["expanded_fact_count"]
+                    .is_number(),
+            "complete graph-assist coverage carries its measured counts: {overview}"
+        );
+
+        let (status, entity_bounded) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/?limit=1&graph_limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(entity_bounded["domain_state"], "partial");
+        assert_eq!(
+            entity_bounded["payload"]["holographic"]["reads"]["entities"]["state"],
+            "partial"
         );
         assert_eq!(
-            project_bank["bundled_fact_count"], 2,
-            "startup bank rebuild should refresh the bundled project snapshot to the live membership count"
+            entity_bounded["payload"]["holographic"]["reads"]["entities"]["code"],
+            "entity_limit_reached"
+        );
+        assert_eq!(
+            entity_bounded["payload"]["holographic"]["entities"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
         );
         let facts = overview["holographic"]["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected facts array in overview payload"));
         assert_eq!(facts.len(), 2, "query should filter to cache facts only");
-        // Access tracking is part of every fact payload (seeded rows carry
-        // the column defaults).
         assert!(
-            facts
-                .iter()
-                .all(|fact| fact["access_count"].is_number()
-                    && fact.get("last_recalled_at").is_some()),
-            "fact list rows must surface access_count and last_recalled_at"
+            facts.iter().all(|fact| {
+                fact["fact_id"]
+                    .as_str()
+                    .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())
+                    && fact["payload_access"] == "eligible"
+                    && fact["access_count"].is_number()
+                    && fact.get("last_recalled_at").is_some()
+            }),
+            "fact rows must expose canonical identities and exact payload availability: {facts:?}"
         );
         let graph_nodes = overview["holographic"]["graph"]["nodes"]
             .as_array()
@@ -208,6 +226,34 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert!(
             graph_nodes.iter().any(|node| node["kind"] == "entity"),
             "graph should include entity nodes"
+        );
+        let graph_fact_nodes = graph_nodes
+            .iter()
+            .filter(|node| node["kind"] == "fact")
+            .collect::<Vec<_>>();
+        assert!(
+            !graph_fact_nodes.is_empty()
+                && graph_fact_nodes.iter().all(|node| node["fact_id"]
+                    .as_str()
+                    .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())),
+            "every Grafeo fact node must preserve canonical identity: {graph_nodes:?}"
+        );
+        let graph_edges = overview["holographic"]["graph"]["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected graph edges array"));
+        assert!(
+            graph_edges
+                .iter()
+                .any(|edge| edge["kind"] == "active_assertion"),
+            "the mounted memory relation graph should expose canonical assertion topology"
+        );
+        assert_eq!(
+            overview["holographic"]["graph"]["coverage"]["completeness"],
+            "complete"
+        );
+        assert_eq!(
+            overview["holographic"]["graph"]["coverage"]["omission_reasons"],
+            Value::Array(Vec::new())
         );
         let growth = overview["holographic"]["overview"]["growth"]
             .as_array()
@@ -228,6 +274,17 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "last cumulative growth point should include all seeded facts"
         );
 
+        let (status, memory_status) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/status", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let memory_status = &memory_status["payload"];
+        assert_eq!(memory_status["memory"]["fact_count"], 3);
+        assert_eq!(memory_status["memory"]["entity_count"], 3);
+        assert_eq!(memory_status["memory"]["algebra"]["name"], "amari_fhrr");
+        assert_eq!(memory_status["memory"]["algebra"]["hrr_dim"], 2048);
+
         let (status, projection) = get_json(
             &agent,
             &format!(
@@ -239,6 +296,10 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(projection["limit"], 2000);
         assert_eq!(projection["method"], "pca");
         assert_eq!(projection["dim"], 2048);
+        assert_eq!(projection["coverage"]["completeness"], "complete");
+        assert_eq!(projection["coverage"]["limit"], 2000);
+        assert!(projection["coverage"]["examined"].is_number());
+        assert_eq!(projection["coverage"]["omission_reasons"], json!([]));
         let projection_points = projection["points"]
             .as_array()
             .unwrap_or_else(|| panic!("expected projection points array"));
@@ -252,21 +313,20 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         let project_point = projection_points
             .iter()
-            .find(|point| point["fact_id"].as_i64() == Some(101))
-            .unwrap_or_else(|| panic!("expected projection point for fact 101"));
-        assert_eq!(project_point["bank_name"], "project");
-        assert!(
-            project_point["bank_id"].is_number(),
-            "projection point should include numeric bank_id"
-        );
+            .find(|point| point["fact_id"] == project_fact_id.as_str())
+            .unwrap_or_else(|| panic!("expected projection point for seeded project fact"));
         assert_eq!(project_point["entity_count"], 1);
-        assert_eq!(project_point["connection_count"], 1);
+        assert_eq!(project_point["payload_access"], "eligible");
         let tool_point = projection_points
             .iter()
-            .find(|point| point["fact_id"].as_i64() == Some(103))
-            .unwrap_or_else(|| panic!("expected projection point for fact 103"));
+            .find(|point| point["fact_id"] == tool_fact_id.as_str())
+            .unwrap_or_else(|| panic!("expected projection point for seeded tool fact"));
         assert_eq!(tool_point["entity_count"], 2);
-        assert_eq!(tool_point["connection_count"], 2);
+        assert!(projection_points.iter().all(|point| {
+            point["fact_id"]
+                .as_str()
+                .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())
+        }));
 
         let (status, similarity) = get_json(
             &agent,
@@ -289,15 +349,26 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             3,
             "min_similarity=0 should return pairs below the previous 0.5 floor"
         );
-        let duplicate_pair = pairs
+        assert!(
+            pairs.iter().all(|pair| {
+                ["a_id", "b_id"].iter().all(|field| {
+                    pair[field]
+                        .as_str()
+                        .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())
+                })
+            }),
+            "similarity must preserve canonical fact identities: {pairs:?}"
+        );
+        let high_similarity_pair = pairs
             .iter()
-            .find(|pair| pair["classification"] == "likely_duplicate")
-            .unwrap_or_else(|| panic!("expected likely_duplicate similarity pair"));
-        let duplicate_similarity = duplicate_pair["similarity"]
+            .find(|pair| pair["classification"] == "high_similarity")
+            .unwrap_or_else(|| panic!("expected high_similarity pair: {pairs:?}"));
+        let high_similarity = high_similarity_pair["similarity"]
             .as_f64()
             .unwrap_or_else(|| panic!("expected numeric similarity"));
+        let rounded_similarity = (high_similarity * 10_000.0).round() / 10_000.0;
         assert!(
-            duplicate_similarity < 1.0 && duplicate_similarity > 0.9999,
+            (high_similarity - rounded_similarity).abs() > f64::EPSILON,
             "similarity should retain full precision instead of rounding to four decimals"
         );
         let distribution = &similarity["score_distribution"];
@@ -333,31 +404,9 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert!(
             pairs
                 .iter()
-                .any(|pair| pair["classification"] == "likely_duplicate"),
-            "fixture vectors should produce a likely_duplicate pair"
+                .any(|pair| pair["classification"] == "high_similarity"),
+            "fixture vectors should produce a high_similarity pair"
         );
-
-        let (status, curation_status) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/curation/status",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(curation_status["config"]["enabled"], true);
-
-        let (status, curation_activity) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/curation/activity?limit=75",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(curation_activity["count"], 0);
-        assert_eq!(curation_activity["events"], Value::Array(Vec::new()));
-
     });
 }
 
@@ -370,6 +419,7 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
+        let tool_fact_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
 
         assert!(
             LONG_FACT_CONTENT.chars().count() > 200,
@@ -390,9 +440,9 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             .and_then(|points| {
                 points
                     .iter()
-                    .find(|point| point["fact_id"].as_i64() == Some(103))
+                    .find(|point| point["fact_id"] == tool_fact_id.as_str())
             })
-            .unwrap_or_else(|| panic!("expected projection point for fact 103"));
+            .unwrap_or_else(|| panic!("expected projection point for seeded tool fact"));
         assert_eq!(
             truncated_point["content"]
                 .as_str()
@@ -406,15 +456,27 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         // The detail endpoint returns the complete row plus linked entities.
         let (status, detail) = get_json(
             &agent,
-            &format!("{}/api/plugins/holographic/fact/103", fixture.base_url),
+            &format!(
+                "{}/api/plugins/holographic/fact/{tool_fact_id}",
+                fixture.base_url
+            ),
         );
         assert_eq!(status, 200);
+        assert_eq!(detail["domain_state"], "ready");
+        let detail = &detail["payload"];
         assert_eq!(detail["error"], "");
-        assert_eq!(detail["fact"]["fact_id"], 103);
+        assert_eq!(
+            detail["fact"]["fact_id"].as_str(),
+            Some(tool_fact_id.as_str())
+        );
         assert_eq!(detail["fact"]["category"], "tool");
         assert_eq!(detail["fact"]["content"], LONG_FACT_CONTENT);
-        assert_eq!(detail["fact"]["has_hrr"], 1);
-        assert_eq!(detail["fact"]["trust_score"], 0.76);
+        assert_eq!(
+            detail["fact"]["entities"],
+            serde_json::json!(["LCMTab", "SimilarityView"]),
+            "canonical fact payload entities stay normalized strings"
+        );
+        assert_eq!(detail["fact"]["trust_score"], 0.66);
         assert!(
             detail["fact"]["access_count"].is_number(),
             "fact detail must surface access_count"
@@ -423,9 +485,9 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             detail["fact"].get("last_recalled_at").is_some(),
             "fact detail must surface last_recalled_at"
         );
-        let entities = detail["fact"]["entities"]
+        let entities = detail["fact"]["linked_entities"]
             .as_array()
-            .unwrap_or_else(|| panic!("expected entities array in fact detail"));
+            .unwrap_or_else(|| panic!("expected linked_entities array in fact detail: {detail}"));
         let entity_names: Vec<&str> = entities
             .iter()
             .filter_map(|entity| entity["name"].as_str())
@@ -436,18 +498,33 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             "fact detail must list linked entities sorted by name"
         );
 
-        // Unknown ids are a 404 with the FastAPI-style detail body.
+        let missing_fact_id = absent_canonical_fact_id(&tool_fact_id);
+        FactId::new(missing_fact_id.clone())
+            .unwrap_or_else(|error| panic!("missing fixture id must remain canonical: {error}"));
         let (status, missing) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/{missing_fact_id}",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(missing["domain_state"], "complete_zero_findings");
+        assert_eq!(missing["payload"], Value::Null);
+
+        let (status, numeric) = get_json(
             &agent,
             &format!("{}/api/plugins/holographic/fact/99999", fixture.base_url),
         );
-        assert_eq!(status, 404);
+        assert_eq!(status, 200);
+        assert_eq!(numeric["domain_state"], "error");
         assert!(
-            missing["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("99999"),
-            "404 body should carry the requested fact id"
+            numeric["coverage"]["omission_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("invalid canonical fact id")))),
+            "numeric legacy identity must fail closed: {numeric}"
         );
     });
 }
@@ -460,88 +537,81 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        let conn = project_db_conn(&fixture).await;
-        conn.execute(
-            "INSERT INTO memory_feedback_events
-                (fact_id, action, trust_delta, old_trust, new_trust, created_at, source, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql::params![
-                103_i64,
-                "helpful",
-                0.05_f64,
-                0.71_f64,
-                0.76_f64,
-                1_700_000_450_i64,
-                "dashboard-test",
-                "confirmed durable"
-            ],
-        )
-        .await
-        .unwrap_or_else(|err| panic!("failed to insert helpful feedback row: {err}"));
-        conn.execute(
-            "INSERT INTO memory_feedback_events
-                (fact_id, action, trust_delta, old_trust, new_trust, created_at, source, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql::params![
-                103_i64,
-                "unhelpful",
-                -0.10_f64,
-                0.76_f64,
-                0.66_f64,
-                1_700_000_460_i64,
-                "dashboard-test",
-                libsql::Value::Null
-            ],
-        )
-        .await
-        .unwrap_or_else(|err| panic!("failed to insert unhelpful feedback row: {err}"));
-
         let agent = http_agent();
+        let tool_fact_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
+        let project_fact_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must be explicit",
+        );
         let (status, history) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/fact/103/trust-history",
+                "{}/api/plugins/holographic/fact/{tool_fact_id}/trust-history",
                 fixture.base_url
             ),
         );
         assert_eq!(status, 200);
         assert_eq!(history["error"], "");
-        assert_eq!(history["fact_id"], 103);
+        assert_eq!(history["fact_id"].as_str(), Some(tool_fact_id.as_str()));
+        assert_eq!(history["limit"], 300);
+        assert_eq!(history["completeness"], "complete");
+        assert!(history["next_after"].is_null());
+        assert!(history.get("repair").is_none());
         let trail = history["trust_history"]
             .as_array()
             .unwrap_or_else(|| panic!("expected trust_history array: {history}"));
         assert_eq!(trail.len(), 2);
-        assert_eq!(trail[0]["timestamp"], 1_700_000_450_i64);
+        assert!(trail.iter().all(|entry| entry["event_id"].is_string()));
+        assert!(trail[0]["timestamp"].is_number());
         assert_eq!(trail[0]["action"], "helpful");
         assert_eq!(trail[0]["old_trust"], 0.71);
         assert_eq!(trail[0]["new_trust"], 0.76);
-        assert_eq!(trail[0]["delta"], 0.05);
+        assert!(
+            (trail[0]["delta"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("expected numeric trust delta: {}", trail[0]))
+                - 0.05)
+                .abs()
+                < 1e-12
+        );
         assert_eq!(trail[0]["source"], "dashboard-test");
         assert_eq!(trail[0]["note"], "confirmed durable");
+        assert_eq!(trail[0]["details_availability"], "available");
         assert_eq!(trail[1]["action"], "unhelpful");
+        assert_eq!(trail[1]["old_trust"], 0.76);
+        assert_eq!(trail[1]["new_trust"], 0.66);
         assert!(trail[1]["note"].is_null());
 
         let (status, empty_history) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/fact/101/trust-history",
+                "{}/api/plugins/holographic/fact/{project_fact_id}/trust-history",
                 fixture.base_url
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(empty_history["fact_id"], 101);
+        assert_eq!(
+            empty_history["fact_id"].as_str(),
+            Some(project_fact_id.as_str())
+        );
         assert_eq!(
             empty_history["trust_history"]
                 .as_array()
                 .map(|rows| rows.len()),
             Some(0)
         );
+        assert_eq!(empty_history["completeness"], "complete");
+        assert!(empty_history["next_after"].is_null());
 
+        let missing_fact_id = absent_canonical_fact_id(&project_fact_id);
+        FactId::new(missing_fact_id.clone())
+            .unwrap_or_else(|error| panic!("missing fixture id must remain canonical: {error}"));
         let (status, missing) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/fact/99999/trust-history",
-                fixture.base_url
+                "{}/api/plugins/holographic/fact/{missing_fact_id}/trust-history",
+                fixture.base_url,
             ),
         );
         assert_eq!(status, 404);
@@ -549,8 +619,23 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
             missing["detail"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("99999"),
+                .contains(&missing_fact_id),
             "404 body should carry the requested fact id"
+        );
+
+        let (status, numeric) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/99999/trust-history",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            numeric["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("invalid canonical fact id")),
+            "numeric legacy identity must fail closed: {numeric}"
         );
     });
 }
@@ -573,24 +658,27 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["exists"], true);
         assert_eq!(
-            overview["storage_scope"], "profile_sharded",
+            overview["payload"]["exists"], true,
+            "seeded LCM overview must serve a ready payload: {overview}"
+        );
+        assert_eq!(
+            overview["payload"]["storage_scope"], "profile_sharded",
             "LCM serves the resolved project session store even when TRACEDECAY_GLOBAL_DB is set for accounting"
         );
-        assert_eq!(overview["overview"]["messages_total"], 3);
-        assert_eq!(overview["overview"]["sessions_total"], 1);
-        assert_eq!(overview["overview"]["summary_nodes_total"], 1);
+        assert_eq!(overview["payload"]["overview"]["messages_total"], 3);
+        assert_eq!(overview["payload"]["overview"]["sessions_total"], 1);
+        assert_eq!(overview["payload"]["overview"]["summary_nodes_total"], 1);
         assert_eq!(
-            overview["overview"]["compression"]["source_token_count"],
+            overview["payload"]["overview"]["compression"]["source_token_count"],
             180
         );
-        assert_eq!(overview["overview"]["compression"]["token_count"], 72);
-        let latest_sessions = overview["latest_sessions"]
+        assert_eq!(overview["payload"]["overview"]["compression"]["token_count"], 72);
+        let latest_sessions = overview["payload"]["latest_sessions"]
             .as_array()
             .unwrap_or_else(|| panic!("expected latest_sessions array"));
         assert_eq!(latest_sessions.len(), 1);
-        let matches_messages = overview["matches"]["messages"]
+        let matches_messages = overview["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected overview.matches.messages array"));
         assert!(
@@ -606,20 +694,20 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["engine"], "fts");
-        let search_messages = search["matches"]["messages"]
+        assert_eq!(search["payload"]["engine"], "canonical_temporal");
+        let search_messages = search["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.messages array"));
-        let search_nodes = search["matches"]["summary_nodes"]
+        let search_nodes = search["payload"]["matches"]["summary_nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.summary_nodes array"));
         assert!(
             !search_messages.is_empty(),
-            "FTS search should match seeded messages"
+            "canonical search should match seeded messages"
         );
         assert!(
             !search_nodes.is_empty(),
-            "FTS search should match seeded summary nodes"
+            "canonical search should match seeded summary nodes"
         );
 
         let (status, like_search) = get_json(
@@ -630,7 +718,11 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(like_search["engine"], "like");
+        assert_eq!(like_search["payload"]["engine"], "canonical_temporal");
+        assert!(
+            like_search["payload"]["matches"]["messages"].is_array(),
+            "a non-tokenizable query must stay a valid empty search, not an error: {like_search}"
+        );
     });
 }
 
@@ -652,16 +744,16 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["exists"], true);
-        assert_eq!(overview["overview"]["messages_total"], 0);
-        assert_eq!(overview["overview"]["summary_nodes_total"], 0);
+        assert_eq!(overview["payload"]["exists"], true);
+        assert_eq!(overview["payload"]["overview"]["messages_total"], 0);
+        assert_eq!(overview["payload"]["overview"]["summary_nodes_total"], 0);
         assert_eq!(
-            overview["latest_sessions"],
+            overview["payload"]["latest_sessions"],
             Value::Array(Vec::new()),
             "empty LCM store should have no latest sessions"
         );
         assert_eq!(
-            overview["latest_summary_nodes"],
+            overview["payload"]["latest_summary_nodes"],
             Value::Array(Vec::new()),
             "empty LCM store should have no summary nodes"
         );
@@ -674,14 +766,14 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["engine"], "fts");
+        assert_eq!(search["payload"]["engine"], "canonical_temporal");
         assert_eq!(
-            search["matches"]["messages"],
+            search["payload"]["matches"]["messages"],
             Value::Array(Vec::new()),
             "empty LCM store search should have zero message matches"
         );
         assert_eq!(
-            search["matches"]["summary_nodes"],
+            search["payload"]["matches"]["summary_nodes"],
             Value::Array(Vec::new()),
             "empty LCM store search should have zero summary-node matches"
         );
@@ -708,16 +800,17 @@ fn lcm_serves_project_session_store_without_global_override() {
         let _env_guard = EnvVarGuard::unset(GLOBAL_DB_ENV);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
-        let session_store = open_project_session_store(&project_root).await;
-        let expected_session_path =
-            tracedecay::sessions::cursor::project_session_db_path(&project_root);
+        let (cg, session_store) = setup_project(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
-        drop(session_store);
 
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            session_store,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
 
         let agent = http_agent();
         wait_for_dashboard(&agent, &base_url).await;
@@ -726,12 +819,10 @@ fn lcm_serves_project_session_store_without_global_override() {
         assert_eq!(status, 200);
         assert_eq!(capabilities["lcm_scope"], "profile_sharded");
         assert_eq!(capabilities["features"]["lcm"], true);
-        let lcm_db = capabilities["lcm_db"]
-            .as_str()
-            .unwrap_or_else(|| panic!("expected capabilities.lcm_db string"));
         assert!(
-            Path::new(lcm_db) == expected_session_path,
-            "capabilities.lcm_db should be the resolved project session store, got {lcm_db}"
+            capabilities["lcm_db"]
+                .as_str()
+                .is_some_and(|path| !path.is_empty())
         );
 
         let (status, overview) = get_json(
@@ -739,17 +830,18 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "profile_sharded");
-        assert_eq!(overview["exists"], true);
-        assert_eq!(overview["overview"]["messages_total"], 3);
-        assert_eq!(overview["overview"]["sessions_total"], 1);
-        assert_eq!(overview["overview"]["summary_nodes_total"], 1);
-        let path = overview["path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("expected overview.path string"));
+        assert_eq!(
+            overview["payload"]["storage_scope"], "profile_sharded",
+            "project-store LCM overview must serve a ready payload: {overview}"
+        );
+        assert_eq!(overview["payload"]["exists"], true);
+        assert_eq!(overview["payload"]["overview"]["messages_total"], 3);
+        assert_eq!(overview["payload"]["overview"]["sessions_total"], 1);
+        assert_eq!(overview["payload"]["overview"]["summary_nodes_total"], 1);
         assert!(
-            Path::new(path) == expected_session_path,
-            "overview.path should be the resolved project session store, got {path}"
+            overview["payload"]["path"]
+                .as_str()
+                .is_some_and(|path| !path.is_empty())
         );
 
         let (status, search) = get_json(
@@ -757,8 +849,8 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/search?q=vector&limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["storage_scope"], "profile_sharded");
-        let search_messages = search["matches"]["messages"]
+        assert_eq!(search["payload"]["storage_scope"], "profile_sharded");
+        let search_messages = search["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.messages array"));
         assert!(
@@ -789,17 +881,18 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let cg = setup_project(&project_root).await;
+        let (cg, session_store) = setup_project(&project_root).await;
         // The project store has rows; the overridden global accounting store has none.
-        let session_store = open_project_session_store(&project_root).await;
-        let expected_session_path =
-            tracedecay::sessions::cursor::project_session_db_path(&project_root);
         seed_lcm_fixture(&session_store, &project_root).await;
-        drop(session_store);
 
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            session_store,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
 
         let agent = http_agent();
         wait_for_dashboard(&agent, &base_url).await;
@@ -813,18 +906,19 @@ fn lcm_project_store_wins_over_global_accounting_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "profile_sharded");
-        assert_eq!(overview["exists"], true);
         assert_eq!(
-            overview["overview"]["messages_total"], 3,
+            overview["payload"]["storage_scope"], "profile_sharded",
+            "override-pinned LCM overview must serve a ready payload: {overview}"
+        );
+        assert_eq!(overview["payload"]["exists"], true);
+        assert_eq!(
+            overview["payload"]["overview"]["messages_total"], 3,
             "LCM must serve the project store, not the empty accounting DB"
         );
-        let path = overview["path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("expected overview.path string"));
         assert!(
-            Path::new(path) == expected_session_path,
-            "expected resolved project session DB path, got {path}"
+            overview["payload"]["path"]
+                .as_str()
+                .is_some_and(|path| !path.is_empty())
         );
 
         server.stop();

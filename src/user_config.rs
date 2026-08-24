@@ -1,5 +1,7 @@
-pub use tracedecay_usecases::user_config::{
-    ConfigSaveError, UserConfig, automation_is_configured, config_path, parse_duration,
-};
+//! Root shim for user-level `TraceDecay` configuration.
+//!
+//! The implementation lives in `tracedecay_usecases::user_config` (canonical
+//! copy; see SEAMS.md). This module keeps every historical
+//! `crate::user_config::…` path resolving from the root crate.
 
-pub(crate) use tracedecay_usecases::user_config::parse_or_warn_default;
+pub use tracedecay_usecases::user_config::*;

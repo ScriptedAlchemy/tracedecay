@@ -14,7 +14,10 @@ Ship-readiness sweep and delete-safely protocol for `tracedecay:reviewing-change
 2. **Unfinished work → `tracedecay_todos`** (`kinds:
    ["FIXME","HACK","XXX","UNIMPLEMENTED"]`).
 3. **Unreachable code → `tracedecay_dead_code`** (`include_public: true` for
-   workspace-internal audits) and **`tracedecay_unused_imports`**.
+   workspace-internal audits), **`tracedecay_unused_imports`**, and
+   **`tracedecay_unmounted_files`** (files no build root reaches — no
+   compiler, bundler, or test runner ever loads them, so nothing in them was
+   type-checked or linted, however healthy the graph makes them look).
 4. **Risky and untested → `tracedecay_test_risk`**: high-complexity,
    high-fan-in symbols with weak coverage.
 5. **Rank:** production panic/unsafe in hot paths first (cross-check fan-in
@@ -25,6 +28,8 @@ Ship-readiness sweep and delete-safely protocol for `tracedecay:reviewing-change
 
 1. Discover with `tracedecay_dead_code` / `tracedecay_unused_imports` /
    `tracedecay_redundancy`; focused pass → `tracedecay_simplify_scan` (`files`).
+   Start with `tracedecay_unmounted_files`: a file nothing reaches is dead
+   wholesale, and every symbol in it looks live to the other three tools.
 2. **Before deleting anything → confirm zero real callers** with
    `tracedecay_callers` / `tracedecay_rename_preview`. Be conservative with
    `pub` items (they may be used outside the indexed scope). Never delete a

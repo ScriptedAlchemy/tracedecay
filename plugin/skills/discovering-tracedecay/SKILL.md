@@ -25,6 +25,8 @@ transports. MCP is optional: capability discovery must work from a shell alone.
 | Trace calls or assess blast radius | `tracedecay:tracing-functions` / `tracedecay:assessing-impact` |
 | Review or edit code | `tracedecay:reviewing-changes` / `tracedecay:editing-safely` |
 | Recover decisions or session history | `tracedecay:project-memory` / `tracedecay:managing-session-context` |
+| Run or inspect Work tasks and attempts | `tracedecay:managing-work` |
+| Register or run Workflow definitions | `tracedecay:managing-workflows` |
 | Diagnose adoption or host health | `tracedecay:diagnosing-analytics` / `tracedecay doctor` |
 | Fix compiler or type errors | `tracedecay:fixing-build-and-type-errors` |
 

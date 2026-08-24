@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>CORTEX — the codebase as relief</title>
+<link rel="stylesheet" href="topography.css" />
+<style>
+  .body { display: grid; grid-template-columns: 1fr 306px; gap: 0; }
+  .terrain { border-right: 1px solid var(--raw-edge-subtle); }
+  .legend-col { background: var(--raw-surface-1); }
+  .legend-block { padding: 12px 14px; border-bottom: 1px solid var(--raw-edge-subtle); }
+  .legend-block:last-child { border-bottom: none; }
+  .legend-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+  .legend-body { font-size: 11px; line-height: 1.45; color: var(--raw-text-secondary); }
+  .swatch-row { display: flex; align-items: flex-end; gap: 14px; margin: 8px 0 7px; }
+  .swatch-row .cap { font-family: var(--font-mono); font-size: 9px; color: var(--raw-text-muted); text-align: center; display: block; margin-top: 5px; }
+  .ramp { height: 10px; border: 1px solid var(--raw-edge-subtle); }
+  .ramp-scale { display: flex; justify-content: space-between; margin-top: 4px; }
+  .ramp-scale span { font-family: var(--font-mono); font-size: 9px; color: var(--raw-text-muted); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="spine">
+    <span class="chan">01</span>
+    <h1>Cortex</h1>
+    <span class="sub">The indexed repository as continuous relief. Elevation is dependency depth, area is symbol mass,
+      contour density is internal connectivity, tint is churn. Nothing here is a box and nothing is an arrow.</span>
+  </header>
+
+  <div class="readbar">
+    <div class="readout"><span class="td-legend">Indexed symbols</span><span class="v">1 206</span></div>
+    <div class="readout"><span class="td-legend">Module regions</span><span class="v">19 <span class="u">+1 unindexed</span></span></div>
+    <div class="readout"><span class="td-legend">Depth strata</span><span class="v">0 – 6</span></div>
+    <div class="readout"><span class="td-legend">Contour interval</span><span class="v">0.50 <span class="u">edges / symbol</span></span></div>
+    <div class="readout"><span class="td-legend">Channels drawn</span><span class="v">6 <span class="u">of 214 cross-module</span></span></div>
+    <div class="readout grow"><span class="td-legend">Aggregation</span><span class="v">19 regions ⟵ 1 206 symbols <span class="u">subgraph cap 250 nodes</span></span></div>
+  </div>
+
+  <div class="body">
+    <div class="terrain field graticule"><svg id="map" viewBox="0 0 1130 1190" width="100%"></svg></div>
+
+    <aside class="legend-col">
+      <div class="legend-block plate" style="border-left:none;border-right:none;border-top:none">
+        <div class="legend-head"><span class="td-title">Map legend</span><span class="td-rule"></span><span class="td-legend">plate 01</span></div>
+        <div class="legend-body">Every mark on the field is one of these six measurements. There are no
+          decorative marks.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Contour interval</span><span class="td-rule"></span></div>
+        <svg viewBox="0 0 272 70" width="100%" height="70" id="lg-contour"></svg>
+        <div class="legend-body"><b>0.50 internal edges per symbol.</b> One line per half-edge of internal
+          connectivity; every 5th is an index contour, drawn heavier and labelled with its value. A region ringed
+          seven times is seven times half an edge per symbol dense — <span class="mono">retrieval/</span> at 3.22.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Elevation</span><span class="td-rule"></span></div>
+        <svg viewBox="0 0 272 40" width="100%" height="40" id="lg-elev"></svg>
+        <div class="legend-body"><b>File-level dependency depth</b> (Tarjan SCC condensation → longest path).
+          Stratum 0 is bedrock everything stands on; stratum 6 is the ridge nothing imports.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Area</span><span class="td-rule"></span></div>
+        <svg viewBox="0 0 272 62" width="100%" height="62" id="lg-area"></svg>
+        <div class="legend-body"><b>Symbol mass.</b> Area, not radius, carries the count: a region twice as wide
+          holds four times the symbols.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Tint</span><span class="td-rule"></span></div>
+        <div class="ramp" id="lg-churn"></div>
+        <div class="ramp-scale"><span>0</span><span>commits / 90 d</span><span>23</span></div>
+        <div class="legend-body">Heat is <b>git churn</b>. Cool relief is settled ground; the warm regions are where
+          the repository is being cut into right now.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Channel width</span><span class="td-rule"></span></div>
+        <svg viewBox="0 0 272 54" width="100%" height="54" id="lg-flow"></svg>
+        <div class="legend-body"><b>Call sites on the bundled edge.</b> Width is √(call sites), so volume reads as
+          area. Six macro channels are drawn; the other 208 cross-module edges are folded into the regions they
+          connect and are not on this sheet.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Absence</span><span class="td-rule"></span></div>
+        <svg viewBox="0 0 272 44" width="100%" height="44" id="lg-absent"></svg>
+        <div class="legend-body">A region with <b>no relief</b> is not missing from the sheet — it is drawn at its
+          true position and area with its outline dashed and its interior empty. Blank means unmeasured, never zero.</div>
+      </div>
+
+      <div class="legend-block">
+        <div class="legend-head"><span class="td-legend">Scale</span><span class="td-rule"></span></div>
+        <div class="legend-body">
+          <span class="mono">1 region ≈ 63 symbols</span> · this is an <b>aggregate surface</b>. The subgraph endpoint
+          serves 80–250 nodes; 1 206 symbols cannot be drawn as bodies, so they are drawn as mass. Zooming a region
+          is what fetches its nodes.
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="note">
+    <section>
+      <h2>What this is</h2>
+      <p class="td-caption">A topographic sheet of the repository. Modules are not boxes on a canvas — they are
+      <b>landforms</b> with an elevation, an area, a shoreline and a contour density, and the reader navigates them
+      the way they navigate a map: by shape, by height, by where the water runs.</p>
+      <p class="td-caption">The point of the form is that <b>structure is continuous</b>. A dependency graph drawn as
+      nodes and arrows makes a reader trace a route. A relief map lets them see the whole basin at once and notice
+      that <code>retrieval/</code> is a broad, densely-ringed, hot massif sitting three strata above bedrock, before
+      they have read a single label.</p>
+    </section>
+    <section>
+      <h2>Channel → data</h2>
+      <dl>
+        <dt>y position</dt><dd>file-level dependency depth (Tarjan SCC → longest path). Real, already computed.</dd>
+        <dt>x position</dt><dd>DSM directory cluster. Real. Order within a cluster is by symbol mass, descending.</dd>
+        <dt>area</dt><dd>count of symbol nodes whose <code>file_path</code> is under the module. Real.</dd>
+        <dt>contours</dt><dd>internal <code>calls</code>+<code>uses</code> edges ÷ symbols. Real; edge kinds exist.</dd>
+        <dt>tint</dt><dd>git churn over 90 days. Real (hotspots).</dd>
+        <dt>channel width</dt><dd>√(call-site count on the bundled cross-module edge). Real; per-edge call-site counts exist.</dd>
+        <dt>cluster hue</dt><dd>the kind-hue arc from <code>kindColor.ts</code>, applied to the cluster id, so a cluster keeps one hue across all four sheets.</dd>
+        <dt>weather strip</dt><dd><b>project-level only.</b> Live SSE activity is project-granular today, so the strip reports the whole project and is captioned as such. Per-region weather is a future state.</dd>
+      </dl>
+    </section>
+    <section>
+      <h2>Open question</h2>
+      <p class="td-caption">Contour density and area are computed on the <i>same</i> quantity family — a big module
+      tends to have more internal edges — so the two channels are correlated and a reader may double-count. Should
+      contours encode <b>edges per symbol</b> (as drawn: a shape measure, roughly area-independent) or <b>coupling
+      ratio</b> — internal edges ÷ external edges — which is what actually predicts whether a module can be moved?
+      The second is more useful and less correlated, but it is no longer a "how crowded is it here" reading, and the
+      map metaphor may not survive it.</p>
+      <p class="td-caption">Second-order: the strata are drawn evenly spaced, but dependency depth is an integer with
+      a wildly uneven population (stratum 3 holds a third of the repository). An area-preserving vertical scale would
+      be truer and much harder to read.</p>
+    </section>
+  </div>
+</div>
+
+<script src="topography.js"></script>
+<script>
+(function () {
+  'use strict';
+  var T = window.TOPO;
+  var el = T.el, text = T.text;
+
+  /* ---- fixture -----------------------------------------------------------
+   * Shaped exactly like the wire: module = a directory of file_paths; symbols =
+   * node count; internal = calls+uses edges wholly inside the module; churn =
+   * commits touching it in 90 days; depth = file-level dependency depth. */
+  var CLUSTERS = [
+    { id: 'graph-retrieval', label: 'retrieval spine', x: 190 },
+    { id: 'policy-authz',    label: 'policy / hooks',  x: 405 },
+    { id: 'persistence',     label: 'persistence',     x: 630 },
+    { id: 'feedback-memory', label: 'feedback',        x: 840 },
+    { id: 'surface-api',     label: 'surface',         x: 1010 },
+  ];
+
+  var MODULES = [
+    { path: 'crates/tracedecay-domain/src/graph',              depth: 0, c: 0, sym: 148, int: 421, churn: 6 },
+    { path: 'crates/tracedecay-domain/src/memory',             depth: 0, c: 3, sym: 71,  int: 118, churn: 5 },
+    { path: 'crates/tracedecay-domain/src/feedback',           depth: 0, c: 3, sym: 62,  int: 96,  churn: 14 },
+    { path: 'crates/tracedecay-policy/src/authorization',      depth: 1, c: 1, sym: 71,  int: 138, churn: 9 },
+    { path: 'crates/tracedecay-policy/src/routing',            depth: 1, c: 1, sym: 38,  int: 62,  churn: 11 },
+    { path: 'crates/tracedecay-store/src/schema',              depth: 1, c: 2, sym: 96,  int: 154, churn: 4 },
+    { path: 'crates/tracedecay-store/src/repository',          depth: 2, c: 2, sym: 133, int: 287, churn: 5 },
+    { path: 'crates/tracedecay-rusqlite-runtime/src/reader',   depth: 2, c: 2, sym: 54,  int: 108, churn: 7 },
+    { path: 'crates/tracedecay-rusqlite-runtime/src/writer',   depth: 2, c: 2, sym: 47,  int: 121, churn: 12 },
+    { path: 'crates/tracedecay-application/src/retrieval',     depth: 3, c: 0, sym: 214, int: 690, churn: 23 },
+    { path: 'crates/tracedecay-application/src/git',           depth: 3, c: 0, sym: 88,  int: 173, churn: 8 },
+    { path: 'crates/tracedecay-application/src/storage',       depth: 3, c: 2, sym: 79,  int: 121, churn: 6 },
+    { path: 'crates/tracedecay-application/src/feedback',      depth: 3, c: 3, sym: 102, int: 186, churn: 17 },
+    { path: 'crates/tracedecay-application/src/handlers.rs',   depth: 4, c: 0, sym: 156, int: 249, churn: 19 },
+    { path: 'crates/tracedecay-tool-catalog/src/snapshot',     depth: 4, c: 4, sym: 64,  int: 143, churn: 10 },
+    { path: 'crates/tracedecay-api/src/routes',                depth: 5, c: 4, sym: 121, int: 168, churn: 15 },
+    { path: 'crates/tracedecay-api/src/plugins',               depth: 5, c: 4, sym: 58,  int: 74,  churn: 4 },
+    { path: 'crates/tracedecay-hooks/src/session',             depth: 6, c: 1, sym: 92,  int: 141, churn: 21 },
+    { path: 'crates/tracedecay-hooks/src/dispatch',            depth: 6, c: 1, sym: 41,  int: 55,  churn: 13 },
+    // The absence beat: present in the tree, absent from the index.
+    { path: 'crates/tracedecay-hooks/src/vendor', depth: 6, c: 4, sym: 74, int: null, churn: null,
+      unindexed: 'vendored — 0 of 11 files parsed' },
+  ];
+
+  // Six macro channels. `calls` is the summed call-site count on the bundled
+  // cross-module edge; the other 208 are folded into the regions.
+  var CHANNELS = [
+    { via: [15, 13, 9, 6, 7], calls: 1412, label: 'routes → handlers → retrieval → repository → reader' },
+    { via: [9, 0],            calls: 977,  label: 'retrieval → domain graph' },
+    { via: [17, 13],          calls: 386,  label: 'hooks session → handlers' },
+    { via: [12, 2],           calls: 244,  label: 'app feedback → domain feedback' },
+    { via: [10, 6],           calls: 158,  label: 'git surfaces → repository' },
+    { via: [14, 11],          calls: 121,  label: 'catalog snapshot → app storage' },
+  ];
+
+  var CONTOUR_INTERVAL = 0.5;   // internal edges per symbol, per contour line
+  var INDEX_EVERY = 5;          // heavier, labelled line every 5th contour
+  var AREA_K = 3.55;            // radius = √symbols × k, so AREA carries mass
+  var CHURN_MAX = 23;
+
+  var STRATA = [
+    { d: 0, name: 'bedrock' }, { d: 1, name: '' }, { d: 2, name: '' }, { d: 3, name: '' },
+    { d: 4, name: '' }, { d: 5, name: '' }, { d: 6, name: 'ridge' },
+  ];
+  function bandY(depth) { return 1006 - depth * 131; }
+
+  var svg = document.getElementById('map');
+
+  /* ---- strata: the vertical scale, ruled and labelled like a section ---- */
+  var gStrata = el('g', {}, svg);
+  STRATA.forEach(function (s) {
+    var y = bandY(s.d);
+    el('line', { x1: 82, y1: y, x2: 1122, y2: y, stroke: 'var(--raw-grid)', 'stroke-width': 1,
+      'stroke-dasharray': '1 5' }, gStrata);
+    text(gStrata, 70, y + 3, 'depth ' + s.d, 'num', { 'text-anchor': 'end' });
+    if (s.name) text(gStrata, 70, y + 14, s.name, 'lbl', { 'text-anchor': 'end' });
+  });
+
+  /* ---- cluster axis: the horizontal scale, hued by the kindColor arc ---- */
+  var gClusters = el('g', {}, svg);
+  CLUSTERS.forEach(function (cluster) {
+    var hue = T.paint(cluster.id);
+    el('line', { x1: cluster.x, y1: 44, x2: cluster.x, y2: 1062, stroke: hue, 'stroke-width': 1,
+      opacity: 0.16 }, gClusters);
+    el('rect', { x: cluster.x - 26, y: 30, width: 52, height: 2, fill: hue, opacity: 0.75 }, gClusters);
+    var t = text(gClusters, cluster.x, 24, cluster.label, 'lbl', { 'text-anchor': 'middle' });
+    t.setAttribute('fill', hue);
+  });
+  text(gClusters, 70, 24, 'cluster ⟶', 'lbl', { 'text-anchor': 'end' });
+
+  /* ---- layout: cluster x, depth y, spread inside the band by mass ------- */
+  var placed = MODULES.map(function (m, i) {
+    m.index = i;
+    m.radius = Math.sqrt(m.sym) * AREA_K;
+    m.density = m.int == null ? null : m.int / m.sym;
+    return m;
+  });
+  // Within one (cluster, depth) cell, offset horizontally by rank so bodies do
+  // not fuse. An offset inside a cell costs nothing; an offset across one would
+  // be a lie about the cluster.
+  var cells = {};
+  placed.forEach(function (m) {
+    var key = m.c + ':' + m.depth;
+    (cells[key] = cells[key] || []).push(m);
+  });
+  Object.keys(cells).forEach(function (key) {
+    var group = cells[key].sort(function (a, b) { return b.sym - a.sym; });
+    var span = group.reduce(function (acc, m) { return acc + m.radius * 2.55; }, 0);
+    var cursor = -span / 2;
+    group.forEach(function (m) {
+      m.cx = CLUSTERS[m.c].x + cursor + m.radius * 1.275;
+      cursor += m.radius * 2.55;
+      m.rank = group.indexOf(m);
+      m.cy = bandY(m.depth);
+    });
+  });
+
+  /* ---- channels: hierarchically bundled, drawn under the labels --------- */
+  var gFlow = el('g', {}, svg);
+  var byIndex = {};
+  placed.forEach(function (m) { byIndex[m.index] = m; });
+  CHANNELS.forEach(function (channel, ci) {
+    var pts = [];
+    channel.via.forEach(function (idx, k) {
+      var m = byIndex[idx];
+      pts.push([m.cx, m.cy]);
+      var next = byIndex[channel.via[k + 1]];
+      if (next) {
+        // The bundle waypoint: pull the segment toward the trunk so shared
+        // legs braid instead of running parallel.
+        pts.push([(m.cx + next.cx) / 2 + (ci % 2 ? 26 : -26), (m.cy + next.cy) / 2]);
+      }
+    });
+    var w = Math.sqrt(channel.calls) * 0.55;
+    el('path', {
+      d: T.ribbonPath(pts, w, w * 0.72),
+      fill: 'var(--raw-accent)', opacity: 0.26, stroke: 'var(--raw-accent)',
+      'stroke-width': 0.75, 'stroke-opacity': 0.42,
+    }, gFlow);
+    channel.mark = { pt: pts[Math.floor(pts.length / 2)], w: w };
+  });
+
+  /* ---- relief: one region per module ------------------------------------ */
+  var gRelief = el('g', {}, svg);
+  placed.forEach(function (m) {
+    var seed = T.hashKind(m.path);
+    var rx = m.radius, ry = m.radius * 0.60;
+    var rough = 0.10 + (m.density ? Math.min(0.11, m.density * 0.028) : 0.05);
+
+    if (m.unindexed) {
+      // Absence is drawn: true position, true area, empty interior.
+      el('path', { d: T.blobPath(m.cx, m.cy, rx, ry, seed, rough), class: 'absence-hatch' }, gRelief);
+      var lbl = text(gRelief, m.cx, m.cy + 1, 'vendor/', 'name', { 'text-anchor': 'middle' });
+      lbl.setAttribute('fill', 'var(--raw-text-muted)');
+      lbl.setAttribute('stroke', 'var(--raw-surface-0)');
+      lbl.setAttribute('stroke-width', '3');
+      lbl.setAttribute('paint-order', 'stroke');
+      var sub = text(gRelief, m.cx, m.cy + 14, 'NO RELIEF', 'lbl', { 'text-anchor': 'middle' });
+      sub.setAttribute('fill', 'var(--raw-state-unknown)');
+      var note = text(gRelief, m.cx, m.cy + 26, m.unindexed, 'num', { 'text-anchor': 'middle' });
+      note.setAttribute('fill', 'var(--raw-text-muted)');
+      el('line', { x1: m.cx - rx, y1: m.cy - ry - 6, x2: m.cx + rx, y2: m.cy - ry - 6,
+        stroke: 'var(--raw-state-unknown)', 'stroke-width': 1, 'stroke-dasharray': '2 3' }, gRelief);
+      return;
+    }
+
+    var rings = Math.max(1, Math.round(m.density / CONTOUR_INTERVAL));
+    // Churn is a tint over the neutral relief fill, never a replacement for it.
+    var heat = Math.min(1, m.churn / CHURN_MAX);
+    var fill = 'color-mix(in oklab, var(--raw-sev-high) ' + (heat * 34).toFixed(0) +
+      '%, var(--relief-fill-lo))';
+    el('path', { d: T.blobPath(m.cx, m.cy, rx, ry, seed, rough), fill: fill,
+      stroke: 'var(--relief-line-index)', 'stroke-width': 1.4 }, gRelief);
+
+    for (var i = 1; i <= rings; i += 1) {
+      var k = 1 - (i / (rings + 0.6)) * 0.88;
+      var isIndex = i % INDEX_EVERY === 0;
+      el('path', {
+        d: T.blobPath(m.cx, m.cy, rx * k, ry * k, seed + i * 7, rough * (1 - i / (rings + 2))),
+        fill: 'color-mix(in oklab, var(--relief-fill-hi) ' + (10 + i * 7) + '%, transparent)',
+        stroke: isIndex ? 'var(--relief-line-index)' : 'var(--relief-line)',
+        'stroke-width': isIndex ? 1.3 : 0.7,
+      }, gRelief);
+      if (isIndex) {
+        var v = (i * CONTOUR_INTERVAL).toFixed(1);
+        var tv = text(gRelief, m.cx + rx * k * 0.72, m.cy - ry * k * 0.62, v, 'num');
+        tv.setAttribute('fill', 'var(--relief-line-index)');
+      }
+    }
+  });
+
+  /* ---- names: set on the landform, haloed, like a printed sheet ---------
+   * Three lines, and every one of them is a reading: what the region is, how
+   * much of it there is, how dense it is. The crate the module belongs to is
+   * set OUTSIDE the shoreline and alternates above/below within a cell, which
+   * is what keeps two neighbouring landforms from sharing one caption. */
+  var gNames = el('g', {}, svg);
+  function halo(node, weight) {
+    node.setAttribute('stroke', 'var(--raw-surface-0)');
+    node.setAttribute('stroke-width', String(weight || 3));
+    node.setAttribute('paint-order', 'stroke');
+    return node;
+  }
+  placed.forEach(function (m) {
+    if (m.unindexed) return;
+    var parts = m.path.replace(/^crates\/tracedecay-/, '').split('/src/');
+    var leaf = (parts[1] || parts[0]).replace(/\.rs$/, '');
+    var ry = m.radius * 0.60;
+    halo(text(gNames, m.cx, m.cy + 1, leaf, 'name', { 'text-anchor': 'middle' }), 3.4);
+    halo(text(gNames, m.cx, m.cy + 14, m.sym + ' sym', 'num', { 'text-anchor': 'middle' }));
+    if (m.radius > 30) {
+      halo(text(gNames, m.cx, m.cy + 25, m.density.toFixed(2) + ' e/s', 'num', { 'text-anchor': 'middle' }));
+    }
+    var above = (m.rank || 0) % 2 === 0;
+    var crate = halo(text(gNames, m.cx, m.cy + (above ? -(ry + 12) : ry + 20), parts[0] + '/', 'lbl',
+      { 'text-anchor': 'middle' }));
+    crate.setAttribute('fill', T.paint(CLUSTERS[m.c].id));
+    el('line', {
+      x1: m.cx, y1: m.cy + (above ? -(ry + 9) : ry + 11),
+      x2: m.cx, y2: m.cy + (above ? -(ry + 2) : ry + 3),
+      stroke: 'var(--raw-edge-strong)', 'stroke-width': 0.75,
+    }, gNames);
+  });
+
+  /* ---- the channels' own measurements, set last so they stay legible ---- */
+  var gFlowLabels = el('g', {}, svg);
+  CHANNELS.forEach(function (channel) {
+    if (!channel.mark) return;
+    var t = text(gFlowLabels, channel.mark.pt[0], channel.mark.pt[1] - channel.mark.w / 2 - 11,
+      channel.calls.toLocaleString() + ' call sites', 'num', { 'text-anchor': 'middle' });
+    t.setAttribute('fill', 'var(--raw-accent)');
+    t.setAttribute('stroke', 'var(--raw-surface-0)');
+    t.setAttribute('stroke-width', '3');
+    t.setAttribute('paint-order', 'stroke');
+  });
+
+  /* ---- weather: honestly project-granular ------------------------------- */
+  var gWeather = el('g', {}, svg);
+  el('rect', { x: 82, y: 1084, width: 1040, height: 1, fill: 'var(--raw-edge-subtle)' }, gWeather);
+  var wx = 82;
+  for (var s = 0; s < 60; s += 1) {
+    var h = 3 + Math.abs(Math.sin(s * 0.7) * Math.cos(s * 0.23)) * 14;
+    el('rect', { x: wx + s * 17.3, y: 1176 - h, width: 3, height: h,
+      fill: 'var(--raw-accent)', opacity: 0.34 }, gWeather);
+  }
+  var wt = text(gWeather, 82, 1100, 'WEATHER — PROJECT-LEVEL INGEST, LAST 60 MIN. NOT PER-REGION: LIVE ACTIVITY IS PROJECT-GRANULAR TODAY.', 'lbl');
+  wt.setAttribute('fill', 'var(--raw-text-muted)');
+  text(gWeather, 1122, 1100, '4.2 ev/min', 'num', { 'text-anchor': 'end' });
+
+  /* ---- legend plate figures --------------------------------------------- */
+  (function contourKey() {
+    var g = document.getElementById('lg-contour');
+    var cx = 62, cy = 34;
+    for (var i = 0; i < 5; i += 1) {
+      var k = 1 - i * 0.185;
+      var isIndex = i === 0;
+      el('path', { d: T.blobPath(cx, cy, 44 * k, 26 * k, 991 + i * 7, 0.14 * (1 - i * 0.15)),
+        fill: i === 0 ? 'var(--relief-fill-lo)' : 'none',
+        stroke: isIndex ? 'var(--relief-line-index)' : 'var(--relief-line)',
+        'stroke-width': isIndex ? 1.3 : 0.7 }, g);
+    }
+    el('line', { x1: 118, y1: 12, x2: 118, y2: 56, stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, g);
+    text(g, 128, 20, '1 line', 'lbl');
+    var v = text(g, 128, 36, '= 0.50 e / sym', 'num'); v.setAttribute('fill', 'var(--raw-text-primary)');
+    text(g, 128, 50, 'index every 5th', 'lbl');
+  })();
+
+  (function elevationKey() {
+    var g = document.getElementById('lg-elev');
+    for (var d = 0; d <= 6; d += 1) {
+      var x = 10 + d * 40;
+      el('rect', { x: x, y: 22 - d * 2.6, width: 34, height: 4 + d * 2.6,
+        fill: 'color-mix(in oklab, var(--relief-fill-hi) ' + (30 + d * 10) + '%, transparent)',
+        stroke: 'var(--relief-line)', 'stroke-width': 0.7 }, g);
+      text(g, x + 17, 38, String(d), 'num', { 'text-anchor': 'middle' });
+    }
+  })();
+
+  (function areaKey() {
+    var g = document.getElementById('lg-area');
+    [[38, 214], [102, 96], [148, 38]].forEach(function (pair) {
+      var r = Math.sqrt(pair[1]) * 2.1;
+      el('ellipse', { cx: pair[0], cy: 28, rx: r, ry: r * 0.6, fill: 'var(--relief-fill-lo)',
+        stroke: 'var(--relief-line-index)', 'stroke-width': 1 }, g);
+      text(g, pair[0], 56, pair[1] + ' sym', 'num', { 'text-anchor': 'middle' });
+    });
+    text(g, 196, 24, 'r = √symbols', 'lbl');
+    text(g, 196, 38, 'area carries mass', 'lbl');
+  })();
+
+  document.getElementById('lg-churn').style.background =
+    'linear-gradient(to right, var(--relief-fill-lo), color-mix(in oklab, var(--raw-sev-high) 34%, var(--relief-fill-lo)))';
+
+  (function flowKey() {
+    var g = document.getElementById('lg-flow');
+    [[1412, 12], [386, 28], [121, 42]].forEach(function (pair) {
+      var w = Math.sqrt(pair[0]) * 0.55;
+      el('rect', { x: 10, y: pair[1] - w / 2, width: 96, height: w, fill: 'var(--raw-accent)',
+        opacity: 0.32, stroke: 'var(--raw-accent)', 'stroke-width': 0.75, 'stroke-opacity': 0.5 }, g);
+      var t = text(g, 116, pair[1] + 3, pair[0].toLocaleString() + ' call sites', 'num');
+      t.setAttribute('fill', 'var(--raw-text-secondary)');
+    });
+  })();
+
+  (function absentKey() {
+    var g = document.getElementById('lg-absent');
+    el('path', { d: T.blobPath(58, 22, 42, 15, 4242, 0.13), class: 'absence-hatch' }, g);
+    var t = text(g, 58, 25, 'NO RELIEF', 'lbl', { 'text-anchor': 'middle' });
+    t.setAttribute('fill', 'var(--raw-state-unknown)');
+    text(g, 112, 18, 'drawn at true position', 'lbl');
+    text(g, 112, 32, 'and true area', 'lbl');
+  })();
+
+  // Theme is set by the screenshot harness, or by ?theme=light when opened by hand.
+  var q = new URLSearchParams(location.search).get('theme');
+  if (q === 'light') document.documentElement.setAttribute('data-theme', 'light');
+})();
+</script>
+</body>
+</html>

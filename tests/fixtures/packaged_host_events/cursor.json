@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "provider": "cursor",
+  "sources": [
+    {
+      "kind": "live_native_hook_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/cursor/README.md",
+      "cursor_agent_cli_version": "2026.07.09-a3815c0",
+      "captured_on": "2026-07-21"
+    },
+    {
+      "kind": "checked_in_provider_capture",
+      "path": "tests/fixtures/host_events/cursor/baseline.json"
+    },
+    {
+      "kind": "official_documentation_example",
+      "url": "https://cursor.com/docs/hooks",
+      "sections": ["Common schema", "afterFileEdit", "stop"],
+      "retrieved_at": "2026-07-21"
+    }
+  ],
+  "events": [
+    {
+      "identity": "session_start",
+      "family": "session_boundary",
+      "support": "native",
+      "request": {
+        "hook_event_name": "sessionStart",
+        "conversation_id": "<SESSION_ID>",
+        "workspace_roots": ["<PROJECT_ROOT>"]
+      }
+    },
+    {
+      "identity": "saved_edit",
+      "family": "saved_edit",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json",
+      "request": {
+        "conversation_id": "<CONVERSATION_ID>",
+        "generation_id": "<GENERATION_ID>",
+        "model": "<MODEL>",
+        "file_path": "<WORKSPACE_ROOT>/probe.txt",
+        "edits": [
+          {
+            "old_string": "<REDACTED_OLD_TEXT>",
+            "new_string": "<REDACTED_NEW_TEXT>"
+          }
+        ],
+        "session_id": "<SESSION_ID>",
+        "hook_event_name": "afterFileEdit",
+        "cursor_version": "<CURSOR_VERSION>",
+        "workspace_roots": ["<WORKSPACE_ROOT>"],
+        "user_email": "<USER_EMAIL>",
+        "transcript_path": "<CURSOR_DATA_ROOT>/projects/<PROJECT>/agent-transcripts/<SESSION_ID>.jsonl"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "documented_unverified",
+      "request": {
+        "conversation_id": "<SESSION_ID>",
+        "generation_id": "<GENERATION_ID>",
+        "model": "<MODEL>",
+        "hook_event_name": "stop",
+        "cursor_version": "<CURSOR_VERSION>",
+        "workspace_roots": ["<PROJECT_ROOT>"],
+        "user_email": null,
+        "transcript_path": "<TRANSCRIPT_PATH>",
+        "status": "completed",
+        "loop_count": 0
+      }
+    }
+  ]
+}

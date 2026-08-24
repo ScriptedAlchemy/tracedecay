@@ -1,24 +1,58 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 
-use libsql::{Connection, Value, params};
+#[cfg(test)]
+use serde_json::Value as JsonValue;
+use serde_json::{Map, json};
+use tracedecay_domain::HydrationStateV1;
 
-use super::{
-    LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmSummaryExpansion,
-    LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
+use crate::retrieval_content::projected_content_hash;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
+use tracedecay_runtime_core::privacy::{
+    bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, sanitize_provider_metadata_json,
 };
 
-pub async fn insert_summary_node(
-    conn: &Connection,
-    draft: LcmSummaryNodeDraft,
-) -> Result<LcmSummaryNode, LcmError> {
-    util::with_immediate_tx(conn, insert_summary_node_in_transaction(conn, draft)).await
+use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
+use super::{
+    LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmRawMessageMetadata, LcmSourceRef,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
+};
+
+#[derive(Clone)]
+enum RawMessageRow {
+    Hydrated(LcmRawMessage),
+    Metadata(LcmRawMessageMetadata),
 }
 
-pub async fn insert_summary_node_in_transaction(
-    conn: &Connection,
+impl RawMessageRow {
+    fn provider(&self) -> &str {
+        match self {
+            Self::Hydrated(raw) => &raw.provider,
+            Self::Metadata(raw) => &raw.provider,
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Hydrated(raw) => &raw.session_id,
+            Self::Metadata(raw) => &raw.session_id,
+        }
+    }
+}
+
+pub trait LcmSummaryPublicationPort {
+    fn publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> impl Future<Output = Result<LcmSummaryPublicationReceipt, LcmError>>;
+}
+
+pub async fn insert_summary_node(
+    publisher: &impl LcmSummaryPublicationPort,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
-    let summary_hash = raw::sha256_hex(&draft.summary_text);
+    let draft = sanitize_summary_draft(draft)?;
+    let summary_hash = projected_content_hash(&draft.summary_text);
     let node_id = summary_node_id(
         &draft.provider,
         &draft.session_id,
@@ -27,48 +61,217 @@ pub async fn insert_summary_node_in_transaction(
         &summary_hash,
     );
 
-    validate_summary_sources(conn, &draft, &node_id).await?;
-    upsert_summary_node(conn, &node_id, &summary_hash, &draft).await?;
-    replace_summary_sources(conn, &node_id, &draft.source_refs).await?;
-    load_summary_node(conn, &draft.provider, &draft.session_id, &node_id).await
+    publisher
+        .publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: node_id,
+            predecessor_summary_id: None,
+            draft,
+        })
+        .await
+        .map(|receipt| receipt.summary)
+}
+
+pub fn sanitize_summary_draft(
+    mut draft: LcmSummaryNodeDraft,
+) -> Result<LcmSummaryNodeDraft, LcmError> {
+    const MAX_SUMMARY_METADATA_BYTES: u64 = 1_048_576;
+
+    let summary = sanitize_lcm_payload_text(&draft.summary_text)
+        .map_err(|error| LcmError::Db(format!("summary privacy sanitization failed: {error}")))?;
+    draft.summary_text = summary.sanitized_text().to_owned();
+
+    let hint = draft
+        .expand_hint
+        .as_deref()
+        .map(sanitize_lcm_payload_text)
+        .transpose()
+        .map_err(|error| LcmError::Db(format!("summary hint sanitization failed: {error}")))?;
+    draft.expand_hint = hint
+        .as_ref()
+        .map(|sanitization| sanitization.sanitized_text().to_owned());
+
+    let raw_metadata = draft.metadata_json.as_deref().unwrap_or("{}");
+    let mut metadata = sanitize_provider_metadata_json(raw_metadata, MAX_SUMMARY_METADATA_BYTES)
+        .ok_or_else(|| LcmError::Db("summary metadata sanitization failed".to_owned()))?;
+    if !metadata.is_object() {
+        return Err(LcmError::Db(
+            "summary metadata sanitization failed: metadata must be a JSON object".to_owned(),
+        ));
+    }
+    let sanitized_metadata = serde_json::to_string(&metadata)
+        .map_err(|error| LcmError::Db(format!("summary metadata encoding failed: {error}")))?;
+    let metadata_receipt = bind_sanitized_lcm_payload_text(raw_metadata, &sanitized_metadata)
+        .map_err(|error| LcmError::Db(format!("summary metadata receipt failed: {error}")))?;
+    let mut receipts = Map::new();
+    receipts.insert(
+        "summary_text".to_owned(),
+        serde_json::to_value(summary.receipt())
+            .map_err(|error| LcmError::Db(format!("summary receipt encoding failed: {error}")))?,
+    );
+    if let Some(hint) = hint {
+        receipts.insert(
+            "expand_hint".to_owned(),
+            serde_json::to_value(hint.receipt()).map_err(|error| {
+                LcmError::Db(format!("summary hint receipt encoding failed: {error}"))
+            })?,
+        );
+    }
+    receipts.insert(
+        "metadata".to_owned(),
+        serde_json::to_value(metadata_receipt.receipt()).map_err(|error| {
+            LcmError::Db(format!("summary metadata receipt encoding failed: {error}"))
+        })?,
+    );
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "tracedecay_privacy".to_owned(),
+            json!({"sanitization_receipts": receipts}),
+        );
+    }
+    draft.metadata_json = Some(metadata.to_string());
+    Ok(draft)
 }
 
 pub async fn expand_summary_node(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_id: &str,
 ) -> Result<LcmSummaryExpansion, LcmError> {
-    let summary = load_summary_node(conn, provider, session_id, node_id).await?;
+    let mut expansions =
+        expand_summary_nodes_with_content(conn, provider, session_id, &[node_id.to_string()], true)
+            .await?;
+    expansions.pop().ok_or(LcmError::SummaryNodeNotFound)
+}
+
+/// Expands every requested node against **one** hydration pass.
+///
+/// The node rows, their lineage rows, the raw sources of the whole set, and the
+/// child summary nodes of the whole set are each loaded once, so a page of `N`
+/// explicitly requested nodes costs a fixed number of round trips instead of
+/// `N` independent expansions. Per-node semantics are unchanged: nodes are
+/// assembled in request order and the first ownership or integrity failure
+/// still aborts the whole call with the same error it raised before.
+pub async fn expand_summary_nodes(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_ids: &[String],
+) -> Result<Vec<LcmSummaryExpansion>, LcmError> {
+    expand_summary_nodes_with_content(conn, provider, session_id, node_ids, true).await
+}
+
+async fn expand_summary_nodes_with_content(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_ids: &[String],
+    include_content: bool,
+) -> Result<Vec<LcmSummaryExpansion>, LcmError> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requested = load_summary_nodes_by_ids(conn, node_ids, include_content).await?;
+
+    // Resolve every requested node up front so the source closure below is the
+    // union of the whole page, then hydrate that union once.
+    let mut summaries = Vec::with_capacity(node_ids.len());
     let mut raw_store_ids = Vec::new();
     let mut child_node_ids = Vec::new();
-    for source_ref in &summary.source_refs {
-        match source_ref {
-            LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
-            LcmSourceRef::SummaryNode { node_id } => child_node_ids.push(node_id.clone()),
+    for node_id in node_ids {
+        let summary = requested
+            .get(node_id)
+            .cloned()
+            .ok_or(LcmError::SummaryNodeNotFound)?;
+        if summary.provider != provider || summary.session_id != session_id {
+            return Err(LcmError::SummaryNodeNotFound);
         }
+        for source_ref in &summary.source_refs {
+            match source_ref {
+                LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
+                LcmSourceRef::SummaryNode { node_id } => child_node_ids.push(node_id.clone()),
+            }
+        }
+        summaries.push(summary);
     }
-    let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids).await?;
-    let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids).await?;
 
+    let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content).await?;
+    let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids, include_content).await?;
+
+    let mut expansions = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        expansions.push(assemble_summary_expansion(
+            summary,
+            provider,
+            session_id,
+            include_content,
+            &raw_sources,
+            &child_sources,
+        )?);
+    }
+    Ok(expansions)
+}
+
+/// Assembles one expansion from an already-hydrated source closure. Pure: it
+/// issues no queries, so the round-trip cost of a page lives entirely in
+/// [`expand_summary_nodes_with_content`].
+fn assemble_summary_expansion(
+    summary: LcmSummaryNode,
+    provider: &str,
+    session_id: &str,
+    include_content: bool,
+    raw_sources: &BTreeMap<i64, RawMessageRow>,
+    child_sources: &BTreeMap<String, LcmSummaryNode>,
+) -> Result<LcmSummaryExpansion, LcmError> {
     let mut sources = Vec::with_capacity(summary.source_refs.len());
 
     for source_ref in &summary.source_refs {
         match source_ref {
             LcmSourceRef::RawMessage { store_id } => {
-                let raw = raw_sources
-                    .get(store_id)
-                    .cloned()
-                    .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-                if raw.provider != provider || raw.session_id != session_id {
+                // An *absent* raw row is not an ownership violation: publication
+                // (`session_temporal::operations::sources::prepare_raw_source`)
+                // proves every raw source exists and is session-owned before the
+                // lineage row is written, so a row that is missing at read time
+                // was removed afterwards — by the projection-durability retention
+                // drop pass (plan 38 §3), whose whole premise is that the summary
+                // is the durable survivor. Report the source as retention-expired
+                // (plan 23 hydration state) and keep expanding; aborting the whole
+                // expansion would make every summary older than the drop window
+                // unreadable, and would do so under a misleading ownership error.
+                let Some(raw) = raw_sources.get(store_id).cloned() else {
+                    sources.push(LcmExpandedSummarySource {
+                        source_ref: source_ref.clone(),
+                        state: HydrationStateV1::RetentionExpired,
+                        content: String::new(),
+                        content_range: None,
+                        content_truncated: false,
+                        raw_message: None,
+                        raw_message_metadata: None,
+                        summary_node: None,
+                    });
+                    continue;
+                };
+                // A row that is present but foreign is still a hard ownership
+                // violation and must never be disclosed.
+                if raw.provider() != provider || raw.session_id() != session_id {
                     return Err(LcmError::SummarySourceNotOwnedBySession);
                 }
+                let (content, raw_message, raw_message_metadata) = match raw {
+                    RawMessageRow::Hydrated(raw) => (raw.content.clone(), Some(raw), None),
+                    RawMessageRow::Metadata(raw) => (String::new(), None, Some(raw)),
+                };
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
-                    content: raw.content.clone(),
+                    state: if include_content {
+                        HydrationStateV1::Available
+                    } else {
+                        HydrationStateV1::RetainedButUnavailable
+                    },
+                    content,
                     content_range: None,
                     content_truncated: false,
-                    raw_message: Some(raw),
+                    raw_message,
+                    raw_message_metadata,
                     summary_node: None,
                 });
             }
@@ -84,10 +287,16 @@ pub async fn expand_summary_node(
                 }
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
+                    state: if include_content {
+                        HydrationStateV1::Available
+                    } else {
+                        HydrationStateV1::RetainedButUnavailable
+                    },
                     content: child.summary_text.clone(),
                     content_range: None,
                     content_truncated: false,
                     raw_message: None,
+                    raw_message_metadata: None,
                     summary_node: Some(Box::new(child)),
                 });
             }
@@ -110,7 +319,7 @@ pub struct LcmUncondensedSummaryNode {
 /// collapsed across all depths in one query; replay assembly consumes the
 /// result ordered by lineage position (then depth, highest first).
 pub async fn load_uncondensed_summary_nodes(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmUncondensedSummaryNode>, LcmError> {
@@ -182,50 +391,30 @@ pub async fn load_uncondensed_summary_nodes(
         .await?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next().await? {
+        let node = LcmSummaryNode {
+            node_id: row.get(0)?,
+            provider: row.get(1)?,
+            conversation_id: row.get(2)?,
+            session_id: row.get(3)?,
+            depth: row.get(4)?,
+            summary_text: row.get(5)?,
+            summary_hash: row.get(6)?,
+            summary_token_count: row.get(7)?,
+            source_token_count: row.get(8)?,
+            source_time_start: row.get(9)?,
+            source_time_end: row.get(10)?,
+            expand_hint: row.get(11)?,
+            metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
+            source_refs: Vec::new(),
+        };
+        verify_summary_content(&node.summary_text, &node.summary_hash)?;
         nodes.push(LcmUncondensedSummaryNode {
-            node: LcmSummaryNode {
-                node_id: row.get(0)?,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
+            node,
             first_source_store_id: row.get(14)?,
         });
     }
     Ok(nodes)
-}
-
-/// Moves all summary nodes from one session id to another inside the caller's
-/// transaction, preserving node ids and node-to-node lineage. Mirrors
-/// hermes-lcm `SummaryDAG.reassign_session_nodes`.
-pub async fn reassign_session_nodes(
-    conn: &Connection,
-    provider: &str,
-    old_session_id: &str,
-    new_session_id: &str,
-) -> Result<u64, LcmError> {
-    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
-        return Ok(0);
-    }
-    conn.execute(
-        "UPDATE lcm_summary_nodes
-         SET session_id = ?3, conversation_id = ?3
-         WHERE provider = ?1 AND session_id = ?2",
-        params![provider, old_session_id, new_session_id],
-    )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))
 }
 
 pub fn summary_node_id(
@@ -242,211 +431,14 @@ pub fn summary_node_id(
         "source_refs": source_refs,
         "summary_hash": summary_hash,
     });
-    format!("sum_{}", raw::sha256_hex(&input.to_string()))
-}
-
-async fn upsert_summary_node(
-    conn: &Connection,
-    node_id: &str,
-    summary_hash: &str,
-    draft: &LcmSummaryNodeDraft,
-) -> Result<(), LcmError> {
-    conn.execute(
-        "INSERT INTO lcm_summary_nodes (
-            node_id, provider, conversation_id, session_id, depth, summary_text,
-            summary_hash, summary_token_count, source_token_count, source_time_start,
-            source_time_end, expand_hint, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-         ON CONFLICT(node_id) DO UPDATE SET
-            provider = excluded.provider,
-            conversation_id = excluded.conversation_id,
-            session_id = excluded.session_id,
-            depth = excluded.depth,
-            summary_text = excluded.summary_text,
-            summary_hash = excluded.summary_hash,
-            summary_token_count = excluded.summary_token_count,
-            source_token_count = excluded.source_token_count,
-            source_time_start = excluded.source_time_start,
-            source_time_end = excluded.source_time_end,
-            expand_hint = excluded.expand_hint,
-            metadata_json = excluded.metadata_json",
-        params![
-            node_id,
-            draft.provider.as_str(),
-            draft.conversation_id.as_str(),
-            draft.session_id.as_str(),
-            draft.depth,
-            draft.summary_text.as_str(),
-            summary_hash,
-            draft.summary_token_count,
-            draft.source_token_count,
-            util::opt_i64(draft.source_time_start),
-            util::opt_i64(draft.source_time_end),
-            util::opt_text(draft.expand_hint.as_deref()),
-            util::opt_text(draft.metadata_json.as_deref()),
-        ],
-    )
-    .await?;
-    Ok(())
-}
-
-async fn validate_summary_sources(
-    conn: &Connection,
-    draft: &LcmSummaryNodeDraft,
-    node_id: &str,
-) -> Result<(), LcmError> {
-    let mut raw_store_ids = Vec::new();
-    let mut child_node_ids = Vec::new();
-    for source_ref in &draft.source_refs {
-        match source_ref {
-            LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
-            LcmSourceRef::SummaryNode {
-                node_id: child_node_id,
-            } => {
-                if child_node_id == node_id {
-                    return Err(LcmError::SummarySourceNotOwnedBySession);
-                }
-                child_node_ids.push(child_node_id.clone());
-            }
-        }
-    }
-
-    let raw_owners = load_raw_message_owners_by_store_ids(conn, &raw_store_ids).await?;
-    for store_id in raw_store_ids {
-        let Some((provider, session_id)) = raw_owners.get(&store_id) else {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        };
-        if provider != &draft.provider || session_id != &draft.session_id {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        }
-    }
-
-    let child_owners = load_summary_node_owners_by_ids(conn, &child_node_ids).await?;
-    for child_node_id in child_node_ids {
-        let Some((provider, session_id, child_depth)) = child_owners.get(child_node_id.as_str())
-        else {
-            return Err(LcmError::SummaryNodeNotFound);
-        };
-        if provider != &draft.provider || session_id != &draft.session_id {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        }
-        if *child_depth >= draft.depth {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        }
-    }
-    Ok(())
-}
-
-async fn replace_summary_sources(
-    conn: &Connection,
-    node_id: &str,
-    source_refs: &[LcmSourceRef],
-) -> Result<(), LcmError> {
-    conn.execute(
-        "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
-        params![node_id],
-    )
-    .await?;
-
-    if source_refs.is_empty() {
-        return Ok(());
-    }
-
-    let placeholders = std::iter::repeat_n("(?, ?, ?, ?)", source_refs.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
-         VALUES {placeholders}"
-    );
-    let mut values = Vec::with_capacity(source_refs.len() * 4);
-    for (ordinal, source_ref) in source_refs.iter().enumerate() {
-        let (source_kind, source_id) = source_ref_to_db(source_ref);
-        values.push(Value::Text(node_id.to_string()));
-        values.push(Value::Text(source_kind.to_string()));
-        values.push(Value::Text(source_id));
-        values.push(Value::Integer(ordinal as i64));
-    }
-    conn.execute(&sql, values).await?;
-    Ok(())
-}
-
-async fn load_summary_node(
-    conn: &Connection,
-    provider: &str,
-    session_id: &str,
-    node_id: &str,
-) -> Result<LcmSummaryNode, LcmError> {
-    let node = load_summary_node_by_id(conn, node_id).await?;
-    if node.provider == provider && node.session_id == session_id {
-        Ok(node)
-    } else {
-        Err(LcmError::SummaryNodeNotFound)
-    }
-}
-
-async fn load_summary_node_by_id(
-    conn: &Connection,
-    node_id: &str,
-) -> Result<LcmSummaryNode, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count, source_time_start,
-                    source_time_end, expand_hint, metadata_json, created_at
-             FROM lcm_summary_nodes
-             WHERE node_id = ?1",
-            params![node_id],
-        )
-        .await?;
-    let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
-    let source_refs = load_summary_source_refs(conn, node_id).await?;
-    Ok(LcmSummaryNode {
-        node_id: row.get(0)?,
-        provider: row.get(1)?,
-        conversation_id: row.get(2)?,
-        session_id: row.get(3)?,
-        depth: row.get(4)?,
-        summary_text: row.get(5)?,
-        summary_hash: row.get(6)?,
-        summary_token_count: row.get(7)?,
-        source_token_count: row.get(8)?,
-        source_time_start: row.get(9)?,
-        source_time_end: row.get(10)?,
-        expand_hint: row.get(11)?,
-        metadata_json: row.get(12)?,
-        created_at: row.get(13)?,
-        source_refs,
-    })
-}
-
-async fn load_summary_source_refs(
-    conn: &Connection,
-    node_id: &str,
-) -> Result<Vec<LcmSourceRef>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
-             ORDER BY ordinal",
-            params![node_id],
-        )
-        .await?;
-    let mut source_refs = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_kind: String = row.get(0)?;
-        let source_id: String = row.get(1)?;
-        source_refs.push(source_ref_from_db(&source_kind, &source_id)?);
-    }
-    Ok(source_refs)
+    format!("sum_{}", projected_content_hash(&input.to_string()))
 }
 
 async fn load_raw_messages_by_store_ids(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     store_ids: &[i64],
-) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
+    include_content: bool,
+) -> Result<BTreeMap<i64, RawMessageRow>, LcmError> {
     let unique_store_ids = store_ids
         .iter()
         .copied()
@@ -456,36 +448,51 @@ async fn load_raw_messages_by_store_ids(
     if unique_store_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let placeholders = std::iter::repeat_n("?", unique_store_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, content, content_hash, storage_kind, payload_ref,
-                snippet_text, legacy_source, legacy_truncated, metadata_json
-         FROM lcm_raw_messages
-         WHERE store_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_store_ids
-                .iter()
-                .map(|store_id| Value::Integer(*store_id))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
+    let select_columns = if include_content {
+        raw::RAW_MESSAGE_SELECT_COLUMNS
+    } else {
+        raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
+    };
     let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let raw = raw::raw_message_from_row(&row)?;
-        out.insert(raw.store_id, raw);
+    for chunk in unique_store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "SELECT {select_columns}
+             FROM lcm_raw_messages
+             WHERE store_id IN ({})",
+            util::sql_in_placeholders(chunk.len())
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                chunk
+                    .iter()
+                    .map(|store_id| Value::Integer(*store_id))
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let raw = if include_content {
+                RawMessageRow::Hydrated(raw::verified_raw_message_from_row(&row)?)
+            } else {
+                RawMessageRow::Metadata(raw::raw_message_metadata_from_row(&row)?)
+            };
+            let store_id = match &raw {
+                RawMessageRow::Hydrated(raw) => raw.store_id,
+                RawMessageRow::Metadata(raw) => raw.store_id,
+            };
+            out.insert(store_id, raw);
+        }
     }
     Ok(out)
 }
 
 async fn load_summary_nodes_by_ids(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_ids: &[String],
+    include_content: bool,
 ) -> Result<BTreeMap<String, LcmSummaryNode>, LcmError> {
     let unique_node_ids = node_ids
         .iter()
@@ -496,28 +503,33 @@ async fn load_summary_nodes_by_ids(
     if unique_node_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let placeholders = std::iter::repeat_n("?", unique_node_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let node_sql = format!(
-        "SELECT node_id, provider, conversation_id, session_id, depth, summary_text,
-                summary_hash, summary_token_count, source_token_count, source_time_start,
-                source_time_end, expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE node_id IN ({placeholders})"
-    );
-    let values = unique_node_ids
-        .iter()
-        .map(|node_id| Value::Text(node_id.clone()))
-        .collect::<Vec<_>>();
-    let mut node_rows = conn.query(&node_sql, values.clone()).await?;
+    let summary_text = if include_content {
+        "summary_text"
+    } else {
+        "'' AS summary_text"
+    };
     let mut nodes = BTreeMap::new();
-    while let Some(row) = node_rows.next().await? {
-        let node_id: String = row.get(0)?;
-        nodes.insert(
-            node_id.clone(),
-            LcmSummaryNode {
-                node_id,
+    for chunk in unique_node_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = util::sql_in_placeholders(chunk.len());
+        let node_sql = format!(
+            "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
+                    summary_hash, summary_token_count, source_token_count, source_time_start,
+                    source_time_end, expand_hint, metadata_json, created_at
+             FROM lcm_summary_nodes
+             WHERE node_id IN ({placeholders})"
+        );
+        let values = chunk
+            .iter()
+            .map(|node_id| Value::Text(node_id.clone()))
+            .collect::<Vec<_>>();
+        let mut node_rows = conn.query(&node_sql, values.clone()).await?;
+        while let Some(row) = node_rows.next().await? {
+            let node_id: String = row.get(0)?;
+            let node = LcmSummaryNode {
+                node_id: node_id.clone(),
                 provider: row.get(1)?,
                 conversation_id: row.get(2)?,
                 session_id: row.get(3)?,
@@ -532,114 +544,40 @@ async fn load_summary_nodes_by_ids(
                 metadata_json: row.get(12)?,
                 created_at: row.get(13)?,
                 source_refs: Vec::new(),
-            },
+            };
+            if include_content {
+                verify_summary_content(&node.summary_text, &node.summary_hash)?;
+            }
+            nodes.insert(node_id, node);
+        }
+        let source_sql = format!(
+            "SELECT node_id, source_kind, source_id
+             FROM lcm_summary_sources
+             WHERE node_id IN ({placeholders})
+             ORDER BY node_id, ordinal"
         );
-    }
-    let source_sql = format!(
-        "SELECT node_id, source_kind, source_id
-         FROM lcm_summary_sources
-         WHERE node_id IN ({placeholders})
-         ORDER BY node_id, ordinal"
-    );
-    let mut source_rows = conn.query(&source_sql, values).await?;
-    while let Some(row) = source_rows.next().await? {
-        let node_id: String = row.get(0)?;
-        let source_kind: String = row.get(1)?;
-        let source_id: String = row.get(2)?;
-        if let Some(node) = nodes.get_mut(&node_id) {
-            node.source_refs
-                .push(source_ref_from_db(&source_kind, &source_id)?);
+        let mut source_rows = conn.query(&source_sql, values).await?;
+        while let Some(row) = source_rows.next().await? {
+            let node_id: String = row.get(0)?;
+            let source_kind: String = row.get(1)?;
+            let source_id: String = row.get(2)?;
+            if let Some(node) = nodes.get_mut(&node_id) {
+                node.source_refs
+                    .push(source_ref_from_db(&source_kind, &source_id)?);
+            }
         }
     }
     Ok(nodes)
 }
 
-async fn load_raw_message_owners_by_store_ids(
-    conn: &Connection,
-    store_ids: &[i64],
-) -> Result<BTreeMap<i64, (String, String)>, LcmError> {
-    let unique_store_ids = store_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if unique_store_ids.is_empty() {
-        return Ok(BTreeMap::new());
+pub(crate) fn verify_summary_content(
+    summary_text: &str,
+    summary_hash: &str,
+) -> Result<(), LcmError> {
+    if projected_content_hash(summary_text) != summary_hash {
+        return Err(LcmError::PayloadIntegrityMismatch);
     }
-    let placeholders = std::iter::repeat_n("?", unique_store_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT store_id, provider, session_id
-         FROM lcm_raw_messages
-         WHERE store_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_store_ids
-                .iter()
-                .map(|store_id| Value::Integer(*store_id))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-    let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let provider: String = row.get(1)?;
-        let session_id: String = row.get(2)?;
-        out.insert(store_id, (provider, session_id));
-    }
-    Ok(out)
-}
-
-async fn load_summary_node_owners_by_ids(
-    conn: &Connection,
-    node_ids: &[String],
-) -> Result<BTreeMap<String, (String, String, i64)>, LcmError> {
-    let unique_node_ids = node_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if unique_node_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let placeholders = std::iter::repeat_n("?", unique_node_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT node_id, provider, session_id, depth
-         FROM lcm_summary_nodes
-         WHERE node_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_node_ids
-                .iter()
-                .map(|node_id| Value::Text(node_id.clone()))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-    let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let node_id: String = row.get(0)?;
-        let provider: String = row.get(1)?;
-        let session_id: String = row.get(2)?;
-        let depth: i64 = row.get(3)?;
-        out.insert(node_id, (provider, session_id, depth));
-    }
-    Ok(out)
-}
-
-fn source_ref_to_db(source_ref: &LcmSourceRef) -> (&'static str, String) {
-    match source_ref {
-        LcmSourceRef::RawMessage { store_id } => ("raw_message", store_id.to_string()),
-        LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
-    }
+    Ok(())
 }
 
 fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {
@@ -654,5 +592,40 @@ fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef
         _ => Err(LcmError::Db(format!(
             "invalid summary source_kind: {source_kind}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[test]
+    fn summary_text_hint_and_metadata_are_sanitized_before_publication() {
+        let secret = "sk-summary-canary-1234567890abcdef";
+        let draft = LcmSummaryNodeDraft {
+            provider: "codex".to_owned(),
+            conversation_id: "conversation-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            depth: 0,
+            summary_text: format!("api_key={secret}"),
+            source_refs: vec![LcmSourceRef::RawMessage { store_id: 1 }],
+            source_token_count: 1,
+            summary_token_count: 1,
+            source_time_start: None,
+            source_time_end: None,
+            expand_hint: Some(format!("Bearer {secret}")),
+            metadata_json: Some(json!({"authorization": secret}).to_string()),
+        };
+
+        let sanitized = sanitize_summary_draft(draft).expect("sanitize summary draft");
+        let durable = serde_json::to_string(&sanitized).expect("serialize sanitized draft");
+        assert!(!durable.contains(secret));
+        let metadata: JsonValue =
+            serde_json::from_str(sanitized.metadata_json.as_deref().expect("metadata"))
+                .expect("decode sanitized metadata");
+        assert_eq!(
+            metadata["tracedecay_privacy"]["sanitization_receipts"]["summary_text"]["disposition"],
+            "redacted"
+        );
     }
 }

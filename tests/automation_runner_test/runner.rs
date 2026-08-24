@@ -21,10 +21,11 @@ async fn scheduler_memory_curator_respects_failure_cooldown() {
     let run = run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
@@ -61,10 +62,11 @@ async fn scheduler_memory_curator_respects_interval_gate() {
     let run = run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
@@ -107,6 +109,7 @@ async fn scheduler_session_reflector_respects_interval_gate() {
     let run = run_session_reflector_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         SessionReflectorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
@@ -162,6 +165,7 @@ async fn scheduler_skill_writer_respects_interval_gate() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activity() {
     let temp = tempdir().unwrap();
@@ -192,6 +196,7 @@ async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activi
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_success() {
     let temp = tempdir().unwrap();
@@ -261,10 +266,11 @@ async fn memory_curator_runner_cleans_up_lock_file() {
     run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
@@ -296,10 +302,11 @@ async fn memory_curator_runner_recovers_stale_scheduler_lock_file() {
     let run = run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
@@ -339,10 +346,11 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
     let run = run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
@@ -365,7 +373,7 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
 }
 
 #[tokio::test]
-async fn manual_memory_curator_run_ignores_scheduler_lock() {
+async fn manual_memory_curator_ledgers_active_lock_skip() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
@@ -387,10 +395,11 @@ async fn manual_memory_curator_run_ignores_scheduler_lock() {
     let run = run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
@@ -398,7 +407,15 @@ async fn manual_memory_curator_run_ignores_scheduler_lock() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("scheduler_lock_active")
+    );
     assert!(lock_path.exists());
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records, vec![run.ledger_record]);
 }

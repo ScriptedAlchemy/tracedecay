@@ -13,6 +13,16 @@
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/tracedecay-cli/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "json",
+          "path": "server.json",
+          "jsonpath": "$.version"
         }
       ]
     }
