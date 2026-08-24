@@ -65,10 +65,18 @@ const SEALED_PROJECTION_DEADLINE_CEILING: Duration = Duration::from_mins(15);
 const MAX_PENDING_REPLAY_COMPLETIONS_V1: usize = 8;
 
 fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
-    let scaled = Duration::from_secs(sealed_bytes.div_ceil(SEALED_PROJECTION_BYTES_PER_SECOND));
+    let scaled = sealed_projection_scaled_deadline(sealed_bytes);
     SEALED_PROJECTION_DEADLINE_FLOOR
         .saturating_add(scaled)
         .min(SEALED_PROJECTION_DEADLINE_CEILING)
+}
+
+fn sealed_projection_scaled_deadline(sealed_bytes: u64) -> Duration {
+    Duration::from_secs(sealed_bytes.div_ceil(SEALED_PROJECTION_BYTES_PER_SECOND))
+}
+
+fn sealed_projection_requires_stage_boundary(sealed_bytes: u64) -> bool {
+    sealed_projection_scaled_deadline(sealed_bytes) > SEALED_PROJECTION_DEADLINE_FLOOR
 }
 
 struct AtomicGraphCancellationV1 {
@@ -656,6 +664,22 @@ impl RetainedCodeGraphRuntimeV1 {
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        let sealed_bytes = self.sealed_generation_bytes()?;
+        self.publish_verified_snapshot_with_stage_boundary(
+            generation,
+            request_cancelled,
+            sealed_bytes,
+            sealed_projection_requires_stage_boundary(sealed_bytes),
+        )
+    }
+
+    fn publish_verified_snapshot_with_stage_boundary(
+        &self,
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+        request_cancelled: Arc<AtomicBool>,
+        sealed_bytes: u64,
+        durable_stage_boundary: bool,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         if generation.manifest().generation_id != self.generation_id {
             return Err(GraphDbError::Conflict);
         }
@@ -669,7 +693,7 @@ impl RetainedCodeGraphRuntimeV1 {
             .publication_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let projection_deadline = sealed_projection_deadline(self.sealed_generation_bytes()?);
+        let projection_deadline = sealed_projection_deadline(sealed_bytes);
         let deadline_at = Instant::now() + projection_deadline;
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
             &self.generation_id,
@@ -857,8 +881,19 @@ impl RetainedCodeGraphRuntimeV1 {
             // journaled by an interrupted publisher carries no in-hand
             // manifest, so publication reconstructs it from the journaled
             // canonical replay source.
-            self.graph_registry
-                .publish_verified(registration, storage, &context, key, manifest)
+            if durable_stage_boundary {
+                self.graph_registry
+                    .publish_verified_with_durable_stage_boundary(
+                        registration,
+                        storage,
+                        &context,
+                        key,
+                        manifest,
+                    )
+            } else {
+                self.graph_registry
+                    .publish_verified(registration, storage, &context, key, manifest)
+            }
         };
         match storage
             .replay(&publication_key, &context)

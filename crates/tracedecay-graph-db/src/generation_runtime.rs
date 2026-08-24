@@ -72,6 +72,23 @@ struct GenerationStageContext {
     dependency_digest: tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
 }
 
+pub(crate) enum GenerationStageOutcome {
+    Applied(GraphCommit),
+    Reseated(GraphCommit),
+}
+
+impl GenerationStageOutcome {
+    pub(crate) fn commit(self) -> GraphCommit {
+        match self {
+            Self::Applied(commit) | Self::Reseated(commit) => commit,
+        }
+    }
+
+    pub(crate) fn was_applied(&self) -> bool {
+        matches!(self, Self::Applied(_))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum GenerationRetirementPageKind {
     Relations,
@@ -134,13 +151,24 @@ impl GraphDb {
         self.apply_generation_unverified_with_digest(manifest, &expected, check)
     }
 
-    #[hotpath::measure(label = "graph_db.generation.stage", impl_type = "GraphDb")]
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn apply_generation_unverified_with_digest(
         &self,
         manifest: &GraphGenerationManifest,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
+        self.apply_generation_unverified_with_digest_observed(manifest, expected, check)
+            .map(GenerationStageOutcome::commit)
+    }
+
+    #[hotpath::measure(label = "graph_db.generation.stage", impl_type = "GraphDb")]
+    pub(crate) fn apply_generation_unverified_with_digest_observed(
+        &self,
+        manifest: &GraphGenerationManifest,
+        expected: &GraphRecoveredGenerationDigestV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GenerationStageOutcome, GraphDbError> {
         check()?;
         manifest.validate_checked(check)?;
         let context = GenerationStageContext {
@@ -153,7 +181,7 @@ impl GraphDb {
             dependency_digest: manifest.dependency_closure_digest(check)?,
         };
         if let Some(commit) = self.reseat_complete_staged_generation(manifest, &context)? {
-            return Ok(commit);
+            return Ok(GenerationStageOutcome::Reseated(commit));
         }
         let pages = generation_stage_pages(manifest)?;
         #[cfg(feature = "hotpath")]
@@ -184,6 +212,7 @@ impl GraphDb {
             check()?;
         }
         self.finalize_staged_generation(manifest, expected, &context, pages.last(), check)
+            .map(GenerationStageOutcome::Applied)
     }
 
     fn reseat_complete_staged_generation(
@@ -1327,7 +1356,7 @@ mod tests {
         NeverCancelled, SourceGeneration, VectorMetric,
     };
 
-    use super::{GenerationLocator, generation_stage_pages};
+    use super::{GenerationLocator, GenerationStageOutcome, generation_stage_pages};
 
     fn manifest(source: &str, watermark: &str) -> GraphGenerationManifest {
         GraphGenerationManifest::new(
@@ -1700,11 +1729,15 @@ mod tests {
     #[test]
     fn retry_admission_apply_then_reopen_streams_rows_once() {
         let temp = TempDir::new().unwrap();
-        let (owner, database, manifest) = large_persistent_generation(&temp, "retry-admission");
+        let (owner, database) = persistent_database(&temp);
+        let manifest = large_manifest("retry-admission");
         let sealed = sealed_digest(&manifest);
         let first = database
-            .apply_generation_unverified_with_digest(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
             .unwrap();
+        let GenerationStageOutcome::Applied(first) = first else {
+            panic!("a fresh generation must report durable native staging");
+        };
 
         // The live retry admission sequence is publish's apply-then-reopen.
         // The re-seat apply is bookkeeping only; the mandatory close/reopen
@@ -1713,8 +1746,11 @@ mod tests {
         reset_manifest_canonicalizations();
         reset_batch_canonicalizations();
         let reapplied = database
-            .apply_generation_unverified_with_digest(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
             .unwrap();
+        let GenerationStageOutcome::Reseated(reapplied) = reapplied else {
+            panic!("an exact retry must resume from durable staging receipts");
+        };
         let (_, recovered) = database
             .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
             .unwrap();
@@ -1884,7 +1920,7 @@ mod tests {
     }
 
     #[test]
-    fn interruption_between_pages_is_hidden_and_exact_retry_resumes() {
+    fn partial_stage_resumes_to_applied_then_reseats_before_one_reopen() {
         let manifest = large_manifest("interrupted-stage-resume");
         let locator =
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
@@ -1914,14 +1950,14 @@ mod tests {
                 Ok(())
             }
         };
-        assert_eq!(
-            second_database.apply_generation_unverified_with_digest(
+        assert!(matches!(
+            second_database.apply_generation_unverified_with_digest_observed(
                 &manifest,
                 &sealed,
                 &cancel_after_first_page,
             ),
             Err(GraphDbError::Cancelled)
-        );
+        ));
 
         assert!(
             second_database
@@ -1942,27 +1978,45 @@ mod tests {
 
         reset_batch_canonicalizations();
         let resumed = second_database
-            .apply_generation_unverified_with_digest(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
             .unwrap();
+        let GenerationStageOutcome::Applied(resumed) = resumed else {
+            panic!("a partial stage must finish its durable pages before yielding to reopen");
+        };
         assert_eq!(
             batch_canonicalizations(),
             2,
             "the exact first-page receipt must skip rebuilding that page on resume"
         );
+
+        reset_recovered_generation_enumerations();
+        reset_batch_canonicalizations();
+        let exact = second_database
+            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .unwrap();
+        let GenerationStageOutcome::Reseated(exact) = exact else {
+            panic!("the boundary retry must re-seat the exact durable stage");
+        };
+        assert_eq!(exact.sequence, resumed.sequence);
+        assert_eq!(
+            batch_canonicalizations(),
+            0,
+            "the boundary retry must not rebuild any durable page"
+        );
+        assert_eq!(
+            recovered_generation_enumerations(),
+            0,
+            "re-seat must not stream rows before the mandatory reopen"
+        );
         let (_, recovered) = second_database
             .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
             .unwrap();
+        assert_eq!(recovered, sealed, "the reopened rows must prove the seal");
         assert_eq!(
-            recovered, sealed,
-            "the resumed rows must prove the sealed digest"
+            recovered_generation_enumerations(),
+            1,
+            "partial resume, boundary yield, and re-seat must perform one reopen"
         );
-
-        reset_batch_canonicalizations();
-        let exact = second_database
-            .apply_generation_unverified_with_digest(&manifest, &sealed, &|| Ok(()))
-            .unwrap();
-        assert_eq!(exact.sequence, resumed.sequence);
-        assert_eq!(batch_canonicalizations(), 0);
         second_owner.close().unwrap();
     }
 

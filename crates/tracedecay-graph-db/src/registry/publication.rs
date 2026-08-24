@@ -412,6 +412,31 @@ impl GraphDbRegistry {
             publication_key,
             supplied_manifest,
             false,
+            false,
+        )
+    }
+
+    /// Publishes a native generation in two bounded, crash-safe attempts when
+    /// this call writes any durable staging page. The retry proves the exact
+    /// finalization receipt, then performs the mandatory close/reopen digest
+    /// proof without repeating native staging.
+    pub fn publish_verified_with_durable_stage_boundary(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        publication_key: &GraphPublicationKeyV1,
+        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+    ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        self.publish_verified_inner(
+            &operation,
+            authority,
+            context,
+            publication_key,
+            supplied_manifest,
+            false,
+            true,
         )
     }
 
@@ -428,7 +453,15 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation_with_lease(database)?;
-        self.publish_verified_inner(&operation, authority, context, publication_key, None, false)
+        self.publish_verified_inner(
+            &operation,
+            authority,
+            context,
+            publication_key,
+            None,
+            false,
+            false,
+        )
     }
 
     pub(super) fn publish_ready_staged_generation(
@@ -439,7 +472,15 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation(registration)?;
-        self.publish_verified_inner(&operation, authority, context, publication_key, None, true)
+        self.publish_verified_inner(
+            &operation,
+            authority,
+            context,
+            publication_key,
+            None,
+            true,
+            false,
+        )
     }
 
     #[hotpath::measure(label = "graph_db.generation.publish", impl_type = "GraphDbRegistry")]
@@ -451,6 +492,7 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
         supplied_manifest: Option<Arc<GraphGenerationManifest>>,
         reopen_metadata: bool,
+        durable_stage_boundary: bool,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
@@ -533,11 +575,16 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
-                            let commit = database.apply_generation_unverified_with_digest(
-                                &manifest,
-                                sealed_digest,
-                                &check,
-                            )?;
+                            let staged = database
+                                .apply_generation_unverified_with_digest_observed(
+                                    &manifest,
+                                    sealed_digest,
+                                    &check,
+                                )?;
+                            if durable_stage_boundary && staged.was_applied() {
+                                return Err(GraphDbError::DeadlineExceeded);
+                            }
+                            let commit = staged.commit();
                             let (_, recovered) = database.reopen_and_verify_existing_generation(
                                 &manifest,
                                 sealed_digest,
@@ -612,11 +659,15 @@ impl GraphDbRegistry {
             // native rows (vectors) the canonical source omits; a first
             // commit must install them natively before verification.
             (true, _) | (false, true) => {
-                let commit = database.apply_generation_unverified_with_digest(
+                let staged = database.apply_generation_unverified_with_digest_observed(
                     &manifest,
                     sealed_digest,
                     &check,
                 )?;
+                if durable_stage_boundary && staged.was_applied() {
+                    return Err(GraphDbError::DeadlineExceeded);
+                }
+                let commit = staged.commit();
                 database
                     .reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
                     .map(|(_, recovered)| (commit, recovered))
