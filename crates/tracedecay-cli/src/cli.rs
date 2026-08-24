@@ -196,7 +196,12 @@ pub enum Commands {
         /// on other project-scoped commands (e.g. `dashboard`, `gitignore`,
         /// `bench`). Conflicts with the positional PATH — pass one or the
         /// other, not both.
-        #[arg(short = 'p', long = "path", value_name = "PATH", conflicts_with = "path")]
+        #[arg(
+            short = 'p',
+            long = "path",
+            value_name = "PATH",
+            conflicts_with = "path"
+        )]
         path_flag: Option<String>,
         /// Folders to skip during indexing (can be repeated)
         #[arg(long = "skip-folder", num_args = 1..)]
