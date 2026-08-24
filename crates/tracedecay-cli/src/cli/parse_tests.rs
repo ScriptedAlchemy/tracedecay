@@ -716,6 +716,57 @@ fn branch_autotrack_enable_parses_poll_secs_and_path() {
 }
 
 #[test]
+fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
+    // `-p, --path` is documented (see TOP_LEVEL_AFTER_HELP) and already works
+    // on `dashboard`, `gitignore`, and `bench`; `init` previously only took
+    // PATH positionally and rejected `-p`/`--path` outright.
+    let short = Cli::try_parse_from(["tracedecay", "init", "-p", "/tmp/project"])
+        .expect("init -p PATH should parse");
+    assert!(matches!(
+        short.command,
+        Some(Commands::Init {
+            path: None,
+            path_flag,
+            ..
+        }) if path_flag.as_deref() == Some("/tmp/project")
+    ));
+
+    let long = Cli::try_parse_from(["tracedecay", "init", "--path", "/tmp/project"])
+        .expect("init --path PATH should parse");
+    assert!(matches!(
+        long.command,
+        Some(Commands::Init {
+            path: None,
+            path_flag,
+            ..
+        }) if path_flag.as_deref() == Some("/tmp/project")
+    ));
+
+    // The positional form keeps working unchanged.
+    let positional = Cli::try_parse_from(["tracedecay", "init", "/tmp/project"])
+        .expect("init PATH should still parse positionally");
+    assert!(matches!(
+        positional.command,
+        Some(Commands::Init {
+            path,
+            path_flag: None,
+            ..
+        }) if path.as_deref() == Some("/tmp/project")
+    ));
+
+    // Supplying both the positional PATH and `-p`/`--path` is refused rather
+    // than silently picking one — clap's `conflicts_with` rejects it.
+    // `Cli` does not derive `Debug`, so match directly instead of
+    // `.expect_err(...)` (which requires the `Ok` type to be `Debug`).
+    let conflict =
+        match Cli::try_parse_from(["tracedecay", "init", "/tmp/project", "--path", "/tmp/other"]) {
+            Ok(_) => panic!("init PATH and --path together should be rejected as a conflict"),
+            Err(error) => error,
+        };
+    assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
+}
+
+#[test]
 fn init_and_sync_parse_runtime_skip_and_include_folders() {
     let init = Cli::try_parse_from([
         "tracedecay",
@@ -732,6 +783,7 @@ fn init_and_sync_parse_runtime_skip_and_include_folders() {
         init.command,
         Some(Commands::Init {
             path,
+            path_flag: None,
             skip_folders,
             include_folders,
             adopt_project: None,

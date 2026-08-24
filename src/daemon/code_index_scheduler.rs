@@ -1925,6 +1925,15 @@ impl LatestCompleteCodeIndexV1 {
         self.generation.as_ref()
     }
 
+    /// The decoded generation as a shared handle.
+    ///
+    /// Graph activation offers this to the code-graph manifest provider so the
+    /// publication and recovery branches reuse this decode instead of reading
+    /// and parsing the identical sealed payload a second time.
+    pub(in crate::daemon) fn generation_handle(&self) -> Arc<CodeIndexPublishedGenerationV1> {
+        Arc::clone(&self.generation)
+    }
+
     /// Point-lookup indices over this sealed generation's record vectors.
     ///
     /// Built at most once per generation and shared by every clone of this
@@ -2954,7 +2963,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `Notify` already coalesces stored permits. Always refresh the permit:
         // a prior worker may have consumed its wake and then failed before
         // draining this overflow marker.
-        DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
 

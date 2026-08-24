@@ -3267,40 +3267,6 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    /// Queue an authoritative source scan without invalidating work that is
-    /// already reconstructing an authoritative snapshot.
-    ///
-    /// Background read/startup reconciliation carries no changed-path
-    /// evidence. If it arrives during a reconcile, the stored wake guarantees
-    /// a follow-up scan; advancing the epoch would only discard the in-flight
-    /// complete snapshot and restart the same work. Hook overflow remains the
-    /// source-invalidation path and still advances the epoch above.
-    pub(in crate::daemon) async fn request_authoritative_reconcile(
-        &self,
-        project_root: &Path,
-    ) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return false;
-        };
-        let (hints, wake, pending_wake) = {
-            let mounted = self.mounted.lock().await;
-            let Some(worktree) = mounted.get(&project_root) else {
-                return false;
-            };
-            (
-                Arc::clone(&worktree.hints),
-                Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake),
-            )
-        };
-        hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .overflow();
-        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
-        true
-    }
-
     /// Mounted scope identity plus the currently serving generation for one
     /// project. Daemon authorities that must retain this scope's code-graph
     /// runtime (semantic vectors, generation retention) resolve through this

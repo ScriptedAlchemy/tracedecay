@@ -82,6 +82,19 @@ tar -xzf "${tmp_dir}/${asset}" -C "$tmp_dir"
 
 mkdir -p "$install_dir"
 install -m 0755 "${tmp_dir}/tracedecay" "${install_dir}/tracedecay"
+# Linux archives ship the $ORIGIN-linked ONNX companion beside the binary.
+# Copy it (and any soname symlink) into the install directory so the
+# advertised installer works without a system ONNX Runtime.
+shopt -s nullglob
+for companion in "${tmp_dir}"/libonnxruntime.so*; do
+  dest="${install_dir}/$(basename "$companion")"
+  if [[ -L $companion ]]; then
+    ln -sfn "$(readlink "$companion")" "$dest"
+  else
+    install -m 0644 "$companion" "$dest"
+  fi
+done
+shopt -u nullglob
 printf 'Installed tracedecay %s to %s\n' "${tag#v}" "${install_dir}/tracedecay"
 
 case ":${PATH}:" in

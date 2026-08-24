@@ -98,6 +98,26 @@ describe('fetchEnvelope', () => {
     });
   });
 
+  it('carries the daemon reason when an unavailable read returns no payload', async () => {
+    // `DashboardEnvelopeV1::unavailable` is how every failed graph read reaches
+    // the client: domain_state `unknown`, payload null, and the cause pushed
+    // onto `coverage.omission_reasons`. The state alone is not actionable —
+    // "unknown" does not tell a reader whether the index is still sealing or
+    // the generation is gone — so the reason has to survive the decode. Without
+    // this the Code workspace renders a blocked panel with no explanation,
+    // which is indistinguishable from an empty project.
+    const envelope = fixtureEnvelope(null, 'unknown');
+    const coverage = { ...(envelope['coverage'] as Record<string, unknown>) };
+    coverage['omission_reasons'] = ['no code generation is currently serving for this project'];
+    stub(200, { ...envelope, coverage });
+
+    expect(await fetchEnvelope('/api/x', PayloadSchema)).toMatchObject({
+      outcome: 'transport',
+      state: 'unknown',
+      detail: 'no code generation is currently serving for this project',
+    });
+  });
+
   it('reports a network failure as offline', async () => {
     vi.stubGlobal(
       'fetch',
