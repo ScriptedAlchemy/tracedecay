@@ -1334,8 +1334,13 @@ async fn hint_summary(
     durable_events: Option<&[AnalyticsEventRecord]>,
     project_id: Option<&str>,
 ) -> AnalyticsHintsPayloadV1 {
+    // A present savings/profile DB can query successfully with zero hint rows
+    // while the project store still has durable events. Empty counts are not a
+    // source; fall through so session-only fixtures stay unavailable and
+    // project-scoped events remain visible.
     if let (Some(db), Some(project_id)) = (db, project_id)
         && let Ok(counts) = db.query_analytics_hint_counts(Some(project_id), 0).await
+        && !counts.is_empty()
     {
         return typed_hint_summary_from_counts(&counts);
     }

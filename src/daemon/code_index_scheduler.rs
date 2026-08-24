@@ -2965,7 +2965,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             let snapshot = self.resident_memory.snapshot();
             tracedecay_code_index::parallelism::install_worker_plan(
-                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
                 snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
             )?;
             Ok(())

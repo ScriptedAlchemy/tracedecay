@@ -530,14 +530,17 @@ pub enum ConfigurationValueKindV1 {
 /// Profile-level worker-count intent for the process-wide code-index pool.
 /// `Automatic` delegates the concrete count to runtime resource admission;
 /// `Exact` persists an operator-requested positive worker count.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "mode")]
 pub enum CodeIndexWorkerSelectionV1 {
-    #[default]
-    Automatic,
-    Exact {
-        workers: u16,
-    },
+    Automatic {},
+    Exact { workers: u16 },
+}
+
+impl Default for CodeIndexWorkerSelectionV1 {
+    fn default() -> Self {
+        Self::Automatic {}
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -581,14 +584,14 @@ mod code_index_worker_selection_tests {
     #[test]
     fn tagged_contract_is_stable_and_zero_exact_is_noncanonical() {
         assert_eq!(
-            serde_json::to_value(CodeIndexWorkerSelectionV1::Automatic).unwrap(),
+            serde_json::to_value(CodeIndexWorkerSelectionV1::Automatic {}).unwrap(),
             serde_json::json!({ "mode": "automatic" })
         );
         assert_eq!(
             serde_json::to_value(CodeIndexWorkerSelectionV1::Exact { workers: 64 }).unwrap(),
             serde_json::json!({ "mode": "exact", "workers": 64 })
         );
-        assert!(CodeIndexWorkerSelectionV1::Automatic.validate().is_ok());
+        assert!(CodeIndexWorkerSelectionV1::Automatic {}.validate().is_ok());
         assert!(
             CodeIndexWorkerSelectionV1::Exact { workers: 1 }
                 .validate()
@@ -602,7 +605,7 @@ mod code_index_worker_selection_tests {
 
         assert_eq!(
             serde_json::to_value(CodeIndexWorkerStatusV1 {
-                configured: CodeIndexWorkerSelectionV1::Automatic,
+                configured: CodeIndexWorkerSelectionV1::Automatic {},
                 environment_override_workers: None,
                 effective_workers: 64,
                 available_logical_cpus: 128,

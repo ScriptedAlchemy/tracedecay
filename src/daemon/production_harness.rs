@@ -727,7 +727,7 @@ mod code_index_activation_test {
             .expect("production harness worker plan");
         assert_eq!(
             worker_status.configured,
-            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
             "a fresh harness must install the profile-scoped default selection"
         );
         let query = timeout(Duration::from_secs(20), async {

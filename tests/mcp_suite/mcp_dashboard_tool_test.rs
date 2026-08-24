@@ -8,6 +8,8 @@ use std::time::Duration;
 
 #[cfg(feature = "test-transport")]
 use crate::common::http_agent;
+#[cfg(feature = "test-transport")]
+use serde_json::Value;
 use serde_json::json;
 #[cfg(feature = "test-transport")]
 use serde_json::Value;

@@ -49,7 +49,7 @@ fn fixture() -> TempDir {
 
 fn worker_reservation_bytes() -> u64 {
     let status = tracedecay_code_index::parallelism::install_worker_plan(
-        CodeIndexWorkerSelectionV1::Automatic,
+        CodeIndexWorkerSelectionV1::Automatic {},
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
     )
     .expect("install automatic worker plan");

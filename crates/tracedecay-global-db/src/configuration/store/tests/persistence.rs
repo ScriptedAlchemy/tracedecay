@@ -90,7 +90,10 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
             .unwrap();
 
     let initialized = store.read_or_initialize(UtcMicros(1)).await.unwrap();
-    assert_eq!(initialized.selection, CodeIndexWorkerSelectionV1::Automatic);
+    assert_eq!(
+        initialized.selection,
+        CodeIndexWorkerSelectionV1::Automatic {}
+    );
     let authority = control_authority_with_key_for_layer(
         ConfigurationMutationOperationV1::DirectMutation,
         &initialized.revision_id,
@@ -123,7 +126,7 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
         store
             .commit_selection(
                 &authority,
-                CodeIndexWorkerSelectionV1::Automatic,
+                CodeIndexWorkerSelectionV1::Automatic {},
                 &initialized.revision_id,
             )
             .await,
