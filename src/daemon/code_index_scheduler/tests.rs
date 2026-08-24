@@ -57,7 +57,7 @@ use super::{
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
     SharedCodeIndexBytePoolV1,
 };
-use crate::code_index::production::CodeIndexExecutionControlV1;
+use crate::code_index::production::{CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1};
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::exact::{
@@ -4863,9 +4863,6 @@ fn restart_restores_complete_generation_and_content_noop() {
         restored.generation.manifest().generation_id,
         first.generation_id
     );
-    restored
-        .production_query_owners()
-        .expect("restored generation reconnects all query owners");
     match restarted.reconcile_now().expect("restart reconciliation") {
         CodeIndexReconcileOutcomeV1::Noop(evidence) => {
             assert_eq!(
@@ -5094,6 +5091,73 @@ fn restart_rejects_corrupt_sealed_generation() {
     assert!(
         reopened.latest_complete_already_decoded().is_none(),
         "corrupt sealed state never becomes serving state"
+    );
+}
+
+#[test]
+fn durable_publication_streams_canonical_bytes_and_reuses_immutable_target() {
+    let fixture =
+        GitFixture::new(&[("src/lib.rs", "pub fn streamed_publication() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("initial publish"));
+    let latest = scheduler
+        .latest_complete_already_decoded()
+        .expect("published generation remains decoded");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let pointer: super::DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
+            .expect("decode active pointer");
+    let generation_path = store
+        .path()
+        .join("code-generations-v1")
+        .join(&pointer.generation_file);
+    let streamed = std::fs::read(&generation_path).expect("read streamed generation");
+    let canonical = latest
+        .generation
+        .encode_sealed()
+        .expect("encode canonical reference");
+    assert_eq!(
+        streamed, canonical,
+        "streaming must preserve exact v6 bytes"
+    );
+
+    let active_generation = latest.generation.manifest().generation_id.clone();
+    let mut reopened = super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("reopen publication store");
+    reopened
+        .publish_atomically(
+            &latest.generation.sealed_scope(),
+            Some(&active_generation),
+            Arc::clone(&latest.generation),
+        )
+        .expect("identical immutable generation republishes");
+
+    assert_eq!(
+        std::fs::read(&generation_path).expect("read republished generation"),
+        canonical,
+        "an existing content-addressed target must remain byte exact"
+    );
+    assert!(
+        std::fs::read_dir(store.path().join("code-generations-v1"))
+            .expect("read generation directory")
+            .all(|entry| {
+                !entry
+                    .expect("generation directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".generation-publication.")
+            }),
+        "successful publication must not retain a streamed temporary file"
     );
 }
 

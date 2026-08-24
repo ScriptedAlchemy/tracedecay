@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 #[cfg(test)]
 use serde::de::DeserializeOwned;
@@ -185,26 +185,218 @@ fn read_admitted_bytes<R: std::io::Read>(
     Ok(bytes)
 }
 
-fn encode_sealed_envelope_bytes(
-    state_digest: &ManifestDigest,
-    generation_bytes: &[u8],
-) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-    let mut sealed = Vec::with_capacity(
-        generation_bytes
-            .len()
-            .saturating_add(state_digest.as_str().len())
-            .saturating_add(36),
-    );
-    sealed.extend_from_slice(b"{\"state_digest\":");
-    serde_json::to_writer(&mut sealed, state_digest).map_err(|error| {
+const SEALED_GENERATION_WRITE_CHUNK_BYTES_V1: usize = 64 * 1024;
+
+struct BoundedChunkWriterV1<'a, W> {
+    writer: &'a mut W,
+    written: u64,
+    byte_limit: u64,
+    maximum_write: usize,
+    limit_exceeded: bool,
+}
+
+impl<W: Write> Write for BoundedChunkWriterV1<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.byte_limit.saturating_sub(self.written);
+        if remaining == 0 {
+            self.limit_exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "sealed generation exceeds the canonical byte limit",
+            ));
+        }
+        let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
+        let admitted = bytes.len().min(self.maximum_write).min(remaining);
+        let written = self.writer.write(&bytes[..admitted])?;
+        self.written = self
+            .written
+            .checked_add(u64::try_from(written).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("sealed generation length overflowed"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+struct GenerationDigestWriterV1<'writer, 'sink, W> {
+    writer: &'writer mut BoundedChunkWriterV1<'sink, W>,
+    hasher: Sha256,
+}
+
+impl<W: Write> Write for GenerationDigestWriterV1<'_, '_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.writer.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+fn byte_limit_error() -> CodeIndexProductionErrorV1 {
+    CodeIndexProductionErrorV1::Contract(
+        "sealed generation exceeds the canonical byte limit".to_owned(),
+    )
+}
+
+fn write_chunked<W: Write>(
+    writer: &mut W,
+    mut bytes: &[u8],
+    maximum_write: usize,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let written = writer.write(&bytes[..bytes.len().min(maximum_write)])?;
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
+fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
+    generation: &T,
+    writer: &mut W,
+    byte_limit: u64,
+    maximum_write: usize,
+) -> Result<u64, CodeIndexProductionErrorV1> {
+    if maximum_write == 0 {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation write chunk must be non-zero".to_owned(),
+        ));
+    }
+    let placeholder = ManifestDigest::from_sha256_bytes(&[0; 32])
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let envelope_start = writer.stream_position().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation writer position failed: {error}"
+        ))
+    })?;
+    let (digest_start, digest_end, generation_hash, written) = {
+        let mut bounded = BoundedChunkWriterV1 {
+            writer,
+            written: 0,
+            byte_limit,
+            maximum_write,
+            limit_exceeded: false,
+        };
+        bounded.write_all(b"{\"state_digest\":").map_err(|error| {
+            if bounded.limit_exceeded {
+                byte_limit_error()
+            } else {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation serialization failed: {error}"
+                ))
+            }
+        })?;
+        let digest_start = envelope_start.checked_add(bounded.written).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation writer position overflowed".to_owned(),
+            )
+        })?;
+        if let Err(error) = serde_json::to_writer(&mut bounded, &placeholder) {
+            return Err(if bounded.limit_exceeded {
+                byte_limit_error()
+            } else {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation digest serialization failed: {error}"
+                ))
+            });
+        }
+        let digest_end = envelope_start.checked_add(bounded.written).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation writer position overflowed".to_owned(),
+            )
+        })?;
+        bounded.write_all(b",\"generation\":").map_err(|error| {
+            if bounded.limit_exceeded {
+                byte_limit_error()
+            } else {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation serialization failed: {error}"
+                ))
+            }
+        })?;
+        let generation_hash = {
+            let mut generation_writer = GenerationDigestWriterV1 {
+                writer: &mut bounded,
+                hasher: Sha256::new(),
+            };
+            if let Err(error) = serde_json::to_writer(&mut generation_writer, generation) {
+                return Err(if generation_writer.writer.limit_exceeded {
+                    byte_limit_error()
+                } else {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed generation serialization failed: {error}"
+                    ))
+                });
+            }
+            generation_writer.hasher.finalize()
+        };
+        bounded.write_all(b"}").map_err(|error| {
+            if bounded.limit_exceeded {
+                byte_limit_error()
+            } else {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation serialization failed: {error}"
+                ))
+            }
+        })?;
+        (digest_start, digest_end, generation_hash, bounded.written)
+    };
+
+    let state_digest = ManifestDigest::from_sha256_bytes(&generation_hash)
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let digest_bytes = serde_json::to_vec(&state_digest).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation digest serialization failed: {error}"
         ))
     })?;
-    sealed.extend_from_slice(b",\"generation\":");
-    sealed.extend_from_slice(generation_bytes);
-    sealed.push(b'}');
-    Ok(sealed)
+    let digest_width = digest_end
+        .checked_sub(digest_start)
+        .and_then(|width| usize::try_from(width).ok())
+        .ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation digest width overflowed".to_owned(),
+            )
+        })?;
+    if digest_bytes.len() != digest_width {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation digest width changed during encoding".to_owned(),
+        ));
+    }
+    writer
+        .seek(SeekFrom::Start(digest_start))
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation digest seek failed: {error}"
+            ))
+        })?;
+    write_chunked(writer, &digest_bytes, maximum_write).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation digest serialization failed: {error}"
+        ))
+    })?;
+    let envelope_end = envelope_start.checked_add(written).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed generation writer position overflowed".to_owned(),
+        )
+    })?;
+    writer
+        .seek(SeekFrom::Start(envelope_end))
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation final seek failed: {error}"
+            ))
+        })?;
+    Ok(written)
 }
 
 fn json_generation_digest(
@@ -227,9 +419,14 @@ fn json_generation_bytes_and_digest<T: Serialize>(
 }
 
 impl CodeIndexPublishedGenerationV1 {
-    /// Encode the complete sealed generation for immutable store publication.
+    /// Stream the complete sealed generation into one seekable immutable-store
+    /// sink. Writes and the total envelope are bounded independently, and the
+    /// payload digest is patched in place after the generation has been hashed.
     #[hotpath::measure]
-    pub fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    pub fn write_sealed<W: Write + Seek>(
+        &self,
+        writer: &mut W,
+    ) -> Result<u64, CodeIndexProductionErrorV1> {
         self.validate()?;
         let generation = PersistedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -253,15 +450,23 @@ impl CodeIndexPublishedGenerationV1 {
             projection_request: self.projection.request(),
             projection_receipt: self.projection.receipt(),
         };
-        let (generation_bytes, state_digest) = json_generation_bytes_and_digest(&generation)?;
-        let sealed = encode_sealed_envelope_bytes(&state_digest, &generation_bytes)?;
-        // Publication and restoration share one bound: a generation this
-        // build cannot read back must never be published in the first place.
-        admit_sealed_generation_len(u64::try_from(sealed.len()).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
-        })?)?;
-        crate::hotpath_observe::record_seal_bytes(sealed.len() as u64);
-        Ok(sealed)
+        let written = write_generation_envelope_with_limits(
+            &generation,
+            writer,
+            MAX_SEALED_CODE_GENERATION_BYTES_V1,
+            SEALED_GENERATION_WRITE_CHUNK_BYTES_V1,
+        )?;
+        crate::hotpath_observe::record_seal_bytes(written);
+        Ok(written)
+    }
+
+    /// Encode the complete sealed generation in memory for callers that need
+    /// an owned wire payload. Durable publication uses [`Self::write_sealed`]
+    /// so it never materializes a corpus-sized intermediate buffer.
+    pub fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+        let mut sealed = std::io::Cursor::new(Vec::new());
+        self.write_sealed(&mut sealed)?;
+        Ok(sealed.into_inner())
     }
 
     /// Restore and revalidate a complete sealed generation.
@@ -431,6 +636,30 @@ impl CodeIndexPublishedGenerationV1 {
 mod tests {
     use super::*;
 
+    struct MaximumWriteSink {
+        inner: std::io::Cursor<Vec<u8>>,
+        maximum_write: usize,
+    }
+
+    impl Write for MaximumWriteSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.maximum_write {
+                return Err(std::io::Error::other("write exceeded the fixture bound"));
+            }
+            self.inner.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl std::io::Seek for MaximumWriteSink {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
     #[derive(Serialize)]
     struct EnvelopeParityFixture<'a> {
         state_digest: &'a ManifestDigest,
@@ -438,17 +667,22 @@ mod tests {
     }
 
     #[test]
-    fn assembled_envelope_matches_serde_struct_bytes() {
-        let state_digest =
-            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("state digest");
+    fn direct_envelope_encoding_matches_canonical_serde_bytes() {
         let generation = serde_json::json!({
             "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
-            "manifest": {"generation_id": "generation.parity"}
+            "manifest": {"generation_id": "generation.parity", "payload": "x".repeat(256)}
         });
+        let mut assembled = MaximumWriteSink {
+            inner: std::io::Cursor::new(Vec::new()),
+            maximum_write: 7,
+        };
+        write_generation_envelope_with_limits(&generation, &mut assembled, u64::MAX, 7)
+            .expect("direct sealed envelope encoding");
+        let assembled = assembled.inner.into_inner();
         let generation_bytes =
             serde_json::to_vec(&generation).expect("generation fixture serialization");
-        let assembled = encode_sealed_envelope_bytes(&state_digest, &generation_bytes)
-            .expect("assemble sealed envelope");
+        let state_digest =
+            json_generation_digest(&generation_bytes).expect("generation fixture digest");
         let prior = serde_json::to_vec(&EnvelopeParityFixture {
             state_digest: &state_digest,
             generation: &generation,
@@ -456,6 +690,38 @@ mod tests {
         .expect("serde envelope serialization");
 
         assert_eq!(assembled, prior);
+    }
+
+    #[test]
+    fn direct_envelope_encoding_refuses_before_exceeding_its_byte_limit() {
+        let generation = serde_json::json!({
+            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+            "payload": "x".repeat(256)
+        });
+        let generation_bytes =
+            serde_json::to_vec(&generation).expect("generation fixture serialization");
+        let state_digest =
+            json_generation_digest(&generation_bytes).expect("generation fixture digest");
+        let canonical = serde_json::to_vec(&EnvelopeParityFixture {
+            state_digest: &state_digest,
+            generation: &generation,
+        })
+        .expect("canonical envelope serialization");
+        let byte_limit = u64::try_from(canonical.len() - 1).expect("fixture length fits u64");
+        let mut refused = MaximumWriteSink {
+            inner: std::io::Cursor::new(Vec::new()),
+            maximum_write: 7,
+        };
+
+        let error = write_generation_envelope_with_limits(&generation, &mut refused, byte_limit, 7)
+            .expect_err("an oversized envelope must be refused");
+
+        assert!(error.to_string().contains("canonical byte limit"));
+        assert!(
+            u64::try_from(refused.inner.get_ref().len()).expect("fixture length fits u64")
+                <= byte_limit,
+            "a refused stream must never write beyond its admitted limit"
+        );
     }
 
     /// Publishing a sealed generation re-encodes its content as one canonical

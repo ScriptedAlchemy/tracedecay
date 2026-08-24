@@ -105,6 +105,7 @@ const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// caught immediately by the tier-1 metadata check regardless of this bound.
 const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
+const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// Page bounds for streaming one sealed generation into the durable lexical
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
@@ -465,6 +466,32 @@ enum CodeIndexPublicationDispositionV1 {
     RetainedHistory,
 }
 
+struct TemporaryGenerationFileV1 {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TemporaryGenerationFileV1 {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TemporaryGenerationFileV1 {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 impl DaemonCodeIndexPublicationStoreV1 {
     fn new(
         store_root: &Path,
@@ -512,6 +539,75 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .map_err(Self::unavailable)?;
         file.write_all(bytes).map_err(Self::unavailable)?;
         file.sync_all().map_err(Self::unavailable)
+    }
+
+    fn write_sealed_durable(
+        path: &Path,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<u64, CodeIndexPublicationStoreErrorV1> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(Self::unavailable)?;
+        let written = generation
+            .write_sealed(&mut file)
+            .map_err(Self::unavailable)?;
+        file.sync_all().map_err(Self::unavailable)?;
+        let actual = file.metadata().map_err(Self::unavailable)?.len();
+        if actual != written {
+            return Err(Self::unavailable(
+                "sealed code-generation byte size changed during durable write",
+            ));
+        }
+        Ok(written)
+    }
+
+    fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
+        let mut file = File::open(path).map_err(Self::unavailable)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        loop {
+            let read = file.read(&mut buffer).map_err(Self::unavailable)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
+    }
+
+    fn files_equal(left: &Path, right: &Path) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        let left_metadata = left.symlink_metadata().map_err(Self::unavailable)?;
+        let right_metadata = right.symlink_metadata().map_err(Self::unavailable)?;
+        if !left_metadata.file_type().is_file() || !right_metadata.file_type().is_file() {
+            return Err(Self::unavailable(
+                "immutable code-generation path is not a regular file",
+            ));
+        }
+        if left_metadata.len() != right_metadata.len() {
+            return Ok(false);
+        }
+        let mut left = File::open(left).map_err(Self::unavailable)?;
+        let mut right = File::open(right).map_err(Self::unavailable)?;
+        let mut left_buffer = [0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        let mut right_buffer = [0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        loop {
+            let left_read = left.read(&mut left_buffer).map_err(Self::unavailable)?;
+            if left_read == 0 {
+                return Ok(right
+                    .read(&mut right_buffer[..1])
+                    .map_err(Self::unavailable)?
+                    == 0);
+            }
+            right
+                .read_exact(&mut right_buffer[..left_read])
+                .map_err(Self::unavailable)?;
+            if left_buffer[..left_read] != right_buffer[..left_read] {
+                return Ok(false);
+            }
+        }
     }
 
     fn state_digest(bytes: &[u8]) -> String {
@@ -1103,14 +1199,30 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         // Encode and fsync without the decoded-generation cache lock so
         // readers are not parked across the durable write.
         drop(state);
-        let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
-        let generation_size = u64::try_from(generation_bytes.len()).map_err(Self::unavailable)?;
+        let temporary_path = self.generations_root.join(format!(
+            ".generation-publication.{}.tmp",
+            std::process::id()
+        ));
+        match temporary_path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(&temporary_path).map_err(Self::unavailable)?;
+            }
+            Ok(_) => {
+                return Err(Self::unavailable(
+                    "sealed code-generation temporary path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Self::unavailable(error)),
+        }
+        let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
+        let generation_size = Self::write_sealed_durable(&temporary.path, &generation)?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
             return Err(Self::unavailable(
                 "sealed code generation exceeds the durable history byte bound",
             ));
         }
-        let state_digest = Self::state_digest(&generation_bytes);
+        let state_digest = Self::state_digest_file(&temporary.path)?;
         let generation_file = format!(
             "generation-{}.json",
             state_digest
@@ -1118,23 +1230,22 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .unwrap_or(&state_digest)
         );
         let generation_path = self.generations_root.join(&generation_file);
-        if generation_path.exists() {
-            let existing = std::fs::read(&generation_path).map_err(Self::unavailable)?;
-            if existing != generation_bytes {
-                return Err(Self::unavailable(
-                    "immutable code-generation path contains different bytes",
-                ));
+        match generation_path.symlink_metadata() {
+            Ok(_) => {
+                if !Self::files_equal(&generation_path, &temporary.path)? {
+                    return Err(Self::unavailable(
+                        "immutable code-generation path contains different bytes",
+                    ));
+                }
+                std::fs::remove_file(&temporary.path).map_err(Self::unavailable)?;
+                temporary.commit();
             }
-        } else {
-            let temporary = self
-                .generations_root
-                .join(format!(".{generation_file}.{}.tmp", std::process::id()));
-            if temporary.exists() {
-                std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(&temporary.path, &generation_path).map_err(Self::unavailable)?;
+                temporary.commit();
+                Self::sync_directory(&self.generations_root)?;
             }
-            Self::write_durable(&temporary, &generation_bytes)?;
-            std::fs::rename(&temporary, &generation_path).map_err(Self::unavailable)?;
-            Self::sync_directory(&self.generations_root)?;
+            Err(error) => return Err(Self::unavailable(error)),
         }
 
         let prior_pointer = self.read_publication_pointer()?;
