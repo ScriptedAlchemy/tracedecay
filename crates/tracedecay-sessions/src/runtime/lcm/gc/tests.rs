@@ -1695,8 +1695,14 @@ async fn pending_delete_drain_batches_mixed_metadata_presence() -> Result<(), St
         .await
         .map_err(|err| err.to_string())?;
 
-    assert_eq!(drain.outcomes.preserved.refs, *std::slice::from_ref(&live_ref));
-    assert_eq!(drain.outcomes.removed.refs, *std::slice::from_ref(&dead_ref));
+    assert_eq!(
+        drain.outcomes.preserved.refs,
+        *std::slice::from_ref(&live_ref)
+    );
+    assert_eq!(
+        drain.outcomes.removed.refs,
+        *std::slice::from_ref(&dead_ref)
+    );
     assert!(dir.join(&live_ref).is_file(), "live payload was unlinked");
     assert!(!dir.join(&dead_ref).exists(), "dead payload survived");
     Ok(())

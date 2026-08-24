@@ -506,7 +506,6 @@ impl GraphDbRegistry {
         )
     }
 
-
     #[hotpath::measure(label = "graph_db.generation.publish", impl_type = "GraphDbRegistry")]
     fn publish_verified_inner(
         &self,
