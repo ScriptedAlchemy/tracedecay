@@ -3,7 +3,7 @@
 # external SDK surface or generated binding.
 
 [[production]]
-package = "tracedecay"
+package = "tracedecay-cli"
 bin = "tracedecay"
 reason = "shipped CLI, daemon, MCP, and dashboard binary"
 
