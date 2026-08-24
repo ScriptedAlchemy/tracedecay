@@ -706,6 +706,119 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertTrue(all(arguments["format"] == "json" for _, arguments in calls))
 
 
+class FixturePrimingRetryTests(unittest.TestCase):
+    @staticmethod
+    def response(payload, *, is_error=False):
+        return {
+            "result": {
+                "_meta": {"duration_us": 5},
+                "isError": is_error,
+                "content": [{"type": "text", "text": payload}],
+            }
+        }
+
+    @staticmethod
+    def project_route_error(reason_code, *, retryable):
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32603,
+                "message": "tool project route failed: fixture authority is warming",
+                "data": {
+                    "tool": "tracedecay_by_qualified_name",
+                    "reason_code": reason_code,
+                    "retryable": retryable,
+                    "detail": "fixture authority is warming",
+                },
+            },
+        }
+
+    @classmethod
+    def client(cls, qualified_name_responses):
+        responses = {
+            "tracedecay_node": cls.response(
+                '{"node":{"qualified_name":"sweep_anchor","kind":"function"}}'
+            ),
+            "tracedecay_read": cls.response('{"handle":"rh_fixture"}'),
+            "tracedecay_retrieve": cls.response("catalog sweep handle source"),
+            "tracedecay_code_symbol_search": cls.response('{"node_id":"sym:code"}'),
+            "tracedecay_git_hunks": cls.response(
+                '{"preview_input_id":"preview.fixture","hunks":'
+                '[{"digest":"sha256:fixture","hunk":{}}]}'
+            ),
+        }
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+                self.qualified_name_responses = list(qualified_name_responses)
+
+            def call_tool(self, name, arguments, _deadline_ms):
+                self.calls.append((name, arguments))
+                if name == "tracedecay_by_qualified_name":
+                    return self.qualified_name_responses.pop(0), 3
+                return responses[name], 3
+
+        return Client()
+
+    @staticmethod
+    def policies(runner):
+        names = (
+            "tracedecay_by_qualified_name",
+            "tracedecay_node",
+            "tracedecay_read",
+            "tracedecay_retrieve",
+            "tracedecay_code_symbol_search",
+            "tracedecay_git_hunks",
+        )
+        return {
+            name: runner.ToolPolicy(name, "available", "read", 1_000)
+            for name in names
+        }
+
+    def test_graph_warming_retries_into_the_real_fixture_identity(self) -> None:
+        """Cold graph admission must not prevent every catalog journey from starting."""
+        runner = load_runner()
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        warming = self.project_route_error(
+            "code-graph-unavailable", retryable=True
+        )
+        ready = self.response('{"node_id":"function:fixture"}')
+        client = self.client([warming, ready])
+        fixture = {"symbol": "sweep_anchor"}
+
+        runner.prime_fixture_values(client, fixture, self.policies(runner))
+
+        qualified_name_calls = [
+            name for name, _arguments in client.calls
+            if name == "tracedecay_by_qualified_name"
+        ]
+        self.assertEqual(len(qualified_name_calls), 2)
+        self.assertEqual(fixture["node_id"], "function:fixture")
+        self.assertEqual(fixture["code_node_id"], "sym:code")
+        self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+
+    def test_non_retryable_graph_failure_remains_immediately_fatal(self) -> None:
+        """The warming reason code alone cannot authorize another attempt."""
+        runner = load_runner()
+        terminal = self.project_route_error(
+            "code-graph-unavailable", retryable=False
+        )
+        client = self.client([terminal, self.response('{"node_id":"function:fixture"}')])
+
+        with self.assertRaisesRegex(runner.SweepError, "code-graph-unavailable"):
+            runner.prime_fixture_values(
+                client, {"symbol": "sweep_anchor"}, self.policies(runner)
+            )
+
+        qualified_name_calls = [
+            name for name, _arguments in client.calls
+            if name == "tracedecay_by_qualified_name"
+        ]
+        self.assertEqual(len(qualified_name_calls), 1)
+
+
 class MountRetryTests(unittest.TestCase):
     """Reads honor typed retryable-unavailable states within one bounded budget."""
 

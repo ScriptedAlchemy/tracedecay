@@ -527,6 +527,17 @@ def prime_fixture_values(
         if resolved.get("error") is not None or (
             isinstance(resolved.get("result"), dict) and resolved["result"].get("isError") is True
         ):
+            _kind, code = response_problem_code(resolved)
+            retryable = any(
+                value.get("retryable") is True for value in _objects(resolved)
+            )
+            if (
+                code == "code-graph-unavailable"
+                and retryable
+                and time.monotonic() < ends_at
+            ):
+                time.sleep(MOUNT_RETRY_DELAY_S)
+                continue
             row = response_row(
                 "tool", "tracedecay_by_qualified_name", resolved, elapsed_ms, deadline("tracedecay_by_qualified_name")
             )
