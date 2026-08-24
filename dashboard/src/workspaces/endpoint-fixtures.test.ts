@@ -792,7 +792,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
         .filter((action) => action.kind === 'request_apply')
         .map((action) => action.operation)
         .sort(),
-    ).toEqual(['configuration_batch']);
+    ).toEqual(['configuration_batch', 'profile_code_index_worker_selection']);
   });
 
   it('GET /api/capabilities — capabilities gateway', () => {

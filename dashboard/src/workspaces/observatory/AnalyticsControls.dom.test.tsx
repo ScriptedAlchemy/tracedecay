@@ -329,6 +329,8 @@ function settingsPayload() {
         memory_safe_workers: 6,
       },
       code_index_workers: { mode: 'automatic' },
+      code_index_worker_configuration_revision_id: 'worker-revision-1',
+      code_index_worker_configuration_snapshot_id: 'worker-snapshot-1',
       configuration_revision_id: 'revision-1',
       configuration_snapshot_id: 'snapshot-1',
       extraction_timeout_secs: 30,
