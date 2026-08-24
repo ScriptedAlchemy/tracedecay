@@ -178,6 +178,31 @@ pub struct HookCompletedReadinessDistributions {
     pub(crate) rows_folded_to_other_host: u64,
     pub(crate) disposition_values_folded_to_unknown: u64,
 }
+impl HookCompletedReadinessDistributions {
+    /// Readiness counters the root-crate observation benchmark folds. The
+    /// struct moved into this crate, so its `pub(crate)` fields are no longer
+    /// reachable from there; these expose exactly the five it reads.
+    pub fn source_event(&self) -> &str {
+        &self.source_event
+    }
+
+    pub fn input_rows_received(&self) -> u64 {
+        self.input_rows_received
+    }
+
+    pub fn input_rows_processed(&self) -> u64 {
+        self.input_rows_processed
+    }
+
+    pub fn input_rows_dropped_at_cap(&self) -> u64 {
+        self.input_rows_dropped_at_cap
+    }
+
+    pub fn events_considered(&self) -> u64 {
+        self.events_considered
+    }
+}
+
 
 #[derive(Default)]
 struct MutableNumericSummary {
