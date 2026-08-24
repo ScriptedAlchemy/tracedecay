@@ -1984,7 +1984,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 runtime: graph_runtime,
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
-                resident_memory: Arc::clone(&self.resident_memory),
             },
         )
         .await

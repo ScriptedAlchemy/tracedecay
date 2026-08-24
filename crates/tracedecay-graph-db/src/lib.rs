@@ -1,7 +1,6 @@
 mod backup;
 mod error;
 mod generation;
-mod generation_memory;
 mod generation_runtime;
 mod generation_staging_runtime;
 mod hotpath_observe;
@@ -32,7 +31,6 @@ pub use generation::{
     GraphReplayCollectionOutcome, SealedCodeGenerationReplay, SealedGraphStateDigest,
     SemanticVectorGenerationReplay,
 };
-pub use generation_memory::GraphGenerationMemoryPlanV1;
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
 pub use limits::{
     MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,
