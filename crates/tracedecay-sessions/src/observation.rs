@@ -1,8 +1,10 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+use tokio::task::JoinSet;
 use tracedecay_application::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
@@ -19,6 +21,7 @@ use tracedecay_store::{
 };
 
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
@@ -308,6 +311,8 @@ pub enum ObservationApplicationError {
     Cancelled,
     #[error("observation batch contains a non-durable privacy outcome")]
     BatchContainsNonDurable,
+    #[error("observation batch worker stopped before completing")]
+    BatchWorkerStopped,
 }
 
 enum PreparedObservationCapture {
@@ -330,10 +335,48 @@ enum PreparedObservationCapture {
     },
 }
 
+struct DurableObservationCapture {
+    sanitized_record: SanitizedObservationRecordV1,
+    findings: Vec<SanitizationFindingV1>,
+    cancellation: ObservationCancellation,
+}
+
+struct PersistedObservationCapture {
+    outcome: ObservationPersistOutcome,
+    stored: Option<StoredObservation>,
+    durable: DurableObservationCapture,
+}
+
+/// Bounds independent batch preparation.
+///
+/// The daemon owns the actual width selection. Keeping the bound here makes
+/// the application boundary deterministic while allowing composition to pass
+/// the shared, memory-aware daemon plan without creating another CPU pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObservationBatchConcurrency(NonZeroUsize);
+
+impl ObservationBatchConcurrency {
+    pub const fn new(max_in_flight: NonZeroUsize) -> Self {
+        Self(max_in_flight)
+    }
+
+    const fn max_in_flight(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Default for ObservationBatchConcurrency {
+    fn default() -> Self {
+        Self(NonZeroUsize::MIN)
+    }
+}
+
 /// Application-owned composition of sanitizer and an already-authoritative store.
 pub struct ObservationApplication<S> {
     store: S,
     sanitizer: RecordSanitizerV1,
+    batch_concurrency: ObservationBatchConcurrency,
+    background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
 }
 
 impl<S> ObservationApplication<S>
@@ -341,7 +384,32 @@ where
     S: ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
 {
     pub fn new(store: S, sanitizer: RecordSanitizerV1) -> Self {
-        Self { store, sanitizer }
+        Self {
+            store,
+            sanitizer,
+            batch_concurrency: ObservationBatchConcurrency::default(),
+            background_cpu: None,
+        }
+    }
+
+    /// Applies a narrow injected bound in projectless or test composition.
+    ///
+    /// Production composition must use [`Self::with_background_cpu`] so active
+    /// preparation participates in the process-wide CPU authority.
+    #[must_use]
+    pub fn with_batch_concurrency(mut self, batch_concurrency: NonZeroUsize) -> Self {
+        self.batch_concurrency = ObservationBatchConcurrency::new(batch_concurrency);
+        self
+    }
+
+    /// Mounts the daemon's canonical background-CPU authority for independent
+    /// preparation. Cursor-dependent persistence remains ordered in the one
+    /// store-owned batch transaction.
+    #[must_use]
+    pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+        self.batch_concurrency = ObservationBatchConcurrency::new(background_cpu.width());
+        self.background_cpu = Some(background_cpu);
+        self
     }
 
     /// Advances a validated non-durable frame cursor without exposing the store.
@@ -371,6 +439,15 @@ where
         &self,
         request: CaptureObservationRequest,
     ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
+        Self::prepare_capture_with_sanitizer(&self.sanitizer, request)
+    }
+
+    fn prepare_capture_with_sanitizer(
+        sanitizer: &RecordSanitizerV1,
+        request: CaptureObservationRequest,
+    ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
+        #[cfg(test)]
+        tests::observe_capture_preparation(&request);
         let CaptureObservationRequest {
             parsed_record,
             identity,
@@ -383,9 +460,7 @@ where
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
         }
-        let sanitized = self
-            .sanitizer
-            .sanitize_parsed(parsed_record, identity, retention_class)?;
+        let sanitized = sanitizer.sanitize_parsed(parsed_record, identity, retention_class)?;
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
         }
@@ -475,6 +550,20 @@ where
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
         }
+        Ok(Self::persisted_outcome_from_readback(
+            outcome,
+            sanitized_record,
+            findings,
+            stored,
+        ))
+    }
+
+    fn persisted_outcome_from_readback(
+        outcome: ObservationPersistOutcome,
+        sanitized_record: SanitizedObservationRecordV1,
+        findings: Vec<SanitizationFindingV1>,
+        stored: Option<StoredObservation>,
+    ) -> CaptureObservationOutcome {
         // Preserve authoritative projection state when visible. A
         // new commit establishes queued state. Duplicate receipts
         // prove durability but carry no projection status, so a
@@ -492,12 +581,12 @@ where
                 | ObservationPersistOutcome::CoveredDuplicate(_),
             ) => ObservationProjectionReadback::Unavailable,
         };
-        Ok(CaptureObservationOutcome::Persisted {
+        CaptureObservationOutcome::Persisted {
             outcome: Box::new(outcome),
             projection_status,
             sanitized_record: Box::new(sanitized_record),
             findings,
-        })
+        }
     }
 
     /// Boxes the whole admission future at this shared chokepoint so every
@@ -631,8 +720,73 @@ where
 
 impl<S> ObservationApplication<S>
 where
-    S: ObservationStore,
+    S: ObservationStore + ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
 {
+    #[hotpath::measure(future = true)]
+    async fn prepare_batch_captures(
+        &self,
+        requests: Vec<CaptureObservationRequest>,
+    ) -> Result<Vec<PreparedObservationCapture>, ObservationApplicationError> {
+        let total = requests.len();
+        let mut pending = requests.into_iter().enumerate();
+        let limit = self.batch_concurrency.max_in_flight().min(total);
+        let mut tasks = JoinSet::new();
+        let mut prepared = (0..total).map(|_| None).collect::<Vec<_>>();
+
+        loop {
+            while tasks.len() < limit {
+                let Some((index, request)) = pending.next() else {
+                    break;
+                };
+                if request.cancellation.is_cancelled() {
+                    tasks.abort_all();
+                    return Err(ObservationApplicationError::Cancelled);
+                }
+                let sanitizer = self.sanitizer.clone();
+                let background_cpu = self.background_cpu.clone();
+                tasks.spawn_blocking(move || {
+                    let capture = match background_cpu {
+                        Some(authority) => authority.with_permit(|| {
+                            Self::prepare_capture_with_sanitizer(&sanitizer, request)
+                        }),
+                        None => Self::prepare_capture_with_sanitizer(&sanitizer, request),
+                    };
+                    (index, capture)
+                });
+            }
+
+            let Some(joined) = tasks.join_next().await else {
+                break;
+            };
+            let (index, capture) =
+                joined.map_err(|_| ObservationApplicationError::BatchWorkerStopped)?;
+            prepared[index] = Some(capture?);
+        }
+
+        prepared
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(ObservationApplicationError::BatchWorkerStopped)
+    }
+
+    fn persisted_batch_outcomes(
+        persisted: Vec<PersistedObservationCapture>,
+    ) -> Result<Vec<CaptureObservationOutcome>, ObservationApplicationError> {
+        let mut outcomes = Vec::with_capacity(persisted.len());
+        for persisted_capture in persisted {
+            if persisted_capture.durable.cancellation.is_cancelled() {
+                return Err(ObservationApplicationError::Cancelled);
+            }
+            outcomes.push(Self::persisted_outcome_from_readback(
+                persisted_capture.outcome,
+                persisted_capture.durable.sanitized_record,
+                persisted_capture.durable.findings,
+                persisted_capture.stored,
+            ));
+        }
+        Ok(outcomes)
+    }
+
     /// Sanitizes every request, then persists durable writes through one
     /// store-owned `persist_observations` call. Empty input returns empty
     /// without touching persist authority. A sanitizer reject or quarantine
@@ -646,9 +800,15 @@ where
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        let mut prepared = Vec::with_capacity(requests.len());
-        for request in requests {
-            prepared.push(self.prepare_capture(request)?);
+        let prepared = self.prepare_batch_captures(requests).await?;
+        if prepared.iter().any(|capture| {
+            matches!(
+                capture,
+                PreparedObservationCapture::Durable { cancellation, .. }
+                    if cancellation.is_cancelled()
+            )
+        }) {
+            return Err(ObservationApplicationError::Cancelled);
         }
         let all_durable = prepared
             .iter()
@@ -667,7 +827,11 @@ where
                     cancellation,
                 } => {
                     writes.push(*write);
-                    durable.push((sanitized_record, findings, cancellation));
+                    durable.push(DurableObservationCapture {
+                        sanitized_record,
+                        findings,
+                        cancellation,
+                    });
                 }
                 PreparedObservationCapture::Rejected { .. }
                 | PreparedObservationCapture::Quarantined { .. } => {
@@ -686,16 +850,19 @@ where
                 },
             ));
         }
-        let mut outcomes = Vec::with_capacity(durable.len());
-        for ((sanitized_record, findings, cancellation), persist_outcome) in
-            durable.into_iter().zip(persist_outcomes)
-        {
-            outcomes.push(
-                self.persisted_outcome(persist_outcome, sanitized_record, findings, &cancellation)
-                    .await?,
-            );
-        }
-        Ok(outcomes)
+        let persisted = durable
+            .into_iter()
+            .zip(persist_outcomes)
+            .map(|(durable, persisted)| {
+                let (outcome, stored) = persisted.into_parts();
+                PersistedObservationCapture {
+                    outcome,
+                    stored,
+                    durable,
+                }
+            })
+            .collect();
+        Self::persisted_batch_outcomes(persisted)
     }
 }
 

@@ -23,6 +23,7 @@ use crate::observation::{
 };
 use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::background_cpu::process_background_cpu;
 use tracedecay_runtime_core::privacy::{PrivacySanitizerError, RecordSanitizerV1};
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
@@ -203,6 +204,7 @@ pub(crate) const fn admission_outcome(
         status,
         retryable,
         reason_code,
+        recovery: None,
     }
 }
 
@@ -480,6 +482,29 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         ))
     }
 
+    fn replace_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+        expected: ParseOffset,
+        next: ParseOffset,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(HostAdmissionFacade::replace_parse_offset(
+            self, scope, path, expected, next,
+        ))
+    }
+
+    fn replace_parse_offset_pair<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        first: (&'a str, ParseOffset, ParseOffset),
+        second: (&'a str, ParseOffset, ParseOffset),
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(HostAdmissionFacade::replace_parse_offset_pair(
+            self, scope, first, second,
+        ))
+    }
+
     fn enqueue_discovery_paths<'a>(
         &'a self,
         scope: &'a ObservationScopeV1,
@@ -691,6 +716,12 @@ impl<'a> HostAdmissionFacade<'a> {
         store
             .persist_observations(writes)
             .await
+            .map(|outcomes| {
+                outcomes
+                    .into_iter()
+                    .map(|outcome| outcome.into_parts().0)
+                    .collect()
+            })
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
 
@@ -730,7 +761,14 @@ impl<'a> HostAdmissionFacade<'a> {
                 Some("sanitizer_unavailable"),
             )
         })?;
-        Ok(ObservationApplication::new(store, sanitizer))
+        let background_cpu = process_background_cpu().ok_or_else(|| {
+            admission_outcome(
+                HostAdmissionStatus::Unavailable,
+                false,
+                Some("background_cpu_unavailable"),
+            )
+        })?;
+        Ok(ObservationApplication::new(store, sanitizer).with_background_cpu(background_cpu))
     }
 
     fn store(
@@ -1096,6 +1134,27 @@ fn accepted_for_external_source_replay(
 }
 
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
+    match error {
+        ObservationStoreError::BatchRequiresScalarFallback { cause } => {
+            return HostAdmissionOutcome::batch_requires_scalar_fallback(*cause);
+        }
+        ObservationStoreError::ObservationCollision { .. } => {
+            return HostAdmissionOutcome::deterministic_content_refusal(
+                "observation_identity_collision",
+            );
+        }
+        ObservationStoreError::SanitizationReceiptCollision => {
+            return HostAdmissionOutcome::deterministic_content_refusal(
+                "observation_sanitization_receipt_collision",
+            );
+        }
+        ObservationStoreError::RetrievalAnchorAliasCollision { .. } => {
+            return HostAdmissionOutcome::deterministic_content_refusal(
+                "observation_retrieval_anchor_alias_collision",
+            );
+        }
+        _ => {}
+    }
     let reason_code = match error {
         ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
         ObservationStoreError::CursorCoverageMismatch => "observation_cursor_coverage_mismatch",
@@ -1155,11 +1214,18 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             true,
             Some("admission_cancelled"),
         ),
-        ObservationApplicationError::BatchContainsNonDurable => admission_outcome(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("privacy_boundary_failed"),
+        // A worker that stopped before finishing left the batch unapplied
+        // without saying anything about the observations themselves, so this
+        // is an availability failure the caller re-drives once a worker is
+        // back — not a rejection of the payload.
+        ObservationApplicationError::BatchWorkerStopped => admission_outcome(
+            HostAdmissionStatus::Unavailable,
+            true,
+            Some("batch_worker_stopped"),
         ),
+        ObservationApplicationError::BatchContainsNonDurable => {
+            HostAdmissionOutcome::deterministic_content_refusal("privacy_boundary_failed")
+        }
         ObservationApplicationError::Store(ObservationStoreError::CursorConflict { .. }) => {
             admission_outcome(
                 HostAdmissionStatus::Backpressured,
@@ -1174,11 +1240,9 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
                 Some("authority_write_failed"),
             )
         }
-        ObservationApplicationError::Contract(_) => admission_outcome(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("invalid_observation_contract"),
-        ),
+        ObservationApplicationError::Contract(_) => {
+            HostAdmissionOutcome::deterministic_content_refusal("invalid_observation_contract")
+        }
         ObservationApplicationError::Privacy(
             PrivacySanitizerError::InvalidPolicy | PrivacySanitizerError::DetectorUnavailable,
         ) => admission_outcome(
@@ -1186,11 +1250,9 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             true,
             Some("privacy_authority_unavailable"),
         ),
-        ObservationApplicationError::Privacy(_) => admission_outcome(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("privacy_boundary_failed"),
-        ),
+        ObservationApplicationError::Privacy(_) => {
+            HostAdmissionOutcome::deterministic_content_refusal("privacy_boundary_failed")
+        }
         ObservationApplicationError::Store(error) => classify_store_error(error),
     }
 }

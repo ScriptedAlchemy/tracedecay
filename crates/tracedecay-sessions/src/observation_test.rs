@@ -1,19 +1,25 @@
 use std::fs;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, EvidenceAvailabilityV1,
-    ObservationScopeV1, ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId, WorktreeId,
+    MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES, ObservationScopeV1,
+    ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId, WorktreeId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
 };
-use tracedecay_store::{ObservationCommitReceipt, ObservationStore, ObservationStoreResult};
+use tracedecay_store::{
+    ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationStore,
+    ObservationStoreResult,
+};
 
-use tracedecay_runtime_core::privacy::parse_claude_record_v1;
+use tracedecay_runtime_core::privacy::{ClaudeSanitizerPolicyV1, parse_claude_record_v1};
 
 use super::*;
 
@@ -33,6 +39,72 @@ struct FakeStore {
     /// row as absent, the way a trailing reader snapshot does under load.
     read_none_once: Mutex<bool>,
     persist_batch_calls: Mutex<usize>,
+}
+
+#[derive(Default)]
+struct ConcurrencyProbe {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl ConcurrencyProbe {
+    fn enter(&self) -> ConcurrencyProbeGuard<'_> {
+        let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.peak.fetch_max(active, Ordering::AcqRel);
+        ConcurrencyProbeGuard { probe: self }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+}
+
+struct ConcurrencyProbeGuard<'probe> {
+    probe: &'probe ConcurrencyProbe,
+}
+
+impl Drop for ConcurrencyProbeGuard<'_> {
+    fn drop(&mut self) {
+        self.probe.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone)]
+struct PreparationProbe {
+    session_id: String,
+    probe: Arc<ConcurrencyProbe>,
+}
+
+static PREPARATION_PROBE: Mutex<Option<PreparationProbe>> = Mutex::new(None);
+
+pub(super) fn observe_capture_preparation(request: &CaptureObservationRequest) {
+    let probe = PREPARATION_PROBE.lock().unwrap().clone();
+    let Some(probe) = probe else {
+        return;
+    };
+    if request.identity.source().session_id().as_str() != probe.session_id {
+        return;
+    }
+    let _running = probe.probe.enter();
+    std::thread::sleep(Duration::from_millis(50));
+}
+
+struct PreparationProbeLease;
+
+impl PreparationProbeLease {
+    fn install(session_id: &str, probe: Arc<ConcurrencyProbe>) -> Self {
+        *PREPARATION_PROBE.lock().unwrap() = Some(PreparationProbe {
+            session_id: session_id.to_owned(),
+            probe,
+        });
+        Self
+    }
+}
+
+impl Drop for PreparationProbeLease {
+    fn drop(&mut self) {
+        *PREPARATION_PROBE.lock().unwrap() = None;
+    }
 }
 
 impl ObservationStore for FakeStore {
@@ -86,7 +158,7 @@ impl ObservationStore for FakeStore {
     async fn persist_observations(
         &self,
         writes: Vec<AnchoredObservationWrite>,
-    ) -> ObservationStoreResult<Vec<ObservationPersistOutcome>> {
+    ) -> ObservationStoreResult<Vec<ObservationBatchPersistOutcome>> {
         // Named batch contract for the in-memory fake: empty is empty, and
         // each write uses the same cursor/collision/identity rules as
         // persist_observation. This is not a production writer transaction.
@@ -96,7 +168,18 @@ impl ObservationStore for FakeStore {
         }
         let mut outcomes = Vec::with_capacity(writes.len());
         for write in writes {
-            outcomes.push(self.persist_observation(write).await?);
+            let outcome = self.persist_observation(write).await?;
+            let stored = self
+                .observations
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|stored| {
+                    stored.observation().observation_id()
+                        == outcome.receipt().observation().observation_id()
+                })
+                .cloned();
+            outcomes.push(ObservationBatchPersistOutcome::new(outcome, stored));
         }
         Ok(outcomes)
     }
@@ -200,13 +283,21 @@ fn request_at_with_cancellation(
     start: u64,
     cancellation: ObservationCancellation,
 ) -> CaptureClaudeObservationRequest {
+    request_at_for_session(record, start, "session.application-test", cancellation)
+}
+
+fn request_at_for_session(
+    record: &Value,
+    start: u64,
+    session_id: &str,
+    cancellation: ObservationCancellation,
+) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(record).unwrap();
     let end = start + u64::try_from(encoded_frame.len()).unwrap();
     let parsed_record =
         parse_claude_record_v1(&encoded_frame, ClaudeByteRangeV1::new(start, end).unwrap())
             .unwrap();
-    let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.application-test").unwrap()).unwrap();
+    let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
     let scope = ObservationScopeV1::Project {
         project_id: ProjectId::new("project.application-test").unwrap(),
     };
@@ -236,6 +327,52 @@ fn application() -> ObservationApplication<FakeStore> {
         FakeStore::default(),
         RecordSanitizerV1::claude_v1().unwrap(),
     )
+}
+
+fn application_with_batch_concurrency(max_in_flight: usize) -> ObservationApplication<FakeStore> {
+    application().with_batch_concurrency(std::num::NonZeroUsize::new(max_in_flight).unwrap())
+}
+
+fn consecutive_requests(
+    records: &[Value],
+    session_id: &str,
+) -> Vec<CaptureClaudeObservationRequest> {
+    let mut start = 0;
+    records
+        .iter()
+        .map(|record| {
+            let request = request_at_for_session(
+                record,
+                start,
+                session_id,
+                ObservationCancellation::default(),
+            );
+            start += u64::try_from(serde_json::to_vec(record).unwrap().len()).unwrap();
+            request
+        })
+        .collect()
+}
+
+fn captured_contents(outcomes: &[CaptureObservationOutcome]) -> Vec<&str> {
+    outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            CaptureObservationOutcome::Persisted {
+                sanitized_record, ..
+            }
+            | CaptureObservationOutcome::AcceptedForReplay {
+                sanitized_record, ..
+            } => sanitized_record
+                .payload()
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .expect("captured test content"),
+            CaptureObservationOutcome::Rejected { .. }
+            | CaptureObservationOutcome::Quarantined { .. } => {
+                panic!("batch fixture must remain durable")
+            }
+        })
+        .collect()
 }
 
 fn mark_first_observation_not_queued(store: &FakeStore) {
@@ -917,15 +1054,188 @@ async fn capture_observations_sanitizes_then_persists_once() {
 }
 
 #[tokio::test]
+async fn capture_observations_bounds_parallel_preparation_and_preserves_input_order() {
+    let session_id = "session.application-batch-preparation";
+    let probe = Arc::new(ConcurrencyProbe::default());
+    let _probe = PreparationProbeLease::install(session_id, Arc::clone(&probe));
+    let application = application_with_batch_concurrency(2);
+    let records = [
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "prepare-first" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "prepare-second" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "prepare-third" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "prepare-fourth" }
+        }),
+    ];
+
+    let outcomes = application
+        .capture_observations(consecutive_requests(&records, session_id))
+        .await
+        .expect("independent preparation remains durable");
+
+    assert_eq!(probe.peak(), 2, "preparation must use the injected bound");
+    assert_eq!(
+        captured_contents(&outcomes),
+        [
+            "prepare-first",
+            "prepare-second",
+            "prepare-third",
+            "prepare-fourth"
+        ]
+    );
+    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn capture_observations_uses_ordered_bulk_receipts_without_point_reads() {
+    let application = application_with_batch_concurrency(2);
+    let records = [
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "readback-first" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "readback-second" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "readback-third" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "readback-fourth" }
+        }),
+    ];
+
+    let outcomes = application
+        .capture_observations(consecutive_requests(
+            &records,
+            "session.application-batch-readbacks",
+        ))
+        .await
+        .expect("bulk receipts preserve committed outcomes");
+
+    assert_eq!(
+        *application.store.point_reads.lock().unwrap(),
+        0,
+        "batch persistence must use its store-owned bulk snapshot rather than N point reads"
+    );
+    assert_eq!(
+        captured_contents(&outcomes),
+        [
+            "readback-first",
+            "readback-second",
+            "readback-third",
+            "readback-fourth"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn capture_observations_cancellation_before_parallel_preparation_skips_persistence() {
+    let application = application_with_batch_concurrency(2);
+    let cancelled = ObservationCancellation::default();
+    cancelled.cancel();
+    let first = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "cancelled-before-prepare" }
+    });
+    let second = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "must-not-persist" }
+    });
+    let second_start = u64::try_from(serde_json::to_vec(&first).unwrap().len()).unwrap();
+
+    let result = application
+        .capture_observations(vec![
+            request_at_for_session(&first, 0, "session.application-batch-cancel", cancelled),
+            request_at_for_session(
+                &second,
+                second_start,
+                "session.application-batch-cancel",
+                ObservationCancellation::default(),
+            ),
+        ])
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ObservationApplicationError::Cancelled)
+    ));
+    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 0);
+    assert!(application.store.observations.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn capture_observations_reports_cancellation_after_the_single_batch_commit() {
+    let application = application_with_batch_concurrency(2);
+    let cancellation = ObservationCancellation::default();
+    *application.store.cancel_on_persist.lock().unwrap() = Some(cancellation.clone());
+    let records = [
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "commit-before-batch-ack-first" }
+        }),
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": "commit-before-batch-ack-second" }
+        }),
+    ];
+    let mut requests = consecutive_requests(&records, "session.application-batch-cancel-commit");
+    requests[0] = request_at_for_session(
+        &records[0],
+        0,
+        "session.application-batch-cancel-commit",
+        cancellation,
+    );
+
+    let result = application.capture_observations(requests).await;
+
+    assert!(matches!(
+        result,
+        Err(ObservationApplicationError::Cancelled)
+    ));
+    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 1);
+    assert_eq!(application.store.observations.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn capture_observations_refuses_mixed_privacy_batch_before_persist() {
-    let application = application();
+    // `parse_claude_record_v1` (used by `request`/`request_at` below) enforces
+    // the parser's own 1 MiB ceiling before any record reaches the sanitizer,
+    // so a record large enough to trip that ceiling can never reach
+    // `sanitize_parsed`'s own `RecordSize` disposition through this path. To
+    // reach a sanitizer-level rejection instead, this test runs a sanitizer
+    // whose policy caps records well below the parser's default so the
+    // "rejected" record still parses but is over *policy* before persist.
+    let policy = ClaudeSanitizerPolicyV1::claude_v1()
+        .unwrap()
+        .with_limits(
+            256,
+            MAX_OBSERVATION_STRUCTURE_DEPTH,
+            MAX_OBSERVATION_STRUCTURE_VALUES,
+        )
+        .unwrap();
+    let application =
+        ObservationApplication::new(FakeStore::default(), RecordSanitizerV1::new(policy));
     let durable = json!({
         "type": "user",
         "message": { "role": "user", "content": "batch-durable" }
     });
     let rejected = json!({
         "type": "user",
-        "message": { "role": "user", "content": "x".repeat(1_048_577) }
+        "message": { "role": "user", "content": "x".repeat(512) }
     });
     let start_two = u64::try_from(serde_json::to_vec(&durable).unwrap().len()).unwrap();
     let result = application

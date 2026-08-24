@@ -1,3 +1,7 @@
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::time::Duration;
+
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{
@@ -10,6 +14,9 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::background_cpu::{
+    ProcessBackgroundCpuV1, install_process_background_cpu, process_background_cpu,
+};
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
@@ -23,6 +30,13 @@ use super::*;
 
 const BATCH_PROVIDER: &str = "claude";
 const BATCH_SIZE: usize = 8;
+
+fn background_cpu_for_host_admission_test() -> Arc<ProcessBackgroundCpuV1> {
+    process_background_cpu().unwrap_or_else(|| {
+        install_process_background_cpu(NonZeroUsize::new(4).expect("nonzero test CPU width"))
+            .expect("install canonical background CPU authority")
+    })
+}
 
 fn committed_transactions(database: &tracedecay_global_db::RegisteredGlobalDb) -> u64 {
     database
@@ -41,6 +55,7 @@ fn profile_facade<'a>(
     HostAdmissionFacade<'a>,
     &'a tracedecay_global_db::RegisteredGlobalDb,
 ) {
+    let _background_cpu = background_cpu_for_host_admission_test();
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
@@ -176,6 +191,33 @@ async fn mounted_capture_batch_reduces_writer_transactions() {
         committed, 2,
         "one observation batch plus one external-source batch must commit"
     );
+}
+
+#[tokio::test]
+async fn production_facade_preparation_waits_for_shared_background_cpu() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, _) = profile_facade(&runtime);
+    let authority = background_cpu_for_host_admission_test();
+    let permits = (0..authority.width().get())
+        .map(|_| authority.acquire())
+        .collect::<Vec<_>>();
+    let session_id = SessionId::new("session.host-admission-capture.shared-cpu").unwrap();
+    let capture = facade.capture_observations(sequential_capture_requests(&session_id, 2));
+    tokio::pin!(capture);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), capture.as_mut())
+            .await
+            .is_err(),
+        "the production facade must mount preparation beneath the canonical CPU authority"
+    );
+    drop(permits);
+
+    let outcomes = capture.await.unwrap();
+    assert_eq!(outcomes.len(), 2);
 }
 
 fn fixture_receipt(receipt_id: &str, payload: &serde_json::Value) -> SanitizationReceiptV1 {

@@ -764,8 +764,8 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
 /// Once the collision is durably terminal, a re-admitted candidate (late
 /// catch-up pass or temporal trigger holding a stale cursor) must fail with
 /// the same typed error without accessing the retained observation row and
-/// with only the one source-cursor runtime dispatch needed to converge
-/// coverage.
+/// without any point-read runtime dispatches: the bounded preflight snapshot
+/// supplies the refusal, retained identity, and source-cursor authorities.
 #[tokio::test]
 async fn re_admitted_identity_collision_uses_marker_without_retained_row_access() {
     let tmp = TempDir::new().unwrap();
@@ -823,9 +823,9 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     assert_eq!(
         first_dispatch_trace.snapshot(),
         ObservationDispatchSnapshot {
-            runtime_commands: 2,
+            runtime_commands: 0,
         },
-        "the full collision path must dispatch the stored-observation and source-cursor reads"
+        "the full collision path must use the bounded preflight snapshot"
     );
 
     // The terminal marker now exists. Arm the corruption tripwire: overwrite
@@ -863,9 +863,9 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     assert_eq!(
         dispatch_trace.snapshot(),
         ObservationDispatchSnapshot {
-            runtime_commands: 1,
+            runtime_commands: 0,
         },
-        "the terminal marker path may dispatch only the canonical source-cursor read"
+        "the terminal marker path must use the bounded preflight snapshot"
     );
     // Any access to the retained row — including an ignored bare-column read
     // that would evade a byte-corruption tripwire — would have failed because
@@ -2597,6 +2597,11 @@ impl ProductionJsonlAdmission {
             ObservationApplicationError::BatchContainsNonDurable => {
                 tracedecay_sessions::admission::HostAdmissionOutcome::degraded(
                     "observation_batch_non_durable",
+                )
+            }
+            ObservationApplicationError::BatchWorkerStopped => {
+                tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                    "observation_batch_worker_stopped",
                 )
             }
             ObservationApplicationError::Store(_) => {

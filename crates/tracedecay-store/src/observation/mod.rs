@@ -794,10 +794,55 @@ impl StoredObservation {
     }
 }
 
+/// Ordered result from one bounded observation-admission transaction.
+///
+/// The optional stored snapshot is produced by the same store-owned bulk
+/// operation as the persistence outcome. Callers must not replace it with
+/// per-record post-commit reads, which would serialize a batch on the
+/// readback path and can observe a later projection state instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationBatchPersistOutcome {
+    outcome: ObservationPersistOutcome,
+    stored: Option<StoredObservation>,
+}
+
+impl ObservationBatchPersistOutcome {
+    pub const fn new(
+        outcome: ObservationPersistOutcome,
+        stored: Option<StoredObservation>,
+    ) -> Self {
+        Self { outcome, stored }
+    }
+
+    pub const fn outcome(&self) -> &ObservationPersistOutcome {
+        &self.outcome
+    }
+
+    pub const fn stored(&self) -> Option<&StoredObservation> {
+        self.stored.as_ref()
+    }
+
+    pub fn into_parts(self) -> (ObservationPersistOutcome, Option<StoredObservation>) {
+        (self.outcome, self.stored)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationProjectionStatus {
     Queued,
     NotQueued,
+}
+
+/// Why one bounded observation batch must be retried as scalar operations.
+///
+/// These causes describe only collisions between not-yet-durable members of
+/// the current batch. Collisions against durable evidence remain terminal
+/// store errors and must never be retried as scalar writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationBatchFallbackCause {
+    IntraBatchIdentityCollision,
+    IntraBatchSanitizationReceiptCollision,
+    IntraBatchRetrievalAnchorAliasCollision,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -832,6 +877,10 @@ impl ObservationReplayRequest {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ObservationStoreError {
+    #[error("observation batch requires scalar fallback: {cause:?}")]
+    BatchRequiresScalarFallback {
+        cause: ObservationBatchFallbackCause,
+    },
     #[error("observation cursor does not match its source evidence")]
     CursorObservationMismatch,
     #[error("covered source evidence is not contiguous with the expected cursor")]
@@ -944,14 +993,15 @@ pub trait ObservationStore: Send + Sync {
     ) -> impl Future<Output = ObservationStoreResult<ObservationPersistOutcome>> + Send;
 
     /// Persist a bounded admission batch through one store-owned writer
-    /// transaction. An empty `writes` returns an empty outcome list and must
-    /// not mint a success that skipped cursor, collision, or file-identity
-    /// authority. Implementations cannot default this to N one-record
-    /// transactions; test fakes have to name the batch contract.
+    /// transaction plus an ordered, bounded post-submit snapshot. An empty
+    /// `writes` returns an empty outcome list and must not mint a success that
+    /// skipped cursor, collision, or file-identity authority. Implementations
+    /// cannot default this to N one-record transactions or point reads; test
+    /// fakes have to name the batch contract.
     fn persist_observations(
         &self,
         writes: Vec<AnchoredObservationWrite>,
-    ) -> impl Future<Output = ObservationStoreResult<Vec<ObservationPersistOutcome>>> + Send;
+    ) -> impl Future<Output = ObservationStoreResult<Vec<ObservationBatchPersistOutcome>>> + Send;
 
     fn get_source_cursor(
         &self,
