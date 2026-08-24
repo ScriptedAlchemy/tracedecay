@@ -90,6 +90,7 @@ pub(crate) fn retained_mcp_operation(
     }
 }
 
+#[hotpath::measure(label = "mcp.dispatch.profile_retained_application")]
 pub(super) async fn dispatch_profile_retained_application_tool(
     operation: RetainedSurfaceOperation,
     tool_name: &str,

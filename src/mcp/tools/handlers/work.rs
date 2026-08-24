@@ -19,6 +19,7 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::tool_call_support::json_result;
 
+#[hotpath::measure(label = "mcp.dispatch.work")]
 pub(super) async fn handle_work(
     tool_name: &str,
     mut body: Value,

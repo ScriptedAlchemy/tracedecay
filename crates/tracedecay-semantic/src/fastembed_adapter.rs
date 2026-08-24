@@ -568,10 +568,8 @@ impl AdmittedProjectionArtifactV1 {
         &self.runtime_artifact.projection
     }
 
-    /// Intra-op width is admitted with the artifact and is part of the exact
-    /// FastEmbed execution identity, even though it is not a projection-key
-    /// field. Keep it crate-private so callers cannot label a cache entry
-    /// with an independently supplied width.
+    /// Maximum intra-op width admitted with the artifact. The process CPU
+    /// authority may narrow the native runtime below this ceiling.
     pub(crate) fn execution_max_threads(&self) -> u32 {
         self.runtime_artifact.max_threads()
     }
@@ -1084,9 +1082,11 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         self.verify_artifact_compatibility(authority)?;
         let artifact = authority.runtime_artifact();
         let model = fastembed_model(artifact)?;
+        let intra_threads =
+            crate::embedding_parallelism::embedding_intra_threads(artifact.max_threads());
         let options = InitOptionsUserDefined::new()
             .with_max_length(artifact.truncation_length() as usize)
-            .with_intra_threads(artifact.max_threads() as usize);
+            .with_intra_threads(intra_threads);
         let embedding = hotpath::measure_block!("semantic.model.load", {
             TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
                 let failure = fastembed_error(

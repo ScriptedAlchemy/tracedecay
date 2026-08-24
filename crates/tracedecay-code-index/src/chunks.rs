@@ -147,8 +147,10 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().map(operation).collect();
     }
-    let results: Vec<Result<T, ChunkingFailureV1>> =
-        chunks.par_iter().map(operation).collect::<Vec<_>>();
+    let results: Vec<Result<T, ChunkingFailureV1>> = chunks
+        .par_iter()
+        .map(|chunk| crate::parallelism::with_background_cpu_permit(|| operation(chunk)))
+        .collect::<Vec<_>>();
     results.into_iter().collect()
 }
 
@@ -168,7 +170,11 @@ where
     let failure = chunks
         .par_iter()
         .enumerate()
-        .filter_map(|(index, chunk)| operation(chunk).err().map(|error| (index, error)))
+        .filter_map(|(index, chunk)| {
+            crate::parallelism::with_background_cpu_permit(|| operation(chunk))
+                .err()
+                .map(|error| (index, error))
+        })
         .min_by_key(|(index, _)| *index);
     match failure {
         Some((_, error)) => Err(error),
@@ -261,7 +267,7 @@ impl ExactExtractionAuthorityV1 {
         }
         let admitted = chunks
             .into_par_iter()
-            .map(|chunk| self.admit(chunk))
+            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
             .collect::<Vec<_>>();
         admitted.into_iter().collect()
     }
@@ -1963,10 +1969,12 @@ fn emit_windows(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
 
     use super::*;
     use tracedecay_domain::{
@@ -1985,8 +1993,70 @@ mod tests {
     };
     use crate::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
+    use tracedecay_runtime_core::background_cpu::{
+        install_process_background_cpu, process_background_cpu,
+    };
 
     struct AlwaysCancelled;
+
+    #[test]
+    fn nested_chunk_fanout_admits_stolen_workers_without_exceeding_width() {
+        assert!(
+            process_background_cpu().is_none(),
+            "no test may install a shadow background CPU authority"
+        );
+        let _preview = crate::parallelism::preview_worker_plan(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+            20 * crate::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
+        );
+        assert!(
+            process_background_cpu().is_none(),
+            "worker-plan preview must not install background CPU authority"
+        );
+        let authority =
+            install_process_background_cpu(NonZeroUsize::new(2).expect("nonzero background width"))
+                .expect("background CPU authority");
+        let fixture = chunk_source("pub fn shared_cpu_fixture() {}\n")
+            .chunks
+            .into_iter()
+            .next()
+            .expect("fixture chunk");
+        let chunks = vec![fixture; PARALLEL_CHUNK_THRESHOLD * 2];
+        let active = AtomicUsize::new(0);
+        let maximum = AtomicUsize::new(0);
+        let parent_completed = AtomicUsize::new(0);
+        let stolen_completed = AtomicUsize::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("nested Rayon pool");
+
+        let mapped = pool
+            .install(|| {
+                crate::parallelism::with_background_cpu_permit(|| {
+                    let parent = rayon::current_thread_index().expect("parent Rayon worker");
+                    map_chunks_ordered(&chunks, |_| {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(current, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(5));
+                        if rayon::current_thread_index() == Some(parent) {
+                            parent_completed.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            stolen_completed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                })
+            })
+            .expect("nested chunk fan-out");
+
+        assert_eq!(mapped.len(), chunks.len());
+        assert_eq!(maximum.load(Ordering::SeqCst), authority.width().get());
+        assert!(parent_completed.load(Ordering::SeqCst) > 0);
+        assert!(stolen_completed.load(Ordering::SeqCst) > 0);
+        assert_eq!(authority.active_units(), 0);
+    }
 
     impl ExtractionCancellation for AlwaysCancelled {
         fn is_cancelled(&self) -> bool {

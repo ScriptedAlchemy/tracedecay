@@ -120,7 +120,10 @@ use tracedecay_usecases::provider_pricing as savings_pricing;
 pub mod scope;
 mod settings_api;
 pub use settings_api::{
-    DashboardPrAutoTrackEntryV1, DashboardPrAutoTrackReadPort,
+    DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
+    DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
+    DashboardCodeIndexWorkerSettingsFuture, DashboardPrAutoTrackEntryV1,
+    DashboardPrAutoTrackReadPort, DashboardProfileCodeIndexWorkerSettingsPort,
     install_dashboard_pr_autotrack_read_port,
 };
 mod storage_findings_api;
@@ -263,6 +266,11 @@ pub struct DashboardStateCompositionV1 {
     /// structure routes report typed unavailable.
     pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     pub registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    /// Exact ProfileSessions read/mutation capability for the daemon-wide
+    /// code-index worker preference. This never aliases the project settings
+    /// control plane: it has its own profile revision and CAS boundary.
+    pub profile_code_index_worker_settings:
+        Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection. Loom's git sources report unavailable without it.
@@ -410,6 +418,11 @@ pub struct DashboardState {
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
     pub user_settings: Arc<dyn crate::application::configuration::UserSettingsDaemonClient>,
+    /// Root-injected ProfileSessions worker preference authority. It remains
+    /// separate from `user_settings`, whose revision belongs to the ordinary
+    /// profile settings resource.
+    pub profile_code_index_worker_settings:
+        Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub token_counts: Arc<token_count::TokenCountCache>,
     /// Admitted daemon/application diagnostics authority. `None` keeps all
@@ -452,6 +465,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    profile_code_index_worker_settings:
+        Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
@@ -476,6 +491,7 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_graph_projection_read_port: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
+            profile_code_index_worker_settings: None,
             application_invocation_executor: None,
         }
     }
@@ -547,6 +563,18 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         delivery_read_authority: Arc<dyn DashboardDeliveryReadPortV1>,
     ) -> Self {
         self.delivery_read_authority = Some(delivery_read_authority);
+        self
+    }
+
+    /// Attaches the exact ProfileSessions worker settings port used by the
+    /// production dashboard composition. Tests keep the same separate CAS
+    /// resource instead of routing this preference through project settings.
+    #[must_use]
+    pub fn with_profile_code_index_worker_settings(
+        mut self,
+        profile_code_index_worker_settings: Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>,
+    ) -> Self {
+        self.profile_code_index_worker_settings = Some(profile_code_index_worker_settings);
         self
     }
 }
@@ -681,6 +709,7 @@ async fn build_state_inner(
         code_graph_read_admission,
         code_graph_projection_read_port,
         registered_project_session_db,
+        profile_code_index_worker_settings,
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
@@ -770,6 +799,7 @@ async fn build_state_inner(
         dashboard_root,
         retention_config: cg.retention_config(),
         user_settings: cg.user_settings_client(),
+        profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority,
@@ -820,6 +850,10 @@ pub async fn build_selected_project_state(
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
             registered_project_session_db: None,
+            // This capability is profile-global and its route is deliberately
+            // unscoped, so selected projects reuse the active dashboard's
+            // exact ProfileSessions authority. It is not a project write.
+            profile_code_index_worker_settings: active.profile_code_index_worker_settings.clone(),
             lcm_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
@@ -951,6 +985,8 @@ where
                 .and_then(|authority| authority.code_graph_projection_read_port.clone()),
             registered_project_session_db: test_authority
                 .map(|authority| authority.project_sessions.clone()),
+            profile_code_index_worker_settings: test_authority
+                .and_then(|authority| authority.profile_code_index_worker_settings.clone()),
             lcm_read_authority: test_authority
                 .and_then(|authority| authority.lcm_read_authority.clone()),
             git_correlation_read_authority: test_authority
@@ -1516,6 +1552,10 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/settings/user",
             patch(settings_api::patch_user_settings),
+        )
+        .route(
+            "/api/settings/user/code-index-workers",
+            patch(settings_api::patch_code_index_worker_settings),
         )
         .route("/api/explorer/queries", post(explorer_api::create_query))
         .route(
@@ -2238,6 +2278,7 @@ mod authority_tests {
                     crate::application::configuration::ProductionUserSettingsDaemonClient::default(
                     ),
                 ),
+                profile_code_index_worker_settings: None,
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
                 code_diagnostics_authority: None,
                 automation_authority: None,

@@ -7,6 +7,7 @@ use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::RegisteredGlobalDb;
 use super::query::{PERSIST_OPERATION, storage, storage_message};
@@ -26,7 +27,7 @@ use materialize::materialize_session_temporal_refresh_batch_in_transaction;
 pub(super) use materialize::canonical_parent_message_resolver;
 pub(in crate::session_temporal) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
-    persist_session_temporal_projection_batch_in_transaction,
+    ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
 };
 pub(in crate::session_temporal) use receipts::digest_bytes;
@@ -208,12 +209,13 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        hotpath_observe::record_transaction_rows(1);
-        hotpath_observe::record_transaction_bytes(
-            u64::try_from(batch.item_count()).unwrap_or(u64::MAX),
-        );
-        let receipt =
-            persist_session_temporal_projection_batch_in_transaction(&transaction, &batch).await?;
+        let receipt = persist_session_temporal_projection_batch_in_transaction(
+            &transaction,
+            &batch,
+            &ExecutionControl::default(),
+            ProjectionProgressBaseline::Empty,
+        )
+        .await?;
         transaction
             .commit()
             .await

@@ -49,19 +49,47 @@ struct Processed {
     fatal: Option<StorageRuntimeErrorV1>,
 }
 
+/// When a batch left the queue, and how long it had waited to get there.
+///
+/// Both are fixed at the dequeue boundary and are only ever reported together,
+/// so they travel as one value rather than as two positional arguments that
+/// could be transposed.
+#[derive(Clone, Copy)]
+pub(super) struct BatchTiming {
+    pub(super) dequeued_at: Instant,
+    pub(super) queue_wait_micros: u64,
+}
+
+/// The writer actor's shared reporting handles.
+///
+/// None of these varies per batch — they are the actor's, not the batch's —
+/// and every batch reports through all three, so passing them as one borrow
+/// keeps the per-batch arguments to the things that actually differ per batch.
+#[derive(Clone, Copy)]
+pub(super) struct WriterReporting<'reporting> {
+    pub(super) telemetry: &'reporting WriterTelemetry,
+    pub(super) state: &'reporting AtomicU8,
+    pub(super) watermark_publisher: &'reporting CommittedWatermarkPublisher,
+}
+
 #[hotpath::measure]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn process_batch(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
-    started: Instant,
-    queue_wait_micros: u64,
+    timing: BatchTiming,
     persistence: &mut dyn WriterPersistence,
-    telemetry: &WriterTelemetry,
-    state: &AtomicU8,
-    watermark_publisher: &CommittedWatermarkPublisher,
+    reporting: WriterReporting<'_>,
 ) {
+    let BatchTiming {
+        dequeued_at: started,
+        queue_wait_micros,
+    } = timing;
+    let WriterReporting {
+        telemetry,
+        state,
+        watermark_publisher,
+    } = reporting;
     let command_count = u64::try_from(batch.items.len()).unwrap_or(u64::MAX);
     let rows_before = connection.total_changes();
     let lock_work = LockWorkScope::enter();
