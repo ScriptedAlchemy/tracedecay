@@ -1221,13 +1221,14 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, atomic::AtomicBool};
 
-    use tracedecay_domain::ProjectId;
+    use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_graph_db::{
         GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
         VerifiedGraphSnapshot,
     };
     use tracedecay_runtime_core::db::{
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+        TestRuntimeProfileIdentityV1,
     };
     use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_runtime_core::store_runtime::registry::{
@@ -1350,11 +1351,24 @@ mod tests {
             .reserve_retirement_batch(vec![retirement.retirement_target()])
         {
             StoreRuntimeRetirementResult::Blocked(refusal) => {
-                assert!(matches!(
-                    refusal.blockers(),
-                    [StoreRuntimeRetirementBlocker::ClientLeases { binding, count }]
-                        if binding.as_ref() == retirement.binding() && *count == 1
-                ));
+                let blockers = refusal.blockers();
+                assert_eq!(blockers.len(), 2, "unexpected blockers: {blockers:#?}");
+                assert!(
+                    blockers.iter().any(|blocker| matches!(
+                        blocker,
+                        StoreRuntimeRetirementBlocker::DatabaseAttachments { binding, count }
+                            if binding.as_ref() == retirement.binding() && *count == 1
+                    )),
+                    "the foreign facade must retain its shared database attachment: {blockers:#?}"
+                );
+                assert!(
+                    blockers.iter().any(|blocker| matches!(
+                        blocker,
+                        StoreRuntimeRetirementBlocker::ClientLeases { binding, count }
+                            if binding.as_ref() == retirement.binding() && *count == 1
+                    )),
+                    "the foreign facade must retain its independently counted client: {blockers:#?}"
+                );
                 assert!(matches!(
                     refusal.targets(),
                     [target] if target.binding() == retirement.binding()
@@ -1387,7 +1401,16 @@ mod tests {
             .reopen()
             .await
             .expect("reopen retired registered runtime");
-        assert_eq!(reopened.binding(), retirement.binding());
+        assert_ne!(reopened.binding(), retirement.binding());
+        assert_eq!(reopened.binding().shard_id, retirement.binding().shard_id);
+        assert_eq!(
+            reopened.binding().incarnation,
+            retirement.binding().incarnation
+        );
+        assert!(
+            reopened.binding().authority_epoch > retirement.binding().authority_epoch,
+            "a reopened runtime must mint a newer authority epoch"
+        );
         assert_eq!(reopened.locator().verified(), retirement.locator());
     }
 
@@ -1418,9 +1441,15 @@ mod tests {
 
     #[tokio::test]
     async fn registered_project_graph_binding_retains_only_the_database_weak_proxy() {
+        crate::register_test_schema_installer();
         let directory = tempfile::tempdir().expect("registered weak graph proxy directory");
         let project_id = ProjectId::new("project.registered-weak-graph")
             .expect("valid registered weak graph project identity");
+        let profile_identity = TestRuntimeProfileIdentityV1::new(
+            BrainId::new("brain.registered-weak-graph").expect("valid test brain identity"),
+            UserProfileId::new("profile.registered-weak-graph")
+                .expect("valid test profile identity"),
+        );
         let graph_path = directory.path().join("project/memory.db");
         let sessions_path = directory.path().join("project/sessions.db");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(
@@ -1432,10 +1461,11 @@ mod tests {
             "open registered weak graph project runtime",
         )
         .expect("project graph database authority");
-        let (graph_database, _) = Database::publish_registered_test_runtime(
+        let (graph_database, _) = Database::publish_registered_test_runtime_for_profile_identity(
             &graph_path,
             &graph_authority,
             TestDatabaseRuntimeMode::Initialize,
+            profile_identity.clone(),
             TestDatabaseRuntimeScope::Project {
                 project_id: project_id.clone(),
             },
@@ -1459,14 +1489,16 @@ mod tests {
             "open registered weak graph sessions runtime",
         )
         .expect("project sessions database authority");
-        let (sessions_database, _) = Database::publish_registered_test_runtime(
-            &sessions_path,
-            &sessions_authority,
-            TestDatabaseRuntimeMode::Initialize,
-            TestDatabaseRuntimeScope::ProjectSessions { project_id },
-        )
-        .await
-        .expect("publish project sessions database");
+        let (sessions_database, _) =
+            Database::publish_registered_test_runtime_for_profile_identity(
+                &sessions_path,
+                &sessions_authority,
+                TestDatabaseRuntimeMode::Initialize,
+                profile_identity,
+                TestDatabaseRuntimeScope::ProjectSessions { project_id },
+            )
+            .await
+            .expect("publish project sessions database");
         let registered = RegisteredGlobalDb::from_database(sessions_database);
         assert!(
             registered.bind_project_graph_runtime(proxy.clone()).is_ok(),
