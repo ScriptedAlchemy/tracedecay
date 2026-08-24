@@ -531,7 +531,7 @@ pub enum ConfigurationValueKindV1 {
 /// `Automatic` delegates the concrete count to runtime resource admission;
 /// `Exact` persists an operator-requested positive worker count.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "mode")]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "mode")]
 pub enum CodeIndexWorkerSelectionV1 {
     #[default]
     Automatic,
@@ -618,6 +618,39 @@ mod code_index_worker_selection_tests {
                 "memory_safe_workers": 80,
                 "limiting_reason": "automatic_half_cores"
             })
+        );
+    }
+
+    #[test]
+    fn tagged_contract_rejects_fields_owned_by_another_mode_or_future_fields() {
+        assert!(
+            serde_json::from_value::<CodeIndexWorkerSelectionV1>(serde_json::json!({
+                "mode": "automatic",
+                "workers": 8
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CodeIndexWorkerSelectionV1>(serde_json::json!({
+                "mode": "exact",
+                "workers": 8,
+                "worker": 9
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_schema_closes_every_tagged_variant() {
+        let schema = serde_json::to_value(schemars::schema_for!(CodeIndexWorkerSelectionV1))
+            .expect("selection schema");
+        let variants = schema["oneOf"].as_array().expect("tagged variants");
+
+        assert_eq!(variants.len(), 2);
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant["additionalProperties"] == serde_json::Value::Bool(false))
         );
     }
 }

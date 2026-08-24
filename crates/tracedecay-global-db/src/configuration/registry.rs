@@ -102,7 +102,7 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
-        register_user_profile_settings(&mut registry)?;
+        register_project_stored_user_profile_settings(&mut registry)?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(ANALYZER_SETTINGS_SETTING_KEY)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
@@ -205,6 +205,7 @@ impl ConfigurationRegistry {
         register_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
             .iter()
+            .filter(|key| **key != USER_CODE_INDEX_WORKERS_SETTING_KEY)
             .map(|key| setting_key(key))
             .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
         let actual = registry
@@ -219,6 +220,17 @@ impl ConfigurationRegistry {
                 },
             ));
         }
+        Ok(registry)
+    }
+
+    /// Build the exact profile-session registry for the daemon-wide code-index
+    /// worker selection. This setting must be available before any project is
+    /// opened, so it cannot share the project-session snapshot authority.
+    pub fn profile_code_index_workers() -> Result<Self, ConfigurationRegistryError> {
+        let mut registry = Self {
+            definitions: BTreeMap::new(),
+        };
+        registry.register(code_index_worker_definition()?)?;
         Ok(registry)
     }
 
@@ -337,7 +349,7 @@ impl ConfigurationRegistry {
 /// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
-fn register_user_profile_settings(
+fn register_project_stored_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
     registry.register(SettingDefinitionV1 {
@@ -350,18 +362,6 @@ fn register_user_profile_settings(
         sensitivity: SettingSensitivityV1::Sensitive,
         scope: SettingScopeV1::UserProfile,
         restart_requirement: RestartRequirementV1::None,
-        deprecation: DeprecationStateV1::Active,
-    })?;
-    registry.register(SettingDefinitionV1 {
-        key: setting_key(USER_CODE_INDEX_WORKERS_SETTING_KEY)?,
-        schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
-        value_kind: ConfigurationValueKindV1::CodeIndexWorkerSelection,
-        default_value: ConfigurationValueV1::CodeIndexWorkerSelection(
-            CodeIndexWorkerSelectionV1::Automatic,
-        ),
-        sensitivity: SettingSensitivityV1::Public,
-        scope: SettingScopeV1::UserProfile,
-        restart_requirement: RestartRequirementV1::DaemonRestart,
         deprecation: DeprecationStateV1::Active,
     })?;
     for (key, default_value, restart_requirement) in [
@@ -393,6 +393,21 @@ fn register_user_profile_settings(
         })?;
     }
     Ok(())
+}
+
+fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRegistryError> {
+    Ok(SettingDefinitionV1 {
+        key: setting_key(USER_CODE_INDEX_WORKERS_SETTING_KEY)?,
+        schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+        value_kind: ConfigurationValueKindV1::CodeIndexWorkerSelection,
+        default_value: ConfigurationValueV1::CodeIndexWorkerSelection(
+            CodeIndexWorkerSelectionV1::Automatic,
+        ),
+        sensitivity: SettingSensitivityV1::Public,
+        scope: SettingScopeV1::UserProfile,
+        restart_requirement: RestartRequirementV1::DaemonRestart,
+        deprecation: DeprecationStateV1::Active,
+    })
 }
 
 /// Canonical defaults for the project-scoped runtime settings.
@@ -745,8 +760,16 @@ mod user_profile_settings_tests {
     #[test]
     fn code_index_workers_default_is_automatic_and_zero_exact_is_denied() {
         assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 5);
-        let registry = ConfigurationRegistry::core().expect("registry");
         let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).expect("key");
+        let project_registry = ConfigurationRegistry::core().expect("project registry");
+        assert!(matches!(
+            project_registry.definition(&key),
+            Err(ConfigurationRegistryError::UnknownSetting(_))
+        ));
+
+        let registry =
+            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
+        assert_eq!(registry.definitions().count(), 1);
         let definition = registry.definition(&key).expect("definition");
 
         assert_eq!(definition.scope, SettingScopeV1::UserProfile);

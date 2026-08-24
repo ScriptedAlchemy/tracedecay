@@ -1,11 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, Value as SqlValue, params};
 
 use super::{LcmGcError, LcmGcPhaseReport, MAX_SAMPLES};
-use crate::runtime::lcm::{LcmError, payload, schema};
+use crate::runtime::lcm::{LcmError, payload, schema, util};
 
 const PENDING_PAYLOAD_DELETE_PREFIX: &str = "pending_payload_delete:";
 pub(super) const PENDING_PAYLOAD_DELETE_ERROR_PREFIX: &str = "pending payload deletion partial:";
@@ -177,28 +178,25 @@ async fn drain_pending_payload_deletes_matching(
     }
     drop(rows);
 
+    // One chunked existence probe for the whole tombstone set replaces the
+    // per-tombstone `SELECT 1 ... LIMIT 1`. Nothing in the loop below writes to
+    // `lcm_external_payloads`, so a single snapshot taken here answers every
+    // iteration exactly as its own probe would have.
+    let probe = probe_metadata_rows(
+        conn,
+        &pending
+            .iter()
+            .map(|(_, payload_ref, _)| payload_ref.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await;
+
     for (key, payload_ref, pending) in pending {
-        let mut metadata = match conn
-            .query(
-                "SELECT 1 FROM lcm_external_payloads WHERE payload_ref = ?1 LIMIT 1",
-                params![payload_ref.as_str()],
-            )
-            .await
-        {
-            Ok(rows) => rows,
-            Err(err) => {
-                drain.add_error(&payload_ref, "metadata_check_failed", err.to_string());
-                continue;
-            }
-        };
-        let metadata_exists = match metadata.next().await {
-            Ok(row) => row.is_some(),
-            Err(err) => {
-                drain.add_error(&payload_ref, "metadata_check_failed", err.to_string());
-                continue;
-            }
-        };
-        drop(metadata);
+        if let Some(detail) = probe.failures.get(&payload_ref) {
+            drain.add_error(&payload_ref, "metadata_check_failed", detail.clone());
+            continue;
+        }
+        let metadata_exists = probe.existing.contains(&payload_ref);
         if metadata_exists {
             schema::clear_gc_meta(conn, &key).await?;
             drain
@@ -243,6 +241,60 @@ async fn drain_pending_payload_deletes_matching(
     }
     record_pending_delete_diagnostics(conn, &drain).await?;
     Ok(drain)
+}
+
+/// Snapshot of which pending-delete refs still own a metadata row, plus the
+/// refs whose chunk query failed and must be reported as `metadata_check_failed`
+/// in loop order rather than silently treated as absent.
+#[derive(Default)]
+struct MetadataProbe {
+    existing: HashSet<String>,
+    failures: HashMap<String, String>,
+}
+
+/// Batched form of the per-tombstone `SELECT 1 FROM lcm_external_payloads`
+/// probe. Chunked at [`util::SQLITE_IN_BATCH_SIZE`] so an unbounded tombstone
+/// backlog cannot exceed SQLite's bind-variable limit; an empty input issues no
+/// query at all.
+async fn probe_metadata_rows(
+    conn: &(impl Executor + ?Sized),
+    payload_refs: &[String],
+) -> MetadataProbe {
+    let mut probe = MetadataProbe::default();
+    for chunk in payload_refs.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "SELECT payload_ref FROM lcm_external_payloads WHERE payload_ref IN ({})",
+            util::sql_in_placeholders(chunk.len())
+        );
+        let values = chunk
+            .iter()
+            .cloned()
+            .map(SqlValue::Text)
+            .collect::<Vec<_>>();
+        let outcome: Result<Vec<String>, LcmError> = async {
+            let mut rows = conn.query(&sql, values).await?;
+            let mut present = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let payload_ref: String = row.get(0)?;
+                present.push(payload_ref);
+            }
+            Ok(present)
+        }
+        .await;
+        match outcome {
+            Ok(present) => probe.existing.extend(present),
+            Err(err) => {
+                let detail = err.to_string();
+                for payload_ref in chunk {
+                    probe.failures.insert(payload_ref.clone(), detail.clone());
+                }
+            }
+        }
+    }
+    probe
 }
 
 async fn record_pending_delete_diagnostics(

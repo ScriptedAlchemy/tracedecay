@@ -27,11 +27,3 @@ pub(crate) fn record_transaction_rows(count: u64) {
     #[cfg(not(feature = "hotpath"))]
     let _ = count;
 }
-
-#[inline(always)]
-pub(crate) fn record_transaction_bytes(count: u64) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.transaction_bytes").inc(count);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = count;
-}

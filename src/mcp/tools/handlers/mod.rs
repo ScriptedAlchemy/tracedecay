@@ -235,6 +235,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_profile_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
@@ -310,6 +311,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             project_registry_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
+            registered_profile_session_db: None,
             registered_savings_db: None,
             dashboard_session_retrieval_service: None,
             dashboard_session_retrieval_identity: None,
@@ -369,8 +371,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
     scope_prefix: Option<&'a str>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    Box::pin(async move {
-        hotpath::measure_block!("mcp.tool_call", async {
+    let application_executor_available = options.application_invocation_executor.is_some();
+    #[cfg(feature = "hotpath")]
+    let hotpath_tool_name = mcp_tool_hotpath_identity(tool_name, application_executor_available);
+    let dispatch = async move {
+        #[cfg(feature = "hotpath")]
+        hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
                 return Err(TraceDecayError::Config {
@@ -480,10 +486,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the
         // analysis group, whose binding row routes it to the local handler.
-        let dispatch_group = classify_mcp_tool_dispatch_group(
-            tool_name,
-            options.application_invocation_executor.is_some(),
-        );
+        let dispatch_group =
+            classify_mcp_tool_dispatch_group(tool_name, application_executor_available);
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             // Application-surface tools return before the root guard below.
             // Reject unavailable effects before parsing, routing, or invoking
@@ -685,8 +689,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 )),
             }
         }
-        }.await)
-    })
+    };
+    Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
 }
 
 /// The single rejection every dispatch group returns for a name it does not own.
@@ -699,6 +703,21 @@ fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
 /// The `diagnostics_read` name that still carries the pre-application argument
 /// shape, and so the only one [`dispatch_analysis_tools`] can serve in-process.
 const DIAGNOSTICS_COMPATIBILITY_TOOL: &str = "tracedecay_diagnostics";
+
+#[cfg(any(feature = "hotpath", test))]
+fn mcp_tool_hotpath_identity(
+    tool_name: &str,
+    application_invocation_executor_available: bool,
+) -> &str {
+    if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+        || classify_mcp_tool_dispatch_group(tool_name, application_invocation_executor_available)
+            .is_some()
+    {
+        tool_name
+    } else {
+        "unknown"
+    }
+}
 
 fn classify_mcp_tool_dispatch_group(
     tool_name: &str,

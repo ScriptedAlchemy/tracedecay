@@ -814,7 +814,7 @@ fn reject_tool_result_truncation_detects_content_envelope() {
     );
 }
 
-/// `main` maps `Ok` to exit 0 and any `Err` to `process::exit(1)`, so the
+/// `main` maps `Ok` to exit 0 and any `Err` to a failing `ExitCode`, so the
 /// outcome these assertions inspect *is* the process exit status.
 #[test]
 fn successful_tool_result_exits_zero() {
