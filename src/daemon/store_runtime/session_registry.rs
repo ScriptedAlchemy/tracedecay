@@ -2453,8 +2453,10 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     graph_manifest_provider: Arc<code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: Mutex<Option<ProfileAuthorityPin>>,
+    profile_database_mount: Mutex<()>,
     profile_database: StdMutex<Option<RegisteredGlobalDbOwnerV1>>,
     profile_memory: StdMutex<Option<MemoryStoreOwnerV1>>,
+    profile_sessions_mount: Mutex<()>,
     profile_sessions: StdMutex<Option<RegisteredSessionOwnerV1>>,
     remote_nodes: StdMutex<BTreeMap<BrainNodeId, RemoteNodeOwnerStateV1>>,
     remote_credential_authority:
