@@ -4,6 +4,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_domain::SessionId;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
@@ -117,6 +118,8 @@ pub(super) struct SessionTemporalRefreshWakeState {
     pub(super) dirty: AtomicBool,
     historical_dirty: AtomicBool,
     pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
+    projection_discovery_after: std::sync::Mutex<Option<SessionId>>,
+    projection_discovery_active_turn: AtomicBool,
     pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
     pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
     pub(super) busy: AtomicBool,
@@ -136,6 +139,8 @@ impl Default for SessionTemporalRefreshWakeState {
             dirty: AtomicBool::new(false),
             historical_dirty: AtomicBool::new(false),
             requests: std::sync::Mutex::new(VecDeque::new()),
+            projection_discovery_after: std::sync::Mutex::new(None),
+            projection_discovery_active_turn: AtomicBool::new(true),
             terminal_attempts: std::sync::Mutex::new(HashSet::new()),
             recovery_cycle_pending: std::sync::Mutex::new(VecDeque::new()),
             busy: AtomicBool::new(false),
@@ -183,6 +188,32 @@ impl SessionTemporalRefreshWakeState {
         drop(requests);
         self.observe_queued_backlog(remaining);
         drained
+    }
+
+    pub(super) fn projection_discovery_after(&self) -> Option<SessionId> {
+        self.projection_discovery_after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn projection_discovery_active_slots(&self, limit: usize) -> usize {
+        match limit {
+            0 => 0,
+            1 => usize::from(
+                self.projection_discovery_active_turn
+                    .fetch_xor(true, Ordering::AcqRel),
+            ),
+            _ => 1,
+        }
+    }
+
+    pub(super) fn update_projection_discovery_cursor(&self, active_after: Option<SessionId>) {
+        let mut cursor = self
+            .projection_discovery_after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *cursor = active_after;
     }
 
     pub(super) fn requeue_request(&self, request: SessionRefreshBeginOrJoinRequestV1) {

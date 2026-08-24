@@ -334,7 +334,7 @@ fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetr
     }
 }
 
-async fn process_refresh_begin_requests(
+pub(super) async fn process_refresh_begin_requests(
     store: &GlobalDbSessionTemporalStore<'_>,
     state: &SessionTemporalRefreshWakeState,
     limit: usize,
@@ -374,18 +374,28 @@ async fn process_refresh_begin_requests(
 }
 
 #[hotpath::measure]
-async fn begin_admitted_session_refreshes(
+pub(super) async fn begin_admitted_session_refreshes(
     database: &RegisteredGlobalDb,
     store: &GlobalDbSessionTemporalStore<'_>,
     state: &SessionTemporalRefreshWakeState,
     limit: usize,
     report: &mut SessionTemporalRefreshPassReport,
 ) {
-    let mut requests = match database
-        .pending_session_temporal_refresh_requests_result(limit.saturating_add(1))
+    if state.has_requests() {
+        report.saturated = true;
+        return;
+    }
+    let active_after = state.projection_discovery_after();
+    let active_scan_slots = state.projection_discovery_active_slots(limit);
+    let page = match database
+        .pending_session_temporal_refresh_page_result(
+            limit,
+            active_scan_slots,
+            active_after.as_ref(),
+        )
         .await
     {
-        Ok(requests) => requests,
+        Ok(page) => page,
         Err(error) => {
             if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
                 report.retryable_errors += 1;
@@ -396,24 +406,13 @@ async fn begin_admitted_session_refreshes(
             return;
         }
     };
-    report.saturated |= requests.len() > limit;
-    requests.truncate(limit);
-    for request in requests {
-        if state.cancelled.load(Ordering::Acquire) {
-            return;
-        }
-        match store.begin_or_join_session_refresh(request).await {
-            Ok(receipt) => match receipt.disposition() {
-                tracedecay_store::SessionRefreshDispositionV1::Started => report.begun += 1,
-                tracedecay_store::SessionRefreshDispositionV1::Joined => report.joined += 1,
-            },
-            Err(error) if error.is_storage() => {
-                report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-            }
-            Err(_) => report.terminal_errors += 1,
-        }
+    let (requests, active_scanned_through, has_more) = page.into_parts();
+    for request in requests.into_iter().rev() {
+        state.requeue_request(request);
     }
+    state.update_projection_discovery_cursor(active_scanned_through);
+    report.saturated |= has_more;
+    process_refresh_begin_requests(store, state, limit, report).await;
 }
 
 async fn complete_ready_refresh(

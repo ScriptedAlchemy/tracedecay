@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use tracedecay_domain::SessionId;
 use tracedecay_graph_db::NeverCancelled;
@@ -38,63 +38,107 @@ const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
 const MAX_BASELINE_RELATION_ITEMS: usize = 100_000;
 
+pub struct SessionTemporalRefreshDiscoveryPage {
+    requests: Vec<SessionRefreshBeginOrJoinRequestV1>,
+    active_scanned_through: Option<SessionId>,
+    active_exhausted: bool,
+    active_rows_scanned: usize,
+    pending_has_more: bool,
+}
+
+impl SessionTemporalRefreshDiscoveryPage {
+    pub fn active_rows_scanned(&self) -> usize {
+        self.active_rows_scanned
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<SessionRefreshBeginOrJoinRequestV1>,
+        Option<SessionId>,
+        bool,
+    ) {
+        let active_after = if self.active_exhausted {
+            None
+        } else {
+            self.active_scanned_through
+        };
+        (
+            self.requests,
+            active_after,
+            self.pending_has_more || !self.active_exhausted,
+        )
+    }
+}
+
 impl RegisteredGlobalDb {
     /// Discovers sessions that need temporal projection.
     ///
     #[hotpath::measure]
-    pub async fn pending_session_temporal_refresh_requests_result(
+    pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
-    ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
+        active_scan_slots: usize,
+        active_after: Option<&SessionId>,
+    ) -> SessionStoreResult<SessionTemporalRefreshDiscoveryPage> {
         let snapshot = self
             .read_snapshot()
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
         hotpath_observe::record_snapshot_admissions(1);
-        let limit = i64::try_from(limit).map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        if limit == 0 {
+            return Ok(SessionTemporalRefreshDiscoveryPage {
+                requests: Vec::new(),
+                active_scanned_through: active_after.cloned(),
+                active_exhausted: true,
+                active_rows_scanned: 0,
+                pending_has_more: false,
+            });
+        }
+        let active_scan_slots = active_scan_slots.min(limit);
+        let pending_limit = limit.saturating_sub(active_scan_slots);
+        let query_limit = pending_limit.saturating_add(1);
+        let query_limit =
+            i64::try_from(query_limit).map_err(|error| storage(DISCOVER_REFRESH, error))?;
         // Visit only output-producing effects past each session's projection
         // frontier. History-only (`output_count = 0`) rows never enter grouping.
+        // An active generation created before native relation publication was
+        // authoritative may already cover its source frontier but have no
+        // relation receipt. Rediscover that exact committed frontier so the
+        // ordinary refresh path rebuilds and verifies it; discovery itself
+        // never fabricates a receipt or mutates the projection.
         let mut rows = snapshot
             .query(
-                "WITH active AS (
-                    SELECT session_id, frozen_watermarks_json
-                    FROM session_temporal_generations
-                    WHERE state = 'active'
-                 ),
-                 running AS (
-                    SELECT session_id
-                    FROM session_refresh_operations
-                    WHERE state = 'running'
-                 )
-                 SELECT effect.session_id,
-                        MAX(effect.observation_sequence),
-                        COALESCE(
-                            CAST(json_extract(
-                                active.frozen_watermarks_json,
-                                '$.projection_frontier'
-                            ) AS INTEGER),
-                            0
-                        )
+                "SELECT effect.session_id,
+                        MAX(effect.observation_sequence) AS observed_through,
+                        COALESCE(active.projection_frontier, 0) AS committed_through
                  FROM session_temporal_observation_effects AS effect
-                 LEFT JOIN active ON active.session_id = effect.session_id
-                 LEFT JOIN running ON running.session_id = effect.session_id
-                 WHERE running.session_id IS NULL
+                 LEFT JOIN (
+                     SELECT session_id,
+                            CAST(json_extract(
+                                frozen_watermarks_json,
+                                '$.projection_frontier'
+                            ) AS INTEGER) AS projection_frontier
+                     FROM session_temporal_generations
+                     WHERE state = 'active'
+                 ) AS active ON active.session_id = effect.session_id
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM session_refresh_operations AS running
+                     WHERE running.session_id = effect.session_id
+                       AND running.state = 'running'
+                 )
                    AND effect.output_count > 0
-                   AND effect.observation_sequence > COALESCE(
-                        CAST(json_extract(
-                            active.frozen_watermarks_json,
-                            '$.projection_frontier'
-                        ) AS INTEGER),
-                        0
-                   )
+                   AND effect.observation_sequence >
+                       COALESCE(active.projection_frontier, 0)
                  GROUP BY effect.session_id
                  ORDER BY effect.session_id
                  LIMIT ?1",
-                params![limit],
+                params![query_limit],
             )
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-        let mut requests = Vec::new();
+        let mut requests = BTreeMap::new();
         while let Some(row) = rows
             .next()
             .await
@@ -115,13 +159,108 @@ impl RegisteredGlobalDb {
                     .map_err(|error| storage(DISCOVER_REFRESH, error))?,
             )
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-            requests.push(SessionRefreshBeginOrJoinRequestV1::new(
-                session_id,
-                SessionRefreshFrontierV1::new(observed_through, committed_through)?,
-            ));
+            requests.insert(
+                session_id.as_str().to_owned(),
+                SessionRefreshBeginOrJoinRequestV1::new(
+                    session_id,
+                    SessionRefreshFrontierV1::new(observed_through, committed_through)?,
+                ),
+            );
         }
+        drop(rows);
+        let pending_has_more = requests.len() > pending_limit;
+        while requests.len() > pending_limit {
+            requests.pop_last();
+        }
+
+        let mut active_scanned_through = active_after.cloned();
+        let mut active_exhausted = false;
+        let mut active_rows_scanned = 0;
+        if active_scan_slots > 0 {
+            let active_limit = i64::try_from(active_scan_slots)
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            let mut active_rows = snapshot
+                .query(
+                    "SELECT active.session_id,
+                            CAST(json_extract(
+                                active.frozen_watermarks_json,
+                                '$.projection_frontier'
+                            ) AS INTEGER),
+                            EXISTS (
+                                SELECT 1
+                                FROM session_relation_receipts AS receipt
+                                WHERE receipt.session_id = active.session_id
+                                  AND receipt.generation = active.generation
+                            ),
+                            EXISTS (
+                                SELECT 1
+                                FROM session_refresh_operations AS running
+                                WHERE running.session_id = active.session_id
+                                  AND running.state = 'running'
+                            )
+                     FROM session_temporal_generations AS active
+                     WHERE active.state = 'active'
+                       AND (?1 IS NULL OR active.session_id > ?1)
+                     ORDER BY active.session_id
+                     LIMIT ?2",
+                    params![active_after.map(SessionId::as_str), active_limit],
+                )
+                .await
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            let mut scanned = Vec::new();
+            while let Some(row) = active_rows
+                .next()
+                .await
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?
+            {
+                let session_id = SessionId::new(
+                    row.get::<String>(0)
+                        .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+                )
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+                let projection_frontier = u64::try_from(
+                    row.get::<i64>(1)
+                        .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+                )
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+                let has_receipt = row
+                    .get::<i64>(2)
+                    .map_err(|error| storage(DISCOVER_REFRESH, error))?
+                    != 0;
+                let has_running = row
+                    .get::<i64>(3)
+                    .map_err(|error| storage(DISCOVER_REFRESH, error))?
+                    != 0;
+                scanned.push((session_id, projection_frontier, has_receipt, has_running));
+            }
+            drop(active_rows);
+            active_exhausted = scanned.len() < active_scan_slots;
+            active_rows_scanned = scanned.len();
+            active_scanned_through = scanned
+                .last()
+                .map(|(session_id, _, _, _)| session_id.clone());
+            for (session_id, projection_frontier, has_receipt, has_running) in scanned {
+                if has_receipt || has_running {
+                    continue;
+                }
+                requests.entry(session_id.as_str().to_owned()).or_insert(
+                    SessionRefreshBeginOrJoinRequestV1::new(
+                        session_id,
+                        SessionRefreshFrontierV1::new(projection_frontier, projection_frontier)?,
+                    ),
+                );
+            }
+        }
+
+        let requests = requests.into_values().collect::<Vec<_>>();
         hotpath_observe::record_output_sessions(u64::try_from(requests.len()).unwrap_or(u64::MAX));
-        Ok(requests)
+        Ok(SessionTemporalRefreshDiscoveryPage {
+            requests,
+            active_scanned_through,
+            active_exhausted,
+            active_rows_scanned,
+            pending_has_more,
+        })
     }
 
     #[hotpath::measure]

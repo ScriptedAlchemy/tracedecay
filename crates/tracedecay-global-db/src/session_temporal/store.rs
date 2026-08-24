@@ -126,8 +126,10 @@ impl<'a> GlobalDbSessionTemporalStore<'a> {
     ) -> SessionStoreResult<()> {
         let request = self
             .db
-            .pending_session_temporal_refresh_requests_result(128)
+            .pending_session_temporal_refresh_page_result(128, 0, None)
             .await?
+            .into_parts()
+            .0
             .into_iter()
             .find(|request| request.session_id() == session_id)
             .ok_or(SessionStoreError::InvalidStateTransition {

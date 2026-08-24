@@ -137,6 +137,7 @@ pub use remote_deletion::{
 };
 pub use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
+    SessionTemporalRefreshDiscoveryPage,
 };
 pub use tracedecay_runtime_core::store_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,

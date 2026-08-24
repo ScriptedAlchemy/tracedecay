@@ -7,6 +7,7 @@ mod hydration;
 pub mod operations;
 mod participant_freeze;
 mod projection;
+pub use projection::SessionTemporalRefreshDiscoveryPage;
 mod query;
 mod rebuild;
 mod refresh;

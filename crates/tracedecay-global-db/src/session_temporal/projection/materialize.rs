@@ -140,6 +140,31 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
     }
     drop(rows);
     if effects.is_empty() {
+        if matches!(
+            recovery.restart_state(),
+            SessionRefreshRestartStateV1::BeginProjection
+        ) {
+            let batch = SessionTemporalProjectionBatchV1::new(
+                recovery.session_id().clone(),
+                recovery.candidate_generation(),
+                recovery.frozen_watermarks().clone(),
+                vec![],
+                vec![],
+                vec![],
+            )?
+            .with_checkpoint(batch_ordinal, target_through, target_through)?;
+            let progress = SessionRefreshProgressV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+                SessionRefreshFrontierV1::new(target_through, target_through)?,
+                previous_coverage,
+                batch_ordinal.saturating_add(1),
+                previous_records,
+                now_micros(MATERIALIZE_REFRESH)?,
+            )
+            .with_source_coverage(recovery.source_coverage(target_through)?);
+            return Ok(Some((progress, batch)));
+        }
         return Ok(None);
     }
 

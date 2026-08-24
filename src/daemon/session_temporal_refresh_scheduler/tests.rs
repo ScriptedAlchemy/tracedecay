@@ -333,6 +333,206 @@ async fn admitted_effect_refreshes_to_a_real_non_empty_active_projection() {
 }
 
 #[tokio::test]
+async fn missing_active_relation_receipt_rebuilds_through_canonical_refresh() {
+    let temp = TempDir::new().unwrap();
+    let authority = registered_test_database(
+        &temp,
+        "missing-active-relation",
+        HostAdmissionScope::Profile,
+    )
+    .await;
+    let db = authority.database();
+    let session_id = SessionId::new("session.refresh.missing-active-relation").unwrap();
+    admit_canonical_effect(db, &session_id, 1, "native relation repair canary").await;
+
+    let initial_projection = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+    assert_eq!(
+        initial_projection.projected_batches, 1,
+        "initial projection failed: {initial_projection:?}"
+    );
+    let initial_completion = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+    assert_eq!(
+        initial_completion.completed, 1,
+        "initial completion failed: {initial_completion:?}"
+    );
+    let transaction = db.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM session_relation_receipts WHERE session_id = ?1",
+                [session_id.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let repair_projection = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+    assert_eq!(repair_projection.begun, 1, "{repair_projection:?}");
+    assert_eq!(
+        repair_projection.projected_batches, 1,
+        "the committed frontier must use the canonical no-op projection batch: {repair_projection:?}"
+    );
+    let repair_completion = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+    assert_eq!(repair_completion.completed, 1, "{repair_completion:?}");
+    assert_eq!(
+        scalar(
+            db,
+            "SELECT COUNT(*)
+             FROM session_temporal_generations AS generation
+             JOIN session_relation_receipts AS receipt
+               ON receipt.session_id = generation.session_id
+              AND receipt.generation = generation.generation
+              AND receipt.state = 'applied'
+              AND receipt.graph_watermark = receipt.expected_graph_watermark
+             WHERE generation.session_id = 'session.refresh.missing-active-relation'
+               AND generation.state = 'active'"
+        )
+        .await,
+        1
+    );
+    assert!(
+        db.pending_session_temporal_refresh_page_result(1, 1, None)
+            .await
+            .unwrap()
+            .into_parts()
+            .0
+            .is_empty(),
+        "a repaired active generation must become idle"
+    );
+}
+
+#[tokio::test]
+async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance() {
+    let temp = TempDir::new().unwrap();
+    let authority =
+        registered_test_database(&temp, "retained-begin-retry", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
+    let state = SessionTemporalRefreshWakeState::default();
+    let cursor = SessionId::new("session.refresh.cursor-before-retry").unwrap();
+    state.update_projection_discovery_cursor(Some(cursor.clone()));
+    let session_id = SessionId::new("session.refresh.retained-storage-retry").unwrap();
+    state.requeue_request(request(session_id.as_str(), 1));
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "ALTER TABLE session_query_cursor_keys
+             RENAME TO session_query_cursor_keys_begin_fault",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    for _ in 0..2 {
+        let mut report = SessionTemporalRefreshPassReport::default();
+        super::worker::process_refresh_begin_requests(&store, &state, 1, &mut report).await;
+        assert_eq!(report.retryable_errors, 1);
+        assert_eq!(
+            report.retry_class,
+            Some(SessionTemporalRefreshRetryClass::Storage)
+        );
+        super::worker::begin_admitted_session_refreshes(db, &store, &state, 1, &mut report).await;
+        assert_eq!(
+            report.retryable_errors, 1,
+            "queued retry must suppress a second begin/discovery attempt in the same pass"
+        );
+        assert!(
+            report.saturated,
+            "retained storage retry keeps the pass live"
+        );
+        assert_eq!(
+            state
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            1,
+            "discovery must not append another page behind a retained begin retry"
+        );
+        assert_eq!(
+            state.projection_discovery_after(),
+            Some(cursor.clone()),
+            "a retained begin retry must prevent discovery cursor advance"
+        );
+    }
+
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "ALTER TABLE session_query_cursor_keys_begin_fault
+             RENAME TO session_query_cursor_keys",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let mut recovered = SessionTemporalRefreshPassReport::default();
+    super::worker::process_refresh_begin_requests(&store, &state, 1, &mut recovered).await;
+    assert_eq!(
+        recovered.begun, 1,
+        "the exact retained request must admit once"
+    );
+    assert_eq!(recovered.retryable_errors, 0);
+    assert!(
+        !state.has_requests(),
+        "successful retry drains the exact request"
+    );
+    assert_eq!(
+        scalar(
+            db,
+            "SELECT COUNT(*) FROM session_refresh_operations
+             WHERE session_id = 'session.refresh.retained-storage-retry'
+               AND state = 'running'"
+        )
+        .await,
+        1,
+        "fault recovery must not duplicate the admitted refresh operation"
+    );
+}
+
+#[test]
+fn one_slot_discovery_alternates_active_and_pending_lanes() {
+    let state = SessionTemporalRefreshWakeState::default();
+    assert_eq!(state.projection_discovery_active_slots(1), 1);
+    assert_eq!(state.projection_discovery_active_slots(1), 0);
+    assert_eq!(state.projection_discovery_active_slots(1), 1);
+    assert_eq!(state.projection_discovery_active_slots(1), 0);
+    assert_eq!(
+        state.projection_discovery_active_slots(2),
+        1,
+        "wider pages reserve one active scan slot and leave ordinary capacity"
+    );
+}
+
+#[tokio::test]
 async fn restart_after_materialization_resumes_from_durable_receipts() {
     let temp = TempDir::new().unwrap();
     let authority = registered_test_database(
@@ -345,12 +545,13 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
     let session_id = SessionId::new("session.refresh.materialized-crash").unwrap();
     admit_canonical_effect(db, &session_id, 2, "materialized crash canary").await;
     let store = crate::store::GlobalDbSessionTemporalStore::new(db);
-    let request = db
-        .pending_session_temporal_refresh_requests_result(1)
+    let mut requests = db
+        .pending_session_temporal_refresh_page_result(1, 0, None)
         .await
         .unwrap()
-        .pop()
-        .unwrap();
+        .into_parts()
+        .0;
+    let request = requests.pop().unwrap();
     store.begin_or_join_session_refresh(request).await.unwrap();
     let recovery = store
         .session_refresh_recovery(&session_id)

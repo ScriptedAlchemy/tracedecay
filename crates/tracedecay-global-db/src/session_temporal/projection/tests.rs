@@ -2028,10 +2028,174 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     let pending = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("profile registered database")
-        .pending_session_temporal_refresh_requests_result(128)
+        .pending_session_temporal_refresh_page_result(128, 1, None)
         .await
-        .unwrap();
+        .unwrap()
+        .into_parts()
+        .0;
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].session_id(), &session_id);
+}
+
+#[tokio::test]
+async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let healthy_session_id = fixture_session("session.projector.missing-native-relation.0-healthy");
+    let session_id = fixture_session("session.projector.missing-native-relation.a");
+    let second_session_id = fixture_session("session.projector.missing-native-relation.b");
+    for (session, ordinal) in [
+        (&healthy_session_id, 5_000),
+        (&session_id, 10_000),
+        (&second_session_id, 20_000),
+    ] {
+        let (observation, write) = fixture_observation(session, ordinal, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        temporal_store(&runtime)
+            .materialize_pending_session_refresh_for_test(session)
+            .await
+            .expect("seed active temporal generation");
+    }
+
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("missing relation receipt fixture transaction");
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM session_relation_receipts WHERE session_id IN (?1, ?2)",
+                params![session_id.as_str(), second_session_id.as_str()],
+            )
+            .await
+            .expect("remove relation receipt"),
+        2
+    );
+    transaction
+        .commit()
+        .await
+        .expect("commit missing relation receipt fixture");
+    let pending_session_id = fixture_session("session.projector.pending-during-relation-repair");
+    let (pending_observation, pending_write) =
+        fixture_observation(&pending_session_id, 30_000, None, false);
+    Box::pin(persist_fixture(
+        &runtime,
+        pending_observation,
+        pending_write,
+    ))
+    .await;
+
+    let mut cursor = None;
+    let mut discovered = Vec::new();
+    let mut pending_pages = 0usize;
+    let mut active_rows_scanned = 0usize;
+    let mut pages = 0usize;
+    loop {
+        let page = db
+            .pending_session_temporal_refresh_page_result(2, 1, cursor.as_ref())
+            .await
+            .expect("discover missing native relation projection");
+        active_rows_scanned = active_rows_scanned.saturating_add(page.active_rows_scanned());
+        let (requests, scanned_through, has_more) = page.into_parts();
+        pages = pages.saturating_add(1);
+        for request in requests {
+            if request.session_id() == &pending_session_id {
+                pending_pages = pending_pages.saturating_add(1);
+                continue;
+            }
+            assert!(
+                request.target_frontier().is_complete(),
+                "relation repair rebuilds the committed generation without fabricating source work"
+            );
+            discovered.push(request.session_id().clone());
+        }
+        if !has_more {
+            break;
+        }
+        cursor = scanned_through;
+    }
+
+    assert_eq!(
+        discovered,
+        [session_id.clone(), second_session_id.clone()],
+        "the healthy prefix is skipped once while both missing receipts are discovered in order"
+    );
+    assert_eq!(
+        pages, 4,
+        "three bounded pages visit the rows and one empty page proves the wrapped end"
+    );
+    assert_eq!(
+        active_rows_scanned, 3,
+        "cursor paging must visit each active row exactly once per sweep"
+    );
+    assert_eq!(
+        pending_pages, 4,
+        "a full pending-effect lane must not consume the reserved active scan slot"
+    );
+    let snapshot = db.read_snapshot().await.expect("relation receipt snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT
+                 (SELECT COUNT(*) FROM session_temporal_generations
+                  WHERE session_id IN (?1, ?2, ?3) AND state = 'active'),
+                 (SELECT COUNT(*) FROM session_relation_receipts
+                  WHERE session_id IN (?1, ?2, ?3))",
+            params![
+                healthy_session_id.as_str(),
+                session_id.as_str(),
+                second_session_id.as_str()
+            ],
+        )
+        .await
+        .expect("query rediscovery state");
+    let row = rows
+        .next()
+        .await
+        .expect("read rediscovery state")
+        .expect("rediscovery state row");
+    assert_eq!(row.get::<i64>(0).expect("active generation count"), 3);
+    assert_eq!(
+        row.get::<i64>(1).expect("relation receipt count"),
+        1,
+        "read-only discovery must not fabricate an applied relation receipt"
+    );
+
+    let mut plan_rows = snapshot
+        .query(
+            "EXPLAIN QUERY PLAN
+             SELECT active.session_id
+             FROM session_temporal_generations AS active
+             WHERE active.state = 'active'
+               AND active.session_id > ?1
+             ORDER BY active.session_id
+             LIMIT ?2",
+            params!["", 2_i64],
+        )
+        .await
+        .expect("plan bounded missing-relation discovery");
+    let mut plan = Vec::new();
+    while let Some(row) = plan_rows.next().await.expect("missing-relation plan row") {
+        plan.push(
+            row.get::<String>(3)
+                .expect("missing-relation plan detail")
+                .to_ascii_uppercase(),
+        );
+    }
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("IDX_SESSION_TEMPORAL_GENERATIONS_ONE_ACTIVE")),
+        "repair discovery must walk active sessions in indexed key order: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "repair discovery must stop at the arm-local limit without sorting all active sessions: \
+         {plan:?}"
+    );
 }
