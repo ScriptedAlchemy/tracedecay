@@ -715,11 +715,15 @@ async fn dispatch_project_command(
     match command {
         Commands::Init {
             path,
+            path_flag,
             skip_folders,
             include_folders,
             adopt_project,
             fresh,
         } => {
+            // `clap` refuses `-p`/`--path` together with the positional PATH
+            // (`conflicts_with`), so at most one of these is ever `Some`.
+            let path = path.or(path_flag);
             commands::handle_init(
                 path,
                 skip_folders,
@@ -838,20 +842,27 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
                 }),
             )
             .await?;
-            let url = result
-                .get("url")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: "daemon dashboard response omitted URL".to_string(),
-                })?;
-            println!("tracedecay dashboard listening on {url}");
-            eprintln!("Serving project {}", project_path.display());
-            if open {
-                match open::that(url) {
-                    Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
-                    Err(error) => {
-                        eprintln!("Warning: could not open browser for {url}: {error}")
-                    }
+            match interpret_dashboard_start_response(&result, &project_path, &host, port)? {
+                DashboardStartOutcome::Started { url } => {
+                    println!("tracedecay dashboard listening on {url}");
+                    eprintln!("Serving project {}", project_path.display());
+                    report_dashboard_browser_open(&url, open);
+                }
+                DashboardStartOutcome::AlreadyServingRequest { url, project_root } => {
+                    // Exactly what was requested is already being served:
+                    // a truthful no-op, not a conflict.
+                    println!("tracedecay dashboard already listening on {url}");
+                    eprintln!("Serving project {project_root}");
+                    report_dashboard_browser_open(&url, open);
+                }
+                DashboardStartOutcome::Conflict { message } => {
+                    // The daemon runs at most one dashboard per process
+                    // (`src/mcp/tools/handlers/dashboard.rs`); this call found
+                    // one already up (or shutting down) that is serving
+                    // something other than what was requested. Fail loudly
+                    // instead of claiming the requested host/port/project
+                    // were honored — they were never started.
+                    return Err(tracedecay::errors::TraceDecayError::Config { message });
                 }
             }
         }
@@ -1462,5 +1473,101 @@ fn is_local_install_command(command: &Commands) -> bool {
     matches!(command, Commands::Install { local: true, .. })
 }
 
+/// What actually happened after a `tracedecay dashboard` `start` request.
+///
+/// The `tracedecay_dashboard` MCP tool runs at most one dashboard per daemon
+/// process (`src/mcp/tools/handlers/dashboard.rs`): a second `start` finds
+/// the first instance already up (or mid-shutdown) instead of binding the
+/// newly requested host/port for the newly requested project. That reuse is
+/// intentional, but the CLI must never claim the requested host/port/project
+/// were honored when they were not — hence three distinct outcomes instead
+/// of a single always-successful "listening on {url}" message.
+#[derive(Debug, PartialEq, Eq)]
+enum DashboardStartOutcome {
+    /// A fresh dashboard was bound for exactly the requested host/port/project.
+    Started { url: String },
+    /// A dashboard was already running (or shutting down) but it is already
+    /// serving exactly the requested host/port/project: a truthful no-op.
+    AlreadyServingRequest { url: String, project_root: String },
+    /// A dashboard was already running (or shutting down) serving something
+    /// OTHER than what was requested. The requested host/port/project were
+    /// never started; `message` explains the truth to the user.
+    Conflict { message: String },
+}
+
+/// Turns the raw `tracedecay_dashboard` tool response into one of the three
+/// outcomes above, without printing anything or touching the network/browser
+/// — kept pure so the reporting logic is unit-testable against fabricated
+/// daemon responses instead of only against a live daemon.
+fn interpret_dashboard_start_response(
+    result: &serde_json::Value,
+    requested_project_path: &std::path::Path,
+    requested_host: &str,
+    requested_port: u16,
+) -> tracedecay::errors::Result<DashboardStartOutcome> {
+    let url = result
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "daemon dashboard response omitted URL".to_string(),
+        })?
+        .to_string();
+    let status = result
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("started");
+
+    if status == "started" {
+        return Ok(DashboardStartOutcome::Started { url });
+    }
+
+    let actual_project = result
+        .get("project_root")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown project>")
+        .to_string();
+    let matches_request = result
+        .get("matches_request")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    if matches_request {
+        return Ok(DashboardStartOutcome::AlreadyServingRequest {
+            url,
+            project_root: actual_project,
+        });
+    }
+
+    let state_word = if status == "stopping" {
+        "is shutting down"
+    } else {
+        "is already running"
+    };
+    Ok(DashboardStartOutcome::Conflict {
+        message: format!(
+            "a tracedecay dashboard for this daemon process {state_word} at {url}, serving project {actual_project}. Only one dashboard runs per daemon process, so the requested host/port ({requested_host}:{requested_port}) and project ({}) were NOT started. Stop the running dashboard first with `tracedecay tool tracedecay_dashboard --args '{{\"action\":\"stop\"}}'`, then retry, or connect to the dashboard already running at the URL above.",
+            requested_project_path.display()
+        ),
+    })
+}
+
+/// Best-effort browser open for a dashboard URL that is genuinely reachable
+/// (either freshly started or already running exactly as requested). Never
+/// called for a `Conflict` outcome — opening a browser to a URL serving a
+/// different project than the one the user asked for would compound the
+/// original falsehood.
+fn report_dashboard_browser_open(url: &str, open: bool) {
+    if !open {
+        return;
+    }
+    match open::that(url) {
+        Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
+        Err(error) => eprintln!("Warning: could not open browser for {url}: {error}"),
+    }
+}
+
 #[cfg(test)]
 mod startup_tests;
+
+#[cfg(test)]
+mod dashboard_start_tests;

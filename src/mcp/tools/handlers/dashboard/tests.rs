@@ -15,6 +15,9 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
     });
     *manager = Some(RunningDashboard {
         url: "http://127.0.0.1:0/".to_owned(),
+        host: "127.0.0.1".to_owned(),
+        port: 0,
+        project_root: std::path::PathBuf::from("/tmp"),
         shutdown: Some(shutdown),
         task,
         completed,

@@ -361,6 +361,15 @@ fn dashboard_configuration_unavailable(
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
     url: String,
+    /// Host the running instance actually bound. Recorded so a later `start`
+    /// call that finds this instance already up can truthfully report what
+    /// is really being served instead of echoing back the new caller's
+    /// request as if it had been honored.
+    host: String,
+    /// Port the running instance actually bound.
+    port: u16,
+    /// Canonicalized project root the running instance is actually serving.
+    project_root: PathBuf,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<Result<()>>,
     completed: Arc<tokio::sync::Notify>,
@@ -548,6 +557,20 @@ pub(super) async fn handle_dashboard(
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|p| u16::try_from(p).ok())
                 .unwrap_or(DEFAULT_PORT);
+            // Canonicalized ahead of the reuse check (not just the fresh-start
+            // path below) so a caller that finds an already-running instance
+            // can be told truthfully whether that instance is actually
+            // serving what was requested, instead of the response silently
+            // echoing the request back as if it had been honored.
+            let requested_root =
+                cg.project_root()
+                    .canonicalize()
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "dashboard project root '{}' is unavailable: {error}",
+                            cg.project_root().display()
+                        ),
+                    })?;
 
             let manager = get_manager();
             let mut guard = manager.lock().await;
@@ -558,12 +581,22 @@ pub(super) async fn handle_dashboard(
                 } else {
                     "stopping"
                 };
+                let matches_request = handle.host == host
+                    && handle.port == port
+                    && handle.project_root == requested_root;
                 return Ok(dashboard_tool_result(
                     cg,
                     &args,
                     &json!({
                         "status": status,
-                        "url": handle.url
+                        "url": handle.url,
+                        "host": handle.host,
+                        "port": handle.port,
+                        "project_root": handle.project_root.display().to_string(),
+                        "requested_host": host,
+                        "requested_port": port,
+                        "requested_project_root": requested_root.display().to_string(),
+                        "matches_request": matches_request,
                     }),
                 ));
             }
@@ -606,15 +639,6 @@ pub(super) async fn handle_dashboard(
                         retained_graph.project_root().display()
                     ),
                 })?;
-            let requested_root =
-                cg.project_root()
-                    .canonicalize()
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!(
-                            "dashboard project root '{}' is unavailable: {error}",
-                            cg.project_root().display()
-                        ),
-                    })?;
             if retained_root != requested_root {
                 return Err(TraceDecayError::project_route(
                     "project_route_unavailable",
@@ -751,6 +775,9 @@ pub(super) async fn handle_dashboard(
 
             *guard = Some(RunningDashboard {
                 url: url.clone(),
+                host: host.clone(),
+                port: addr.port(),
+                project_root: requested_root.clone(),
                 shutdown: Some(shutdown_tx),
                 task,
                 completed,
@@ -763,7 +790,8 @@ pub(super) async fn handle_dashboard(
                     "status": "started",
                     "url": url,
                     "host": host,
-                    "port": addr.port()
+                    "port": addr.port(),
+                    "project_root": requested_root.display().to_string(),
                 }),
             ))
         }
