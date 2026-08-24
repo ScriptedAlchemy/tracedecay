@@ -22,8 +22,8 @@ use super::super::github_runtime::{
     GitHubActionsCheckRunV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
     GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1,
     GitHubCheckAnnotationV1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
-    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,
-    GitHubReadOnlyCredentialV1,
+    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubRateLimitAdmissionV1,
+    GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1,
 };
 use super::{
     CiExactEvidenceAuthorityV1, CiProviderReadResultV1, CiReadOnlyProviderArchiveV1,
@@ -209,6 +209,15 @@ struct GitHubActionsCheckRunsPageV1 {
 }
 
 trait ProductionCiDiscoveryReadPortV1: Send + Sync {
+    /// Pre-flight verdict for a planned burst of `planned_requests` reads.
+    ///
+    /// Defaults to [`GitHubRateLimitAdmissionV1::Unknown`] so a port with no
+    /// quota observation - every in-process fixture - is never gated.
+    fn admit_request_burst(&self, planned_requests: u32) -> GitHubRateLimitAdmissionV1 {
+        let _ = planned_requests;
+        GitHubRateLimitAdmissionV1::Unknown
+    }
+
     fn read_workflow_runs_for_head<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -232,6 +241,10 @@ trait ProductionCiDiscoveryReadPortV1: Send + Sync {
 }
 
 impl ProductionCiDiscoveryReadPortV1 for GitHubCiReadOnlyClientV1 {
+    fn admit_request_burst(&self, planned_requests: u32) -> GitHubRateLimitAdmissionV1 {
+        self.admit_request_burst(planned_requests)
+    }
+
     fn read_workflow_runs_for_head<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -378,6 +391,31 @@ fn consensus_ci_discovery_outcome(
     }
 }
 
+/// Pre-flight quota check for one paged discovery burst.
+///
+/// Returns the greatest page count the observed remaining quota can carry. An
+/// exhausted window refuses the burst before a single request is spent, so the
+/// caller never discovers exhaustion mid-sequence holding a half-populated page
+/// set it must discard - having already paid for it.
+///
+/// This costs no provider request: the verdict comes from the `x-ratelimit-*`
+/// headers earlier responses already carried.
+fn admitted_discovery_pages(
+    client: &dyn ProductionCiDiscoveryReadPortV1,
+) -> Result<u32, ProductionCiFailureDiscoveryOutcomeV1> {
+    let admission = client.admit_request_burst(MAX_CI_DISCOVERY_PAGES_V1);
+    let admitted = admission.admitted_requests(MAX_CI_DISCOVERY_PAGES_V1);
+    if admitted > 0 {
+        return Ok(admitted);
+    }
+    Err(admission.checkpoint().map_or(
+        ProductionCiFailureDiscoveryOutcomeV1::Unavailable,
+        |checkpoint| {
+            ProductionCiFailureDiscoveryOutcomeV1::RateLimited(ci_rate_limit(checkpoint.clone()))
+        },
+    ))
+}
+
 async fn collect_workflow_runs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
@@ -386,7 +424,7 @@ async fn collect_workflow_runs(
 ) -> Result<Vec<GitHubActionsWorkflowRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
     let mut expected_total = None;
-    for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
+    for page_number in 1..=admitted_discovery_pages(client)? {
         authorize_ci_source(context, config, scope).await?;
         let body = discovery_response_body(
             client
@@ -418,7 +456,7 @@ async fn collect_workflow_jobs(
 ) -> Result<Vec<GitHubActionsWorkflowJobV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
     let mut expected_total = None;
-    for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
+    for page_number in 1..=admitted_discovery_pages(client)? {
         authorize_ci_source(context, config, scope).await?;
         let body = discovery_response_body(
             client
@@ -450,7 +488,7 @@ async fn collect_check_runs(
 ) -> Result<Vec<GitHubActionsCheckRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
     let mut expected_total = None;
-    for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
+    for page_number in 1..=admitted_discovery_pages(client)? {
         authorize_ci_source(context, config, scope).await?;
         let body = discovery_response_body(
             client
@@ -971,7 +1009,17 @@ impl ProductionGitHubCiArchiveV1 {
             return Ok(Vec::new());
         }
         let mut annotations = Vec::with_capacity(retained_limit);
-        for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
+        // Same pre-flight gate as paged discovery: refuse or shorten the burst
+        // before the first request rather than after the eighteenth.
+        let admission = self.client.admit_request_burst(MAX_CI_DISCOVERY_PAGES_V1);
+        let admitted_pages = admission.admitted_requests(MAX_CI_DISCOVERY_PAGES_V1);
+        if admitted_pages == 0 {
+            return Err(admission.checkpoint().map_or(
+                LiveCiReadFailureV1::Unavailable,
+                |checkpoint| LiveCiReadFailureV1::RateLimited(ci_rate_limit(checkpoint.clone())),
+            ));
+        }
+        for page_number in 1..=admitted_pages {
             self.authorize_source(context, request).await?;
             let body = response_body(
                 self.client
@@ -2155,5 +2203,155 @@ mod discovery_tests {
             Err(ProductionCiFailureDiscoveryOutcomeV1::Denied)
         );
         assert_eq!(*client.requested_pages.lock().unwrap(), vec![1]);
+    }
+
+    /// Serves an unbounded run of distinct pages so the discovery loop only
+    /// stops where the pre-flight gate stops it.
+    struct GatedDiscoveryClient {
+        admission: GitHubRateLimitAdmissionV1,
+        workflow_run: GitHubActionsWorkflowRunV1,
+        requested_pages: Mutex<Vec<u32>>,
+    }
+
+    impl ProductionCiDiscoveryReadPortV1 for GatedDiscoveryClient {
+        fn admit_request_burst(&self, _planned_requests: u32) -> GitHubRateLimitAdmissionV1 {
+            self.admission.clone()
+        }
+
+        fn read_workflow_runs_for_head<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _head_sha: &'a str,
+            page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            self.requested_pages.lock().unwrap().push(page);
+            let mut run = self.workflow_run.clone();
+            run.id = 1_000 + u64::from(page);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "total_count": 50,
+                "workflow_runs": [run],
+            }))
+            .unwrap();
+            Box::pin(async move { GitHubCiTransportOutcomeV1::Response(body) })
+        }
+
+        fn read_workflow_jobs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _run_id: u64,
+            _page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
+        }
+
+        fn read_check_runs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _check_suite_id: u64,
+            _page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
+        }
+    }
+
+    fn exhausted_admission() -> GitHubRateLimitAdmissionV1 {
+        GitHubRateLimitAdmissionV1::Exhausted {
+            checkpoint: tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1 {
+                limit: 60,
+                remaining: 0,
+                reset_at: UtcMicros(9_000_000),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_quota_refuses_discovery_before_any_request() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let client = GatedDiscoveryClient {
+            admission: exhausted_admission(),
+            workflow_run: fixture.ci_provider_record.workflow_run.clone(),
+            requested_pages: Mutex::new(Vec::new()),
+        };
+
+        let outcome = collect_workflow_runs(
+            &context(&scope, UtcMicros(i64::MAX)),
+            &config(&fixture),
+            &scope,
+            &client,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(ProductionCiFailureDiscoveryOutcomeV1::RateLimited(_))
+            ),
+            "an exhausted quota must refuse the burst, not attempt it"
+        );
+        assert!(
+            client.requested_pages.lock().unwrap().is_empty(),
+            "the pre-flight gate must spend no request at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_quota_shortens_the_discovery_burst() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let client = GatedDiscoveryClient {
+            admission: GitHubRateLimitAdmissionV1::Degraded {
+                admitted_requests: 3,
+                checkpoint: tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1 {
+                    limit: 60,
+                    remaining: 8,
+                    reset_at: UtcMicros(9_000_000),
+                },
+            },
+            workflow_run: fixture.ci_provider_record.workflow_run.clone(),
+            requested_pages: Mutex::new(Vec::new()),
+        };
+
+        let _ = collect_workflow_runs(
+            &context(&scope, UtcMicros(i64::MAX)),
+            &config(&fixture),
+            &scope,
+            &client,
+        )
+        .await;
+
+        assert_eq!(
+            *client.requested_pages.lock().unwrap(),
+            vec![1, 2, 3],
+            "a degraded quota must cap the burst at the admitted request count"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_quota_leaves_the_bounded_burst_intact() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let client = GatedDiscoveryClient {
+            admission: GitHubRateLimitAdmissionV1::Unknown,
+            workflow_run: fixture.ci_provider_record.workflow_run.clone(),
+            requested_pages: Mutex::new(Vec::new()),
+        };
+
+        let _ = collect_workflow_runs(
+            &context(&scope, UtcMicros(i64::MAX)),
+            &config(&fixture),
+            &scope,
+            &client,
+        )
+        .await;
+
+        assert_eq!(
+            client.requested_pages.lock().unwrap().len(),
+            MAX_CI_DISCOVERY_PAGES_V1 as usize,
+            "an unobserved quota must not shrink the existing page bound"
+        );
     }
 }

@@ -1537,17 +1537,54 @@ impl GitHubCiReadOnlyClientV1 {
                 }
             });
             match wait_for_read(context, task).await {
-                Some(HttpResponseV1::Ok { body, .. }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
+                Some(HttpResponseV1::Ok {
+                    body, rate_limit, ..
+                }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
+                    self.record_rate_limit(rate_limit.as_ref());
                     GitHubCiTransportOutcomeV1::Response(body)
                 }
                 Some(HttpResponseV1::RateLimited {
                     checkpoint: Some(limit),
                     ..
-                }) => GitHubCiTransportOutcomeV1::RateLimited(limit),
+                }) => {
+                    self.record_rate_limit(Some(&limit));
+                    GitHubCiTransportOutcomeV1::RateLimited(limit)
+                }
                 Some(HttpResponseV1::Denied) => GitHubCiTransportOutcomeV1::Denied,
                 _ => GitHubCiTransportOutcomeV1::Unavailable,
             }
         })
+    }
+
+    /// Retains one observed quota checkpoint for the pre-flight burst gate.
+    fn record_rate_limit(&self, checkpoint: Option<&GitHubReviewRateLimitCheckpointV1>) {
+        let Some(checkpoint) = checkpoint else {
+            return;
+        };
+        super::rate_gate::record_github_rate_limit_checkpoint_v1(
+            self.credential.generation(),
+            &self.target.owner,
+            &self.target.repository,
+            checkpoint,
+        );
+    }
+
+    /// Pre-flight verdict for a planned burst of `planned_requests` reads
+    /// against this repository under this credential.
+    ///
+    /// Costs no provider request: the answer comes from the `x-ratelimit-*`
+    /// headers earlier responses already carried.
+    pub(crate) fn admit_request_burst(
+        &self,
+        planned_requests: u32,
+    ) -> super::rate_gate::GitHubRateLimitAdmissionV1 {
+        super::rate_gate::admit_github_request_burst_v1(
+            self.credential.generation(),
+            &self.target.owner,
+            &self.target.repository,
+            planned_requests,
+            now_micros(),
+        )
     }
 }
 

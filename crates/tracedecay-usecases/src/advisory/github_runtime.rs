@@ -11,6 +11,7 @@ mod dto;
 mod gh_cli;
 mod network;
 mod owner;
+mod rate_gate;
 mod read_requests;
 mod releases;
 mod stack;
@@ -84,6 +85,7 @@ pub use owner::{
     GitHubReviewRuntimeOwnerBuildErrorV1, GitHubReviewRuntimeOwnerConfigV1,
     GitHubReviewRuntimeOwnerV1, GitHubStackObservabilityV1, build_github_review_runtime_owner_v1,
 };
+pub use rate_gate::GitHubRateLimitAdmissionV1;
 pub use read_requests::{GitHubGraphQlReadRequestV1, GitHubReadResumeV1, GitHubRestReadRequestV1};
 pub use releases::{
     GitHubReleaseAssetV1, GitHubReleaseReadControlV1, GitHubReleaseTagV1, GitHubReleaseV1,
