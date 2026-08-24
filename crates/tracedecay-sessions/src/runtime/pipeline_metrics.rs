@@ -113,13 +113,6 @@ pub(crate) fn record_dir_enumerated() {
 }
 
 #[inline(always)]
-#[cfg(feature = "hotpath")]
-pub(crate) fn record_discovery_slice(recent_selected: u64, history_selected: u64) {
-    add("sessions.discovery.slice.recent", recent_selected);
-    add("sessions.discovery.slice.history", history_selected);
-}
-
-#[inline(always)]
 pub(crate) fn record_sweep_outcome(complete: bool) {
     #[cfg(feature = "hotpath")]
     if complete {
