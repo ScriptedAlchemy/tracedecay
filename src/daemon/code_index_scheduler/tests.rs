@@ -3166,6 +3166,42 @@ fn oversized_activation_hint_is_clamped_to_bounded_text_work() {
     assert!(latest.text_serving_is_ready());
 }
 
+#[tokio::test]
+async fn graph_activation_does_not_wait_for_bounded_text_projection() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn independently_activated_graph() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let replay_binding = scheduler
+        .code_graph_replay_binding(&latest.generation().manifest().generation_id)
+        .expect("sealed graph replay binding");
+    let activation = super::graph_activation::CodeGraphActivationAuthorityV1::Memory {
+        policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    };
+
+    activation
+        .activate(
+            &scheduler.project_id,
+            &scheduler.repository_id,
+            &scheduler.worktree_id,
+            latest.clone(),
+            replay_binding,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+        .expect("graph activation must not wait for the independently bounded text projection");
+
+    assert!(
+        latest.text_serving_needs_work(),
+        "the first bounded text pass must remain warming so this proves graph activation is independent"
+    );
+}
+
 #[test]
 fn text_artifact_hash_honors_cancellation_between_bounded_reads() {
     struct CancelAfterFirstRead {

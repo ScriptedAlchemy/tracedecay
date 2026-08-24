@@ -148,15 +148,11 @@ impl CodeGraphActivationAuthorityV1 {
             latest.refuse_graph_activation(reason);
             return Err(CodeIndexSchedulerErrorV1::GraphActivationRefused(reason));
         }
-        let text_latest = latest.clone();
-        tokio::task::spawn_blocking(move || text_latest.activate_text_serving())
-            .await
-            .map_err(|error| {
-                CodeIndexSchedulerErrorV1::GraphActivation(format!(
-                    "code-index text activation task failed: {error}"
-                ))
-            })?
-            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+        // Graph activation consumes the sealed generation directly. Text
+        // serving is a separate bounded projection advanced by the mounted
+        // scheduler after this generation is seated; requiring it here makes
+        // the first partial text pass enter graph-retry backoff before that
+        // worker can continue the projection.
         match self {
             Self::Persistent {
                 runtime,

@@ -692,7 +692,7 @@ mod code_index_activation_test {
     use super::*;
 
     #[tokio::test]
-    async fn open_mounts_the_profile_worker_plan_before_code_index_activation() {
+    async fn fresh_profile_first_reconcile_makes_query_authority_ready_within_existing_bound() {
         let isolation = TempDir::new().expect("production harness isolation");
         let project = isolation.path().join("project");
         std::fs::create_dir_all(&project).expect("project root");
@@ -723,10 +723,6 @@ mod code_index_activation_test {
             ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
                 .await
                 .expect("production harness activates its code index");
-        let resources = harness
-            .resources
-            .as_ref()
-            .expect("production harness resources");
         let worker_status = tracedecay_code_index::parallelism::installed_worker_status()
             .expect("production harness worker plan");
         assert_eq!(
@@ -734,14 +730,60 @@ mod code_index_activation_test {
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
             "a fresh harness must install the profile-scoped default selection"
         );
+        let query = timeout(Duration::from_secs(20), async {
+            loop {
+                let response = harness
+                    .call_tool(
+                        &project,
+                        "tracedecay_search",
+                        json!({
+                            "query": "indexed_symbol",
+                            "limit": 1,
+                            "format": "json",
+                        }),
+                    )
+                    .await
+                    .expect("fresh-profile production search response");
+                let payload = super::journey_test_support::tool_payload(&response);
+                let served_symbol = payload["results"].as_array().is_some_and(|results| {
+                    results
+                        .iter()
+                        .any(|result| result["display"]["name"] == json!("indexed_symbol"))
+                });
+                if served_symbol {
+                    break payload;
+                }
+                if payload["status"] == json!("unavailable") {
+                    let retryable = matches!(
+                        payload["reason"].as_str(),
+                        Some(
+                            "authority_unavailable"
+                                | "generation_unavailable"
+                                | "generation_unverified"
+                                | "search_capacity_unavailable"
+                        )
+                    );
+                    assert!(
+                        retryable,
+                        "fresh-profile production search failed terminally: {payload}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                panic!(
+                    "fresh-profile production search completed without indexed_symbol: {payload}"
+                );
+            }
+        })
+        .await
+        .expect("fresh-profile query authority becomes ready within the existing bound");
         assert!(
-            resources
-                .invocation
-                .code_index_schedulers
-                .latest_complete_ready(&project)
-                .await
-                .is_some(),
-            "production harness returned before code-index publication"
+            query["results"].as_array().is_some_and(|results| {
+                results
+                    .iter()
+                    .any(|result| result["display"]["name"] == json!("indexed_symbol"))
+            }),
+            "fresh-profile production search did not serve the indexed symbol: {query}"
         );
         harness.shutdown().await;
     }
