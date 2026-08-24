@@ -18,6 +18,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 use super::PROVIDER;
 use super::context::CodexContextState;
 use super::meta::session_meta_with_provenance;
+use super::scope_probe::{CodexFrameScopeProbeV1, probe_codex_frame};
 use crate::admission::HostAdmission;
 use crate::host_ports::unregistered_admission;
 use crate::observation::ObservationCancellation;
@@ -40,6 +41,9 @@ pub struct CodexJsonlAdmissionProgress {
     pub frames_decoded: u64,
     pub frames_accepted: u64,
     pub frames_skipped: u64,
+    /// Of `frames_skipped`, the frames refused from their raw bytes before any
+    /// decode. Every one is a rollout record this scope never owned.
+    pub frames_rejected_before_decode: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
 }
@@ -277,6 +281,19 @@ async fn try_admit_codex_jsonl_observations(
             }
         },
         |context_state, bytes, range, _| {
+            // Scope is settled before the frame is decoded whenever it can be.
+            // A frame that cannot move the session cwd inherits the verdict the
+            // current cwd already carries, so when that verdict is "out of
+            // scope" the authoritative check below would reach it again after
+            // building and walking the frame's whole value tree. Proving the
+            // frame inert costs a tokenize; the parse it replaces does not.
+            if !scope_matcher.accepts(context_state.cwd.as_deref())
+                && probe_codex_frame(bytes, range) == CodexFrameScopeProbeV1::Inert
+            {
+                return Ok(JsonlFrameAdmission::non_durable_before_decode(
+                    ObservationCoverageReason::OutOfScope,
+                ));
+            }
             let mut stable_record_id = None;
             let mut non_durable_reason = None;
             let parsed = parse_normalized_observation_record_v1(
@@ -326,6 +343,7 @@ async fn try_admit_codex_jsonl_observations(
         frames_decoded: progress.frames_decoded,
         frames_accepted: progress.frames_accepted,
         frames_skipped: progress.frames_skipped,
+        frames_rejected_before_decode: progress.frames_rejected_before_decode,
         frames_refused: progress.frames_refused,
         frames_persisted: progress.frames_persisted,
     })

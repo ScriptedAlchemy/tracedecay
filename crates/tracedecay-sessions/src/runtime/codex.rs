@@ -50,6 +50,7 @@ mod goals;
 mod meta;
 mod observation;
 mod records;
+mod scope_probe;
 #[cfg(test)]
 mod tests;
 

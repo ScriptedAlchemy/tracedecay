@@ -185,12 +185,19 @@ fn write_rollout(path: &Path, cwd: &Path) -> u64 {
 }
 
 fn rollout_fixture() -> (tempfile::TempDir, PathBuf, u64) {
+    let (temp, path, len, _cwd) = rollout_fixture_with_cwd();
+    (temp, path, len)
+}
+
+/// The same rollout, plus the working directory its records are recorded under,
+/// so a test can put that directory inside or outside the admitting scope.
+fn rollout_fixture_with_cwd() -> (tempfile::TempDir, PathBuf, u64, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let path = temp.path().join("rollout.jsonl");
     let len = write_rollout(&path, &cwd);
-    (temp, path, len)
+    (temp, path, len, cwd)
 }
 
 async fn stored_cursor(spy: &SeamSpyAdmission) -> Option<ObservationSourceCursorV1> {
@@ -365,5 +372,68 @@ async fn exact_duplicates_are_idempotent_no_op_receipts() {
     assert_eq!(
         unchanged, committed,
         "an exact duplicate replay performs no extra cursor write"
+    );
+}
+
+/// A rollout owned by a registered project is not the profile pass's to ingest,
+/// and the profile pass sees far more of those than of its own.
+///
+/// Scope is a property of the session cwd, not of the frame: only a
+/// `session_meta` or `turn_context` line can move that cwd, so every other
+/// frame inherits a verdict that is already settled. This asserts the seam acts
+/// on that — the message frame is refused from its bytes, while the session
+/// meta, which *can* move the cwd, is still decoded before it is judged.
+#[tokio::test]
+async fn out_of_scope_frames_are_refused_before_they_are_decoded() {
+    let (_temp, path, _len, cwd) = rollout_fixture_with_cwd();
+    let spy = SeamSpyAdmission::default();
+
+    let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path,
+        None,
+        std::slice::from_ref(&cwd),
+        &spy,
+        None,
+    )
+    .await
+    .expect("an out-of-scope rollout is covered, not failed");
+
+    assert!(
+        spy.inner.observations().is_empty(),
+        "a rollout a registered project owns must persist nothing here"
+    );
+    assert_eq!(progress.frames_decoded, 2);
+    assert_eq!(progress.frames_skipped, 2);
+    assert_eq!(progress.frames_persisted, 0);
+    assert_eq!(
+        progress.frames_rejected_before_decode, 1,
+        "the frame that cannot move the cwd must not be parsed to learn it is out of scope"
+    );
+    assert!(
+        spy.cover_past_advances()
+            .iter()
+            .all(|advance| advance.reason() == ObservationCoverageReason::OutOfScope),
+        "moving the verdict earlier must not change the coverage reason it writes"
+    );
+}
+
+/// The counterpart: a rollout no registered project owns still admits in full,
+/// and pays no early rejection.
+#[tokio::test]
+async fn in_scope_frames_still_admit_in_full() {
+    let (_temp, path, _len, _cwd) = rollout_fixture_with_cwd();
+    let spy = SeamSpyAdmission::default();
+
+    let progress =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("a profile-owned rollout must admit");
+
+    assert_eq!(spy.inner.observations().len(), 2);
+    assert_eq!(progress.frames_persisted, 2);
+    assert_eq!(progress.frames_skipped, 0);
+    assert_eq!(
+        progress.frames_rejected_before_decode, 0,
+        "nothing in scope may be refused before it is decoded"
     );
 }

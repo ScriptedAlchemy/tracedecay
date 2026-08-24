@@ -198,11 +198,18 @@ pub(crate) fn record_frame_skipped(reason: ObservationCoverageReason) {
     );
 }
 
+/// One admission batch, counted at the seam that owns the decode boundary.
+///
+/// `frames_rejected_before_decode` is the half of `frames_skipped` that never
+/// paid for a parse. Without it the skip split says how much work is discarded
+/// but not how much of it was avoided, so a change that moves a verdict earlier
+/// is indistinguishable from one that does nothing.
 #[inline(always)]
 pub(crate) fn record_admission_progress(
     frames_decoded: u64,
     frames_accepted: u64,
     frames_skipped: u64,
+    frames_rejected_before_decode: u64,
     frames_refused: u64,
     frames_persisted: u64,
 ) {
@@ -211,12 +218,17 @@ pub(crate) fn record_admission_progress(
         add("sessions.jsonl.frames.decoded", frames_decoded);
         add("sessions.jsonl.frames.accepted", frames_accepted);
         add("sessions.jsonl.frames.skipped", frames_skipped);
+        add(
+            "sessions.jsonl.frames.skipped.before_decode",
+            frames_rejected_before_decode,
+        );
         add("sessions.jsonl.frames.refused", frames_refused);
         add("sessions.jsonl.frames.persisted", frames_persisted);
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = (
         frames_decoded,
+        frames_rejected_before_decode,
         frames_accepted,
         frames_skipped,
         frames_refused,

@@ -96,7 +96,13 @@ pub(super) enum JsonlFrameAdmission {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
     },
-    NonDurable(ObservationCoverageReason),
+    NonDurable {
+        reason: ObservationCoverageReason,
+        /// The verdict was reached from the frame's raw bytes, without
+        /// decoding it. Kept because the cost of a skipped frame is not the
+        /// skip: it is whether the frame was parsed first.
+        before_decode: bool,
+    },
 }
 
 impl JsonlFrameAdmission {
@@ -111,7 +117,22 @@ impl JsonlFrameAdmission {
     }
 
     pub(super) fn non_durable(reason: ObservationCoverageReason) -> Self {
-        Self::NonDurable(reason)
+        Self::NonDurable {
+            reason,
+            before_decode: false,
+        }
+    }
+
+    /// A frame refused from its raw bytes alone.
+    ///
+    /// A normalizer may only answer this when it can prove the decoded frame
+    /// would have carried the same reason, because the coverage row this
+    /// writes is indistinguishable from the one the decoded path writes.
+    pub(super) fn non_durable_before_decode(reason: ObservationCoverageReason) -> Self {
+        Self::NonDurable {
+            reason,
+            before_decode: true,
+        }
     }
 }
 
@@ -122,6 +143,10 @@ pub(super) struct JsonlObservationAdmissionProgress {
     pub frames_decoded: u64,
     pub frames_accepted: u64,
     pub frames_skipped: u64,
+    /// Of `frames_skipped`, how many were refused from their raw bytes before
+    /// being decoded. The aggregate cannot separate a skip that cost a decode
+    /// and two structural walks from one that cost a tokenize.
+    pub frames_rejected_before_decode: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
     pub io: crate::runtime::source::JsonlIoAccounting,
@@ -646,12 +671,19 @@ pub(super) async fn admit_jsonl_observations<State>(
                                 }
                             }
                         }
-                        JsonlFrameAdmission::NonDurable(reason) => {
+                        JsonlFrameAdmission::NonDurable {
+                            reason,
+                            before_decode,
+                        } => {
                             active
                                 .advance_coverage(expected_cursor, checkpoint, reason, None)
                                 .await?;
                             crate::runtime::pipeline_metrics::record_frame_skipped(reason);
                             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                            if before_decode {
+                                progress.frames_rejected_before_decode =
+                                    progress.frames_rejected_before_decode.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -729,7 +761,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                     parsed_record,
                     native_record_id,
                 } => (parsed_record, native_record_id),
-                JsonlFrameAdmission::NonDurable(reason) => {
+                JsonlFrameAdmission::NonDurable {
+                    reason,
+                    before_decode,
+                } => {
                     flush_pending(
                         &active,
                         &mut expected_cursor,
@@ -748,6 +783,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                         .await?;
                     crate::runtime::pipeline_metrics::record_frame_skipped(reason);
                     progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                    if before_decode {
+                        progress.frames_rejected_before_decode =
+                            progress.frames_rejected_before_decode.saturating_add(1);
+                    }
                     continue;
                 }
             };
@@ -824,6 +863,7 @@ pub(super) async fn admit_jsonl_observations<State>(
         progress.frames_decoded,
         progress.frames_accepted,
         progress.frames_skipped,
+        progress.frames_rejected_before_decode,
         progress.frames_refused,
         progress.frames_persisted,
     );
