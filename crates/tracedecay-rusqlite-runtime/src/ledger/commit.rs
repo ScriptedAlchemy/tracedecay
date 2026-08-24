@@ -75,12 +75,12 @@ fn record_with_bookkeeping(
     };
     let receipt_json = encode_json(&receipt, "original_receipt_json")?;
     checkpoint::persist(transaction, &submission, &checkpoint, &receipt)?;
-    // The persisted checkpoint now carries the new epoch, which is what makes
-    // the superseded records unreachable, so the prune reads it after persist.
-    // The record inserted below sits at the new epoch and is never eligible.
-    if checkpoint.supersedes_authority() {
-        prune::prune_superseded(transaction, &metadata.shard_id)?;
-    }
+    // The persisted checkpoint is the validated authority for which of this
+    // incarnation's records are now unreachable, so the prune runs after
+    // persist and carries that checkpoint. Every commit makes one bounded pass
+    // so a backlog converges; the record inserted below sits at the persisted
+    // epoch and is never eligible.
+    prune::prune_superseded(transaction, &submission, &checkpoint)?;
     idempotency::insert(transaction, &submission, &receipt, &receipt_json)?;
     match bookkeeping {
         RuntimeBookkeeping::None => {}

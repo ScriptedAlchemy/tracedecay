@@ -41,20 +41,6 @@ pub(super) struct NextCheckpoint {
     pub(super) watermark: ShardWatermarkV1,
 }
 
-impl NextCheckpoint {
-    /// True when this commit carries the shard past a previously persisted
-    /// authority epoch.
-    ///
-    /// That is exactly the moment the superseded epoch's idempotency records
-    /// stop being reachable: `next` rejects every later submission below the
-    /// persisted epoch, so nothing can match them again.
-    pub(super) fn supersedes_authority(&self) -> bool {
-        self.previous.as_ref().is_some_and(|previous| {
-            previous.watermark.authority_epoch < self.watermark.authority_epoch
-        })
-    }
-}
-
 pub(super) fn next(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
