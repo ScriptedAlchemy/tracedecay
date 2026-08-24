@@ -73,7 +73,7 @@ async fn unchanged_reconcile_retries_semantic_admission_for_the_serving_generati
     let semantic_hook = {
         let accepting = Arc::clone(&accepting);
         let accepted = Arc::clone(&accepted);
-        Arc::new(move |_: &CodeIndexPublishedGenerationV1| {
+        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| {
             if accepting.load(Ordering::Acquire) {
                 accepted.fetch_add(1, Ordering::AcqRel);
                 true

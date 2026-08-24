@@ -41,7 +41,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     let first_calls = Arc::new(AtomicUsize::new(0));
     let first_hook = {
         let calls = Arc::clone(&first_calls);
-        Arc::new(move |_: &CodeIndexPublishedGenerationV1| {
+        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| {
             calls.fetch_add(1, Ordering::SeqCst);
             true
         }) as SavedCodeGenerationScheduleHookV1
@@ -69,7 +69,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     let second_calls = Arc::new(AtomicUsize::new(0));
     let second_hook = {
         let calls = Arc::clone(&second_calls);
-        Arc::new(move |_: &CodeIndexPublishedGenerationV1| {
+        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| {
             calls.fetch_add(1, Ordering::SeqCst);
             true
         }) as SavedCodeGenerationScheduleHookV1
@@ -139,6 +139,57 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn semantic_schedule_reuses_the_serving_generation_handle() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let scheduled_generation = Arc::new(Mutex::new(None));
+    let semantic_hook = {
+        let scheduled_generation = Arc::clone(&scheduled_generation);
+        Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
+            *scheduled_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
+            true
+        }) as SavedCodeGenerationScheduleHookV1
+    };
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(semantic_hook),
+            )
+            .await
+            .expect("mount scheduler")
+    );
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let serving_generation = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_complete()
+        .expect("serving generation")
+        .generation_handle();
+    let scheduled_generation = scheduled_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("scheduled generation");
+
+    assert!(
+        Arc::ptr_eq(&scheduled_generation, &serving_generation),
+        "semantic scheduling must share the immutable serving generation instead of deep-cloning it"
+    );
+    registry.shutdown().await;
+}
+
 struct BlockingSemanticScheduleProbeV1 {
     entered: Arc<Mutex<Receiver<CodeGenerationId>>>,
     release: Sender<()>,
@@ -150,7 +201,7 @@ impl BlockingSemanticScheduleProbeV1 {
         let (entered_tx, entered_rx) = channel();
         let (release_tx, release_rx) = channel();
         let release_rx = Arc::new(Mutex::new(release_rx));
-        let hook = Arc::new(move |generation: &CodeIndexPublishedGenerationV1| {
+        let hook = Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
             entered_tx
                 .send(generation.manifest().generation_id.clone())
                 .expect("report scheduled semantic generation");
@@ -252,7 +303,7 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
     let panic_calls = Arc::new(AtomicUsize::new(0));
     let panicking_hook = {
         let calls = Arc::clone(&panic_calls);
-        Arc::new(move |_: &CodeIndexPublishedGenerationV1| -> bool {
+        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| -> bool {
             calls.fetch_add(1, Ordering::SeqCst);
             panic!("semantic schedule panic fixture");
         }) as SavedCodeGenerationScheduleHookV1
@@ -282,7 +333,7 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
     let replacement_calls = Arc::new(AtomicUsize::new(0));
     let replacement_hook = {
         let calls = Arc::clone(&replacement_calls);
-        Arc::new(move |_: &CodeIndexPublishedGenerationV1| {
+        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| {
             calls.fetch_add(1, Ordering::SeqCst);
             true
         }) as SavedCodeGenerationScheduleHookV1

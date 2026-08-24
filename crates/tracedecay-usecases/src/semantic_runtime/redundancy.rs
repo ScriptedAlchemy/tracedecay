@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
@@ -114,7 +114,7 @@ impl PreparedSemanticRedundancyAuthorityV1 {
 
 struct RetainedProjectGenerationsV1 {
     latest: CodeGenerationId,
-    generations: BTreeMap<CodeGenerationId, CodeIndexPublishedGenerationV1>,
+    generations: BTreeMap<CodeGenerationId, Arc<CodeIndexPublishedGenerationV1>>,
 }
 
 struct SemanticProjectRedundancyStateV1 {
@@ -199,7 +199,7 @@ pub fn project_semantic_redundancy_revision(
 /// generation; reads remain selected by committed compatibility pins.
 pub(crate) fn register_project_semantic_redundancy_generation(
     project_root: PathBuf,
-    generation: CodeIndexPublishedGenerationV1,
+    generation: Arc<CodeIndexPublishedGenerationV1>,
 ) {
     let incoming = generation.manifest().generation_id.clone();
     let mut retained = retained_generations()
@@ -213,6 +213,7 @@ pub(crate) fn register_project_semantic_redundancy_generation(
         });
     project.latest = incoming.clone();
     project.generations.insert(incoming, generation);
+    record_retained_generation_count(&retained);
 }
 
 /// Prune process-local code-generation handles after the daemon retention
@@ -233,12 +234,13 @@ pub fn retain_project_semantic_code_sources(
             .generations
             .retain(|source, _| source == &latest || configured_sources.contains(source));
     }
+    record_retained_generation_count(&retained);
 }
 
 pub fn project_semantic_retained_code_generation(
     project_root: &Path,
     source_generation: &CodeGenerationId,
-) -> Option<CodeIndexPublishedGenerationV1> {
+) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
     retained_generations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -311,10 +313,12 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
     let _activation = activation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    retained_generations()
+    let mut retained = retained_generations()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(project_root);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    retained.remove(project_root);
+    record_retained_generation_count(&retained);
+    drop(retained);
     redundancy_states()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -323,6 +327,21 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
+}
+
+#[inline(always)]
+fn record_retained_generation_count(retained: &BTreeMap<PathBuf, RetainedProjectGenerationsV1>) {
+    #[cfg(feature = "hotpath")]
+    {
+        let count = retained.values().fold(0_usize, |total, project| {
+            total.saturating_add(project.generations.len())
+        });
+        hotpath::gauge!("usecases.semantic.retained_code_generations").set(count);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = retained;
+    }
 }
 
 /// Read only the exact complete cosine generation selected by committed pins.

@@ -551,7 +551,7 @@ impl CodeIndexSchedulerRegistryV1 {
             *serving = Some(candidate.clone());
             swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
             drop(serving);
-            let _ = scheduler.schedule_semantic_generation(candidate.generation());
+            let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
         })
         .await;
