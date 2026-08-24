@@ -309,6 +309,7 @@ fn representative_commands_route_to_their_dispatch_family() {
         (
             Commands::Init {
                 path: None,
+                path_flag: None,
                 skip_folders: Vec::new(),
                 include_folders: Vec::new(),
                 adopt_project: None,
