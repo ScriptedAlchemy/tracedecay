@@ -105,7 +105,7 @@ git add crates/tracedecay-code-index/src/production/lexical_page_source.rs
 git commit -m 'perf(index): batch sealed lexical pages'
 ```
 
-### Task 2: Atomic multi-page artifact append and trigger-free bulk load
+### Task 2: Atomic multi-page artifact append with the mutation fence preserved
 
 **Files:**
 - Modify: `crates/tracedecay-query/src/retrieval/lexical/projection/artifact.rs`
@@ -150,16 +150,15 @@ Compute the batch charge before opening SQLite:
 needed = fixed_ledger_charge_bytes
     + pages.iter().map(VerifiedSealedLexicalPageV1::retained_owned_bytes).sum::<usize>()
     + prepared.iter().map(PreparedCodeLexicalArtifactPageV1::retained_owned_bytes).sum::<usize>()
-    + pages
+    + active_workers
         .iter()
-        .map(|page| page_preparation_scratch_bytes(page, usize::MAX))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .max()
-        .unwrap_or(0);
+        .map(page_preparation_scratch_bytes)
+        .sum::<usize>()
+    + task_overhead;
 ```
 
-Use checked arithmetic and return a typed contract refusal before mutation.
+Use checked arithmetic, independent prepared-row/estimated-write ceilings, and
+return a typed batch-too-large refusal before mutation.
 Validate contiguous ordinals, transitions, and cumulative digests for every
 page against a working progress/cursor. A typed pre-SQLite batch-too-large
 refusal lets the scheduler shrink the batch and retry from the unchanged source
@@ -204,14 +203,13 @@ and one source receipt per page in ordinal order. Check cancellation before each
 page and immediately before commit. Read progress once after commit. Implement
 `append_page` as `self.append_pages(std::slice::from_ref(page), control)`.
 
-- [ ] **Step 6: Move epoch triggers to finalization admission**
+- [ ] **Step 6: Preserve and prove the ingestion-time mutation fence**
 
-Remove the 33 `CREATE TRIGGER` statements from `create_schema`. Add
-`install_finalization_mutation_triggers(&Transaction)` and call it in the same
-transaction that creates the first `PersistedFinalizationStateV1`. Capture the
-epoch only after triggers are installed. Bump format revision from 5 to 6 so an
-old partial staging artifact is discarded instead of interpreted under the new
-schema lifecycle.
+Keep the existing epoch triggers active from staging creation through
+finalization. Add a pre-finalization self-attesting corruption test that changes
+derived rows or postings and rewrites the public integrity digest while keeping
+row counts stable; finalization must still return typed corruption. Do not bump
+the format solely for batching.
 
 - [ ] **Step 7: Add bounded static instrumentation**
 
@@ -313,9 +311,10 @@ ETA absent until a second process-local sample exists.
 - [ ] **Step 6: Prove nonblocking and supersession behavior**
 
 Add tests that hold the scheduler mutex while `dashboard_freshness` completes,
-replace the generation and observe the old snapshot disappear, and reopen an
-intermediate staging artifact with exact committed counts but no fabricated
-rate.
+barrier an old generation immediately before publication, supersede it, and
+prove an epoch CAS prevents the old worker from overwriting or clearing the new
+snapshot. Reopen an intermediate staging artifact with exact committed counts
+but no fabricated rate.
 
 - [ ] **Step 7: Commit runtime integration**
 
@@ -440,16 +439,15 @@ git add crates/tracedecay-query/Cargo.toml \
 git commit -m 'bench(query): measure lexical artifact batching'
 ```
 
-### Task 6: Deferred serving-index construction
+### Task 6: Measure the retained serving-index cost
 
 **Files:**
-- Modify: `crates/tracedecay-query/src/retrieval/lexical/projection/artifact/builder.rs`
-- Modify: `crates/tracedecay-query/src/retrieval/lexical/projection/artifact/format.rs`
-- Test: `crates/tracedecay-query/tests/search_quality_suite/candidate_producers.rs`
+- No production schema edits in this slice.
 
 **Interfaces:**
-- Consumes: persisted bounded finalization cursor.
-- Produces: the existing six named serving indexes with unchanged columns and query plans.
+- Consumes: Task 5 benchmark and Hotpath evidence.
+- Produces: a measured decision while retaining the existing six native indexes
+  and query plans unchanged.
 
 - [ ] **Step 1: Measure the remaining online-index cost**
 
@@ -457,34 +455,14 @@ Run the Task 5 benchmark and a Hotpath feature-on pass after Tasks 1-5. Proceed
 only if online index maintenance remains a material owner or the production
 journey exceeds 300 seconds.
 
-- [ ] **Step 2: Write the bounded restart RED**
+- [ ] **Step 2: Preserve the current contract**
 
-Cancel index construction after one persisted key-ordered slice. Reopen the
-artifact and assert it resumes after the exact last key, produces every expected
-index row once, and finishes with the literal six-index inventory.
-
-- [ ] **Step 3: Implement shadow index tables in bounded slices**
-
-Populate shadow index tables using the existing finalization transaction and
-row budget. Persist section and key cursor after every slice. When complete,
-create the final named indexes over the bounded shadow representation and swap
-them atomically. Do not use one unbounded corpus-wide `CREATE INDEX` as the work
-unit.
-
-- [ ] **Step 4: Verify query plans and recovery**
-
-Run exact query-plan, cancellation, restart, corrupt-index, and artifact-reader
-tests. Confirm every existing `INDEXED BY` statement resolves the same named
-index and column order.
-
-- [ ] **Step 5: Commit only if measured**
-
-```bash
-git add crates/tracedecay-query/src/retrieval/lexical/projection/artifact/builder.rs \
-  crates/tracedecay-query/src/retrieval/lexical/projection/artifact/format.rs \
-  crates/tracedecay-query/tests/search_quality_suite/candidate_producers.rs
-git commit -m 'perf(query): defer lexical serving indexes'
-```
+SQLite cannot incrementally populate a native index through shadow tables and
+atomically rename it into place. Keep the current native index inventory and
+all `INDEXED BY` query plans unchanged. If online maintenance remains a material
+owner after batching, write a separate design that either accepts a measured
+monolithic engine operation or deliberately changes the lookup-table contract;
+do not smuggle either choice into this slice.
 
 ### Task 7: Production acceptance and PR
 
@@ -492,7 +470,7 @@ git commit -m 'perf(query): defer lexical serving indexes'
 - No production edits during measurement.
 
 **Interfaces:**
-- Consumes: exact committed branch head from Tasks 1-6.
+- Consumes: exact committed branch head and measurement from Tasks 1-6.
 - Produces: reproducible cold/resume evidence and PR into the integration branch.
 
 - [ ] **Step 1: Run static and focused gates**
