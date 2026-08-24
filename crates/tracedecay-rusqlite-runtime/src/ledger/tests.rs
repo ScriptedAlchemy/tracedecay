@@ -247,105 +247,6 @@ fn advancing_authority_prunes_only_the_superseded_records() {
     );
 }
 
-/// Authority rotation may discover an arbitrarily large legacy ledger. The
-/// foreground commit that discovers it must make bounded progress instead of
-/// turning the whole backlog into one writer transaction.
-#[test]
-fn one_authority_advance_prunes_at_most_256_superseded_records() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    let transaction = connection.transaction().unwrap();
-    initialize_schema(&transaction).unwrap();
-    for index in 0..258 {
-        let metadata = at_authority(
-            &format!("operation.bounded.{index}"),
-            &format!("key.bounded.{index}"),
-            'a',
-            1,
-            7,
-        );
-        commit(&transaction, &metadata);
-    }
-
-    let advanced = at_authority(
-        "operation.bounded.advance",
-        "key.bounded.advance",
-        'b',
-        1,
-        8,
-    );
-    commit(&transaction, &advanced);
-
-    let rows = idempotency_rows(&transaction);
-    assert_eq!(
-        rows.iter().filter(|(_, epoch)| *epoch == 7).count(),
-        2,
-        "one foreground commit may prune at most 256 legacy records"
-    );
-    assert_eq!(
-        rows.iter().filter(|(_, epoch)| *epoch == 8).count(),
-        1,
-        "the authority-advancing commit remains recorded"
-    );
-}
-
-/// Cleanup cannot be tied only to the transition commit: that bounded pass can
-/// leave a backlog, and an upgraded database can already have its current
-/// checkpoint. Later commits at the standing epoch must keep draining it.
-#[test]
-fn same_epoch_commits_converge_a_bounded_superseded_backlog() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    let transaction = connection.transaction().unwrap();
-    initialize_schema(&transaction).unwrap();
-    for index in 0..257 {
-        let metadata = at_authority(
-            &format!("operation.converge.{index}"),
-            &format!("key.converge.{index}"),
-            'a',
-            1,
-            7,
-        );
-        commit(&transaction, &metadata);
-    }
-
-    let advanced = at_authority(
-        "operation.converge.advance",
-        "key.converge.advance",
-        'b',
-        1,
-        8,
-    );
-    commit(&transaction, &advanced);
-    assert_eq!(
-        idempotency_rows(&transaction)
-            .iter()
-            .filter(|(_, epoch)| *epoch == 7)
-            .count(),
-        1,
-        "the bounded transition pass leaves one legacy record"
-    );
-
-    let follow_up = at_authority(
-        "operation.converge.follow-up",
-        "key.converge.follow-up",
-        'c',
-        1,
-        8,
-    );
-    commit(&transaction, &follow_up);
-
-    let rows = idempotency_rows(&transaction);
-    assert_eq!(
-        rows.iter().filter(|(_, epoch)| *epoch == 7).count(),
-        0,
-        "a same-epoch commit continues draining the superseded backlog"
-    );
-    assert_eq!(
-        rows.iter().filter(|(_, epoch)| *epoch == 8).count(),
-        2,
-        "both current-epoch commits remain replayable"
-    );
-}
-
 /// The safety property that bounds the whole retention rule: a submission whose
 /// idempotency record was pruned must still not be able to commit a second
 /// time. It fails closed on stale authority instead of being admitted as new.
@@ -418,5 +319,153 @@ fn records_are_retained_while_their_authority_still_stands() {
             LedgerDisposition::Replay(found) if found == receipt
         ),
         "a replay under standing authority still returns the original receipt"
+    );
+}
+
+/// Authority rotation can discover an arbitrarily large legacy backlog. The
+/// foreground commit that discovers it must remove at most one bounded batch,
+/// so the epoch advance commits on its own terms instead of dragging the whole
+/// backlog into the user mutation's writer transaction.
+#[test]
+fn one_foreground_commit_prunes_at_most_one_bounded_batch() {
+    let batch = usize::try_from(prune::MAX_PRUNED_ROWS_PER_COMMIT).unwrap();
+    let seeded = batch + 2;
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    for index in 0..seeded {
+        let metadata = at_authority(
+            &format!("operation.bounded.{index}"),
+            &format!("key.bounded.{index}"),
+            'a',
+            1,
+            7,
+        );
+        commit(&transaction, &metadata);
+    }
+
+    let advanced = at_authority(
+        "operation.bounded.advance",
+        "key.bounded.advance",
+        'b',
+        1,
+        8,
+    );
+    commit(&transaction, &advanced);
+
+    let rows = idempotency_rows(&transaction);
+    assert_eq!(
+        rows.iter().filter(|(_, epoch)| *epoch == 7).count(),
+        seeded - batch,
+        "one foreground commit removes at most one bounded batch of superseded \
+         records, never the whole backlog"
+    );
+    assert_eq!(
+        rows.iter().filter(|(_, epoch)| *epoch == 8).count(),
+        1,
+        "the authority-advancing commit still records its own receipt"
+    );
+}
+
+/// A bounded pass leaves a backlog, so cleanup cannot be tied to the transition
+/// commit alone. Later commits at the standing epoch must keep draining it, or
+/// the retention rule never converges.
+#[test]
+fn later_commits_drain_the_remaining_superseded_backlog() {
+    let batch = usize::try_from(prune::MAX_PRUNED_ROWS_PER_COMMIT).unwrap();
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    for index in 0..batch + 1 {
+        let metadata = at_authority(
+            &format!("operation.converge.{index}"),
+            &format!("key.converge.{index}"),
+            'a',
+            1,
+            7,
+        );
+        commit(&transaction, &metadata);
+    }
+
+    let advanced = at_authority(
+        "operation.converge.advance",
+        "key.converge.advance",
+        'b',
+        1,
+        8,
+    );
+    commit(&transaction, &advanced);
+    assert_eq!(
+        idempotency_rows(&transaction)
+            .iter()
+            .filter(|(_, epoch)| *epoch == 7)
+            .count(),
+        1,
+        "the bounded transition pass leaves the remainder of the backlog"
+    );
+
+    let follow_up = at_authority(
+        "operation.converge.follow-up",
+        "key.converge.follow-up",
+        'c',
+        1,
+        8,
+    );
+    commit(&transaction, &follow_up);
+
+    let rows = idempotency_rows(&transaction);
+    assert_eq!(
+        rows.iter().filter(|(_, epoch)| *epoch == 7).count(),
+        0,
+        "a later commit at the standing epoch continues draining the backlog"
+    );
+    assert_eq!(
+        rows.iter().filter(|(_, epoch)| *epoch == 8).count(),
+        2,
+        "both current-epoch commits remain replayable"
+    );
+}
+
+/// Only the incarnation whose checkpoint this commit decoded and validated may
+/// have its records retired. A neighbouring incarnation whose checkpoint row is
+/// inconsistent must never have its receipts deleted on the strength of that
+/// row's raw scalar: losing a receipt silently re-admits a duplicate write.
+#[test]
+fn a_corrupt_neighbouring_checkpoint_cannot_retire_its_receipts() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    let neighbour = at_authority("operation.neighbour", "key.neighbour", 'a', 2, 7);
+    let neighbour_binding = binding(&neighbour);
+    commit(&transaction, &neighbour);
+    let seed = at_authority("operation.seed", "key.seed", 'a', 1, 7);
+    commit(&transaction, &seed);
+
+    // Incarnation 2's checkpoint scalar now claims epoch 999 while its
+    // watermark and receipt still encode 7. Loading that checkpoint fails
+    // closed, so nothing may act on the raw scalar either.
+    transaction
+        .execute(
+            "UPDATE td_runtime_writer_checkpoint_v1 SET authority_epoch = 999
+             WHERE incarnation = 2",
+            [],
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            current_watermark(&transaction, &neighbour_binding),
+            Err(LedgerError::Corrupt { .. })
+        ),
+        "the neighbouring checkpoint is corrupt and fails closed when loaded"
+    );
+
+    // A completely unrelated, fully validated transition on incarnation 1.
+    let advanced = at_authority("operation.unrelated", "key.unrelated", 'a', 1, 8);
+    commit(&transaction, &advanced);
+
+    assert!(
+        idempotency_rows(&transaction).contains(&(2, 7)),
+        "an unvalidated neighbouring checkpoint must not authorise deleting \
+         that incarnation's receipts"
     );
 }
