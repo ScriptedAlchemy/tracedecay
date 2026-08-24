@@ -1,6 +1,8 @@
 //! Dashboard endpoints for project and user settings.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use axum::Json;
@@ -12,8 +14,9 @@ use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
     SETTINGS_REFRESH_OPERATION, configuration_application_problem_error,
     configuration_authority_unavailable_error, configuration_revision_conflict_error,
-    parse_project_settings_patch, parse_user_settings_patch, settings_validation_error,
-    validate_user_settings_patch,
+    parse_code_index_worker_settings_patch, parse_project_settings_patch,
+    parse_user_settings_patch, settings_validation_error,
+    validate_code_index_worker_settings_patch, validate_user_settings_patch,
 };
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
@@ -36,11 +39,81 @@ use crate::application::settings_control::{
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
-use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
+use tracedecay_domain::configuration::{
+    CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1, ConfigurationIdempotencyKey,
+    ConfigurationRevisionId,
+};
 
 use crate::application_surface::{DashboardConfigurationApplyError, configuration_apply_error};
 
-pub use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
+pub use tracedecay_api::configuration::{
+    CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, UserSettingsPatch,
+};
+
+/// The independent profile-session state that owns the code-index worker
+/// preference. It deliberately carries a different revision from the ordinary
+/// profile settings resource, so a worker write cannot be sequenced with a
+/// project or user settings write under a misleading shared CAS token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardCodeIndexWorkerConfigurationV1 {
+    pub configuration_snapshot_id: String,
+    pub configuration_revision_id: String,
+    pub code_index_workers: CodeIndexWorkerSelectionV1,
+}
+
+/// The committed profile-worker configuration returned by the exact
+/// ProfileSessions authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardCodeIndexWorkerSettingsCommitV1 {
+    pub current: DashboardCodeIndexWorkerConfigurationV1,
+}
+
+/// The only failures the dashboard boundary can interpret without inventing a
+/// durable outcome. The root adapter owns store/error conversion and must
+/// retain the exact ProfileSessions lease that performed the operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DashboardCodeIndexWorkerSettingsErrorV1 {
+    Unavailable,
+    RevisionConflict { actual_revision_id: String },
+}
+
+pub type DashboardCodeIndexWorkerSettingsFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    DashboardCodeIndexWorkerConfigurationV1,
+                    DashboardCodeIndexWorkerSettingsErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub type DashboardCodeIndexWorkerSettingsCommitFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    DashboardCodeIndexWorkerSettingsCommitV1,
+                    DashboardCodeIndexWorkerSettingsErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Injected root-owned authority for the sole ProfileSessions-backed worker
+/// configuration resource. It intentionally has no batch operation: project
+/// and ordinary profile settings are different durable resources.
+pub trait DashboardProfileCodeIndexWorkerSettingsPort: Send + Sync {
+    fn read<'a>(&'a self) -> DashboardCodeIndexWorkerSettingsFuture<'a>;
+
+    fn commit<'a>(
+        &'a self,
+        selection: CodeIndexWorkerSelectionV1,
+        expected_revision: ConfigurationRevisionId,
+        idempotency_key: ConfigurationIdempotencyKey,
+    ) -> DashboardCodeIndexWorkerSettingsCommitFuture<'a>;
+}
 
 type ApiResult = std::result::Result<
     Json<DashboardEnvelopeV1<SettingsPayloadV1>>,
@@ -50,6 +123,7 @@ type ProjectSettingsPatchResult =
     std::result::Result<Json<ProjectSettingsPatchResponseV1>, DashboardConfigurationRouteErrorV1>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
+const PROFILE_CODE_INDEX_WORKER_SELECTION_OPERATION: &str = "profile_code_index_worker_selection";
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 pub struct SettingsPayloadV1 {
@@ -141,7 +215,17 @@ struct UserSettingsPayloadV1 {
     legacy_config_read_only: bool,
     configuration_snapshot_id: String,
     configuration_revision_id: String,
+    /// Independent ProfileSessions revision for the code-index worker
+    /// resource. It is intentionally not interchangeable with the ordinary
+    /// user settings revision above.
+    code_index_worker_configuration_snapshot_id: String,
+    code_index_worker_configuration_revision_id: String,
     upload_enabled: bool,
+    code_index_workers: CodeIndexWorkerSelectionV1,
+    /// The admitted process-wide plan. A persisted selection may differ until
+    /// the daemon restarts, so unavailable is carried as `null` rather than
+    /// fabricated from the saved preference.
+    code_index_worker_status: Option<CodeIndexWorkerStatusV1>,
     watcher_debounce: String,
     extraction_timeout_secs: u64,
     installed_agents: Vec<String>,
@@ -239,7 +323,7 @@ pub fn install_dashboard_pr_autotrack_read_port(
 }
 
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
-    Ok(Json(settings_envelope(&state, None, None).await?))
+    Ok(Json(settings_envelope(&state, None, None, None).await?))
 }
 
 pub async fn patch_project_settings(
@@ -322,7 +406,7 @@ pub async fn patch_project_settings(
 
     Ok(Json(ProjectSettingsPatchResponseV1 {
         application_outcome,
-        current: settings_envelope(&state, Some(preview.resync_recommended), None).await?,
+        current: settings_envelope(&state, Some(preview.resync_recommended), None, None).await?,
     }))
 }
 
@@ -364,7 +448,6 @@ pub async fn patch_user_settings(
         profile_id,
         UserSettingsMutationV1 {
             upload_enabled: patch.upload_enabled,
-            code_index_workers: patch.code_index_workers,
             watcher_debounce: patch.watcher_debounce,
             extraction_timeout_secs: patch.extraction_timeout_secs,
         },
@@ -387,14 +470,108 @@ pub async fn patch_user_settings(
     }
 
     Ok(Json(
-        settings_envelope(&state, None, Some(plan.restart_recommended)).await?,
+        settings_envelope(&state, None, Some(plan.restart_recommended), None).await?,
     ))
+}
+
+/// Saves only the ProfileSessions-backed code-index worker selection. This is
+/// deliberately not a branch of `patch_user_settings`: its independent CAS
+/// revision makes a mixed project/profile mutation unrepresentable.
+pub async fn patch_code_index_worker_settings(
+    State(state): State<DashboardState>,
+    Json(patch): Json<Value>,
+) -> ApiResult {
+    let patch = parse_code_index_worker_settings_patch(patch)?;
+    validate_code_index_worker_settings_patch(&patch)?;
+    let worker_admission_errors = code_index_worker_admission_errors(
+        &patch.code_index_workers,
+        tracedecay_code_index::parallelism::installed_worker_status().as_ref(),
+    );
+    if !worker_admission_errors.is_empty() {
+        return Err(settings_validation_error(worker_admission_errors));
+    }
+    let idempotency_key =
+        ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "idempotency_key",
+                "message": "idempotency_key must be one non-empty canonical caller-stable value"
+            }]))
+        })?;
+    let expected_revision =
+        ConfigurationRevisionId::new(patch.expected_revision_id).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "expected_revision_id",
+                "message": "expected_revision_id must name one canonical configuration revision"
+            }]))
+        })?;
+    let port = state
+        .profile_code_index_worker_settings
+        .as_deref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let committed = match port
+        .commit(
+            patch.code_index_workers,
+            expected_revision.clone(),
+            idempotency_key,
+        )
+        .await
+    {
+        Ok(committed) => committed,
+        Err(DashboardCodeIndexWorkerSettingsErrorV1::Unavailable) => {
+            return Err(configuration_authority_unavailable_error());
+        }
+        Err(DashboardCodeIndexWorkerSettingsErrorV1::RevisionConflict { actual_revision_id }) => {
+            return Err(configuration_revision_conflict_error(
+                "the profile code-index worker configuration revision changed before this selection could be saved",
+                expected_revision.as_str(),
+                &actual_revision_id,
+            ));
+        }
+    };
+
+    Ok(Json(
+        settings_envelope(&state, None, Some(true), Some(&committed.current)).await?,
+    ))
+}
+
+/// Reject a persisted exact width when the installed daemon plan exposes the
+/// current CPU and memory admission ceilings. When no plan is installed, the
+/// saved selection remains a restart-time decision rather than an invented
+/// capacity claim.
+fn code_index_worker_admission_errors(
+    selection: &CodeIndexWorkerSelectionV1,
+    status: Option<&CodeIndexWorkerStatusV1>,
+) -> Vec<Value> {
+    let (CodeIndexWorkerSelectionV1::Exact { workers }, Some(status)) = (selection, status) else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    if *workers > status.available_logical_cpus {
+        errors.push(json!({
+            "field": "code_index_workers",
+            "message": format!(
+                "code_index_workers exact mode must request no more than {} available logical CPUs",
+                status.available_logical_cpus,
+            ),
+        }));
+    }
+    if *workers > status.memory_safe_workers {
+        errors.push(json!({
+            "field": "code_index_workers",
+            "message": format!(
+                "code_index_workers exact mode must request no more than {} memory-safe workers",
+                status.memory_safe_workers,
+            ),
+        }));
+    }
+    errors
 }
 
 async fn settings_envelope(
     state: &DashboardState,
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
+    committed_worker_configuration: Option<&DashboardCodeIndexWorkerConfigurationV1>,
 ) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
 {
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
@@ -405,6 +582,16 @@ async fn settings_envelope(
         .read()
         .await
         .map_err(|_| configuration_authority_unavailable_error())?;
+    let worker_configuration = match committed_worker_configuration {
+        Some(configuration) => configuration.clone(),
+        None => state
+            .profile_code_index_worker_settings
+            .as_deref()
+            .ok_or_else(configuration_authority_unavailable_error)?
+            .read()
+            .await
+            .map_err(|_| configuration_authority_unavailable_error())?,
+    };
     let automation = automation_settings_payload(&project_configuration);
     let payload = SettingsPayloadV1 {
         project: ProjectSettingsPayloadV1 {
@@ -421,7 +608,7 @@ async fn settings_envelope(
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
             pr_autotrack: pr_autotrack_payload(state),
         },
-        user: user_settings_payload(&user),
+        user: user_settings_payload(&user, &worker_configuration),
         automation,
         environment: environment_payload(),
         storage: StorageSettingsPayloadV1 {
@@ -458,6 +645,12 @@ async fn settings_envelope(
             PROJECT_SETTINGS_APPLY_OPERATION,
         ));
     }
+    if state.profile_code_index_worker_settings.is_some() {
+        legal_actions.push(DashboardLegalActionRefV1::new(
+            DashboardLegalActionKindV1::RequestApply,
+            PROFILE_CODE_INDEX_WORKER_SELECTION_OPERATION,
+        ));
+    }
     legal_actions.push(DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::Refresh,
         SETTINGS_REFRESH_OPERATION,
@@ -471,13 +664,24 @@ async fn settings_envelope(
     .with_legal_actions(legal_actions))
 }
 
-fn user_settings_payload(user: &UserSettingsSnapshotV1) -> UserSettingsPayloadV1 {
+fn user_settings_payload(
+    user: &UserSettingsSnapshotV1,
+    worker_configuration: &DashboardCodeIndexWorkerConfigurationV1,
+) -> UserSettingsPayloadV1 {
     UserSettingsPayloadV1 {
         legacy_config_path: user.legacy_config_path.clone(),
         legacy_config_read_only: true,
         configuration_snapshot_id: user.configuration_snapshot_id.clone(),
         configuration_revision_id: user.configuration_revision_id.clone(),
+        code_index_worker_configuration_snapshot_id: worker_configuration
+            .configuration_snapshot_id
+            .clone(),
+        code_index_worker_configuration_revision_id: worker_configuration
+            .configuration_revision_id
+            .clone(),
         upload_enabled: user.upload_enabled,
+        code_index_workers: worker_configuration.code_index_workers,
+        code_index_worker_status: tracedecay_code_index::parallelism::installed_worker_status(),
         watcher_debounce: user.watcher_debounce.clone(),
         extraction_timeout_secs: user.extraction_timeout_secs,
         installed_agents: user.installed_agents.clone(),
@@ -635,6 +839,7 @@ fn project_apply_error(
 mod tests {
     use super::*;
     use serde_json::json;
+    use tracedecay_domain::configuration::CodeIndexWorkerLimitingReasonV1;
 
     fn serialization_schema<T: JsonSchema>() -> Value {
         let generator = schemars::generate::SchemaSettings::default()
@@ -662,6 +867,65 @@ mod tests {
         assert_eq!(
             user_route["required"],
             json!(["expected_revision_id", "idempotency_key"])
+        );
+
+        let workers_route = serialization_schema::<CodeIndexWorkerSettingsPatch>();
+        let workers_canonical =
+            serialization_schema::<tracedecay_api::configuration::CodeIndexWorkerSettingsPatch>();
+        assert_eq!(workers_route, workers_canonical);
+        assert_eq!(
+            workers_route["required"],
+            json!([
+                "expected_revision_id",
+                "idempotency_key",
+                "code_index_workers"
+            ])
+        );
+    }
+
+    #[test]
+    fn exact_workers_above_current_logical_cpu_limit_are_a_typed_refusal() {
+        let status = CodeIndexWorkerStatusV1 {
+            configured: CodeIndexWorkerSelectionV1::Automatic,
+            environment_override_workers: None,
+            effective_workers: 4,
+            available_logical_cpus: 4,
+            memory_safe_workers: 6,
+            limiting_reason: CodeIndexWorkerLimitingReasonV1::AutomaticAllCores,
+        };
+
+        assert_eq!(
+            code_index_worker_admission_errors(
+                &CodeIndexWorkerSelectionV1::Exact { workers: 5 },
+                Some(&status),
+            ),
+            vec![json!({
+                "field": "code_index_workers",
+                "message": "code_index_workers exact mode must request no more than 4 available logical CPUs",
+            })]
+        );
+    }
+
+    #[test]
+    fn exact_workers_above_current_memory_safe_limit_are_a_typed_refusal() {
+        let status = CodeIndexWorkerStatusV1 {
+            configured: CodeIndexWorkerSelectionV1::Automatic,
+            environment_override_workers: None,
+            effective_workers: 4,
+            available_logical_cpus: 6,
+            memory_safe_workers: 4,
+            limiting_reason: CodeIndexWorkerLimitingReasonV1::ResidentMemory,
+        };
+
+        assert_eq!(
+            code_index_worker_admission_errors(
+                &CodeIndexWorkerSelectionV1::Exact { workers: 5 },
+                Some(&status),
+            ),
+            vec![json!({
+                "field": "code_index_workers",
+                "message": "code_index_workers exact mode must request no more than 4 memory-safe workers",
+            })]
         );
     }
 }

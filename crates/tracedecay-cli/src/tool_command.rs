@@ -147,6 +147,11 @@ pub(crate) async fn run(
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
+    #[cfg(feature = "hotpath")]
+    {
+        let requested_name = name.as_deref().map(canonical_tool_name);
+        hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
+    }
     let defs = get_tool_definitions().map_err(|error| {
         TraceDecayError::project_route(
             "mcp.catalog_discovery_unavailable",
@@ -300,6 +305,7 @@ fn cli_surface_invocation(
 /// without a project reaches the profile-scoped projectless route, where those
 /// operations can only answer `application.surface.unavailable` /
 /// `not_found_or_not_authorized`.
+#[hotpath::measure(label = "cli.tool.application")]
 async fn dispatch_cli_application_surface(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
@@ -307,6 +313,8 @@ async fn dispatch_cli_application_surface(
     requested_format: RequestedOutputFormat,
     deadline: Instant,
 ) -> Result<()> {
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("cli.application.operation").set(&operation.as_str());
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
@@ -514,6 +522,7 @@ fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDeca
 ///
 /// Owner: root MCP tool-dispatch migration. The operation has already passed
 /// definition admission and, when declared, catalog binding resolution.
+#[hotpath::measure(label = "cli.tool.compatibility")]
 async fn dispatch_compatibility_tool(
     dispatch: DaemonToolDispatch,
     tool_name: &str,
@@ -521,6 +530,8 @@ async fn dispatch_compatibility_tool(
     raw_json: bool,
     deadline: Instant,
 ) -> Result<()> {
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("cli.compatibility_tool.name").set(&tool_name);
     // `deadline` is the caller's *request* deadline: it now travels to the
     // daemon, which enforces it. The local wait exists only to bound a dead or
     // wedged daemon, so it runs on the transport's response bound — that same
@@ -571,9 +582,9 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
         return Ok(());
     }
-    // `print_tool_output` already wrote the exact daemon payload. The failing
-    // path exits through `process::exit`, which runs no destructors, so flush
-    // stdout before returning the status-only error.
+    // `print_tool_output` already wrote the exact daemon payload. Flush before
+    // returning the status-only error so the process boundary can drop its
+    // profiling guard and then return the nonzero `ExitCode`.
     std::io::stdout().flush()?;
     Err(TraceDecayError::Config {
         message: format!("{tool_name} reported an application failure."),

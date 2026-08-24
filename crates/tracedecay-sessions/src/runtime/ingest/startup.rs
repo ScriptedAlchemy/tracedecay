@@ -6,8 +6,10 @@ use crate::runtime::shared::TranscriptIngestStats;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use super::failure::{IngestPassCoverage, IngestPassOutcome, TranscriptCatchUpFailure};
+use super::scheduler::default_ingest_pass_bounds;
 use super::user::{
     ingest_user_global_sources_for_provider_with_roots_and_cancellation,
+    ingest_user_global_sources_for_provider_with_roots_bounded_and_codex_state,
     registered_project_roots_from,
 };
 
@@ -133,6 +135,29 @@ pub async fn ingest_user_global_sources_for_startup_with_db<A: SessionIngestAuth
         registry_db,
         profile_root,
         cancellation,
+        None,
+    )
+    .await
+}
+
+pub async fn ingest_user_global_sources_for_startup_with_db_and_codex_state<
+    A: SessionIngestAuthority,
+>(
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &A,
+    registry_db: &A,
+    profile_root: &Path,
+    cancellation: &ObservationCancellation,
+    codex_discovery: &crate::runtime::codex::CodexDiscoveryHub,
+    codex_consumer: &str,
+) -> TranscriptIngestOutcome {
+    ingest_user_global_sources_for_startup_inner(
+        (brain_id, profile_id, registered),
+        registry_db,
+        profile_root,
+        cancellation,
+        Some((codex_discovery, codex_consumer)),
     )
     .await
 }
@@ -158,6 +183,7 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
     registry_db: &A,
     profile_root: &Path,
     cancellation: &ObservationCancellation,
+    codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestOutcome {
     if cancellation.is_cancelled() {
         return TranscriptIngestOutcome::new(
@@ -203,16 +229,34 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
         );
     }
     let (brain_id, profile_id, registered) = registered;
-    let outcome = ingest_user_global_sources_for_provider_with_roots_and_cancellation(
-        brain_id,
-        profile_id,
-        registered,
-        profile_root,
-        None,
-        roots,
-        cancellation,
-    )
-    .await;
+    let outcome = match codex_discovery {
+        Some((hub, consumer)) => {
+            ingest_user_global_sources_for_provider_with_roots_bounded_and_codex_state(
+                (brain_id, profile_id, registered),
+                profile_root,
+                None,
+                roots,
+                default_ingest_pass_bounds(),
+                cancellation,
+                hub,
+                consumer,
+            )
+            .await
+            .into_transcript_outcome()
+        }
+        None => {
+            ingest_user_global_sources_for_provider_with_roots_and_cancellation(
+                brain_id,
+                profile_id,
+                registered,
+                profile_root,
+                None,
+                roots,
+                cancellation,
+            )
+            .await
+        }
+    };
     if !outcome.is_success() {
         return outcome;
     }

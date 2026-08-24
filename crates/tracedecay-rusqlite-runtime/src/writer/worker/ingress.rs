@@ -105,7 +105,9 @@ pub(super) fn apply_wake(
     checkpoint_closed: &mut bool,
 ) {
     match wake {
-        WorkerWake::Write(Some(item)) => enqueue(queue, item, telemetry),
+        WorkerWake::Write(Some(item)) => {
+            let _ = enqueue(queue, item, telemetry);
+        }
         WorkerWake::Write(None) => *input_closed = true,
         WorkerWake::ExactSql(command) => match *command {
             Some(command) => exact_sql_queue.push_back(command),
@@ -203,7 +205,9 @@ pub(super) fn drain_ingress(
 ) {
     loop {
         match receiver.try_recv() {
-            Ok(item) => enqueue(queue, item, telemetry),
+            Ok(item) => {
+                let _ = enqueue(queue, item, telemetry);
+            }
             Err(mpsc::error::TryRecvError::Empty) => break,
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 *input_closed = true;
@@ -213,11 +217,11 @@ pub(super) fn drain_ingress(
     }
 }
 
-fn enqueue(
+pub(super) fn enqueue(
     queue: &mut FairQueue<AcceptedRequest>,
     item: AcceptedRequest,
     telemetry: &WriterTelemetry,
-) {
+) -> bool {
     if let Err(item) = queue.push(item) {
         let result = Err(infrastructure(
             "duplicate operation id reached persistent writer",
@@ -225,5 +229,49 @@ fn enqueue(
         telemetry.released(1, item.admission_bytes());
         telemetry.completed(&result);
         item.settle(result);
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{runtime::Builder, sync::mpsc};
+
+    use super::{
+        AcceptedRequest, CheckpointCommand, ExactSqlWriterCommand, IncrementalVacuumCommand,
+        OnlineBackupCommand, WorkerWake, wait_for_work,
+    };
+
+    #[test]
+    fn shutdown_wakes_the_batch_wait_without_waiting_for_its_deadline() {
+        let (_write_tx, mut write_rx) = mpsc::channel::<AcceptedRequest>(1);
+        let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel::<ExactSqlWriterCommand>(1);
+        let (_vacuum_tx, mut vacuum_rx) = mpsc::channel::<IncrementalVacuumCommand>(1);
+        let (_backup_tx, mut backup_rx) = mpsc::channel::<OnlineBackupCommand>(1);
+        let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel::<CheckpointCommand>(1);
+        let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
+        shutdown_tx.send(()).expect("shutdown receiver is open");
+        let runtime = Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+
+        let wake = runtime.block_on(wait_for_work(
+            &mut write_rx,
+            &mut exact_sql_rx,
+            &mut vacuum_rx,
+            &mut backup_rx,
+            &mut checkpoint_rx,
+            &mut shutdown_rx,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
+
+        assert!(matches!(wake, WorkerWake::Shutdown));
     }
 }

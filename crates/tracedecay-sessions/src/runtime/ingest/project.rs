@@ -89,6 +89,34 @@ pub async fn ingest_project_sources_for_provider_with_cancellation<A: SessionIng
         provider,
         include_hermes,
         cancellation,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_project_sources_for_provider_with_cancellation_and_codex_state<
+    A: SessionIngestAuthority,
+>(
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &A,
+    project_root: &Path,
+    project_id: Option<ProjectId>,
+    provider: Option<SessionProvider>,
+    include_hermes: bool,
+    cancellation: &ObservationCancellation,
+    codex_discovery: &crate::runtime::codex::CodexDiscoveryHub,
+    codex_consumer: &str,
+) -> TranscriptIngestOutcome {
+    ingest_project_sources_for_provider_inner(
+        (brain_id, profile_id, registered),
+        project_root,
+        project_id,
+        provider,
+        include_hermes,
+        cancellation,
+        Some((codex_discovery, codex_consumer)),
     )
     .await
 }
@@ -132,6 +160,7 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
     provider: Option<SessionProvider>,
     include_hermes: bool,
     cancellation: &ObservationCancellation,
+    codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestOutcome {
     let Some(canonical_project_id) = project_id else {
         return TranscriptIngestOutcome::new(
@@ -227,6 +256,7 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             candidate,
             max_new_bytes: provider_byte_cap,
             cancellation,
+            codex_discovery,
         }
         .run()
         .await;
