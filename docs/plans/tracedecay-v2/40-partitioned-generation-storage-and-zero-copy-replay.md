@@ -4,6 +4,13 @@ Status: ACTIVE (decided 2026-08-22). Supersedes the monolithic sealed-generation
 envelope as the long-term storage design; stages 0–1 land first as compatible
 fixes inside the current `format_revision`.
 
+Stage state (reconciled 2026-08-24 against the tree, not the commit log):
+stages 0a, 0b, and 0c are landed; stage 1 is landed; stages 2 and 3 are
+untouched. `format_revision` is still 6
+(`SEALED_GENERATION_FORMAT_REVISION_V1`), as stages 0–1 require. The
+§Problem measurements below describe the pre-stage-0 state and are retained
+as the original evidence, not as a description of the current tree.
+
 ## Problem (measured, 2026-08-21/22, this repository)
 
 - One sealed code generation for this repository is a single

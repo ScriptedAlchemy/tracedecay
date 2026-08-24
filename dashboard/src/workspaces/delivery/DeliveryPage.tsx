@@ -1,4 +1,3 @@
-import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -12,7 +11,7 @@ import {
   Server,
 } from 'lucide-react';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import { fetchEnvelope } from '../../data/query/envelope.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { ReadSection, type ReadState } from '../../ui/ReadSection.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
@@ -61,10 +60,11 @@ import {
  * a list.
  *
  * `/api/projects` provides the repository field. `/api/delivery/overview`
- * provides independently typed local Git, provider, CI, localization, release,
- * and generation projections. Retained evidence remains visible when its
- * source is partial, stale, rate-limited, failed, or unavailable; none
- * of those states are converted into an empty timeline.
+ * (rewritten through `useEnvelope` / the project gateway when a project is
+ * selected) provides independently typed local Git, provider, CI,
+ * localization, release, and generation projections. Retained evidence
+ * remains visible when its source is partial, stale, rate-limited, failed,
+ * or unavailable; none of those states are converted into an empty timeline.
  *
  * The one word that has to stay exact everywhere on this page: `last_seen_at`
  * is when TraceDecay last INDEXED the checkout, not when anyone last committed
@@ -77,10 +77,11 @@ export function DeliveryPage() {
   // `project_registry_changed` invalidation names the registry root, was the
   // one reader a rename never reached.
   const projects = useProjectRegistry();
-  const overview = useQuery({
-    queryKey: ['delivery', 'overview'],
-    queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewV1Schema),
-  });
+  const overview = useEnvelope(
+    ['delivery', 'overview'],
+    '/api/delivery/overview',
+    DeliveryOverviewV1Schema,
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   return (

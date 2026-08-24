@@ -552,6 +552,9 @@ impl DaemonSemanticVectorGraphProviderV1 {
                 generation.manifest().generation_id.clone(),
                 Arc::clone(&self.project_database),
                 replay_binding,
+                // This path holds only a borrowed generation; cloning it just to
+                // offer it would cost more than the decode it would save.
+                None,
             )
             .await
             .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;

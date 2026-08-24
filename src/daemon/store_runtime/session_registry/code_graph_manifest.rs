@@ -353,9 +353,29 @@ struct BoundCodeGenerationSourceV1 {
     replay_root: PathBuf,
 }
 
+/// One already-decoded sealed generation offered by the code-index activation
+/// path, addressed by the exact identity that authorizes it.
+///
+/// The offering side decoded these bytes only after verifying that their
+/// SHA-256 equals `sealed_state_digest`, so an offer that matches a replay's
+/// `generation` *and* `sealed_state_digest` denotes the same immutable payload
+/// the canonical seal file holds. Matching on the digest — never on the
+/// generation id alone — is what keeps a superseded or foreign decode from
+/// being served in place of the requested seal.
+#[derive(Clone)]
+struct DecodedSealedCodeGenerationV1 {
+    generation: tracedecay_domain::CodeGenerationId,
+    sealed_state_digest: SealedGraphStateDigest,
+    decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+}
+
 #[derive(Default)]
 pub(super) struct DaemonCodeGraphManifestProviderV1 {
     sources: RwLock<BTreeMap<StoreShardIdV1, BoundCodeGenerationSourceV1>>,
+    /// Per-shard decoded seal offered by the activating code index, so graph
+    /// publication and the recovery branches reuse that decode instead of
+    /// re-reading and re-parsing the same sealed payload (plan 40, stage 1).
+    decoded: RwLock<BTreeMap<StoreShardIdV1, DecodedSealedCodeGenerationV1>>,
 }
 
 impl DaemonCodeGraphManifestProviderV1 {
@@ -392,6 +412,62 @@ impl DaemonCodeGraphManifestProviderV1 {
             },
         );
         Ok(())
+    }
+
+    /// Offer the sealed generation this shard just decoded for query serving.
+    ///
+    /// Cold activation decodes the sealed payload once to serve queries; without
+    /// this offer the graph publication and recovery branches decode the very
+    /// same bytes a second time through [`decode_verified_seal_from_roots`].
+    /// The offer is a pure accelerator: it is consulted only on an exact
+    /// generation-and-digest match, and every miss falls through to the
+    /// canonical-then-pool read that remains the authority.
+    pub(super) fn offer_decoded_code_generation(
+        &self,
+        project_shard: StoreShardIdV1,
+        generation: tracedecay_domain::CodeGenerationId,
+        sealed_state_digest: SealedGraphStateDigest,
+        decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+    ) -> Result<(), GraphDbError> {
+        let mut offers = self.decoded.write().map_err(|_| {
+            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
+        })?;
+        offers.insert(
+            project_shard,
+            DecodedSealedCodeGenerationV1 {
+                generation,
+                sealed_state_digest,
+                decoded,
+            },
+        );
+        Ok(())
+    }
+
+    /// The offered decode for this exact replay, or `None` to read from disk.
+    ///
+    /// `None` is an abstention, never a verdict: it means "not already decoded
+    /// here", and the caller must still resolve the seal from the canonical
+    /// root or the replay pool.
+    fn offered_decode(
+        &self,
+        owner: &GraphProjectionIdentityV1,
+        source: &SealedCodeGenerationReplay,
+    ) -> Result<
+        Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+        GraphDbError,
+    > {
+        let offers = self.decoded.read().map_err(|_| {
+            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
+        })?;
+        let Some(offer) = offers.get(&owner.shard_id) else {
+            return Ok(None);
+        };
+        if offer.generation != source.generation
+            || offer.sealed_state_digest != source.sealed_state_digest
+        {
+            return Ok(None);
+        }
+        Ok(Some(Arc::clone(&offer.decoded)))
     }
 }
 
@@ -432,18 +508,34 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             return Err(GraphDbError::Conflict);
         }
 
-        let digest = source
-            .sealed_state_digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
-        let seal_file = format!("generation-{digest}.json");
-        let generation = decode_verified_seal_from_roots(
-            &binding.generations_root.join(&seal_file),
-            &binding.replay_root.join(&seal_file),
-            digest,
-            check,
-        )?;
+        // Stage 1 of plan 40: reuse the decode the activating code index already
+        // paid for. The offer is matched on the exact generation AND sealed
+        // state digest, and the identity guards below still run against it, so
+        // the only difference from the disk path is that the identical bytes are
+        // not read and parsed a second time.
+        let offered = self.offered_decode(owner, source)?;
+        let decoded_from_seal;
+        let generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1 =
+            match offered.as_deref() {
+                Some(already_decoded) => already_decoded,
+                None => {
+                    let digest = source
+                        .sealed_state_digest
+                        .as_str()
+                        .strip_prefix("sha256:")
+                        .ok_or_else(|| {
+                            GraphDbError::invalid("sealed state digest is not sha256")
+                        })?;
+                    let seal_file = format!("generation-{digest}.json");
+                    decoded_from_seal = decode_verified_seal_from_roots(
+                        &binding.generations_root.join(&seal_file),
+                        &binding.replay_root.join(&seal_file),
+                        digest,
+                        check,
+                    )?;
+                    &decoded_from_seal
+                }
+            };
         if generation.manifest().project_id != binding.project_id
             || generation.snapshot().repository != source.repository
             || generation.manifest().generation_id != source.generation
@@ -457,7 +549,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         );
         tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
             projection,
-            &generation,
+            generation,
             &GraphProjectorRevision::try_from(source.projector_revision.as_str().to_owned())?,
             check,
         )
