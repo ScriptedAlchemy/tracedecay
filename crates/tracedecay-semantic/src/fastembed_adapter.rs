@@ -176,7 +176,40 @@ struct VerifiedEmbeddingArtifactV1 {
     max_batch_bytes: u32,
     max_threads: u32,
     resident_byte_ceiling: u64,
+    /// What ONE warmed session is expected to retain, derived from the
+    /// artifact's own declared member lengths.
+    ///
+    /// This is deliberately NOT `resident_byte_ceiling`. The ceiling is the
+    /// whole *process* semantic budget; charging it per session makes the
+    /// first session reserve the entire budget, so the pool's memory check
+    /// refuses every subsequent session and embedding silently collapses to
+    /// one session on every host. The reservation must therefore be a
+    /// per-session estimate, bounded above by the ceiling.
+    resident_bytes_estimate: u64,
     load_deadline_ms: u64,
+}
+
+/// Headroom over the artifact's declared member bytes for ORT arena,
+/// activations, and allocator slack.
+///
+/// Deliberately generous: under-reserving would let the pool admit sessions
+/// the machine cannot hold, which is a worse failure than embedding narrow.
+const RESIDENT_ESTIMATE_HEADROOM_NUMERATOR: u64 = 5;
+const RESIDENT_ESTIMATE_HEADROOM_DENOMINATOR: u64 = 4;
+
+/// Per-session resident estimate from declared member lengths, clamped into
+/// `1..=ceiling`. A zero or unknown length falls back to the ceiling, which
+/// preserves exactly the previous conservative behaviour for any artifact
+/// that does not declare its sizes.
+fn resident_bytes_estimate_for(member_bytes: u64, resident_byte_ceiling: u64) -> u64 {
+    if member_bytes == 0 {
+        return resident_byte_ceiling;
+    }
+    member_bytes
+        .saturating_mul(RESIDENT_ESTIMATE_HEADROOM_NUMERATOR)
+        .checked_div(RESIDENT_ESTIMATE_HEADROOM_DENOMINATOR)
+        .unwrap_or(resident_byte_ceiling)
+        .clamp(1, resident_byte_ceiling.max(1))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,6 +279,12 @@ impl VerifiedEmbeddingArtifactV1 {
 
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.resident_byte_ceiling
+    }
+
+    /// What one warmed session is expected to retain. Always `<=`
+    /// [`Self::resident_byte_ceiling`], which the pool still enforces.
+    pub fn resident_bytes_estimate(&self) -> u64 {
+        self.resident_bytes_estimate.min(self.resident_byte_ceiling)
     }
 
     pub fn load_deadline_ms(&self) -> u64 {
@@ -402,6 +441,10 @@ impl AdmittedProjectionArtifactV1 {
         let model_file = member_path(artifact, ArtifactMemberRoleV1::Model)?;
         let tokenizer_file = member_path(artifact, ArtifactMemberRoleV1::Tokenizer)?;
         let config_file = member_path(artifact, ArtifactMemberRoleV1::Config)?;
+        let declared_member_bytes =
+            member_byte_length(artifact, ArtifactMemberRoleV1::Model).saturating_add(
+                member_byte_length(artifact, ArtifactMemberRoleV1::Tokenizer),
+            );
         Ok(Self {
             runtime_artifact: VerifiedEmbeddingArtifactV1 {
                 projection: projection.clone(),
@@ -417,6 +460,10 @@ impl AdmittedProjectionArtifactV1 {
                 ),
                 max_threads: payload.resource_ceiling.max_threads,
                 resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
+                resident_bytes_estimate: resident_bytes_estimate_for(
+                    declared_member_bytes,
+                    payload.resource_ceiling.max_resident_bytes,
+                ),
                 load_deadline_ms: payload.resource_ceiling.load_deadline_ms,
             },
         })
@@ -488,6 +535,10 @@ impl AdmittedProjectionArtifactV1 {
                 ),
                 max_threads: resources.max_threads,
                 resident_byte_ceiling: resources.max_resident_bytes,
+                resident_bytes_estimate: resident_bytes_estimate_for(
+                    model_member.length.saturating_add(tokenizer.length),
+                    resources.max_resident_bytes,
+                ),
                 load_deadline_ms: resources.load_deadline_ms,
             },
         })
@@ -581,6 +632,10 @@ impl AdmittedProjectionArtifactV1 {
 
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.runtime_artifact.resident_byte_ceiling()
+    }
+
+    pub fn resident_bytes_estimate(&self) -> u64 {
+        self.runtime_artifact.resident_bytes_estimate()
     }
 
     pub fn load_deadline_ms(&self) -> u64 {
@@ -717,6 +772,15 @@ fn member_path(
         .package_member(role)
         .map(|member| member.path.clone())
         .ok_or(ProjectionArtifactPinV1::ManifestIdentity)
+}
+
+/// Declared byte length of one manifest member, or 0 when the role is absent.
+/// A 0 total makes the resident estimate fall back to the ceiling.
+fn member_byte_length(artifact: &AdmittedArtifactV1, role: ArtifactMemberRoleV1) -> u64 {
+    artifact
+        .manifest()
+        .package_member(role)
+        .map_or(0, |member| member.byte_length)
 }
 
 /// One typed embedding vector. Dimensions, metric, and normalization are
@@ -1001,7 +1065,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = UnavailableEmbeddingSession;
 
     fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
-        authority.resident_byte_ceiling()
+        authority.resident_bytes_estimate()
     }
 
     fn verify_artifact_compatibility(
@@ -1030,7 +1094,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = FastEmbedEmbeddingSession;
 
     fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
-        authority.resident_byte_ceiling()
+        authority.resident_bytes_estimate()
     }
 
     fn verify_artifact_compatibility(
@@ -1119,7 +1183,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
     }
 
     fn resident_bytes_estimate(&self) -> u64 {
-        self.authority.resident_byte_ceiling()
+        self.authority.resident_bytes_estimate()
     }
 
     #[hotpath::measure]
@@ -1624,6 +1688,88 @@ mod tests {
         id(&format!("sha256:{}", byte.to_string().repeat(64)))
     }
 
+    /// A session must be charged what one session retains, not the whole
+    /// process budget.
+    ///
+    /// Charging the ceiling per session is self-defeating: the first session
+    /// reserves the entire budget, so the pool's memory check refuses every
+    /// later acquisition and embedding collapses to one session on every
+    /// host, whatever the CPU width arithmetic asked for.
+    #[test]
+    fn resident_estimate_admits_more_than_one_session_under_the_process_ceiling() {
+        const CEILING: u64 = 2 * 1024 * 1024 * 1024;
+        // The shipped default code model plus its tokenizer.
+        const MEMBER_BYTES: u64 = 612 * 1024 * 1024 + 2 * 1024 * 1024;
+
+        let estimate = resident_bytes_estimate_for(MEMBER_BYTES, CEILING);
+        assert!(
+            estimate < CEILING,
+            "a single session must not reserve the whole process budget"
+        );
+        assert!(
+            estimate >= MEMBER_BYTES,
+            "the estimate must still cover the artifact's own declared bytes"
+        );
+        assert!(
+            CEILING / estimate >= 2,
+            "the default ceiling must admit at least the two concurrent \
+             sessions the host width arithmetic derives"
+        );
+    }
+
+    /// End-to-end over the real admission path: a production-scale artifact
+    /// must not charge one session the whole process budget.
+    ///
+    /// Before the reservation was split from the ceiling, the descriptor
+    /// reported the full `max_resident_bytes` for every session, so the
+    /// pool's `resident_bytes + reserved > memory_ceiling` check refused the
+    /// second acquisition and `RuntimeChunkVectorEncoderV1::ensure_sessions`
+    /// silently broke out of its loop at one session.
+    #[test]
+    fn production_scale_artifact_admits_the_derived_session_width() {
+        const CEILING: u64 = 2 * 1024 * 1024 * 1024;
+        const MODEL_BYTES: u64 = 612 * 1024 * 1024;
+        const TOKENIZER_BYTES: u64 = 2 * 1024 * 1024;
+
+        let artifact = crate::session_pool::test_support::admitted_artifact_sized(
+            MODEL_BYTES,
+            TOKENIZER_BYTES,
+            CEILING,
+        );
+        let projection = crate::session_pool::test_support::projection_for(&artifact)
+            .admit()
+            .expect("production-scale fixture projection");
+        let authority = AdmittedProjectionArtifactV1::admit(&artifact, &projection)
+            .expect("production-scale fixture admits");
+
+        let reserved = authority.resident_bytes_estimate();
+        assert!(
+            reserved <= authority.resident_byte_ceiling(),
+            "a per-session reservation may never exceed the process ceiling"
+        );
+        // The pool admits while `resident_bytes + reserved <= ceiling`.
+        let admitted = (1..=8)
+            .take_while(|n| reserved.saturating_mul(*n) <= CEILING)
+            .count();
+        assert!(
+            admitted >= 2,
+            "the process ceiling must admit at least the two sessions the host \
+             width arithmetic derives, but only {admitted} fit at {reserved} bytes each"
+        );
+    }
+
+    #[test]
+    fn resident_estimate_never_exceeds_the_ceiling_and_survives_unknown_sizes() {
+        const CEILING: u64 = 4096;
+        // An artifact that declares no lengths keeps the previous
+        // conservative behaviour rather than under-reserving.
+        assert_eq!(resident_bytes_estimate_for(0, CEILING), CEILING);
+        // A model larger than the ceiling still clamps to it; the pool's own
+        // `reserved_bytes > resident_byte_ceiling` check then refuses it.
+        assert_eq!(resident_bytes_estimate_for(u64::MAX, CEILING), CEILING);
+        assert!(resident_bytes_estimate_for(1024, CEILING) <= CEILING);
+    }
+
     fn authority(dimensions: u32) -> AdmittedProjectionArtifactV1 {
         authority_with(
             dimensions,
@@ -1676,6 +1822,7 @@ mod tests {
                 max_batch_bytes: 16 * 1024,
                 max_threads: 4,
                 resident_byte_ceiling: 64 * 1024 * 1024,
+                resident_bytes_estimate: 8 * 1024 * 1024,
                 load_deadline_ms: 30_000,
             },
         }
