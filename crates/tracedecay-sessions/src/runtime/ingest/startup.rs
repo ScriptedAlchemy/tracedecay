@@ -149,15 +149,14 @@ pub async fn ingest_user_global_sources_for_startup_with_db_and_codex_state<
     registry_db: &A,
     profile_root: &Path,
     cancellation: &ObservationCancellation,
-    codex_discovery: &crate::runtime::codex::CodexDiscoveryHub,
-    codex_consumer: &str,
+    codex_state: (&crate::runtime::codex::CodexDiscoveryHub, &str),
 ) -> TranscriptIngestOutcome {
     ingest_user_global_sources_for_startup_inner(
         (brain_id, profile_id, registered),
         registry_db,
         profile_root,
         cancellation,
-        Some((codex_discovery, codex_consumer)),
+        Some(codex_state),
     )
     .await
 }
@@ -238,8 +237,7 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
                 roots,
                 default_ingest_pass_bounds(),
                 cancellation,
-                hub,
-                consumer,
+                (hub, consumer),
             )
             .await
             .into_transcript_outcome()

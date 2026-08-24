@@ -189,8 +189,10 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         Some(1024),
         None,
         false,
-        None,
-        Some(cancellation),
+        super::SharedJsonlCancellation {
+            blocking: None,
+            operation: Some(cancellation),
+        },
         false,
     )
     .await;
@@ -366,8 +368,7 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
         Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
         None,
         true,
-        None,
-        None,
+        super::SharedJsonlCancellation::default(),
         true,
     )
     .await
@@ -392,8 +393,7 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
         Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
         Some(resume),
         true,
-        None,
-        None,
+        super::SharedJsonlCancellation::default(),
         false,
     )
     .await
@@ -405,8 +405,7 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
         Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
         Some(resume),
         true,
-        None,
-        None,
+        super::SharedJsonlCancellation::default(),
         false,
     )
     .await

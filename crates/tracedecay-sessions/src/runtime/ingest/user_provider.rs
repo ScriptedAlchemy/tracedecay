@@ -96,43 +96,19 @@ impl UserProviderRunResult {
     }
 }
 
-pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
-    store: &S,
-    profile_root: &Path,
-    roots: &[PathBuf],
-    facade: &dyn HostAdmission,
-    candidate: SessionProvider,
-    max_new_bytes: u64,
-    cancellation: &ObservationCancellation,
-    codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
-) -> UserProviderRunResult {
-    UserProviderUnit {
-        store,
-        profile_root,
-        roots,
-        facade,
-        candidate,
-        max_new_bytes,
-        cancellation,
-        codex_discovery,
-    }
-    .run()
-    .await
-}
-
-struct UserProviderUnit<'a, S> {
-    store: &'a S,
-    profile_root: &'a Path,
-    roots: &'a [PathBuf],
-    facade: &'a dyn HostAdmission,
-    candidate: SessionProvider,
-    max_new_bytes: u64,
-    cancellation: &'a ObservationCancellation,
-    codex_discovery: Option<(&'a crate::runtime::codex::CodexDiscoveryHub, &'a str)>,
+pub(super) struct UserProviderUnit<'a, S> {
+    pub(super) store: &'a S,
+    pub(super) profile_root: &'a Path,
+    pub(super) roots: &'a [PathBuf],
+    pub(super) facade: &'a dyn HostAdmission,
+    pub(super) candidate: SessionProvider,
+    pub(super) max_new_bytes: u64,
+    pub(super) cancellation: &'a ObservationCancellation,
+    pub(super) codex_discovery: Option<(&'a crate::runtime::codex::CodexDiscoveryHub, &'a str)>,
 }
 
 impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
-    async fn run(self) -> UserProviderRunResult {
+    pub(super) async fn run(self) -> UserProviderRunResult {
         if self.cancellation.is_cancelled() {
             return UserProviderRunResult::provider(ProviderRunOutcome::skipped());
         }
@@ -211,27 +187,25 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 if let Some(next_frontier) = result
                     .committable_frontier
                     .filter(|next_frontier| *next_frontier != stored)
-                {
-                    if let Err(error) =
+                    && let Err(error) =
                         write_codex_discovery_frontier(self.store, stored, next_frontier).await
-                    {
-                        frontier_persisted = false;
-                        run.add_deferred_units(1);
-                        run.add_failure(warn_transcript_catch_up_failure(
-                            "codex",
-                            "frontier",
-                            &error,
-                            "user Codex discovery frontier persistence failed",
-                        ));
-                    }
+                {
+                    frontier_persisted = false;
+                    run.add_deferred_units(1);
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "codex",
+                        "frontier",
+                        &error,
+                        "user Codex discovery frontier persistence failed",
+                    ));
                 }
                 let coverage = if outcome.deferred_by_byte_cap || !frontier_persisted {
                     HostProviderCoverage::Partial
                 } else {
                     HostProviderCoverage::Complete
                 };
-                if stored_coverage != Some(coverage) {
-                    if let Err(coverage_error) = persist_host_provider_coverage(
+                if stored_coverage != Some(coverage)
+                    && let Err(coverage_error) = persist_host_provider_coverage(
                         self.facade,
                         &ObservationScopeV1::Profile,
                         "codex",
@@ -239,14 +213,13 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                         u64::from(coverage != HostProviderCoverage::Complete),
                     )
                     .await
-                    {
-                        run.add_failure(warn_transcript_catch_up_failure(
-                            "codex",
-                            "coverage",
-                            &coverage_error,
-                            "user Codex coverage persistence failed",
-                        ));
-                    }
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "codex",
+                        "coverage",
+                        &coverage_error,
+                        "user Codex coverage persistence failed",
+                    ));
                 }
                 if frontier_persisted && let Some((hub, consumer)) = self.codex_discovery {
                     hub.acknowledge(consumer);

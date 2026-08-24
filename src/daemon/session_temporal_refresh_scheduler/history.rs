@@ -225,8 +225,7 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                 &registry_authority,
                 self.profile_identity.profile_root(),
                 &self.cancellation,
-                self.codex_discovery.as_ref(),
-                &self.codex_consumer,
+                (self.codex_discovery.as_ref(), &self.codex_consumer),
             );
             let outcome = match self.transcript_source_home.clone() {
                 Some(home) => {

@@ -433,7 +433,7 @@ async fn try_admit_codex_jsonl_observations(
                 return Ok(JsonlFrameAdmission::needs_preparation());
             };
             let parsed = normalize_prepared_observation_record_v1(prepared, |native| {
-                if state.context.observe_context_record(&native, path, &meta) {
+                if state.context.observe_context_record(native, path, &meta) {
                     // Only a context record can move the rollout's cwd,
                     // so the memoized verdict is dropped exactly when it
                     // can no longer be trusted.
@@ -446,14 +446,14 @@ async fn try_admit_codex_jsonl_observations(
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
-                if !codex_observation_record_supported(&native) {
+                if !codex_observation_record_supported(native) {
                     non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
-                let record_id = codex_native_record_id(&meta.session_id, &native)
+                let record_id = codex_native_record_id(&meta.session_id, native)
                     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
                 let envelope = normalize_codex_observation_with_location(
-                    &native,
+                    native,
                     &meta.session_id,
                     native_thread_id.as_deref(),
                     record_id.clone(),

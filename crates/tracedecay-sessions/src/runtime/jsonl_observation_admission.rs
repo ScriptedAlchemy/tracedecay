@@ -474,12 +474,8 @@ fn discard_abandoned_shared_jsonl_in_flight(cache: &mut SharedJsonlPageCache) {
     let abandoned = cache
         .in_flight
         .iter()
-        .filter_map(|(key, state)| {
-            state
-                .abandoned
-                .load(std::sync::atomic::Ordering::Acquire)
-                .then(|| key.clone())
-        })
+        .filter(|(_, state)| state.abandoned.load(std::sync::atomic::Ordering::Acquire))
+        .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     if abandoned.is_empty() {
         return;
@@ -759,17 +755,28 @@ pub(super) fn shared_jsonl_file_identity(
     })
 }
 
+struct SharedJsonlBuildOptions {
+    prepare_frames: bool,
+    reserve_lazy_preparation: bool,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+    memory: Option<ProcessSharedMemoryReservationV1>,
+    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
 fn build_shared_jsonl_page(
     path: PathBuf,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
-    prepare_frames: bool,
-    reserve_lazy_preparation: bool,
-    background_cpu: Arc<ProcessBackgroundCpuV1>,
-    mut memory: Option<ProcessSharedMemoryReservationV1>,
-    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    options: SharedJsonlBuildOptions,
 ) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
+    let SharedJsonlBuildOptions {
+        prepare_frames,
+        reserve_lazy_preparation,
+        background_cpu,
+        mut memory,
+        cancellation,
+    } = options;
     #[cfg(test)]
     let _build_guard = SharedJsonlBuildGuard::enter();
     #[cfg(test)]
@@ -1060,6 +1067,12 @@ const fn preparation_failure_reason(
     }
 }
 
+#[derive(Default)]
+struct SharedJsonlCancellation {
+    blocking: Option<Arc<std::sync::atomic::AtomicBool>>,
+    operation: Option<ObservationCancellation>,
+}
+
 #[cfg(test)]
 async fn shared_jsonl_page(
     path: &Path,
@@ -1074,8 +1087,7 @@ async fn shared_jsonl_page(
         max_new_bytes,
         resume_state,
         prepare_frames,
-        None,
-        None,
+        SharedJsonlCancellation::default(),
         false,
     )
     .await
@@ -1087,10 +1099,13 @@ async fn shared_jsonl_page_with_cancellation(
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
     prepare_frames: bool,
-    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    operation_cancellation: Option<ObservationCancellation>,
+    cancellation: SharedJsonlCancellation,
     speculative: bool,
 ) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
+    let SharedJsonlCancellation {
+        blocking: cancellation,
+        operation: operation_cancellation,
+    } = cancellation;
     let identity_path = path.to_path_buf();
     let (canonical_path, identity) = tokio::task::spawn_blocking(move || {
         let canonical_path = std::fs::canonicalize(&identity_path).map_err(|source| {
@@ -1248,11 +1263,13 @@ async fn shared_jsonl_page_with_cancellation(
             previous,
             max_new_bytes,
             resume_state,
-            prepare_frames_eagerly,
-            prepare_frames && !prepare_frames_eagerly,
-            background_cpu,
-            memory,
-            cancellation,
+            SharedJsonlBuildOptions {
+                prepare_frames: prepare_frames_eagerly,
+                reserve_lazy_preparation: prepare_frames && !prepare_frames_eagerly,
+                background_cpu,
+                memory,
+                cancellation,
+            },
         )
     })
     .await
@@ -1324,7 +1341,8 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
 ) -> Vec<tokio::task::AbortHandle> {
     let workers = shared_jsonl_speculative_capacity_from(shared_jsonl_preparation_capacity());
     let mut prefetches = Vec::with_capacity(workers.min(paths.len()));
-    for path in paths.iter().take(workers).cloned() {
+    for path in paths.iter().take(workers) {
+        let path = path.clone();
         let queued = SharedJsonlQueuedPathGuard::new();
         let cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
@@ -1335,8 +1353,10 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
                 Some(SHARED_JSONL_PAGE_MAX_NEW_BYTES),
                 None,
                 true,
-                cancellation,
-                None,
+                SharedJsonlCancellation {
+                    blocking: cancellation,
+                    operation: None,
+                },
                 true,
             )
             .await
@@ -1365,6 +1385,14 @@ struct DurableJsonlFrame {
     bytes: Arc<[u8]>,
     fallback_prepared: Option<PreparedObservationRecordV1>,
     fallback_hints: JsonlFrameHints,
+}
+
+struct PendingAdmissionWindow<'window, State> {
+    expected_cursor: &'window mut Option<ObservationSourceCursorV1>,
+    frames: &'window mut Vec<DurableJsonlFrame>,
+    bytes: &'window mut u64,
+    start_state: &'window mut Option<State>,
+    progress: &'window mut JsonlObservationAdmissionProgress,
 }
 
 enum CaptureWindowError {
@@ -1776,8 +1804,10 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         max_new_bytes,
         resume_state,
         prepare_shared_frames,
-        None,
-        Some(cancellation.clone()),
+        SharedJsonlCancellation {
+            blocking: None,
+            operation: Some(cancellation.clone()),
+        },
         false,
     )
     .await?;
@@ -1834,12 +1864,8 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
 
     async fn flush_pending<State: Clone>(
         active: &ActiveAdmission<'_>,
-        expected_cursor: &mut Option<ObservationSourceCursorV1>,
-        pending: &mut Vec<DurableJsonlFrame>,
-        pending_bytes: &mut u64,
-        pending_start_state: &mut Option<State>,
+        window: PendingAdmissionWindow<'_, State>,
         policy: FlushPolicy<'_>,
-        progress: &mut JsonlObservationAdmissionProgress,
         normalize: &mut impl FnMut(
             &mut State,
             &[u8],
@@ -1849,6 +1875,13 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
             JsonlFrameHints,
         ) -> TranscriptIngestResult<JsonlFrameAdmission>,
     ) -> TranscriptIngestResult<()> {
+        let PendingAdmissionWindow {
+            expected_cursor,
+            frames: pending,
+            bytes: pending_bytes,
+            start_state: pending_start_state,
+            progress,
+        } = window;
         let frames = std::mem::take(pending);
         *pending_bytes = 0;
         if frames.is_empty() {
@@ -1976,15 +2009,17 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
             }
             flush_pending(
                 &active,
-                &mut expected_cursor,
-                &mut pending,
-                &mut pending_bytes,
-                &mut pending_start_state,
+                PendingAdmissionWindow {
+                    expected_cursor: &mut expected_cursor,
+                    frames: &mut pending,
+                    bytes: &mut pending_bytes,
+                    start_state: &mut pending_start_state,
+                    progress: &mut progress,
+                },
                 FlushPolicy {
                     retention_class: &retention_class,
                     persisted_cursor_update,
                 },
-                &mut progress,
                 &mut normalize,
             )
             .await?;
@@ -2057,15 +2092,17 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
             JsonlFrameAdmission::NonDurable(reason) => {
                 flush_pending(
                     &active,
-                    &mut expected_cursor,
-                    &mut pending,
-                    &mut pending_bytes,
-                    &mut pending_start_state,
+                    PendingAdmissionWindow {
+                        expected_cursor: &mut expected_cursor,
+                        frames: &mut pending,
+                        bytes: &mut pending_bytes,
+                        start_state: &mut pending_start_state,
+                        progress: &mut progress,
+                    },
                     FlushPolicy {
                         retention_class: &retention_class,
                         persisted_cursor_update,
                     },
-                    &mut progress,
                     &mut normalize,
                 )
                 .await?;
@@ -2087,15 +2124,17 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         {
             flush_pending(
                 &active,
-                &mut expected_cursor,
-                &mut pending,
-                &mut pending_bytes,
-                &mut pending_start_state,
+                PendingAdmissionWindow {
+                    expected_cursor: &mut expected_cursor,
+                    frames: &mut pending,
+                    bytes: &mut pending_bytes,
+                    start_state: &mut pending_start_state,
+                    progress: &mut progress,
+                },
                 FlushPolicy {
                     retention_class: &retention_class,
                     persisted_cursor_update,
                 },
-                &mut progress,
                 &mut normalize,
             )
             .await?;
@@ -2120,15 +2159,17 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         if pending.len() >= MAX_CAPTURE_WINDOW {
             flush_pending(
                 &active,
-                &mut expected_cursor,
-                &mut pending,
-                &mut pending_bytes,
-                &mut pending_start_state,
+                PendingAdmissionWindow {
+                    expected_cursor: &mut expected_cursor,
+                    frames: &mut pending,
+                    bytes: &mut pending_bytes,
+                    start_state: &mut pending_start_state,
+                    progress: &mut progress,
+                },
                 FlushPolicy {
                     retention_class: &retention_class,
                     persisted_cursor_update,
                 },
-                &mut progress,
                 &mut normalize,
             )
             .await?;
@@ -2137,15 +2178,17 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
 
     flush_pending(
         &active,
-        &mut expected_cursor,
-        &mut pending,
-        &mut pending_bytes,
-        &mut pending_start_state,
+        PendingAdmissionWindow {
+            expected_cursor: &mut expected_cursor,
+            frames: &mut pending,
+            bytes: &mut pending_bytes,
+            start_state: &mut pending_start_state,
+            progress: &mut progress,
+        },
         FlushPolicy {
             retention_class: &retention_class,
             persisted_cursor_update,
         },
-        &mut progress,
         &mut normalize,
     )
     .await?;

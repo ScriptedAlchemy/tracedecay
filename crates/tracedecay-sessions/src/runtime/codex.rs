@@ -908,7 +908,7 @@ enum CodexScanPhase {
     Files {
         next_directory: usize,
         current: Option<(usize, std::fs::ReadDir)>,
-        deferred: Option<(PathBuf, std::fs::Metadata)>,
+        deferred: Option<Box<(PathBuf, std::fs::Metadata)>>,
         resume_directories: Option<CodexDirectoryResume>,
     },
 }
@@ -2098,7 +2098,7 @@ fn retained_scan_step(
                     break;
                 }
                 let candidate = if let Some(candidate) = deferred.take() {
-                    Some(candidate)
+                    Some(*candidate)
                 } else {
                     loop {
                         if current.is_none() {
@@ -2251,7 +2251,7 @@ fn retained_scan_step(
                     },
                 )?;
                 if !scan.validation && charged > bounds.max_discovery_bytes {
-                    *deferred = Some((path, metadata));
+                    *deferred = Some(Box::new((path, metadata)));
                     discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
                     break;
                 }

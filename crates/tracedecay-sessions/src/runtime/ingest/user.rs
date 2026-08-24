@@ -21,7 +21,7 @@ use super::scheduler::{
     write_ingest_frontier,
 };
 use super::startup::TranscriptIngestOutcome;
-use super::user_provider::run_user_provider;
+use super::user_provider::UserProviderUnit;
 
 pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
@@ -518,8 +518,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_a
     roots: Vec<PathBuf>,
     bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
-    codex_discovery: &codex::CodexDiscoveryHub,
-    codex_consumer: &str,
+    codex_state: (&codex::CodexDiscoveryHub, &str),
 ) -> IngestPassOutcome {
     ingest_user_global_sources_for_provider_with_roots_bounded_inner(
         registered,
@@ -528,7 +527,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_a
         roots,
         bounds,
         cancellation,
-        Some((codex_discovery, codex_consumer)),
+        Some(codex_state),
     )
     .await
 }
@@ -611,16 +610,17 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             if grant == 0 {
                 break 'providers;
             }
-            let provider_run = run_user_provider(
-                &transcript_store,
+            let provider_run = UserProviderUnit {
+                store: &transcript_store,
                 profile_root,
-                &roots,
+                roots: &roots,
                 facade,
                 candidate,
-                grant,
+                max_new_bytes: grant,
                 cancellation,
                 codex_discovery,
-            )
+            }
+            .run()
             .await;
             claude_projected_session_ids.extend(provider_run.claude_projected_session_ids);
             let mut unit_result = provider_run.outcome;
