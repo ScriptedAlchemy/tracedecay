@@ -2927,7 +2927,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `Notify` already coalesces stored permits. Always refresh the permit:
         // a prior worker may have consumed its wake and then failed before
         // draining this overflow marker.
-        DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
 

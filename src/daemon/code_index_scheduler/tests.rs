@@ -3493,6 +3493,28 @@ fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
 }
 
 #[test]
+fn ordinary_background_reconcile_does_not_supersede_in_flight_text_work() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn background_wake() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let control = tracedecay_usecases::code_index::DaemonCodeIndexControlV1::new(
+        Arc::clone(&scheduler.epoch),
+        Arc::clone(&scheduler.shutting_down),
+    );
+
+    scheduler.request_background_reconcile();
+
+    assert!(
+        !control.is_cancelled(),
+        "a source-neutral background wake must not cancel text work already admitted for the current generation"
+    );
+}
+
+#[test]
 fn generation_replacement_drops_incomplete_text_projection_state() {
     let fixture = GitFixture::new(&[
         ("src/first.rs", "pub fn first() {}\n"),
