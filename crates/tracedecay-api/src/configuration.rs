@@ -259,7 +259,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             automatic.code_index_workers,
-            CodeIndexWorkerSelectionV1::Automatic
+            CodeIndexWorkerSelectionV1::Automatic {}
         );
 
         let exact = parse_code_index_worker_settings_patch(json!({

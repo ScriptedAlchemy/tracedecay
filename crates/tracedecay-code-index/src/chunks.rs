@@ -2006,7 +2006,7 @@ mod tests {
             "no test may install a shadow background CPU authority"
         );
         let _preview = crate::parallelism::preview_worker_plan(
-            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic,
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
             20 * crate::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
         );
         assert!(

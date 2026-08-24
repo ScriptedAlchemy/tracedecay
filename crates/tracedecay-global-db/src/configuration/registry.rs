@@ -401,7 +401,7 @@ fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRe
         schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
         value_kind: ConfigurationValueKindV1::CodeIndexWorkerSelection,
         default_value: ConfigurationValueV1::CodeIndexWorkerSelection(
-            CodeIndexWorkerSelectionV1::Automatic,
+            CodeIndexWorkerSelectionV1::Automatic {},
         ),
         sensitivity: SettingSensitivityV1::Public,
         scope: SettingScopeV1::UserProfile,
@@ -779,7 +779,9 @@ mod user_profile_settings_tests {
         );
         assert_eq!(
             definition.default_value,
-            ConfigurationValueV1::CodeIndexWorkerSelection(CodeIndexWorkerSelectionV1::Automatic)
+            ConfigurationValueV1::CodeIndexWorkerSelection(
+                CodeIndexWorkerSelectionV1::Automatic {}
+            )
         );
         assert_eq!(
             definition.restart_requirement,

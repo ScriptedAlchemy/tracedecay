@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn exact_workers_above_current_logical_cpu_limit_are_a_typed_refusal() {
         let status = CodeIndexWorkerStatusV1 {
-            configured: CodeIndexWorkerSelectionV1::Automatic,
+            configured: CodeIndexWorkerSelectionV1::Automatic {},
             environment_override_workers: None,
             effective_workers: 4,
             available_logical_cpus: 4,
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn exact_workers_above_current_memory_safe_limit_are_a_typed_refusal() {
         let status = CodeIndexWorkerStatusV1 {
-            configured: CodeIndexWorkerSelectionV1::Automatic,
+            configured: CodeIndexWorkerSelectionV1::Automatic {},
             environment_override_workers: None,
             effective_workers: 4,
             available_logical_cpus: 6,

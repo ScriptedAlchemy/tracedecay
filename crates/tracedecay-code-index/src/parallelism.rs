@@ -237,7 +237,7 @@ fn worker_plan_from(
             )
         } else {
             match configured {
-                CodeIndexWorkerSelectionV1::Automatic => (
+                CodeIndexWorkerSelectionV1::Automatic {} => (
                     indexing_worker_target(available_logical_cpus),
                     false,
                     if available_logical_cpus <= 8 {
@@ -667,7 +667,7 @@ mod tests {
     fn malformed_environment_override_is_a_typed_refusal() {
         assert!(matches!(
             worker_plan_from(
-                CodeIndexWorkerSelectionV1::Automatic,
+                CodeIndexWorkerSelectionV1::Automatic {},
                 8,
                 8 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
                 Some("many"),
@@ -676,7 +676,7 @@ mod tests {
         ));
         assert!(matches!(
             worker_plan_from(
-                CodeIndexWorkerSelectionV1::Automatic,
+                CodeIndexWorkerSelectionV1::Automatic {},
                 8,
                 8 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
                 Some("0"),
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn automatic_width_is_capped_by_the_resident_budget() {
         let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic,
+            CodeIndexWorkerSelectionV1::Automatic {},
             128,
             12 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
             None,
@@ -707,8 +707,13 @@ mod tests {
     #[test]
     fn default_authority_preserves_source_and_component_headroom() {
         let available = 6 * 1024 * 1024 * 1024;
-        let plan = worker_plan_from(CodeIndexWorkerSelectionV1::Automatic, 96, available, None)
-            .expect("default-memory automatic selection");
+        let plan = worker_plan_from(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            96,
+            available,
+            None,
+        )
+        .expect("default-memory automatic selection");
 
         assert_eq!(plan.requested_workers, 48);
         assert_eq!(plan.memory_safe_workers, 36);
@@ -764,7 +769,7 @@ mod tests {
     #[test]
     fn plan_identity_accepts_repetition_and_refuses_conflict() {
         let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic,
+            CodeIndexWorkerSelectionV1::Automatic {},
             20,
             20 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
             None,
@@ -789,13 +794,21 @@ mod tests {
     fn preview_matches_install_derivation_without_installing_runtime() {
         let runtime_before = installed_worker_status();
         let available = 20 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1;
-        let preview =
-            preview_worker_plan_from(CodeIndexWorkerSelectionV1::Automatic, 20, available, None)
-                .expect("worker-plan preview");
-        let installation_derivation =
-            worker_plan_from(CodeIndexWorkerSelectionV1::Automatic, 20, available, None)
-                .expect("worker-plan installation derivation")
-                .status();
+        let preview = preview_worker_plan_from(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            20,
+            available,
+            None,
+        )
+        .expect("worker-plan preview");
+        let installation_derivation = worker_plan_from(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            20,
+            available,
+            None,
+        )
+        .expect("worker-plan installation derivation")
+        .status();
 
         assert_eq!(preview, installation_derivation);
         assert_eq!(installed_worker_status(), runtime_before);
