@@ -143,10 +143,23 @@ pub async fn expand_query(
             }
         }
     } else {
-        for node_id in request.node_ids.iter().take(max_results) {
-            let expansion =
-                dag::expand_summary_node(conn, &request.provider, &request.session_id, node_id)
-                    .await?;
+        // Explicitly requested nodes are hydrated as one page: the whole set's
+        // node rows, lineage rows, and source closure are each loaded once,
+        // instead of one independent expansion per node id.
+        let requested_node_ids = request
+            .node_ids
+            .iter()
+            .take(max_results)
+            .cloned()
+            .collect::<Vec<_>>();
+        let expansions = dag::expand_summary_nodes(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &requested_node_ids,
+        )
+        .await?;
+        for expansion in expansions {
             matches.push(LcmExpandQueryMatch {
                 kind: "summary_node".to_string(),
                 node_id: Some(expansion.summary.node_id.clone()),
@@ -640,7 +653,6 @@ fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&s
 struct GrepQueryPlan {
     fts_query: String,
     like_terms: Vec<String>,
-    quoted_phrases: Vec<String>,
     requires_like_fallback: bool,
 }
 
@@ -653,7 +665,6 @@ impl GrepQueryPlan {
 fn grep_query_plan(query: &str) -> GrepQueryPlan {
     let fts_query = sanitize_fts5_query(query);
     let terms = extract_search_terms(query);
-    let quoted_phrases = extract_quoted_phrases(query);
     let mut like_terms = Vec::new();
     for term in terms {
         if !term.is_empty() && !like_terms.iter().any(|existing| existing == &term) {
@@ -670,25 +681,8 @@ fn grep_query_plan(query: &str) -> GrepQueryPlan {
     GrepQueryPlan {
         fts_query,
         like_terms,
-        quoted_phrases,
         requires_like_fallback,
     }
-}
-
-fn compute_like_fallback_fetch_limit(limit: usize, query_plan: &GrepQueryPlan) -> usize {
-    compute_search_fetch_limit(limit, &query_plan.like_terms, &query_plan.quoted_phrases)
-}
-
-fn compute_search_fetch_limit(limit: usize, terms: &[String], phrases: &[String]) -> usize {
-    let base = limit.saturating_mul(5).max(limit).max(20);
-    if is_precise_query_shape(terms, phrases) {
-        return base.max(limit.saturating_mul(10)).max(50);
-    }
-    base
-}
-
-fn is_precise_query_shape(terms: &[String], phrases: &[String]) -> bool {
-    terms.len() == 1 || (phrases.len() == 1 && terms.len() <= 2)
 }
 
 fn sanitize_fts5_query(query: &str) -> String {
@@ -797,21 +791,6 @@ fn extract_search_terms(query: &str) -> Vec<String> {
         }
     }
     terms
-}
-
-fn extract_quoted_phrases(query: &str) -> Vec<String> {
-    let text = query.trim();
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let (phrases, _) = split_quoted(text);
-    let mut unique = Vec::new();
-    for phrase in phrases {
-        if !phrase.is_empty() && !unique.iter().any(|existing| existing == &phrase) {
-            unique.push(phrase);
-        }
-    }
-    unique
 }
 
 fn split_quoted(text: &str) -> (Vec<String>, String) {
@@ -1002,7 +981,83 @@ fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use tracedecay_runtime_core::db::engine::{
+        Executor, IntoParams, QueryExecutor, Result as EngineResult, Row, Rows, TestConnection,
+        Value, params,
+    };
+
     use super::*;
+
+    struct CountingQuery<'a> {
+        inner: &'a TestConnection,
+        queries: Cell<usize>,
+        rows_visited: Cell<usize>,
+    }
+
+    impl<'a> CountingQuery<'a> {
+        fn new(inner: &'a TestConnection) -> Self {
+            Self {
+                inner,
+                queries: Cell::new(0),
+                rows_visited: Cell::new(0),
+            }
+        }
+    }
+
+    impl QueryExecutor for CountingQuery<'_> {
+        async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+        where
+            P: IntoParams,
+        {
+            self.queries.set(self.queries.get() + 1);
+            let mut rows = self.inner.query(sql, params).await?;
+            let columns = (0..rows.column_count())
+                .map(|index| rows.column_name(index).unwrap_or_default().to_string())
+                .collect::<Vec<_>>();
+            let mut replay = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let mut values = Vec::new();
+                let mut column = 0_i32;
+                while let Ok(value) = row.get::<Value>(column) {
+                    values.push(value);
+                    column += 1;
+                }
+                replay.push(Row::from_values(values));
+            }
+            self.rows_visited
+                .set(self.rows_visited.get().saturating_add(replay.len()));
+            Ok(Rows::from_parts(columns, replay))
+        }
+    }
+
+    async fn query_test_store() -> (tempfile::TempDir, TestConnection) {
+        let temp = tempfile::tempdir().expect("temporary query store");
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                parent_session_id TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .expect("session schema");
+        schema::ensure_lcm_schema(&*conn).await.expect("LCM schema");
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-a', '/p', '/p')",
+            (),
+        )
+        .await
+        .expect("session fixture");
+        (temp, conn)
+    }
 
     fn summary_source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {
@@ -1025,5 +1080,106 @@ mod tests {
         assert_eq!(page.len(), 1);
         assert_eq!(pagination.next_source_offset, Some(1));
         assert!(pagination.has_more);
+    }
+
+    #[tokio::test]
+    async fn like_fallback_visits_only_the_outer_rerank_candidate_budget() {
+        let (_temp, conn) = query_test_store().await;
+        for ordinal in 0..100_i64 {
+            let message_id = format!("message-{ordinal}");
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, snippet_text, index_text
+                 ) VALUES (
+                    'cursor', ?1, 'session-a', 'assistant', ?2, ?2,
+                    '雪 candidate', 'hash', 'inline', '雪 candidate', '雪 candidate'
+                 )",
+                params![message_id, ordinal],
+            )
+            .await
+            .expect("raw candidate");
+        }
+
+        let counted = CountingQuery::new(&conn);
+        let outcome = grep(
+            &counted,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "雪".to_string(),
+                scope: LcmScope::Session,
+                session_id: Some("session-a".to_string()),
+                include_summaries: false,
+                limit: 2,
+                sort: LcmGrepSort::Recency,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters::default(),
+            None,
+        )
+        .await
+        .expect("LIKE grep");
+
+        assert_eq!(outcome.hits.len(), 2);
+        assert_eq!(counted.queries.get(), 1);
+        assert!(
+            counted.rows_visited.get() <= rerank_fetch_limit(2),
+            "LIKE fallback visited {} rows for {} returned hits",
+            counted.rows_visited.get(),
+            outcome.hits.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_query_batches_explicit_summary_hydration_roundtrips() {
+        let (_temp, conn) = query_test_store().await;
+        let mut node_ids = Vec::new();
+        for ordinal in 0..8_i64 {
+            let node_id = format!("node-{ordinal}");
+            let summary_text = format!("summary {ordinal}");
+            let summary_hash = crate::retrieval_content::projected_content_hash(&summary_text);
+            conn.execute(
+                "INSERT INTO lcm_summary_nodes (
+                    node_id, provider, conversation_id, session_id, depth, summary_text,
+                    summary_hash, summary_token_count, source_token_count
+                 ) VALUES (?1, 'cursor', 'conversation-a', 'session-a', 0, ?2, ?3, 1, 1)",
+                params![
+                    node_id.as_str(),
+                    summary_text.as_str(),
+                    summary_hash.as_str()
+                ],
+            )
+            .await
+            .expect("summary node");
+            node_ids.push(node_id);
+        }
+
+        let counted = CountingQuery::new(&conn);
+        let response = expand_query(
+            &counted,
+            LcmExpandQueryRequest {
+                provider: "cursor".to_string(),
+                session_id: "session-a".to_string(),
+                prompt: "summarize".to_string(),
+                query: None,
+                node_ids,
+                max_results: 8,
+                max_tokens: 100,
+                context_max_tokens: 10_000,
+            },
+        )
+        .await
+        .expect("expand query");
+
+        assert_eq!(response.node_ids.len(), 8);
+        assert!(
+            counted.queries.get() <= 3,
+            "explicit summary hydration used {} DB roundtrips",
+            counted.queries.get()
+        );
     }
 }
