@@ -758,16 +758,11 @@ fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
     // than silently picking one — clap's `conflicts_with` rejects it.
     // `Cli` does not derive `Debug`, so match directly instead of
     // `.expect_err(...)` (which requires the `Ok` type to be `Debug`).
-    let conflict = match Cli::try_parse_from([
-        "tracedecay",
-        "init",
-        "/tmp/project",
-        "--path",
-        "/tmp/other",
-    ]) {
-        Ok(_) => panic!("init PATH and --path together should be rejected as a conflict"),
-        Err(error) => error,
-    };
+    let conflict =
+        match Cli::try_parse_from(["tracedecay", "init", "/tmp/project", "--path", "/tmp/other"]) {
+            Ok(_) => panic!("init PATH and --path together should be rejected as a conflict"),
+            Err(error) => error,
+        };
     assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
 }
 
