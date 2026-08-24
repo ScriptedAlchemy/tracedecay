@@ -10,6 +10,42 @@ import sys
 import tomllib
 
 
+HOTPATH_RELEASE_FEATURES = (
+    "hotpath",
+    "hotpath-alloc",
+    "hotpath-cpu",
+    "hotpath-mcp",
+)
+
+
+def production_release_features(
+    features: dict[str, object], target: str | None
+) -> tuple[str, ...]:
+    """Return the artifact feature set for a production-capable source tag."""
+
+    present = set(HOTPATH_RELEASE_FEATURES).intersection(features)
+    if not present:
+        # Tags predating the shipped profiler remain recoverable with the
+        # production profile they declared at the time.
+        return ("production",)
+    missing = set(HOTPATH_RELEASE_FEATURES).difference(features)
+    if missing:
+        raise SystemExit(
+            "source Cargo.toml has an incomplete Hotpath release feature set: "
+            + ", ".join(sorted(missing))
+        )
+    if target is None:
+        raise SystemExit("--target is required for a Hotpath-enabled release source")
+
+    selected = ["production", "hotpath", "hotpath-alloc"]
+    if "-linux-" in target or target.endswith("-apple-darwin"):
+        selected.append("hotpath-cpu")
+    elif not target.endswith("-pc-windows-msvc"):
+        raise SystemExit(f"unsupported Hotpath release target: {target}")
+    selected.append("hotpath-mcp")
+    return tuple(selected)
+
+
 def expand_local_features(
     features: dict[str, list[str]], selected: list[str]
 ) -> set[str]:
@@ -38,6 +74,7 @@ def write_output(path: Path | None, name: str, value: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--target")
     parser.add_argument("--github-output", type=Path)
     arguments = parser.parse_args()
 
@@ -58,7 +95,10 @@ def main() -> int:
             check=True,
         )
         profile = "production"
-        cargo_args = "--no-default-features --features production"
+        cargo_features = ",".join(
+            production_release_features(features, arguments.target)
+        )
+        cargo_args = f"--no-default-features --features {cargo_features}"
     else:
         resolved_defaults = expand_local_features(features, defaults)
         if "test-transport" in resolved_defaults:
@@ -67,9 +107,11 @@ def main() -> int:
             )
         profile = "legacy-default"
         cargo_args = ""
+        cargo_features = ""
 
     write_output(arguments.github_output, "profile", profile)
     write_output(arguments.github_output, "cargo_args", cargo_args)
+    write_output(arguments.github_output, "cargo_features", cargo_features)
     print(f"release source profile: {profile}")
     return 0
 
