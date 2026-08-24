@@ -769,7 +769,7 @@ async fn run_foreground_unix(
 }
 
 /// Install the daemon-wide worker authority from the profile's exact
-/// ProfileSessions configuration before publishing a transport endpoint.
+/// `ProfileSessions` configuration before publishing a transport endpoint.
 /// Account-deletion-only boots return before this point and never start
 /// projectless capture work.
 async fn install_profile_worker_plan(

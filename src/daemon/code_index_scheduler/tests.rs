@@ -9144,10 +9144,10 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let latest = loop {
-        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await {
-            if latest.query_owners_are_warm() {
-                break latest;
-            }
+        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
+            && latest.query_owners_are_warm()
+        {
+            break latest;
         }
         assert!(
             std::time::Instant::now() <= deadline,
