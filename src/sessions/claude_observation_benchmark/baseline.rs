@@ -266,7 +266,7 @@ pub(super) fn validate_hook_telemetry_readiness() {
     );
     assert_eq!(readiness.unavailable_measurements.len(), 1);
     assert_eq!(
-        readiness.readiness_distributions.source_event,
+        readiness.readiness_distributions.source_event(),
         "hook_completed"
     );
     assert_eq!(
@@ -274,13 +274,15 @@ pub(super) fn validate_hook_telemetry_readiness() {
             .expect("serialize empty readiness distributions")["collection_status"],
         "no_samples"
     );
-    assert_eq!(readiness.readiness_distributions.input_rows_received, 0);
-    assert_eq!(readiness.readiness_distributions.input_rows_processed, 0);
+    assert_eq!(readiness.readiness_distributions.input_rows_received(), 0);
+    assert_eq!(readiness.readiness_distributions.input_rows_processed(), 0);
     assert_eq!(
-        readiness.readiness_distributions.input_rows_dropped_at_cap,
+        readiness
+            .readiness_distributions
+            .input_rows_dropped_at_cap(),
         0
     );
-    assert_eq!(readiness.readiness_distributions.events_considered, 0);
+    assert_eq!(readiness.readiness_distributions.events_considered(), 0);
     assert_eq!(
         readiness.canonical_contract["latency_semantics"]["host_ipc_rtt"]["event_field"],
         "daemon_rtt_us"
