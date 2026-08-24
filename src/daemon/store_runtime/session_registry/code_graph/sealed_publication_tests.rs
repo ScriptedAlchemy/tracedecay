@@ -298,6 +298,10 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
             generation_id.clone(),
             Arc::clone(&project_database),
             replay_binding(),
+            // No decoded-seal offer: this suite asserts the on-disk seal
+            // verification contract, so every read must reach the canonical
+            // root.
+            None,
         )
         .await
         .expect("retain code graph runtime");
@@ -400,6 +404,10 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
             generation_id,
             Arc::clone(&project_database),
             replay_binding(),
+            // No decoded-seal offer: this suite asserts the on-disk seal
+            // verification contract, so every read must reach the canonical
+            // root.
+            None,
         )
         .await
         .expect("retain code graph runtime again");
@@ -433,4 +441,146 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         })
         .sum::<u64>();
     assert_eq!(active_republish_payload_bytes, 0);
+}
+
+/// Stage 1 of `docs/plans/tracedecay-v2/40`: cold activation decodes the sealed
+/// payload once to serve queries, and graph hydration reuses that decode
+/// instead of reading and parsing the identical bytes a second time.
+///
+/// The assertion is falsifiable by construction rather than by timing: BOTH
+/// seal roots handed to the provider are empty, so hydration can only succeed
+/// by consuming the offered decode. The first probe proves the roots really are
+/// unreadable, and the last probe proves a foreign sealed digest is never
+/// answered from the offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
+    use tracedecay_graph_db::{
+        GraphGenerationManifestProvider, GraphNamespace, SealedGraphStateDigest,
+    };
+    use tracedecay_store::{BrainId, GraphNamespaceV1, StoreShardIdV1, UserProfileId};
+
+    use super::super::code_graph_manifest::DaemonCodeGraphManifestProviderV1;
+
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn offered_decode_value() -> usize { 7 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(&project_root, &["commit", "-qm", "offered decode fixture"]);
+    let project_id = ProjectId::new("project.offered-decode").expect("project id");
+    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+        .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+
+    // Seal one real generation through the production worktree scheduler, then
+    // take the exact handle the code index would serve queries from.
+    let store_root = root.join("code-index-store");
+    let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal the generation");
+    let latest = scheduler.latest_complete().expect("complete generation");
+    let decoded = latest.generation_handle();
+    let generation_id = decoded.manifest().generation_id.clone();
+    let repository_id = decoded.snapshot().repository.clone();
+    drop(scheduler);
+
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+    let sealed_state_digest = SealedGraphStateDigest::try_from(pointer.state_digest.clone())
+        .expect("sealed state digest");
+
+    // Deliberately empty: the provider has nothing it could read from either the
+    // canonical root or the replay pool.
+    let absent_generations_root = root.join("absent-generations");
+    let absent_replay_root = root.join("absent-replay");
+    std::fs::create_dir_all(&absent_generations_root).expect("absent generations root");
+    std::fs::create_dir_all(&absent_replay_root).expect("absent replay root");
+
+    let shard = StoreShardIdV1::project(
+        BrainId::new("brain.offered-decode").expect("brain id"),
+        UserProfileId::new("profile.offered-decode").expect("profile id"),
+        project_id.clone(),
+    );
+    let provider = DaemonCodeGraphManifestProviderV1::default();
+    provider
+        .bind(
+            shard.clone(),
+            project_id.clone(),
+            repository_id.clone(),
+            absent_generations_root,
+            absent_replay_root,
+        )
+        .expect("bind code generation source");
+
+    let namespace = GraphNamespace::new("namespace.offered-decode").expect("graph namespace");
+    let projection =
+        tracedecay_code_index::graph_projection::code_graph_projection_identity(namespace.clone())
+            .expect("code graph projection");
+    let owner = GraphProjectionIdentityV1 {
+        shard_id: shard.clone(),
+        namespace: GraphNamespaceV1::new(namespace.as_str()).expect("relational namespace"),
+        projection: GraphProjectionIdV1::new(projection.projection.as_str())
+            .expect("relational projection"),
+    };
+    let source = SealedCodeGenerationReplay {
+        repository: repository_id.clone(),
+        generation: generation_id.clone(),
+        sealed_state_digest: sealed_state_digest.clone(),
+        projector_revision: GraphProjectorRevision::try_from(
+            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+        )
+        .expect("projector revision"),
+    };
+
+    // The seal really is unreadable from both roots, so any success below is
+    // evidence that the offered decode was consumed.
+    provider
+        .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
+        .expect_err("hydration must fail while no seal is readable and nothing is offered");
+
+    provider
+        .offer_decoded_code_generation(
+            shard.clone(),
+            generation_id.clone(),
+            sealed_state_digest.clone(),
+            Arc::clone(&decoded),
+        )
+        .expect("offer the decoded generation");
+    let manifest = provider
+        .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
+        .expect("hydration reuses the offered decode without reading the seal");
+    assert_eq!(manifest.projection.namespace.as_str(), namespace.as_str());
+
+    // A different sealed payload must never be answered from this offer.
+    let foreign = SealedCodeGenerationReplay {
+        sealed_state_digest: SealedGraphStateDigest::try_from(format!("sha256:{}", "b".repeat(64)))
+            .expect("foreign sealed digest"),
+        ..source.clone()
+    };
+    provider
+        .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
+        .expect_err("a foreign sealed digest must never be served from the offer");
 }
