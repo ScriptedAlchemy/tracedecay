@@ -32,6 +32,7 @@ use crate::store::memory::{DatabaseFactStore, FactWriteControl};
 
 use super::apply::{apply_project_memory_fact_curation_tx, curation_receipt_from_value};
 
+mod commit_event_batch_tests;
 mod duplicate_identity_tests;
 mod graph_source_tests;
 mod replay_conflict_tests;
