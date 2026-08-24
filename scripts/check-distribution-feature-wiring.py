@@ -11,9 +11,35 @@ import tomllib
 
 REQUIRED_ROOT_FEATURES = {
     "full",
+    "hotpath",
+    "hotpath-alloc",
+    "hotpath-cpu",
+    "hotpath-mcp",
     "token-counting",
     "semantic-fastembed",
     "test-transport",
+}
+REQUIRED_CLI_FEATURE_MEMBERS = {
+    "production": {"tracedecay/production"},
+    "hotpath": {
+        "dep:regex",
+        "tracedecay/hotpath",
+        "hotpath/hotpath",
+        "hotpath/tokio",
+        "hotpath/axum-0-8",
+        "hotpath/ureq-3",
+    },
+    "hotpath-alloc": {
+        "hotpath",
+        "tracedecay/hotpath-alloc",
+        "hotpath/hotpath-alloc",
+    },
+    "hotpath-cpu": {
+        "hotpath",
+        "tracedecay/hotpath-cpu",
+        "hotpath/hotpath-cpu",
+    },
+    "hotpath-mcp": {"hotpath", "hotpath/hotpath-mcp"},
 }
 REQUIRED_ROOT_SEMANTIC_MEMBERS = {
     "tracedecay-semantic/semantic-fastembed",
@@ -211,6 +237,8 @@ def validate(
     extraction_packaged: dict,
     semantic_source: dict,
     semantic_packaged: dict,
+    cli_source: dict,
+    cli_packaged: dict,
 ) -> None:
     root_features = require_matching_features("root", root_source, root_packaged)
     missing = sorted(REQUIRED_ROOT_FEATURES - root_features.keys())
@@ -288,6 +316,32 @@ def validate(
         "tracedecay-semantic", semantic_packaged, semantic_features
     )
 
+    cli_features = require_matching_features(
+        "tracedecay-cli", cli_source, cli_packaged
+    )
+    missing_cli = sorted(
+        REQUIRED_CLI_FEATURE_MEMBERS.keys() - cli_features.keys()
+    )
+    if missing_cli:
+        raise SystemExit(
+            "distribution acceptance: tracedecay-cli is missing required features: "
+            + ", ".join(missing_cli)
+        )
+    for feature, expected in REQUIRED_CLI_FEATURE_MEMBERS.items():
+        members = cli_features.get(feature)
+        if (
+            not isinstance(members, list)
+            or len(members) != len(expected)
+            or set(members) != expected
+        ):
+            raise SystemExit(
+                f"distribution acceptance: tracedecay-cli {feature} must enable "
+                + ", ".join(sorted(expected))
+            )
+    require_optional_dependencies_wired(
+        "tracedecay-cli", cli_packaged, cli_features
+    )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -299,6 +353,8 @@ def main() -> int:
     parser.add_argument("--extraction-packaged", type=Path, required=True)
     parser.add_argument("--semantic-source", type=Path, required=True)
     parser.add_argument("--semantic-packaged", type=Path, required=True)
+    parser.add_argument("--cli-source", type=Path, required=True)
+    parser.add_argument("--cli-packaged", type=Path, required=True)
     parser.add_argument("--check-extraction-manifest", type=Path)
     parser.add_argument("--cargo-config", type=Path)
     parser.add_argument("--offline", action="store_true")
@@ -313,6 +369,8 @@ def main() -> int:
         extraction_packaged,
         load(arguments.semantic_source),
         load(arguments.semantic_packaged),
+        load(arguments.cli_source),
+        load(arguments.cli_packaged),
     )
     if arguments.check_extraction_manifest is not None:
         require_isolated_language_features_compile(
