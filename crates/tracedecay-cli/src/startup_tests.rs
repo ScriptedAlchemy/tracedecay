@@ -1,7 +1,7 @@
 use super::{
     AnalyticsAction, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
-    HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction,
+    HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, PackageHookAction,
     ProfileStorageAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
     async_worker_threads, daemon_cpu_threads_from, is_daemon_run, is_full_component_set_adoption,
     is_local_install_command, should_skip_agent_install_check, should_skip_startup_maintenance,
@@ -254,7 +254,9 @@ fn unrelated_and_uninstall_commands_reject_adoption() {
 fn async_runtime_bounds_parallel_allocators() {
     assert!((1..=MAX_ASYNC_WORKER_THREADS).contains(&async_worker_threads()));
     assert_eq!(MAX_ASYNC_WORKER_THREADS, 16);
-    assert_eq!(MAX_BLOCKING_THREADS, 32);
+    // The blocking pool is no longer a flat constant: `blocking_thread_limit_tests`
+    // covers `tokio_blocking_thread_limit_from`, which derives the width from the
+    // installed indexing workers plus a serving reserve.
 }
 
 #[test]
