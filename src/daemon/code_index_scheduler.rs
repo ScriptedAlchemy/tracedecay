@@ -1977,6 +1977,7 @@ impl LatestCompleteCodeIndexV1 {
         let _ = self.install_graph_serving(reader, None, CodeGraphServingAuthorityV1::Memory);
     }
 
+    #[cfg(test)]
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
         if !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
             return Err(RetrievalPortError::AuthorityUnavailable(
