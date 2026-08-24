@@ -26,6 +26,9 @@ use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryI
 use tracedecay_lsp::LspRuntimeFailure;
 
 use super::graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1};
+use super::reconcile_panic_guard::{
+    ReconcileCapacityRetryV1, ReconcilePanicDecisionV1, ReconcilePanicGuardV1,
+};
 use super::{
     CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
@@ -41,6 +44,8 @@ use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
 mod cold_read_wake_tests;
 mod ignored_dependencies;
 mod lsp_projection;
+#[cfg(test)]
+mod reconcile_failure_isolation_tests;
 #[cfg(test)]
 mod runtime_generation_census_tests;
 mod scope_identity;
@@ -2209,6 +2214,11 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
+        // The code-index control epoch. It advances exactly when new input is
+        // announced (hook hints, watch paths, overflow), so it is the signal a
+        // quarantined worker uses to decide that the bytes which panicked it
+        // are no longer the bytes it is being asked to index.
+        let worker_control_epoch = Arc::clone(&epoch);
         let worker_pending_wake = Arc::clone(&pending_wake);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
@@ -2289,10 +2299,36 @@ impl CodeIndexSchedulerRegistryV1 {
             // rebuild+reseal of an equivalent generation.
             let mut seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
             let mut next_seat_attempt_at: Option<Instant> = None;
+            // Bounded retry state for a reconcile whose blocking task unwound.
+            // Arbitrary user source runs through the indexing pool, so a panic
+            // there is an input fault, not a programmer-contract break: it
+            // reproduces on every pass over the same bytes. Without this the
+            // loop re-dispatched the identical unit on every wake forever.
+            let mut panic_guard = ReconcilePanicGuardV1::new();
+            // Bounded retry state for a reconcile refused because shared
+            // process capacity was momentarily held by a sibling worktree or
+            // artifact build. Releasing that capacity emits no wake, so this
+            // worker must schedule its own.
+            let mut capacity_retry = ReconcileCapacityRetryV1::new();
             loop {
                 worker_wake.notified().await;
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
+                }
+                // A quarantined or backing-off panic unit must not consume the
+                // pending arrival: the wake stays outstanding so a later
+                // eligible pass still measures its full queue wait.
+                if panic_guard.suppresses_pass(
+                    tokio::time::Instant::now(),
+                    worker_control_epoch.load(Ordering::Acquire),
+                ) {
+                    tracing::debug!(
+                        event = "code_index_reconcile_panic_suppressed",
+                        path = "background_worker",
+                        consecutive_panics = panic_guard.consecutive_panics(),
+                        "code-index reconcile is suppressed after repeated panics over unchanged input"
+                    );
+                    continue;
                 }
                 let _semantic_evaluation_publication =
                     worker_semantic_evaluation_publication_gate.lock().await;
@@ -2600,6 +2636,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                 }
                 if let Ok((Ok(outcome), _, _)) = &result {
+                    // A pass that ran to a terminal outcome proves neither the
+                    // panicking input nor the capacity contention is still
+                    // reproducing, so both bounded retry states restart.
+                    panic_guard.record_progress();
+                    capacity_retry.record_progress();
                     if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
                         Self::publish_generation(
                             &worker_generation_publications,
@@ -2636,12 +2677,81 @@ impl CodeIndexSchedulerRegistryV1 {
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
                     match &result {
-                        Ok((Err(error), _, _)) => tracing::warn!(
-                            event = "code_index_reconcile_failed",
-                            path = "background_worker",
-                            error = %error,
-                            "code-index background reconcile failed; the served generation stays stale"
-                        ),
+                        Ok((Err(error), _, _)) => {
+                            // The pass completed; whatever refused it was not an
+                            // unwind, so panic accounting restarts.
+                            panic_guard.record_progress();
+                            let transient_capacity = error.is_transient_capacity_failure();
+                            tracing::warn!(
+                                event = "code_index_reconcile_failed",
+                                path = "background_worker",
+                                transient_capacity,
+                                error = %error,
+                                "code-index background reconcile failed; the served generation stays stale"
+                            );
+                            if transient_capacity {
+                                // Shared process capacity was held by another
+                                // holder when this pass asked for it. Releasing
+                                // it emits no wake, so without a self-scheduled
+                                // retry this worktree stayed stale until some
+                                // unrelated query or edit happened to wake it.
+                                // Permanent refusals deliberately never reach
+                                // here: retrying those forever is the failure
+                                // this loop already had.
+                                match capacity_retry.record_capacity_failure() {
+                                    Some(delay) => {
+                                        let retry_wake = Arc::clone(&worker_wake);
+                                        tokio::spawn(async move {
+                                            tokio::time::sleep(delay).await;
+                                            retry_wake.notify_one();
+                                        });
+                                    }
+                                    None => tracing::warn!(
+                                        event = "code_index_reconcile_capacity_retry_exhausted",
+                                        path = "background_worker",
+                                        consecutive = capacity_retry.consecutive(),
+                                        "code-index reconcile stopped retrying a capacity refusal; the next hint retries"
+                                    ),
+                                }
+                            } else {
+                                capacity_retry.record_progress();
+                            }
+                        }
+                        Err(error) if error.is_panic() => {
+                            // Arbitrary user source runs through the indexing
+                            // pool, so an unwind here is malformed input that
+                            // reproduces byte-for-byte on every later pass.
+                            // Bound it instead of re-dispatching the identical
+                            // unit on every wake.
+                            capacity_retry.record_progress();
+                            let decision = panic_guard.record_panic(
+                                tokio::time::Instant::now(),
+                                worker_control_epoch.load(Ordering::Acquire),
+                            );
+                            match decision {
+                                ReconcilePanicDecisionV1::RetryAfter(delay) => {
+                                    tracing::warn!(
+                                        event = "code_index_reconcile_panicked",
+                                        path = "background_worker",
+                                        consecutive_panics = panic_guard.consecutive_panics(),
+                                        error = %error,
+                                        "code-index background reconcile panicked; retrying the same input with backoff"
+                                    );
+                                    let retry_wake = Arc::clone(&worker_wake);
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(delay).await;
+                                        retry_wake.notify_one();
+                                    });
+                                }
+                                ReconcilePanicDecisionV1::Quarantine => tracing::warn!(
+                                    event = "code_index_reconcile_quarantined",
+                                    path = "background_worker",
+                                    consecutive_panics = panic_guard.consecutive_panics(),
+                                    error = %error,
+                                    "code-index background reconcile is quarantined after repeated panics; changed input or a progressing pass resumes it"
+                                ),
+                            }
+                        }
                         Err(error) => tracing::warn!(
                             event = "code_index_reconcile_failed",
                             path = "background_worker",
@@ -2656,7 +2766,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
-                // The next coalesced hint wakes this worker after a contained panic.
                 let _ = result;
             }
         };

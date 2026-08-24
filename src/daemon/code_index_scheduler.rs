@@ -2549,6 +2549,36 @@ impl CodeIndexSchedulerErrorV1 {
         }
     }
 
+    /// A refusal that is transient *by construction*: this pass was turned away
+    /// because a bounded shared resource was already fully held, and it is
+    /// released by whoever holds it rather than by anything about this input.
+    ///
+    /// The background worker schedules its own delayed retry for exactly these,
+    /// because releasing shared capacity emits no wake: a sibling worktree or
+    /// artifact build finishing does not notify this worktree, so without a
+    /// self-scheduled retry it stayed stale until an unrelated query or edit
+    /// happened to wake it.
+    ///
+    /// The distinction the admission failure carries is the whole point. A
+    /// request that exceeds the *entire* process limit is shaped like a
+    /// capacity refusal and is not one — no other holder can release enough for
+    /// it — so it is classified permanent and never self-retried. Identity
+    /// failures, git and IO faults, production and privacy refusals, adjustment
+    /// invariant breaks, an uninstalled worker plan, and publication conflicts
+    /// likewise reproduce over the same input or already have an owner that
+    /// re-drives them; self-scheduling those is precisely the unbounded-retry
+    /// failure this module exists to stop.
+    pub(super) fn is_transient_capacity_failure(&self) -> bool {
+        match self {
+            Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
+                failure.requested_bytes <= failure.limit_bytes
+            }
+            Self::SnapshotMemoryCapacityUnavailable => true,
+            Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
+            _ => false,
+        }
+    }
+
     pub(super) fn is_graph_activation_refusal(&self) -> bool {
         matches!(self, Self::GraphActivationRefused(_))
             || matches!(
@@ -2619,6 +2649,10 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// `retained_snapshot_bytes`; worker scratch is admitted separately only
     /// after capture has completed.
     _retained_snapshot_memory: Vec<ResidentMemoryReservationV1>,
+    /// Deterministic reconcile fault used only by the worker-loop isolation
+    /// tests; production never installs one.
+    #[cfg(test)]
+    reconcile_fault: Option<Arc<reconcile_panic_guard::ReconcileFaultInjectionV1>>,
     /// Process resident-memory authority artifact builds and readers reserve
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
@@ -2725,6 +2759,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
             _retained_snapshot_memory: Vec::new(),
+            #[cfg(test)]
+            reconcile_fault: None,
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
             )),
@@ -3048,10 +3084,25 @@ impl CodeIndexWorktreeSchedulerV1 {
         Some(self.bind_latest_complete(generation))
     }
 
+    /// Install a deterministic reconcile fault for one mounted worktree so a
+    /// test can drive the real background worker loop over a pass that panics
+    /// or fails, and count the attempts the loop actually makes.
+    #[cfg(test)]
+    pub(in crate::daemon::code_index_scheduler) fn install_reconcile_fault_for_test(
+        &mut self,
+        fault: Arc<reconcile_panic_guard::ReconcileFaultInjectionV1>,
+    ) {
+        self.reconcile_fault = Some(fault);
+    }
+
     /// Retained-owner activation entry point. Foreground reads never call this.
     pub(super) fn activate_or_reconcile(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        #[cfg(test)]
+        if let Some(fault) = self.reconcile_fault.clone() {
+            fault.arrive()?;
+        }
         // The in-progress signal must cover the retained-activation branch
         // too: the worker has already claimed the pending wake, so without it
         // a failing activation pass would leave query admission unable to see
