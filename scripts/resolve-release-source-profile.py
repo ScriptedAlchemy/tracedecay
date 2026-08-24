@@ -10,40 +10,15 @@ import sys
 import tomllib
 
 
-HOTPATH_RELEASE_FEATURES = (
-    "hotpath",
-    "hotpath-alloc",
-    "hotpath-cpu",
-    "hotpath-mcp",
-)
-
-
 def production_release_features(
-    features: dict[str, object], target: str | None
+    _features: dict[str, object], _target: str | None
 ) -> tuple[str, ...]:
     """Return the artifact feature set for a production-capable source tag."""
-
-    present = set(HOTPATH_RELEASE_FEATURES).intersection(features)
-    if not present:
-        # Tags predating the shipped profiler remain recoverable with the
-        # production profile they declared at the time.
-        return ("production",)
-    missing = set(HOTPATH_RELEASE_FEATURES).difference(features)
-    if missing:
-        raise SystemExit(
-            "source Cargo.toml has an incomplete Hotpath release feature set: "
-            + ", ".join(sorted(missing))
-        )
-    if target is None:
-        raise SystemExit("--target is required for a Hotpath-enabled release source")
-
-    selected = ["production", "hotpath", "hotpath-alloc"]
-    if "-linux-" in target or target.endswith("-apple-darwin"):
-        selected.append("hotpath-cpu")
-    elif not target.endswith("-pc-windows-msvc"):
-        raise SystemExit(f"unsupported Hotpath release target: {target}")
-    selected.append("hotpath-mcp")
-    return tuple(selected)
+    # Hotpath 0.24 uses Cargo features as its process-wide activation
+    # authority. Feature-enabled gauges, futures, and instrumented locks start
+    # collectors independently of TraceDecay's process guard, so a release
+    # executable cannot truthfully make those facilities dormant at runtime.
+    return ("production",)
 
 
 def expand_local_features(

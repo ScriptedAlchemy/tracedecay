@@ -69,30 +69,19 @@ def main() -> int:
     linux_features = resolver.production_release_features(
         modern_features, "x86_64-unknown-linux-gnu"
     )
-    if linux_features != (
-        "production",
-        "hotpath",
-        "hotpath-alloc",
-        "hotpath-cpu",
-        "hotpath-mcp",
-    ):
+    if linux_features != ("production",):
         raise SystemExit(f"unexpected Linux release features: {linux_features!r}")
 
     macos_features = resolver.production_release_features(
         modern_features, "aarch64-apple-darwin"
     )
-    if macos_features != linux_features:
+    if macos_features != ("production",):
         raise SystemExit(f"unexpected macOS release features: {macos_features!r}")
 
     windows_features = resolver.production_release_features(
         modern_features, "x86_64-pc-windows-msvc"
     )
-    if windows_features != (
-        "production",
-        "hotpath",
-        "hotpath-alloc",
-        "hotpath-mcp",
-    ):
+    if windows_features != ("production",):
         raise SystemExit(f"unexpected Windows release features: {windows_features!r}")
 
     historical_production = resolver.production_release_features(
@@ -103,15 +92,13 @@ def main() -> int:
             f"unexpected historical production features: {historical_production!r}"
         )
 
-    try:
-        resolver.production_release_features(
-            {"production": [], "hotpath": []}, "x86_64-unknown-linux-gnu"
+    partial_hotpath = resolver.production_release_features(
+        {"production": [], "hotpath": []}, "x86_64-unknown-linux-gnu"
+    )
+    if partial_hotpath != ("production",):
+        raise SystemExit(
+            f"unexpected partial-Hotpath production features: {partial_hotpath!r}"
         )
-    except SystemExit as error:
-        if "incomplete Hotpath release feature set" not in str(error):
-            raise SystemExit(f"partial Hotpath profile failed unexpectedly: {error}")
-    else:
-        raise SystemExit("partial Hotpath release profile was accepted")
 
     legacy = run_fixture(
         """[package]

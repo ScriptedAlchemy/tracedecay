@@ -153,8 +153,6 @@ impl Drop for Spinner {
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
 #[cfg(feature = "hotpath")]
-const TRACEDECAY_HOTPATH_ENV: &str = "TRACEDECAY_HOTPATH";
-#[cfg(feature = "hotpath")]
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 #[cfg(feature = "hotpath")]
 const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
@@ -281,21 +279,6 @@ fn process_exit_code(code: i32) -> ExitCode {
 }
 
 #[cfg(any(feature = "hotpath", test))]
-fn hotpath_activation_requested(value: Option<&OsStr>) -> bool {
-    value
-        .and_then(OsStr::to_str)
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
-#[cfg(feature = "hotpath")]
-fn hotpath_runtime_active() -> bool {
-    static ACTIVE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        hotpath_activation_requested(std::env::var_os(TRACEDECAY_HOTPATH_ENV).as_deref())
-    });
-    *ACTIVE
-}
-
-#[cfg(any(feature = "hotpath", test))]
 fn hotpath_output_format_is_valid(output_format: Option<&OsStr>) -> bool {
     output_format.is_none_or(|value| {
         value.to_str().is_some_and(|value| {
@@ -407,24 +390,19 @@ fn hotpath_guard() -> hotpath::HotpathGuard {
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(feature = "hotpath")]
-    let _hotpath = if hotpath_runtime_active() {
-        if let Err(message) = configure_hotpath_output(&args) {
-            eprintln!("Error: {message}");
-            return ExitCode::FAILURE;
-        }
-        Some(hotpath_guard())
-    } else {
-        None
-    };
+    if let Err(message) = configure_hotpath_output(&args) {
+        eprintln!("Error: {message}");
+        return ExitCode::FAILURE;
+    }
+    #[cfg(feature = "hotpath")]
+    let _hotpath = hotpath_guard();
     // The guard belongs to the real process boundary rather than the async
     // command body. Native capture hooks intentionally bypass the ordinary
     // composition root, and Clap can terminate before a Tokio runtime exists;
-    // both still need one complete Hotpath lifetime and a flushed report when
-    // runtime profiling is explicitly active.
+    // both still need one complete Hotpath lifetime and a flushed report in a
+    // feature-enabled profiling build.
     #[cfg(feature = "hotpath")]
-    if hotpath_runtime_active()
-        && let Some(command) = args.get(1).and_then(|value| value.to_str())
-    {
+    if let Some(command) = args.get(1).and_then(|value| value.to_str()) {
         hotpath::val!("cli.command.name").set(&command);
     }
     if let Some(code) =
@@ -465,9 +443,7 @@ fn async_main() -> tracedecay::errors::Result<CommandOutcome> {
     tracedecay::register_runtime_ports()?;
     let args: Vec<String> = std::env::args().collect();
     #[cfg(feature = "hotpath")]
-    if hotpath_runtime_active()
-        && let Some(command) = args.get(1)
-    {
+    if let Some(command) = args.get(1) {
         // Fallback identity for Clap help/version/parse failures. A successful
         // parse replaces it below with the exact canonical nested command path.
         hotpath::val!("cli.command.name").set(&command.as_str());
@@ -539,7 +515,7 @@ fn async_main() -> tracedecay::errors::Result<CommandOutcome> {
             })
     })?;
     #[cfg(feature = "hotpath")]
-    if hotpath_runtime_active() {
+    {
         hotpath::tokio_runtime!(runtime.handle());
         // Process-level runtime shape only. Request, project-server, history,
         // and projection gauges belong on those authorities — not bootstrap.
@@ -553,20 +529,14 @@ fn async_main() -> tracedecay::errors::Result<CommandOutcome> {
         hotpath::gauge!("process_in_command").set(1);
     }
     #[cfg(feature = "hotpath")]
-    let result = if hotpath_runtime_active() {
-        hotpath::measure_block!(
-            "process_command",
-            runtime.block_on(hotpath::future!(run(cli), label = "process_command_future"))
-        )
-    } else {
-        runtime.block_on(run(cli))
-    };
+    let result = hotpath::measure_block!(
+        "process_command",
+        runtime.block_on(hotpath::future!(run(cli), label = "process_command_future"))
+    );
     #[cfg(not(feature = "hotpath"))]
     let result = runtime.block_on(run(cli));
     #[cfg(feature = "hotpath")]
-    if hotpath_runtime_active() {
-        hotpath::gauge!("process_in_command").set(0);
-    }
+    hotpath::gauge!("process_in_command").set(0);
     // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
     // can leave OS-backed watcher work behind after their async handles abort,
     // so bound teardown after the command's own graceful shutdown completes.

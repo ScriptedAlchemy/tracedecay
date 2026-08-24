@@ -133,8 +133,8 @@ include = [
 
 [features]
 # Default and explicitly selected production artifacts resolve through the
-# same feature. Current release packaging selects `production` plus the
-# supported Hotpath facilities through `resolve-release-source-profile.py`;
+# same feature. Release packaging selects exactly `production`; profiling is a
+# separate feature-enabled build because Hotpath 0.24 has no runtime-off mode.
 # `--all-features` is test-only because it includes `test-transport`.
 default = ["production"]
 

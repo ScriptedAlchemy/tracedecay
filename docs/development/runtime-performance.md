@@ -47,15 +47,14 @@ model, download models, or start a second daemon against an operator profile.
 The harness does not run Cargo benchmarks. Build or Cargo benchmarking is a
 separate activity and is performed only when separately requested.
 
-Stable and beta release archives compile the Hotpath core, allocation, and MCP
-facilities into the `tracedecay` executable. Linux and macOS archives also
-compile Hotpath's CPU facility; Hotpath 0.24 does not support that facility on
-Windows. Profiler collection services remain opt-in at runtime through
-`TRACEDECAY_HOTPATH`: when it is unset, TraceDecay does not create a Hotpath
-guard or start its report, sampling, metrics, or MCP services. The compiled
-timing call sites still retain Hotpath's inactive guard overhead; this is not a
-claim that the release binary is byte-for-byte equivalent to a feature-off
-build.
+Stable and beta release archives compile only the `production` feature profile.
+They do not contain Hotpath collectors, listeners, sampling, or allocator
+instrumentation. Hotpath 0.24 treats Cargo feature selection as its process-wide
+activation authority: feature-enabled gauges, futures, and instrumented locks
+can initialize collectors without a `HotpathGuard`, so an environment-only
+runtime gate cannot make one compiled binary dormant. Build a separate profiling
+binary with the required Hotpath feature lane when collecting performance
+evidence.
 
 When activated, Hotpath's metrics HTTP server defaults to port 6770 and its
 separate MCP server defaults to `http://127.0.0.1:6771/mcp`; override them with
