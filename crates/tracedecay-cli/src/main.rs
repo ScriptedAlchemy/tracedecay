@@ -954,13 +954,15 @@ async fn dispatch_project_command(
     match command {
         Commands::Init {
             path,
+            path_flag,
             skip_folders,
             include_folders,
             adopt_project,
             fresh,
         } => {
+            // clap enforces that at most one of these is present.
             commands::handle_init(
-                path,
+                path.or(path_flag),
                 skip_folders,
                 include_folders,
                 adopt_project,
