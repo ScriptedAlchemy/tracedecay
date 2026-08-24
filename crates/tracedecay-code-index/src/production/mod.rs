@@ -76,7 +76,8 @@ mod generation_statistics;
 pub use generation_statistics::CodeIndexGenerationStatisticsV1;
 mod lexical_page_source;
 pub use lexical_page_source::{
-    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageReadV1,
+    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };

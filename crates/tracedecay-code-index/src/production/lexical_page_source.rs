@@ -639,6 +639,76 @@ pub enum VerifiedSealedLexicalPageReadV1 {
     Complete(VerifiedSealedLexicalSourceReceiptV1),
 }
 
+/// Deterministic admission limits for one staged lexical-page batch.
+///
+/// Both limits are required so a caller cannot accidentally turn the verified
+/// source into an unbounded retained-page queue. `maximum_retained_bytes`
+/// charges the batch vector slots and
+/// [`VerifiedSealedLexicalPageV1::retained_owned_bytes`] for every page
+/// staged in the batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifiedSealedLexicalPageBatchBoundsV1 {
+    maximum_pages: usize,
+    maximum_retained_bytes: usize,
+    page_slot_bytes: usize,
+}
+
+impl VerifiedSealedLexicalPageBatchBoundsV1 {
+    pub fn new(
+        maximum_pages: usize,
+        maximum_retained_bytes: usize,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if maximum_pages == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page batch count bound must be non-zero".to_owned(),
+            ));
+        }
+        if maximum_retained_bytes == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page batch retained-byte bound must be non-zero".to_owned(),
+            ));
+        }
+        let page_slot_bytes = maximum_pages
+            .checked_mul(std::mem::size_of::<VerifiedSealedLexicalPageV1>())
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical page batch slot bound overflowed".to_owned(),
+                )
+            })?;
+        if page_slot_bytes > maximum_retained_bytes {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page batch retained-byte bound cannot hold its page slots"
+                    .to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_pages,
+            maximum_retained_bytes,
+            page_slot_bytes,
+        })
+    }
+
+    pub fn maximum_pages(&self) -> usize {
+        self.maximum_pages
+    }
+
+    pub fn maximum_retained_bytes(&self) -> usize {
+        self.maximum_retained_bytes
+    }
+
+    fn page_slot_bytes(&self) -> usize {
+        self.page_slot_bytes
+    }
+}
+
+/// Result of one all-or-nothing lexical-page batch admission attempt.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // staged pages dominate this terminal read result
+pub enum VerifiedSealedLexicalPageBatchReadV1 {
+    Pages(Vec<VerifiedSealedLexicalPageV1>),
+    Complete(VerifiedSealedLexicalSourceReceiptV1),
+}
+
 struct PendingSealedLexicalPageV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
     page_bytes: usize,
@@ -659,6 +729,15 @@ enum StagedSealedLexicalPageReadV1 {
     Complete(VerifiedSealedLexicalSourceReceiptV1),
 }
 
+#[allow(clippy::large_enum_variant)] // staged pages dominate this private batch result
+enum StagedSealedLexicalPageBatchReadV1 {
+    Pages {
+        pages: Vec<VerifiedSealedLexicalPageV1>,
+        cursor: VerifiedSealedLexicalCursorV1,
+    },
+    Complete(VerifiedSealedLexicalSourceReceiptV1),
+}
+
 /// Seekable, bounded lexical projection source over a verified v5/v6 seal.
 ///
 /// Opening performs a streaming structural scan and verifies the exact raw
@@ -672,6 +751,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     file_count: u64,
     first_file_offset: u64,
     files_end_offset: u64,
+    total_lexical_bytes: u64,
     maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
     format_revision: u32,
@@ -706,11 +786,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             layout.state_digest.clone(),
             layout.first_file_offset,
         )?;
+        let total_lexical_bytes = layout
+            .files_end_offset
+            .checked_sub(layout.first_file_offset)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical files array has an invalid byte span".to_owned(),
+                )
+            })?;
         Ok(Self {
             reader,
             file_count: layout.file_count,
             first_file_offset: layout.first_file_offset,
             files_end_offset: layout.files_end_offset,
+            total_lexical_bytes,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
@@ -752,11 +841,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             layout.state_digest.clone(),
             layout.first_file_offset,
         )?;
+        let total_lexical_bytes = layout
+            .files_end_offset
+            .checked_sub(layout.first_file_offset)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical files array has an invalid byte span".to_owned(),
+                )
+            })?;
         Ok(Self {
             reader,
             file_count: layout.file_count,
             first_file_offset: layout.first_file_offset,
             files_end_offset: layout.files_end_offset,
+            total_lexical_bytes,
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
@@ -864,6 +962,35 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         &self.cursor
     }
 
+    /// Number of authenticated file records in this sealed lexical source.
+    pub fn total_files(&self) -> u64 {
+        self.file_count
+    }
+
+    /// Authenticated files-array byte span available to the lexical source.
+    pub fn total_lexical_bytes(&self) -> u64 {
+        self.total_lexical_bytes
+    }
+
+    /// Fully completed file records at the durable source cursor.
+    pub fn completed_files(&self) -> u64 {
+        self.cursor.next_file_ordinal()
+    }
+
+    /// Authenticated files-array bytes fully passed by the durable source
+    /// cursor. A partially consumed file counts only after its final chunk and
+    /// imports are committed, matching `completed_files`.
+    pub fn completed_lexical_bytes(&self) -> Result<u64, CodeIndexProductionErrorV1> {
+        self.cursor
+            .next_file_offset
+            .checked_sub(self.first_file_offset)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical cursor precedes the files-array start".to_owned(),
+                )
+            })
+    }
+
     /// Restore this source to its just-opened state so a consumer whose
     /// staging failed after pages were already accepted can replay the same
     /// sealed pages on the same instance instead of terminally blocking.
@@ -918,7 +1045,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         control: &dyn CodeIndexExecutionControlV1,
         admit: impl FnOnce(&VerifiedSealedLexicalPageV1) -> Result<(), E>,
     ) -> Result<Result<VerifiedSealedLexicalPageReadV1, E>, CodeIndexProductionErrorV1> {
-        match self.stage_next_page(control)? {
+        let cursor = self.cursor.clone();
+        match self.stage_next_page_at(&cursor, control)? {
             StagedSealedLexicalPageReadV1::Page(staged) => {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
@@ -933,12 +1061,115 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         }
     }
 
-    fn stage_next_page(
+    /// Stage a bounded ordered page batch and advance only after the caller
+    /// accepts the complete borrowed slice. The source cursor remains at its
+    /// pre-batch position on source or callback failure, so retrying emits the
+    /// same ordered page sequence.
+    pub fn next_page_batch_if<E>(
         &mut self,
+        control: &dyn CodeIndexExecutionControlV1,
+        bounds: VerifiedSealedLexicalPageBatchBoundsV1,
+        admit: impl FnOnce(&[VerifiedSealedLexicalPageV1]) -> Result<(), E>,
+    ) -> Result<Result<VerifiedSealedLexicalPageBatchReadV1, E>, CodeIndexProductionErrorV1> {
+        let staged = hotpath::measure_block!("code_index.lexical_source.batch_stage", {
+            (|| {
+                let mut pages = Vec::new();
+                pages
+                    .try_reserve_exact(bounds.maximum_pages())
+                    .map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed lexical page batch reservation failed: {error}"
+                        ))
+                    })?;
+                let retained_page_slots = pages
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<VerifiedSealedLexicalPageV1>())
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical page batch reservation overflowed".to_owned(),
+                        )
+                    })?;
+                if retained_page_slots > bounds.maximum_retained_bytes()
+                    || retained_page_slots < bounds.page_slot_bytes()
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical page batch reservation exceeds its retained-byte bound"
+                            .to_owned(),
+                    ));
+                }
+
+                let mut working_cursor = self.cursor.clone();
+                let mut retained_bytes = retained_page_slots;
+                let mut completion = None;
+                while pages.len() < bounds.maximum_pages() {
+                    match self.stage_next_page_at(&working_cursor, control)? {
+                        StagedSealedLexicalPageReadV1::Page(staged) => {
+                            let next_retained_bytes = retained_bytes
+                                .checked_add(staged.page.retained_owned_bytes())
+                                .ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "sealed lexical page batch retained bytes overflowed"
+                                            .to_owned(),
+                                    )
+                                })?;
+                            if next_retained_bytes > bounds.maximum_retained_bytes() {
+                                if pages.is_empty() {
+                                    return Err(CodeIndexProductionErrorV1::Contract(
+                                        "one sealed lexical page exceeds the batch retained-byte bound"
+                                            .to_owned(),
+                                    ));
+                                }
+                                break;
+                            }
+                            retained_bytes = next_retained_bytes;
+                            working_cursor = staged.cursor;
+                            pages.push(staged.page);
+                        }
+                        StagedSealedLexicalPageReadV1::Complete(receipt) => {
+                            if pages.is_empty() {
+                                completion = Some(receipt);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                Ok(if let Some(receipt) = completion {
+                    StagedSealedLexicalPageBatchReadV1::Complete(receipt)
+                } else {
+                    StagedSealedLexicalPageBatchReadV1::Pages {
+                        pages,
+                        cursor: working_cursor,
+                    }
+                })
+            })()
+        })?;
+
+        match staged {
+            StagedSealedLexicalPageBatchReadV1::Complete(receipt) => {
+                Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)))
+            }
+            StagedSealedLexicalPageBatchReadV1::Pages {
+                pages,
+                cursor: working_cursor,
+            } => {
+                if let Err(error) = admit(&pages) {
+                    return Ok(Err(error));
+                }
+                crate::hotpath_observe::record_pages(working_cursor.next_page_ordinal());
+                self.cursor = working_cursor;
+                Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)))
+            }
+        }
+    }
+
+    fn stage_next_page_at(
+        &mut self,
+        previous_cursor: &VerifiedSealedLexicalCursorV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         checkpoint(control)?;
-        let mut cursor = self.cursor.clone();
+        let mut cursor = previous_cursor.clone();
         let mut page_hasher = page_hasher(cursor.next_page_ordinal);
         let mut chunks = Vec::new();
         let mut page_bytes = 0usize;
@@ -987,14 +1218,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                             .saturating_add(serialized.len())
                             > self.maximum_page_bytes)
                 {
-                    return self.commit_page(PendingSealedLexicalPageV1 {
-                        chunks,
-                        page_bytes,
-                        imports,
-                        import_bytes,
-                        cursor,
-                        page_hasher,
-                    });
+                    return self.commit_page(
+                        previous_cursor,
+                        PendingSealedLexicalPageV1 {
+                            chunks,
+                            page_bytes,
+                            imports,
+                            import_bytes,
+                            cursor,
+                            page_hasher,
+                        },
+                    );
                 }
                 hash_record(&mut page_hasher, &serialized)?;
                 cursor.cumulative_digest = advance_digest(
@@ -1015,14 +1249,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     )
                 })?;
                 if chunks.len() == self.maximum_page_chunks {
-                    return self.commit_page(PendingSealedLexicalPageV1 {
-                        chunks,
-                        page_bytes,
-                        imports,
-                        import_bytes,
-                        cursor,
-                        page_hasher,
-                    });
+                    return self.commit_page(
+                        previous_cursor,
+                        PendingSealedLexicalPageV1 {
+                            chunks,
+                            page_bytes,
+                            imports,
+                            import_bytes,
+                            cursor,
+                            page_hasher,
+                        },
+                    );
                 }
             }
             let mut import_ordinal = usize::try_from(cursor.next_import_ordinal).map_err(|_| {
@@ -1054,14 +1291,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         .saturating_add(serialized.len())
                         > self.maximum_page_bytes
                 {
-                    return self.commit_page(PendingSealedLexicalPageV1 {
-                        chunks,
-                        page_bytes,
-                        imports,
-                        import_bytes,
-                        cursor,
-                        page_hasher,
-                    });
+                    return self.commit_page(
+                        previous_cursor,
+                        PendingSealedLexicalPageV1 {
+                            chunks,
+                            page_bytes,
+                            imports,
+                            import_bytes,
+                            cursor,
+                            page_hasher,
+                        },
+                    );
                 }
                 hash_import_record(&mut page_hasher, &serialized)?;
                 cursor.cumulative_digest =
@@ -1099,38 +1339,44 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             // Commit after an importing file so a later file cannot append a
             // chunk after bytes already hashed as import records.
             if !imports.is_empty() {
-                return self.commit_page(PendingSealedLexicalPageV1 {
+                return self.commit_page(
+                    previous_cursor,
+                    PendingSealedLexicalPageV1 {
+                        chunks,
+                        page_bytes,
+                        imports,
+                        import_bytes,
+                        cursor,
+                        page_hasher,
+                    },
+                );
+            }
+        }
+
+        if !chunks.is_empty() || !imports.is_empty() {
+            return self.commit_page(
+                previous_cursor,
+                PendingSealedLexicalPageV1 {
                     chunks,
                     page_bytes,
                     imports,
                     import_bytes,
                     cursor,
                     page_hasher,
-                });
-            }
-        }
-
-        if !chunks.is_empty() || !imports.is_empty() {
-            return self.commit_page(PendingSealedLexicalPageV1 {
-                chunks,
-                page_bytes,
-                imports,
-                import_bytes,
-                cursor,
-                page_hasher,
-            });
+                },
+            );
         }
         Ok(StagedSealedLexicalPageReadV1::Complete(
             VerifiedSealedLexicalSourceReceiptV1 {
                 source_state_digest: self.source_state_digest.clone(),
                 format_revision: self.format_revision,
-                page_count: self.cursor.next_page_ordinal,
-                total_chunks: self.cursor.emitted_chunks,
-                total_payload_bytes: self.cursor.emitted_payload_bytes,
-                total_imports: self.cursor.emitted_imports,
-                import_payload_bytes: self.cursor.emitted_import_payload_bytes,
-                import_dictionary_digest: self.cursor.import_dictionary_digest.clone(),
-                cumulative_digest: self.cursor.cumulative_digest.clone(),
+                page_count: previous_cursor.next_page_ordinal,
+                total_chunks: previous_cursor.emitted_chunks,
+                total_payload_bytes: previous_cursor.emitted_payload_bytes,
+                total_imports: previous_cursor.emitted_imports,
+                import_payload_bytes: previous_cursor.emitted_import_payload_bytes,
+                import_dictionary_digest: previous_cursor.import_dictionary_digest.clone(),
+                cumulative_digest: previous_cursor.cumulative_digest.clone(),
             },
         ))
     }
@@ -1207,6 +1453,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     fn commit_page(
         &mut self,
+        previous_cursor: &VerifiedSealedLexicalCursorV1,
         pending: PendingSealedLexicalPageV1,
     ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         let PendingSealedLexicalPageV1 {
@@ -1288,7 +1535,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             next_cursor: cursor.clone(),
             chunks,
             imports,
-            previous_cursor: self.cursor.clone(),
+            previous_cursor: previous_cursor.clone(),
         };
         Ok(StagedSealedLexicalPageReadV1::Page(
             StagedSealedLexicalPageV1 { page, cursor },
@@ -1869,4 +2116,572 @@ fn hash_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProduct
 fn digest_hasher(hasher: Sha256) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+}
+
+#[cfg(test)]
+mod lexical_page_source_tests {
+    use std::{
+        collections::BTreeSet,
+        io::Cursor,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use tracedecay_domain::{
+        ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+        PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1, RepositoryDirtyStateV1,
+        RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+        SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    };
+
+    use super::*;
+    use crate::{
+        chunks::content_digest,
+        production::{
+            CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
+            CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
+            CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+            CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+            CodeIndexRepositoryParseIdentityV1,
+        },
+        projection::{
+            ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
+            ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
+        },
+    };
+
+    const BATCH_FIXTURE_SOURCE: &str = concat!(
+        "pub fn first_batch_page() -> usize { 1 }\n",
+        "pub fn retained_batch_page() -> &'static str { ",
+        "\"retained-batch-page-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\" }\n",
+        "pub fn final_batch_page() -> usize { 3 }\n",
+    );
+
+    #[derive(Default)]
+    struct TestPublicationStore;
+
+    impl CodeIndexAtomicPublicationPort for TestPublicationStore {
+        fn load_active(
+            &self,
+            _scope: &CodeIndexGenerationScopeV1,
+        ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1>
+        {
+            Ok(None)
+        }
+
+        fn publish_atomically(
+            &mut self,
+            _scope: &CodeIndexGenerationScopeV1,
+            _expected_active_generation: Option<&tracedecay_domain::CodeGenerationId>,
+            _generation: Arc<CodeIndexPublishedGenerationV1>,
+        ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ApplyingProjectionSink;
+
+    impl CodeChunkProjectionSink for ApplyingProjectionSink {
+        fn project_changed_chunks(
+            &mut self,
+            request: &tracedecay_domain::ProjectionBatchRequestV1,
+            receipt_builder: ProjectionReceiptBuilderV1<'_>,
+        ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
+            let mut decisions: Vec<ChunkProjectionDecisionV1> = request
+                .changes
+                .added_or_changed
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: if change.prior_digest.is_some() {
+                        tracedecay_domain::ProjectionOperationV1::Updated
+                    } else {
+                        tracedecay_domain::ProjectionOperationV1::Added
+                    },
+                    outcome: tracedecay_domain::ProjectionOutcomeV1::Applied,
+                    output_digest: Some(
+                        change
+                            .current_digest
+                            .clone()
+                            .expect("added or changed chunks have a digest"),
+                    ),
+                })
+                .collect();
+            decisions.extend(request.changes.deleted.iter().map(|change| {
+                ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: None,
+                    operation: tracedecay_domain::ProjectionOperationV1::Deleted,
+                    outcome: tracedecay_domain::ProjectionOutcomeV1::Applied,
+                    output_digest: None,
+                }
+            }));
+            decisions.extend(request.changes.reused.iter().map(|change| {
+                ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: tracedecay_domain::ProjectionOperationV1::Reused,
+                    outcome: tracedecay_domain::ProjectionOutcomeV1::Reused,
+                    output_digest: None,
+                }
+            }));
+            receipt_builder
+                .build(&decisions)
+                .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
+        }
+    }
+
+    struct CancelDuringStaging {
+        checks: AtomicUsize,
+    }
+
+    impl CancelDuringStaging {
+        fn new() -> Self {
+            Self {
+                checks: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CodeIndexExecutionControlV1 for CancelDuringStaging {
+        fn is_cancelled(&self) -> bool {
+            self.checks.fetch_add(1, Ordering::AcqRel) >= 3
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    struct ActiveControl;
+
+    impl CodeIndexExecutionControlV1 for ActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    struct SealedSourceFixture {
+        sealed: Vec<u8>,
+        state_digest: ManifestDigest,
+    }
+
+    impl SealedSourceFixture {
+        fn open(&self) -> VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>> {
+            VerifiedSealedLexicalPageSourceV1::open(
+                Cursor::new(self.sealed.clone()),
+                u64::try_from(self.sealed.len()).expect("sealed fixture length fits u64"),
+                self.state_digest.clone(),
+                1,
+                1024 * 1024,
+                &ActiveControl,
+            )
+            .expect("real sealed fixture source opens")
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct OnePageExpectation {
+        page_ordinal: u64,
+        chunk_count: u64,
+        payload_bytes: u64,
+        import_count: u64,
+        import_payload_bytes: u64,
+        page_digest: String,
+        next_cursor: Vec<u8>,
+        retained_owned_bytes: usize,
+    }
+
+    fn fixture() -> SealedSourceFixture {
+        let source = BATCH_FIXTURE_SOURCE.as_bytes();
+        let file = SanitizedCodeFileV1 {
+            file_occurrence_id: FileOccurrenceId::new("file.lexical-page-batch")
+                .expect("fixture file occurrence ID"),
+            logical_path: "src/batch_fixture.rs".to_owned(),
+            language: Some(LanguageId::new("rust").expect("fixture language ID")),
+            content_digest: content_digest(source),
+            disposition: SnapshotFileDispositionV1::Present,
+        };
+        let snapshot = SanitizedCodeSnapshotV1 {
+            repository: RepositoryId::new("repository.lexical-page-batch")
+                .expect("fixture repository ID"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: SanitizerRevision::new("sanitizer.lexical-page-batch")
+                .expect("fixture sanitizer revision"),
+            sanitization_receipts: vec![
+                SanitizationReceiptId::new("receipt.lexical-page-batch")
+                    .expect("fixture sanitization receipt"),
+            ],
+            content_identity: content_digest(source),
+            captured_at: UtcMicros(1_000_000),
+            files: vec![file.clone()],
+        };
+        let request = CodeIndexBuildRequestV1 {
+            snapshot,
+            captured_files: vec![CodeIndexCapturedFileV1 {
+                file_occurrence_id: file.file_occurrence_id,
+                sanitized_bytes: source.to_vec(),
+                sensitivity_level: SensitivityLevelV1::Public,
+            }],
+            changed_files: BTreeSet::new(),
+            invalidations: BTreeSet::new(),
+            ignored_source_admissions: Vec::new(),
+            repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                tree: None,
+                dirty: RepositoryDirtyStateV1::Dirty,
+            },
+            sealed_at: UtcMicros(1_100_000),
+            target_projection_key: ProjectionKeyV1 {
+                kind: ProjectionKindV1::Lexical,
+                schema_revision: "lexical.v1".to_owned(),
+                profile_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                    .expect("fixture projection profile digest"),
+            },
+        };
+        let mut owner = CodeIndexProductionOwnerV1::new(
+            CodeIndexProductionConfigV1 {
+                project_id: ProjectId::new("project.lexical-page-batch")
+                    .expect("fixture project ID"),
+                repository: RepositoryId::new("repository.lexical-page-batch")
+                    .expect("fixture repository ID"),
+                sanitizer_revision: SanitizerRevision::new("sanitizer.lexical-page-batch")
+                    .expect("fixture sanitizer revision"),
+                policy_revision: PolicyRevisionId::new("policy.lexical-page-batch")
+                    .expect("fixture policy revision"),
+                chunker_revision: ChunkerRevision::new("chunker.lexical-page-batch")
+                    .expect("fixture chunker revision"),
+                privacy_domain: PrivacyDomainId::new("privacy.lexical-page-batch")
+                    .expect("fixture privacy domain"),
+                privacy_key_epoch: 7,
+                max_snapshot_age_micros: None,
+            },
+            TestPublicationStore,
+            ApplyingProjectionSink,
+        )
+        .expect("fixture production owner opens");
+        let generation = owner
+            .build_and_publish(request, &ActiveControl)
+            .expect("fixture generation publishes");
+        let sealed = generation
+            .encode_sealed()
+            .expect("fixture generation seals");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&sealed).expect("fixture sealed envelope decodes");
+        let state_digest = ManifestDigest::new(
+            envelope["state_digest"]
+                .as_str()
+                .expect("fixture sealed state digest"),
+        )
+        .expect("fixture state digest is canonical");
+        SealedSourceFixture {
+            sealed,
+            state_digest,
+        }
+    }
+
+    fn one_page_expectations(fixture: &SealedSourceFixture) -> Vec<OnePageExpectation> {
+        let mut source = fixture.open();
+        let mut expectations = Vec::new();
+        loop {
+            match source
+                .next_page(&ActiveControl)
+                .expect("fixture one-page read")
+            {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
+                    expectations.push(expectation(&page));
+                }
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                    receipt
+                        .verify_completion(Some(source.cursor()))
+                        .expect("fixture one-page receipt verifies");
+                    return expectations;
+                }
+            }
+        }
+    }
+
+    fn expectation(page: &VerifiedSealedLexicalPageV1) -> OnePageExpectation {
+        OnePageExpectation {
+            page_ordinal: page.page_ordinal(),
+            chunk_count: page.chunk_count(),
+            payload_bytes: page.payload_bytes(),
+            import_count: page.import_count(),
+            import_payload_bytes: page.import_payload_bytes(),
+            page_digest: page.page_digest().as_str().to_owned(),
+            next_cursor: page
+                .next_cursor()
+                .persisted_bytes()
+                .expect("one-page cursor persists"),
+            retained_owned_bytes: page.retained_owned_bytes(),
+        }
+    }
+
+    fn assert_page_matches(page: &VerifiedSealedLexicalPageV1, expected: &OnePageExpectation) {
+        assert_eq!(page.page_ordinal(), expected.page_ordinal);
+        assert_eq!(page.chunk_count(), expected.chunk_count);
+        assert_eq!(page.payload_bytes(), expected.payload_bytes);
+        assert_eq!(page.import_count(), expected.import_count);
+        assert_eq!(page.import_payload_bytes(), expected.import_payload_bytes);
+        assert_eq!(page.page_digest().as_str(), expected.page_digest.as_str());
+        assert_eq!(
+            page.next_cursor()
+                .persisted_bytes()
+                .expect("batch page cursor persists"),
+            expected.next_cursor,
+        );
+    }
+
+    fn bounds_for(expected: &[OnePageExpectation]) -> VerifiedSealedLexicalPageBatchBoundsV1 {
+        let page_slots = std::mem::size_of::<VerifiedSealedLexicalPageV1>()
+            .checked_mul(expected.len())
+            .expect("fixture page-slot bytes do not overflow");
+        let retained_bytes = expected.iter().fold(page_slots, |bytes, page| {
+            bytes
+                .checked_add(page.retained_owned_bytes)
+                .expect("fixture retained bytes do not overflow")
+        });
+        VerifiedSealedLexicalPageBatchBoundsV1::new(expected.len(), retained_bytes)
+            .expect("fixture batch bounds are retainable")
+    }
+
+    fn pages(read: VerifiedSealedLexicalPageBatchReadV1) -> Vec<VerifiedSealedLexicalPageV1> {
+        match read {
+            VerifiedSealedLexicalPageBatchReadV1::Pages(pages) => pages,
+            VerifiedSealedLexicalPageBatchReadV1::Complete(_) => {
+                panic!("fixture must stage lexical pages")
+            }
+        }
+    }
+
+    #[test]
+    fn batch_bounds_refuse_limits_that_cannot_retain_a_bounded_page_batch() {
+        let page_slot_bytes = std::mem::size_of::<VerifiedSealedLexicalPageV1>();
+        for (maximum_pages, maximum_retained_bytes) in
+            [(0, 1), (1, 0), (1, page_slot_bytes.saturating_sub(1))]
+        {
+            let error =
+                VerifiedSealedLexicalPageBatchBoundsV1::new(maximum_pages, maximum_retained_bytes)
+                    .expect_err("an unbounded or unretainable batch must be refused");
+            assert!(matches!(error, CodeIndexProductionErrorV1::Contract(_)));
+        }
+    }
+
+    #[test]
+    fn rejected_batch_keeps_the_exact_cursor_and_retries_the_first_one_page_value() {
+        let fixture = fixture();
+        let expected = one_page_expectations(&fixture);
+        assert!(
+            expected.len() >= 2,
+            "fixture must provide a multi-page source"
+        );
+        let mut source = fixture.open();
+        let cursor_before = source
+            .cursor()
+            .persisted_bytes()
+            .expect("initial cursor persists");
+        let rejected = source
+            .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
+                assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
+                Err::<(), _>("builder rejects the complete batch")
+            })
+            .expect("source stages the rejected batch");
+        assert_eq!(
+            rejected.expect_err("callback refusal must be surfaced"),
+            "builder rejects the complete batch"
+        );
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("rejected cursor persists"),
+            cursor_before,
+        );
+
+        let retried = match source.next_page(&ActiveControl).expect("one-page retry") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => page,
+            VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
+        };
+        assert_page_matches(&retried, &expected[0]);
+    }
+
+    #[test]
+    fn count_bound_returns_the_first_two_one_page_values_in_order() {
+        let fixture = fixture();
+        let expected = one_page_expectations(&fixture);
+        assert!(
+            expected.len() >= 2,
+            "fixture must provide a multi-page source"
+        );
+        let mut source = fixture.open();
+        let batch = source
+            .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
+                assert_eq!(pages.len(), 2);
+                Ok::<(), ()>(())
+            })
+            .expect("source stages a count-bounded batch")
+            .expect("callback accepts the count-bounded batch");
+        let batch = pages(batch);
+        assert_eq!(batch.len(), 2);
+        assert_page_matches(&batch[0], &expected[0]);
+        assert_page_matches(&batch[1], &expected[1]);
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("batch cursor persists"),
+            expected[1].next_cursor,
+        );
+    }
+
+    #[test]
+    fn retained_byte_bound_stops_before_the_next_larger_one_page_value() {
+        let fixture = fixture();
+        let expected = one_page_expectations(&fixture);
+        let (start, first, second) = expected
+            .windows(2)
+            .enumerate()
+            .find_map(|(index, pair)| {
+                (pair[0].retained_owned_bytes < pair[1].retained_owned_bytes)
+                    .then_some((index, &pair[0], &pair[1]))
+            })
+            .expect("fixture has an increasing one-page retained-byte boundary");
+        let mut source = fixture.open();
+        for _ in 0..start {
+            let _ = source
+                .next_page(&ActiveControl)
+                .expect("advance to retained boundary");
+        }
+        let page_slots = std::mem::size_of::<VerifiedSealedLexicalPageV1>()
+            .checked_mul(2)
+            .expect("fixture page-slot bytes do not overflow");
+        let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
+            2,
+            page_slots
+                .checked_add(first.retained_owned_bytes)
+                .expect("fixture retained bound does not overflow"),
+        )
+        .expect("first page fits the retained-byte bound");
+        let batch = source
+            .next_page_batch_if(&ActiveControl, bounds, |pages| {
+                assert_eq!(pages.len(), 1, "larger next page must stay unstaged");
+                Ok::<(), ()>(())
+            })
+            .expect("source stages the retained-byte-bounded batch")
+            .expect("callback accepts the retained-byte-bounded batch");
+        let batch = pages(batch);
+        assert_eq!(batch.len(), 1);
+        assert_page_matches(&batch[0], first);
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("retained-byte cursor persists"),
+            first.next_cursor,
+        );
+
+        let next = match source
+            .next_page(&ActiveControl)
+            .expect("read byte-stopped page")
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => page,
+            VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain next page"),
+        };
+        assert_page_matches(&next, second);
+    }
+
+    #[test]
+    fn completion_follows_the_last_accepted_batch_without_an_empty_callback() {
+        let fixture = fixture();
+        let expected = one_page_expectations(&fixture);
+        assert!(!expected.is_empty(), "fixture must provide lexical pages");
+        let mut source = fixture.open();
+        let accepted = source
+            .next_page_batch_if(&ActiveControl, bounds_for(&expected), |pages| {
+                assert_eq!(pages.len(), expected.len());
+                Ok::<(), ()>(())
+            })
+            .expect("source stages the final batch")
+            .expect("callback accepts the final batch");
+        let accepted = pages(accepted);
+        assert_eq!(accepted.len(), expected.len());
+        for (page, expected) in accepted.iter().zip(&expected) {
+            assert_page_matches(page, expected);
+        }
+
+        let mut callback_called = false;
+        let complete = source
+            .next_page_batch_if(&ActiveControl, bounds_for(&expected), |_| {
+                callback_called = true;
+                Ok::<(), ()>(())
+            })
+            .expect("completed source stays readable")
+            .expect("completion has no callback error");
+        let VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) = complete else {
+            panic!("completion follows the last accepted batch")
+        };
+        assert!(
+            !callback_called,
+            "completion must not invoke an empty callback"
+        );
+        receipt
+            .verify_completion(Some(source.cursor()))
+            .expect("completed receipt matches accepted cursor");
+    }
+
+    #[test]
+    fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
+        let fixture = fixture();
+        let expected = one_page_expectations(&fixture);
+        assert!(
+            expected.len() >= 2,
+            "fixture must provide a multi-page source"
+        );
+        let mut source = fixture.open();
+        let cursor_before = source
+            .cursor()
+            .persisted_bytes()
+            .expect("initial cursor persists");
+        let control = CancelDuringStaging::new();
+        let mut callback_called = false;
+        let error = source
+            .next_page_batch_if(&control, bounds_for(&expected[..2]), |_| {
+                callback_called = true;
+                Ok::<(), ()>(())
+            })
+            .expect_err("cancellation must interrupt batch staging");
+        assert!(matches!(
+            error,
+            CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+        ));
+        assert!(
+            control.checks.load(Ordering::Acquire) > 1,
+            "cancellation must be checked during source staging"
+        );
+        assert!(
+            !callback_called,
+            "cancelled staging must not invoke the callback"
+        );
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("cancelled cursor persists"),
+            cursor_before,
+        );
+    }
 }
