@@ -57,6 +57,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_str()
             .unwrap_or_else(|| panic!("missing user settings revision: {settings}"))
             .to_owned();
+        let worker_revision = settings["user"]["code_index_worker_configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing profile worker revision: {settings}"))
+            .to_owned();
         assert_eq!(
             user_revision, revision,
             "project and profile values must share one configuration revision"
@@ -68,6 +72,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
         let user_legacy_config_before = std::fs::read(&user_legacy_config_path).ok();
         assert_eq!(settings["user"]["legacy_config_read_only"], true);
+        assert!(
+            settings["user"]["code_index_worker_configuration_snapshot_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "settings must expose the profile worker snapshot: {settings}"
+        );
         let legacy_config_path = std::path::PathBuf::from(
             settings["project"]["legacy_config_path"]
                 .as_str()
@@ -80,6 +90,27 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         let legacy_config_before = std::fs::read(&legacy_config_path).ok();
 
         assert_eq!(settings["user"]["upload_enabled"], false);
+        assert_eq!(
+            settings["user"]["code_index_workers"],
+            json!({ "mode": "automatic" }),
+            "the profile worker selection must use the canonical tagged contract"
+        );
+        let worker_status = &settings["user"]["code_index_worker_status"];
+        if !worker_status.is_null() {
+            for field in [
+                "configured",
+                "environment_override_workers",
+                "effective_workers",
+                "available_logical_cpus",
+                "memory_safe_workers",
+                "limiting_reason",
+            ] {
+                assert!(
+                    worker_status.get(field).is_some(),
+                    "installed code-index status must retain `{field}`: {worker_status}"
+                );
+            }
+        }
         assert_eq!(settings["user"]["watcher_debounce"], "2s");
         assert_eq!(settings["user"]["extraction_timeout_secs"], 60);
 
@@ -298,6 +329,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(zero["validation_errors"][0]["field"], "max_file_size");
 
         let user_url = format!("{url}/user");
+        let worker_url = format!("{user_url}/code-index-workers");
         let (status, unavailable_user) = patch_json_body(
             &agent,
             &user_url,
@@ -350,6 +382,57 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "watcher_debounce"
         );
 
+        let (status, mixed_user_worker_patch) = patch_json_body(
+            &agent,
+            &user_url,
+            &json!({
+                "expected_revision_id": user_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-user-workers-mixed",
+                "code_index_workers": { "mode": "automatic" }
+            }),
+        );
+        assert_eq!(
+            status, 400,
+            "the project-backed user route must reject a mixed profile worker patch: {mixed_user_worker_patch}"
+        );
+        assert_eq!(
+            mixed_user_worker_patch["validation_errors"][0]["field"],
+            "code_index_workers"
+        );
+
+        let (status, zero_workers) = patch_json_body(
+            &agent,
+            &worker_url,
+            &json!({
+                "expected_revision_id": worker_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-worker-zero",
+                "code_index_workers": { "mode": "exact", "workers": 0 }
+            }),
+        );
+        assert_eq!(
+            status, 400,
+            "zero exact workers must be denied before a durable mutation: {zero_workers}"
+        );
+        assert_eq!(
+            zero_workers["validation_errors"][0]["field"],
+            "code_index_workers"
+        );
+
+        let (status, unknown_worker_key) = patch_json_body(
+            &agent,
+            &worker_url,
+            &json!({
+                "expected_revision_id": worker_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-worker-unknown-key",
+                "code_index_workers": { "mode": "automatic", "workers": 4 }
+            }),
+        );
+        assert_eq!(
+            status, 400,
+            "unknown nested worker selection keys must be rejected: {unknown_worker_key}"
+        );
+        assert_eq!(unknown_worker_key["validation_errors"][0]["field"], "workers");
+
         let (status, reloaded_envelope) = get_json(&agent, &url);
         assert_eq!(status, 200);
         let reloaded = reloaded_envelope["payload"].clone();
@@ -358,5 +441,96 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(reloaded["user"]["configuration_revision_id"], user_revision);
         assert_eq!(reloaded["user"]["upload_enabled"], false);
         assert_eq!(reloaded["user"]["watcher_debounce"], "2s");
+    });
+}
+
+#[test]
+fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_patch() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_configuration_fixture().await;
+        let agent = http_agent();
+        let settings_url = format!("{}/api/settings", fixture.base_url);
+        let worker_url = format!("{settings_url}/user/code-index-workers");
+
+        let (status, before_envelope) = get_json(&agent, &settings_url);
+        assert_eq!(status, 200, "GET settings failed: {before_envelope}");
+        let before = &before_envelope["payload"];
+        let worker_revision = before["user"]["code_index_worker_configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing profile worker revision: {before}"))
+            .to_owned();
+        let user_revision = before["user"]["configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing user revision: {before}"))
+            .to_owned();
+        assert_eq!(
+            before["user"]["code_index_workers"],
+            json!({ "mode": "automatic" })
+        );
+
+        let (status, patched_envelope) = patch_json_body(
+            &agent,
+            &worker_url,
+            &json!({
+                "expected_revision_id": worker_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-profile-workers-exact",
+                "code_index_workers": { "mode": "exact", "workers": 1 }
+            }),
+        );
+        assert_eq!(status, 200, "worker patch failed: {patched_envelope}");
+        assert_eq!(patched_envelope["schema_revision"], 1);
+        assert_eq!(patched_envelope["payload"]["restart_recommended"], true);
+        assert_eq!(
+            patched_envelope["payload"]["user"]["code_index_workers"],
+            json!({ "mode": "exact", "workers": 1 })
+        );
+        let patched_revision = patched_envelope["payload"]["user"]
+            ["code_index_worker_configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("worker patch omitted profile worker revision: {patched_envelope}"));
+        assert_ne!(patched_revision, worker_revision);
+        assert_eq!(
+            patched_envelope["payload"]["user"]["configuration_revision_id"],
+            user_revision,
+            "a profile worker write must not advance the ordinary user revision"
+        );
+
+        let worker_status = &patched_envelope["payload"]["user"]["code_index_worker_status"];
+        if !worker_status.is_null() {
+            for field in [
+                "configured",
+                "environment_override_workers",
+                "effective_workers",
+                "available_logical_cpus",
+                "memory_safe_workers",
+                "limiting_reason",
+            ] {
+                assert!(
+                    worker_status.get(field).is_some(),
+                    "worker status must retain `{field}` after a persisted selection changes: {worker_status}"
+                );
+            }
+        }
+
+        let (status, refreshed_envelope) = get_json(&agent, &settings_url);
+        assert_eq!(status, 200, "refresh after worker patch failed: {refreshed_envelope}");
+        assert_eq!(
+            refreshed_envelope["payload"]["user"]["code_index_workers"],
+            json!({ "mode": "exact", "workers": 1 }),
+            "the refresh must show the durable profile selection, not a browser-side draft"
+        );
+        assert_eq!(
+            refreshed_envelope["payload"]["user"]["code_index_worker_configuration_revision_id"],
+            patched_revision
+        );
+        assert_eq!(
+            refreshed_envelope["payload"]["user"]["configuration_revision_id"],
+            user_revision,
+            "refresh must retain the unrelated user configuration revision"
+        );
     });
 }

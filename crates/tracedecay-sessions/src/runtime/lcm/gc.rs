@@ -26,7 +26,7 @@ pub(crate) use placeholder_scan::{
     PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
     any_placeholder_text_row, bind_placeholder_like_patterns, count_placeholder_text_rows,
     gc_prefix_like_patterns, gc_prefix_ref_like_patterns, live_prefix_like_patterns,
-    placeholder_text_like_sql, scan_placeholder_text_rows,
+    live_prefix_ref_like_patterns, placeholder_text_like_sql, scan_placeholder_text_rows,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -816,7 +816,10 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
     }
     let marks = gc_marks(conn, &candidates).await?;
     let mut marks_to_upsert = Vec::new();
-    let mut stale_marks = Vec::new();
+    let mut marks_to_delete = Vec::new();
+    // One reference-closure scan for the whole batch instead of one per
+    // candidate: only a payload's own deletion can change its own membership.
+    let mut referenced_closure = payload::ReferencedClosureCache::default();
 
     for payload_ref in &candidates {
         let mark = marks.get(payload_ref);
@@ -851,15 +854,17 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         }
         let bytes = metadata_bytes.get(payload_ref).copied().unwrap_or_default();
         if apply {
-            match payload::delete_external_payload_in_transaction(
+            match payload::prepare_external_payload_delete_in_transaction_with_cache(
                 conn,
                 storage_root,
                 payload_ref,
                 &payload::DeleteOpts::default(),
+                &mut referenced_closure,
             )
             .await
             {
                 Ok(prepared) => {
+                    marks_to_delete.push(payload_ref.clone());
                     let outcome = prepared.outcome;
                     if outcome.metadata_row_existed {
                         report.totals.rows_deleted += 1;
@@ -867,7 +872,7 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
                     report.totals.placeholders_rewritten += outcome.placeholders_rewritten;
                 }
                 Err(LcmError::StillReferenced) => {
-                    stale_marks.push(payload_ref.clone());
+                    marks_to_delete.push(payload_ref.clone());
                     continue;
                 }
                 Err(LcmError::PayloadIntegrityMismatch) => {
@@ -889,7 +894,7 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
     }
     if apply {
         upsert_gc_marks(conn, &marks_to_upsert, "unreferenced", now).await?;
-        delete_gc_marks(conn, &stale_marks).await?;
+        delete_gc_marks(conn, &marks_to_delete).await?;
     }
     Ok(())
 }
@@ -950,6 +955,9 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     }
     let marks = gc_marks(conn, &missing_refs).await?;
     let mut marks_to_upsert = Vec::new();
+    let mut marks_to_delete = Vec::new();
+    // As in `reap_unreferenced_metadata`: one scan per provider for the batch.
+    let mut referenced_closure = payload::ReferencedClosureCache::default();
     for payload_ref in &missing_refs {
         let first_seen_at = match marks.get(payload_ref) {
             Some((state, first_seen_at)) if state == "missing" => *first_seen_at,
@@ -965,7 +973,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
             report.batch_cap(1);
             continue;
         }
-        match payload::delete_external_payload_in_transaction(
+        match payload::prepare_external_payload_delete_in_transaction_with_cache(
             conn,
             storage_root,
             payload_ref,
@@ -974,10 +982,12 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
                 remove_file: false,
                 verify_hash: false,
             },
+            &mut referenced_closure,
         )
         .await
         {
             Ok(prepared) => {
+                marks_to_delete.push(payload_ref.clone());
                 let outcome = prepared.outcome;
                 if outcome.metadata_row_existed {
                     report.totals.rows_deleted += 1;
@@ -993,6 +1003,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     }
     if apply {
         upsert_gc_marks(conn, &marks_to_upsert, "missing", now).await?;
+        delete_gc_marks(conn, &marks_to_delete).await?;
     }
     Ok(())
 }
@@ -1126,7 +1137,7 @@ fn tombstone_text_for_refs(text: &str, payload_refs: &BTreeSet<String>) -> (Stri
     (out, changed)
 }
 
-async fn delete_gc_marks(
+pub(super) async fn delete_gc_marks(
     conn: &(impl Executor + ?Sized),
     payload_refs: &[String],
 ) -> Result<(), LcmError> {

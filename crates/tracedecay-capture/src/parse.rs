@@ -1,5 +1,6 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use thiserror::Error;
 pub use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 use tracedecay_domain::{
@@ -117,6 +118,61 @@ impl ParsedClaudeRecordV1 {
 pub type ParsedObservationRecordV1 = ParsedClaudeRecordV1;
 pub type ObservationRecordParseErrorV1 = ClaudeRecordParseErrorV1;
 
+/// Structurally validated native JSON that may be normalized independently
+/// for several observation scopes without decoding or hashing the source bytes
+/// again. It is process-retained evidence only; durable replay remains the
+/// original JSONL plus each scope's source cursor.
+#[derive(Clone)]
+pub struct PreparedObservationRecordV1 {
+    native: Arc<Value>,
+    source_range: ClaudeByteRangeV1,
+    ordering_domain: ObservationOrderingDomainV1,
+    encoded_len: usize,
+    raw_digest: [u8; 32],
+    retained_bytes: u64,
+}
+
+impl PreparedObservationRecordV1 {
+    /// Conservative process-retained charge for the decoded native tree.
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
+    }
+}
+
+fn decoded_value_retained_bytes(value: &Value) -> u64 {
+    const OBJECT_ENTRY_OVERHEAD: u64 = 128;
+
+    fn payload(value: &Value) -> u64 {
+        match value {
+            Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+            Value::String(value) => u64::try_from(value.capacity()).unwrap_or(u64::MAX),
+            Value::Array(values) => {
+                let slots = values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Value>());
+                values
+                    .iter()
+                    .fold(u64::try_from(slots).unwrap_or(u64::MAX), |total, value| {
+                        total.saturating_add(payload(value))
+                    })
+            }
+            Value::Object(values) => values.iter().fold(0_u64, |total, (key, value)| {
+                total
+                    .saturating_add(OBJECT_ENTRY_OVERHEAD)
+                    .saturating_add(u64::try_from(key.capacity()).unwrap_or(u64::MAX))
+                    .saturating_add(payload(value))
+            }),
+        }
+    }
+
+    u64::try_from(
+        std::mem::size_of::<Value>()
+            .saturating_add(2_usize.saturating_mul(std::mem::size_of::<usize>())),
+    )
+    .unwrap_or(u64::MAX)
+    .saturating_add(payload(value))
+}
+
 pub fn parse_claude_record_v1(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
@@ -151,6 +207,18 @@ pub fn parse_normalized_observation_record_v1(
         Value,
     ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1>,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
+    normalize_prepared_observation_record_v1(
+        prepare_observation_record_v1(record, source_range, ordering_domain)?,
+        |native| normalize(native.clone()),
+    )
+}
+
+#[hotpath::measure]
+pub fn prepare_observation_record_v1(
+    record: &[u8],
+    source_range: ClaudeByteRangeV1,
+    ordering_domain: ObservationOrderingDomainV1,
+) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
     let limits = ParseLimits::default_policy();
     validate_record_frame(record, source_range, ordering_domain, limits)?;
     let native =
@@ -159,12 +227,31 @@ pub fn parse_normalized_observation_record_v1(
         return Err(ClaudeRecordParseErrorV1::NonObject);
     }
     validate_structure(&native, limits)?;
-    let envelope = normalize(native)?;
+    let retained_bytes = decoded_value_retained_bytes(&native);
+    Ok(PreparedObservationRecordV1 {
+        native: Arc::new(native),
+        source_range,
+        ordering_domain,
+        encoded_len: record.len(),
+        raw_digest: record_digest(record),
+        retained_bytes,
+    })
+}
+
+#[hotpath::measure]
+pub fn normalize_prepared_observation_record_v1(
+    prepared: PreparedObservationRecordV1,
+    normalize: impl FnOnce(
+        &Value,
+    ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1>,
+) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
+    let limits = ParseLimits::default_policy();
+    let envelope = normalize(prepared.native.as_ref())?;
     envelope
         .validate()
         .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
-    if envelope.evidence().ordering_domain() != ordering_domain
-        || envelope.evidence().range() != source_range
+    if envelope.evidence().ordering_domain() != prepared.ordering_domain
+        || envelope.evidence().range() != prepared.source_range
     {
         return Err(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope);
     }
@@ -179,12 +266,12 @@ pub fn parse_normalized_observation_record_v1(
     let structure = validate_structure(&value, limits)?;
     Ok(ParsedObservationRecordV1 {
         value,
-        source_range,
-        ordering_domain,
-        encoded_len: record.len(),
+        source_range: prepared.source_range,
+        ordering_domain: prepared.ordering_domain,
+        encoded_len: prepared.encoded_len,
         observed_depth: structure.depth,
         observed_values: structure.values,
-        raw_digest: record_digest(record),
+        raw_digest: prepared.raw_digest,
         canonical_provider: Some(canonical_provider),
     })
 }

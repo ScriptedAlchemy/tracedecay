@@ -23,8 +23,11 @@
  */
 
 import {
+  planCodeIndexWorkerChangeAgainst,
   planProjectChangeAgainst,
   planUserChangeAgainst,
+  type CodeIndexWorkerSettingsChangeSet,
+  type CodeIndexWorkerSettingsValues,
   settingsRevisionId,
   type ProjectSettingsChangeSet,
   type ProjectSettingsValues,
@@ -42,6 +45,7 @@ import type { SettingsMutationRequest, SettingsMutationResult } from './settings
 export interface SettingsDraft {
   readonly project: ProjectSettingsValues;
   readonly user: UserSettingsValues;
+  readonly codeIndexWorkers: CodeIndexWorkerSettingsValues;
 }
 
 /**
@@ -55,7 +59,10 @@ export interface SettingsDraft {
 export interface SettingsReview {
   readonly scope: SettingsScope;
   readonly expectedRevisionId: string;
-  readonly patch: ProjectSettingsChangeSet | UserSettingsChangeSet;
+  readonly patch:
+    | ProjectSettingsChangeSet
+    | UserSettingsChangeSet
+    | CodeIndexWorkerSettingsChangeSet;
   readonly reviewId: string;
   readonly idempotencyKey: string;
 }
@@ -138,6 +145,7 @@ export type SettingsEditorAction =
   | { readonly type: 'authority_observed'; readonly authority: SettingsEditor | null }
   | { readonly type: 'project_drafted'; readonly values: ProjectSettingsValues }
   | { readonly type: 'user_drafted'; readonly values: UserSettingsValues }
+  | { readonly type: 'code_index_workers_drafted'; readonly values: CodeIndexWorkerSettingsValues }
   | {
       readonly type: 'review_requested';
       readonly scope: SettingsScope;
@@ -169,6 +177,8 @@ export function reduceSettingsEditor(
       return redraft(state, (draft) => ({ ...draft, project: action.values }));
     case 'user_drafted':
       return redraft(state, (draft) => ({ ...draft, user: action.values }));
+    case 'code_index_workers_drafted':
+      return redraft(state, (draft) => ({ ...draft, codeIndexWorkers: action.values }));
     case 'review_requested':
       return requestReview(state, action.scope, action.idempotencyKey);
     case 'review_dismissed':
@@ -442,8 +452,11 @@ function settleSubmit(
 
 export interface SettingsRoutes {
   readonly readUrl: string;
+  /** Profile-global authority read used only by the worker resource. */
+  readonly codeIndexWorkerReadUrl: string;
   readonly projectPatchUrl: string;
   readonly userPatchUrl: string;
+  readonly codeIndexWorkerPatchUrl: string;
 }
 
 export type SubmittingSettingsState = Extract<SettingsEditorState, { status: 'submitting' }>;
@@ -469,7 +482,7 @@ export function settingsSubmission(
     scope: state.review.scope,
     expectedRevisionId: state.review.expectedRevisionId,
     idempotencyKey: state.review.idempotencyKey,
-    readUrl: routes.readUrl,
+    readUrl: readUrlFor(state.review.scope, routes),
     patchUrl: patchUrlFor(state.review.scope, routes),
     patch: state.review.patch,
   };
@@ -567,10 +580,16 @@ function failed(
 }
 
 function draftOf(authority: SettingsEditor): SettingsDraft {
-  return { project: authority.project, user: authority.user };
+  return {
+    project: authority.project,
+    user: authority.user,
+    codeIndexWorkers: authority.codeIndexWorkers,
+  };
 }
 
-type SettingsPlan = SettingsChangePlan<ProjectSettingsChangeSet | UserSettingsChangeSet>;
+type SettingsPlan = SettingsChangePlan<
+  ProjectSettingsChangeSet | UserSettingsChangeSet | CodeIndexWorkerSettingsChangeSet
+>;
 
 function planFor(
   authority: SettingsEditor,
@@ -582,6 +601,8 @@ function planFor(
       return planProjectChangeAgainst(authority, draft.project);
     case 'user':
       return planUserChangeAgainst(authority, draft.user);
+    case 'code_index_workers':
+      return planCodeIndexWorkerChangeAgainst(authority, draft.codeIndexWorkers);
     default: {
       const exhaustive: never = scope;
       return exhaustive;
@@ -609,11 +630,17 @@ function patchUrlFor(scope: SettingsScope, routes: SettingsRoutes): string {
       return routes.projectPatchUrl;
     case 'user':
       return routes.userPatchUrl;
+    case 'code_index_workers':
+      return routes.codeIndexWorkerPatchUrl;
     default: {
       const exhaustive: never = scope;
       return exhaustive;
     }
   }
+}
+
+function readUrlFor(scope: SettingsScope, routes: SettingsRoutes): string {
+  return scope === 'code_index_workers' ? routes.codeIndexWorkerReadUrl : routes.readUrl;
 }
 
 function savedMessage(scope: SettingsScope): string {
@@ -622,6 +649,8 @@ function savedMessage(scope: SettingsScope): string {
       return 'Project settings saved';
     case 'user':
       return 'User settings saved';
+    case 'code_index_workers':
+      return 'Code-index worker selection saved';
     default: {
       const exhaustive: never = scope;
       return exhaustive;
@@ -647,8 +676,10 @@ function sameAuthority(left: SettingsEditor, right: SettingsEditor): boolean {
   return (
     left.projectExpectedRevisionId === right.projectExpectedRevisionId &&
     left.userExpectedRevisionId === right.userExpectedRevisionId &&
+    left.codeIndexWorkerExpectedRevisionId === right.codeIndexWorkerExpectedRevisionId &&
     sameProjectValues(left.project, right.project) &&
-    sameUserValues(left.user, right.user)
+    sameUserValues(left.user, right.user) &&
+    sameCodeIndexWorkerValues(left.codeIndexWorkers, right.codeIndexWorkers)
   );
 }
 
@@ -675,6 +706,41 @@ function sameUserValues(left: UserSettingsValues, right: UserSettingsValues): bo
     left.upload_enabled === right.upload_enabled &&
     left.watcher_debounce === right.watcher_debounce &&
     left.extraction_timeout_secs === right.extraction_timeout_secs
+  );
+}
+
+function sameCodeIndexWorkerValues(
+  left: CodeIndexWorkerSettingsValues,
+  right: CodeIndexWorkerSettingsValues,
+): boolean {
+  return (
+    sameCodeIndexWorkerSelection(left.code_index_workers, right.code_index_workers) &&
+    sameCodeIndexWorkerStatus(left.code_index_worker_status, right.code_index_worker_status)
+  );
+}
+
+function sameCodeIndexWorkerSelection(
+  left: CodeIndexWorkerSettingsValues['code_index_workers'],
+  right: CodeIndexWorkerSettingsValues['code_index_workers'],
+): boolean {
+  return (
+    left.mode === right.mode &&
+    (left.mode !== 'exact' || (right.mode === 'exact' && left.workers === right.workers))
+  );
+}
+
+function sameCodeIndexWorkerStatus(
+  left: CodeIndexWorkerSettingsValues['code_index_worker_status'],
+  right: CodeIndexWorkerSettingsValues['code_index_worker_status'],
+): boolean {
+  if (left === null || right === null) return left === right;
+  return (
+    sameCodeIndexWorkerSelection(left.configured, right.configured) &&
+    left.environment_override_workers === right.environment_override_workers &&
+    left.effective_workers === right.effective_workers &&
+    left.available_logical_cpus === right.available_logical_cpus &&
+    left.memory_safe_workers === right.memory_safe_workers &&
+    left.limiting_reason === right.limiting_reason
   );
 }
 
