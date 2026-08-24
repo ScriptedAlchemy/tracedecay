@@ -424,8 +424,17 @@ impl ExactSqlHandle {
         (self.health_snapshot)(max_wait)
     }
 
+    /// Opens an immediate exact-SQL transaction, measured as the whole caller
+    /// round trip.
+    ///
+    /// The span covers dispatching to the exact-SQL worker, waiting for that
+    /// single thread to reach this command, and the lock acquisition it then
+    /// performs — not the lock alone. Long-running commands on the same worker
+    /// (vacuum, WAL truncation, a long-lease transaction) are therefore visible
+    /// here as begin latency even when SQLite was never contended, which is the
+    /// distinction `rusqlite.exact_sql.write_lock` exists to make.
     pub fn begin_immediate(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.begin_immediate", {
+        hotpath::measure_block!("rusqlite.exact_sql.begin_immediate", {
             self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
         })
     }

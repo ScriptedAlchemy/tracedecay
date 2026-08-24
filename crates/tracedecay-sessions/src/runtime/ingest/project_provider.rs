@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
@@ -118,6 +119,7 @@ pub(super) struct ProjectProviderRun<'a> {
     pub(super) candidate: SessionProvider,
     pub(super) max_new_bytes: u64,
     pub(super) cancellation: &'a ObservationCancellation,
+    pub(super) codex_discovery: Option<(&'a codex::CodexDiscoveryHub, &'a str)>,
 }
 
 pub(super) struct ProjectProviderRunResult {
@@ -179,33 +181,95 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = codex::CodexSource::new() else {
             return ProviderRunOutcome::skipped();
         };
-        let stored = read_codex_history_frontier(self.facade, self.scope)
-            .await
-            .unwrap_or(0);
-        let coverage_complete = matches!(
-            read_host_provider_coverage(self.facade, self.scope, "codex")
-                .await
-                .ok()
-                .flatten(),
+        let stored = match read_codex_history_frontier(self.facade, self.scope).await {
+            Ok(frontier) => frontier,
+            Err(error) => {
+                return ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "codex",
+                        "frontier",
+                        &error,
+                        "project Codex discovery frontier read failed",
+                    ),
+                    0,
+                );
+            }
+        };
+        let stored_coverage =
+            match read_host_provider_coverage(self.facade, self.scope, "codex").await {
+                Ok(coverage) => coverage,
+                Err(error) => {
+                    return ProviderRunOutcome::failed(
+                        warn_transcript_catch_up_failure(
+                            "codex",
+                            "coverage",
+                            &error,
+                            "project Codex coverage read failed",
+                        ),
+                        0,
+                    );
+                }
+            };
+        let frontier = stored.for_coverage(matches!(
+            stored_coverage,
             Some(HostProviderCoverage::Complete)
-        );
-        let rotation = crate::runtime::codex::effective_history_rotation(stored, coverage_complete);
-        let pass = source.discover_transcript_paths_with_rotation(
-            TranscriptDiscoveryBounds::default_walk(),
-            rotation,
-        );
-        let next_history_rotation = pass.next_history_rotation;
-        let discovery = pass.report;
+        ));
+        let discovered = match self.codex_discovery {
+            Some((hub, consumer)) => match hub
+                .discover(
+                    consumer,
+                    &source,
+                    TranscriptDiscoveryBounds::default_walk(),
+                    frontier,
+                )
+                .await
+            {
+                Ok(codex::CodexDiscoveryDelivery::Ready(pass)) => Ok(pass),
+                Ok(codex::CodexDiscoveryDelivery::Waiting) => {
+                    return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, true);
+                }
+                Err(error) => Err(error),
+            },
+            None => source
+                .discover_transcript_paths_with_frontier(
+                    TranscriptDiscoveryBounds::default_walk(),
+                    frontier,
+                )
+                .map(Arc::new),
+        };
+        let pass = match discovered {
+            Ok(pass) => pass,
+            Err(error) => {
+                return ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "codex",
+                        "discovery",
+                        &error,
+                        "project Codex transcript discovery failed",
+                    ),
+                    0,
+                );
+            }
+        };
+        let next_frontier = pass.next_frontier;
+        let discovery = &pass.report;
         let mut remaining = self.max_new_bytes;
         let mut deferred = discovery.is_truncated();
+        let mut frontier_committable = true;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
-        for path in discovery.paths {
+        for path in &discovery.paths {
+            if remaining == 0 {
+                deferred = true;
+                frontier_committable = false;
+                break;
+            }
             if self.cancellation.is_cancelled() {
                 deferred = true;
+                frontier_committable = false;
                 break;
             }
             match codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
-                &path,
+                path,
                 self.project_root,
                 self.project_id.clone(),
                 self.facade,
@@ -216,6 +280,8 @@ impl<'a> ProjectProviderRun<'a> {
             {
                 Ok(progress) => {
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
+                    frontier_committable &=
+                        !progress.source_deferred && progress.bytes_consumed <= remaining;
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
                 }
                 Err(error) => {
@@ -234,6 +300,7 @@ impl<'a> ProjectProviderRun<'a> {
                         failure.retryable,
                     );
                     outcome.add_failure(failure);
+                    frontier_committable = false;
                     if stop {
                         deferred = true;
                         break;
@@ -243,9 +310,14 @@ impl<'a> ProjectProviderRun<'a> {
         }
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
         outcome.add_deferred_units(u64::from(deferred));
-        if let Err(error) =
-            persist_codex_history_frontier(self.facade, self.scope, next_history_rotation).await
+        let mut frontier_persisted = frontier_committable;
+        if frontier_committable
+            && next_frontier != stored
+            && let Err(error) =
+                persist_codex_history_frontier(self.facade, self.scope, stored, next_frontier).await
         {
+            frontier_persisted = false;
+            outcome.add_deferred_units(1);
             outcome.add_failure(warn_transcript_catch_up_failure(
                 "codex",
                 "frontier",
@@ -253,19 +325,20 @@ impl<'a> ProjectProviderRun<'a> {
                 "project Codex history frontier persistence failed",
             ));
         }
-        let coverage = if deferred {
+        let coverage = if deferred || !frontier_persisted {
             HostProviderCoverage::Partial
         } else {
             HostProviderCoverage::Complete
         };
-        if let Err(error) = persist_host_provider_coverage(
-            self.facade,
-            self.scope,
-            "codex",
-            coverage,
-            u64::from(deferred),
-        )
-        .await
+        if stored_coverage != Some(coverage)
+            && let Err(error) = persist_host_provider_coverage(
+                self.facade,
+                self.scope,
+                "codex",
+                coverage,
+                u64::from(coverage != HostProviderCoverage::Complete),
+            )
+            .await
         {
             outcome.add_failure(warn_transcript_catch_up_failure(
                 "codex",
@@ -274,7 +347,15 @@ impl<'a> ProjectProviderRun<'a> {
                 "project Codex coverage persistence failed",
             ));
         }
-        crate::runtime::pipeline_metrics::record_historical_ingest(!deferred);
+        if frontier_committable
+            && frontier_persisted
+            && let Some((hub, consumer)) = self.codex_discovery
+        {
+            hub.acknowledge(consumer);
+        }
+        crate::runtime::pipeline_metrics::record_historical_ingest(
+            coverage == HostProviderCoverage::Complete,
+        );
         outcome
     }
 

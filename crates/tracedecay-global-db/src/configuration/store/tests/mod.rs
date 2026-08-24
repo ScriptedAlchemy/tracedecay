@@ -276,6 +276,20 @@ fn control_authority_with_key(
     expected_revision: &ConfigurationRevisionId,
     idempotency_key: Option<ConfigurationIdempotencyKey>,
 ) -> ConfigurationMutationAuthority {
+    control_authority_with_key_for_layer(
+        operation,
+        expected_revision,
+        idempotency_key,
+        direct_project_layer(),
+    )
+}
+
+fn control_authority_with_key_for_layer(
+    operation: ConfigurationMutationOperationV1,
+    expected_revision: &ConfigurationRevisionId,
+    idempotency_key: Option<ConfigurationIdempotencyKey>,
+    direct_layer: ConfigurationLayerIdV1,
+) -> ConfigurationMutationAuthority {
     let (sink, effect) = match operation {
         ConfigurationMutationOperationV1::CredentialWrite => (
             ConfigurationMutationSinkV1::CredentialStore,
@@ -296,7 +310,7 @@ fn control_authority_with_key(
     let scope_digest = if operation == ConfigurationMutationOperationV1::DirectMutation {
         canonical_sha256(&(
             "tracedecay.configuration.direct-target-layer.v1",
-            direct_project_layer(),
+            direct_layer,
         ))
         .unwrap()
     } else {

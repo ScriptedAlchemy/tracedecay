@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use tracedecay_automation::config::AutomationConfig;
 use tracedecay_domain::configuration::{
-    CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey,
-    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
+    ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
 };
 
 use super::{DirectConfigurationMutation, ProductionConfigurationDaemonClient};
@@ -28,7 +28,6 @@ pub struct UserSettingsSnapshotV1 {
     pub configuration_snapshot_id: String,
     pub configuration_revision_id: String,
     pub upload_enabled: bool,
-    pub code_index_workers: CodeIndexWorkerSelectionV1,
     pub watcher_debounce: String,
     pub watcher_debounce_ms: u64,
     pub extraction_timeout_secs: u64,
@@ -40,7 +39,6 @@ pub struct UserSettingsSnapshotV1 {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserSettingsMutationV1 {
     pub upload_enabled: Option<bool>,
-    pub code_index_workers: Option<CodeIndexWorkerSelectionV1>,
     pub watcher_debounce: Option<String>,
     pub extraction_timeout_secs: Option<u64>,
 }
@@ -138,8 +136,6 @@ fn user_settings_snapshot(
 ) -> Result<UserSettingsSnapshotV1, UserSettingsAuthorityError> {
     validate_profile_provenance(current, profile_id)?;
     let upload_enabled = required_bool(current, USER_UPLOAD_ENABLED_SETTING_KEY)?;
-    let code_index_workers =
-        required_code_index_worker_selection(current, USER_CODE_INDEX_WORKERS_SETTING_KEY)?;
     let watcher_debounce_ms = required_unsigned(current, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY)?;
     let extraction_timeout_secs =
         required_unsigned(current, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY)?;
@@ -148,7 +144,6 @@ fn user_settings_snapshot(
         configuration_snapshot_id: current.snapshot.snapshot_id.as_str().to_owned(),
         configuration_revision_id: current.revision_id.as_str().to_owned(),
         upload_enabled,
-        code_index_workers,
         watcher_debounce: format_duration_millis(watcher_debounce_ms),
         watcher_debounce_ms,
         extraction_timeout_secs,
@@ -164,7 +159,6 @@ fn validate_profile_provenance(
 ) -> Result<(), UserSettingsAuthorityError> {
     for raw_key in [
         USER_UPLOAD_ENABLED_SETTING_KEY,
-        USER_CODE_INDEX_WORKERS_SETTING_KEY,
         USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
         USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
     ] {
@@ -214,17 +208,6 @@ pub fn plan_user_settings_mutation(
             layer.clone(),
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
             ConfigurationValueV1::Unsigned(watcher_debounce_ms),
-        )?);
-        restart_recommended = true;
-    }
-    if let Some(code_index_workers) = mutation.code_index_workers {
-        code_index_workers
-            .validate()
-            .map_err(|_| unavailable("positive code index worker count"))?;
-        mutations.push(set(
-            layer.clone(),
-            USER_CODE_INDEX_WORKERS_SETTING_KEY,
-            ConfigurationValueV1::CodeIndexWorkerSelection(code_index_workers),
         )?);
         restart_recommended = true;
     }
@@ -309,23 +292,6 @@ fn required_unsigned(
     }
 }
 
-fn required_code_index_worker_selection(
-    current: &crate::config::PinnedRuntimeConfiguration,
-    raw_key: &str,
-) -> Result<CodeIndexWorkerSelectionV1, UserSettingsAuthorityError> {
-    match required_setting(current, raw_key)? {
-        ConfigurationValueV1::CodeIndexWorkerSelection(selection) => {
-            selection
-                .validate()
-                .map_err(|_| unavailable(format!("valid code index worker setting {raw_key}")))?;
-            Ok(*selection)
-        }
-        _ => Err(unavailable(format!(
-            "code index worker selection setting {raw_key}"
-        ))),
-    }
-}
-
 fn unavailable(authority: impl Into<String>) -> UserSettingsAuthorityError {
     UserSettingsAuthorityError::Unavailable {
         message: format!("user settings authority unavailable: {}", authority.into()),
@@ -342,7 +308,6 @@ mod tests {
             configuration_snapshot_id: "configuration.snapshot.fixture".to_owned(),
             configuration_revision_id: "configuration.revision.fixture".to_owned(),
             upload_enabled: false,
-            code_index_workers: CodeIndexWorkerSelectionV1::Automatic,
             watcher_debounce: "2s".to_owned(),
             watcher_debounce_ms: 2_000,
             extraction_timeout_secs: 60,
@@ -362,7 +327,6 @@ mod tests {
                 upload_enabled: Some(true),
                 watcher_debounce: Some("15s".to_owned()),
                 extraction_timeout_secs: Some(60),
-                code_index_workers: None,
             },
         )
         .unwrap();
@@ -377,53 +341,6 @@ mod tests {
                 }) if target_profile_id == &profile_id
             )
         }));
-    }
-
-    #[test]
-    fn code_index_worker_plan_preserves_exact_profile_value_and_requires_restart() {
-        let profile_id = UserProfileId::new("profile.fixture").unwrap();
-        let plan = plan_user_settings_mutation(
-            &snapshot(),
-            profile_id.clone(),
-            UserSettingsMutationV1 {
-                code_index_workers: Some(CodeIndexWorkerSelectionV1::Exact { workers: 64 }),
-                ..UserSettingsMutationV1::default()
-            },
-        )
-        .unwrap();
-
-        assert!(plan.restart_recommended);
-        assert_eq!(plan.mutations.len(), 1);
-        assert!(matches!(
-            &plan.mutations[0],
-            DirectConfigurationMutation::Set { layer, key, value }
-                if layer == &ConfigurationLayerIdV1::UserProfile {
-                    profile_id
-                }
-                    && key.as_str() == USER_CODE_INDEX_WORKERS_SETTING_KEY
-                    && value.as_ref()
-                        == &ConfigurationValueV1::CodeIndexWorkerSelection(
-                            CodeIndexWorkerSelectionV1::Exact { workers: 64 },
-                        )
-        ));
-    }
-
-    #[test]
-    fn code_index_worker_plan_denies_zero_without_staging_a_mutation() {
-        let result = plan_user_settings_mutation(
-            &snapshot(),
-            UserProfileId::new("profile.fixture").unwrap(),
-            UserSettingsMutationV1 {
-                code_index_workers: Some(CodeIndexWorkerSelectionV1::Exact { workers: 0 }),
-                ..UserSettingsMutationV1::default()
-            },
-        );
-
-        assert!(matches!(
-            result,
-            Err(UserSettingsAuthorityError::Unavailable { message })
-                if message.contains("positive code index worker count")
-        ));
     }
 
     #[test]

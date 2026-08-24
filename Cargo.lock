@@ -6479,6 +6479,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "url",
 ]
 
