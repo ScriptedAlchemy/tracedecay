@@ -7,6 +7,7 @@ import {
   MAX_NATIVE_DIAGNOSTIC_MESSAGE_BYTES,
   admitNativeWorkspace,
   createNativeDiagnosticsPayload,
+  batchAdmittedNativeDiagnosticDocuments,
   limitAdmittedNativeDiagnosticDocuments,
   resolveInstalledTraceDecayBinary,
   traceDecayInitializationOptions,
@@ -97,6 +98,21 @@ test("prioritizes admitted documents before the notification cap", () => {
       (document) => document.startsWith("file:///workspace/"),
     ),
     ["file:///workspace/first.ts", "file:///workspace/second.ts"],
+  );
+});
+
+test("batches startup documents instead of dropping the tail", () => {
+  const documents = Array.from(
+    { length: MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT + 3 },
+    (_, index) => `file:///workspace/${index}.ts`,
+  );
+
+  assert.deepEqual(
+    batchAdmittedNativeDiagnosticDocuments(documents, () => true),
+    [
+      documents.slice(0, MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT),
+      documents.slice(MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT),
+    ],
   );
 });
 

@@ -127,6 +127,25 @@ export function limitAdmittedNativeDiagnosticDocuments<T>(
     .slice(0, MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT);
 }
 
+/** Split admitted documents into per-event batches at the notification cap. */
+export function batchAdmittedNativeDiagnosticDocuments<T>(
+  documents: readonly T[],
+  isAdmitted: (document: T) => boolean,
+): T[][] {
+  const admitted = documents.filter(isAdmitted);
+  const batches: T[][] = [];
+  for (
+    let offset = 0;
+    offset < admitted.length;
+    offset += MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT
+  ) {
+    batches.push(
+      admitted.slice(offset, offset + MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT),
+    );
+  }
+  return batches;
+}
+
 export function createNativeDiagnosticsPayload(
   uri: string,
   version: number,
