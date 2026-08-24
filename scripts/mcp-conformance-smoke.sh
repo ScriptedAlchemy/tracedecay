@@ -36,14 +36,19 @@ run_smoke() {
   local work_dir="$1"
   local fixture="$2"
   local tools_a tools_b call_out res_out
-  local diagnostics_out affected_out test_map_out symbol_json impact_out impact_err node_id
-  local impact_deadline impact_ready
+  local diagnostics_out affected_out test_map_out test_map_err symbol_json impact_out impact_err node_id
   local failures=0
 
   inspect() {
+    inspect_with_timeout "$CALL_TIMEOUT_SECS" "$@"
+  }
+
+  inspect_with_timeout() {
+    local timeout_secs="$1"
+    shift
     # Run from the fixture so the spawned server's cwd matches the indexed
     # project (otherwise tool results gain a cwd-mismatch warning block).
-    (cd "$fixture" && timeout "$CALL_TIMEOUT_SECS" \
+    (cd "$fixture" && timeout "$timeout_secs" \
       npx -y "@modelcontextprotocol/inspector@$INSPECTOR_VERSION" --cli \
       "$TRACEDECAY_BIN" serve -p "$fixture" "$@")
   }
@@ -55,6 +60,39 @@ run_smoke() {
       const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
       if (!eval(process.argv[2])) process.exit(1);
     ' "$1" "$2"
+  }
+
+  retryable_graph_warming_error() {
+    node - "$1" <<'NODE'
+const fs = require("fs");
+const error = fs.readFileSync(process.argv[2], "utf8");
+const retryable = /tool project route failed: reason_code=code-graph-(?:unavailable|stale) retryable=true:/.test(error);
+process.exit(retryable ? 0 : 1);
+NODE
+  }
+
+  call_tool_until_graph_ready() {
+    local output="$1"
+    local error="$2"
+    shift 2
+    local deadline=$((SECONDS + CALL_TIMEOUT_SECS))
+    local remaining
+
+    while ((SECONDS < deadline)); do
+      remaining=$((deadline - SECONDS))
+      if inspect_with_timeout "$remaining" "$@" >"$output" 2>"$error" &&
+        json_assert "$output" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+        return 0
+      fi
+      if ! retryable_graph_warming_error "$error"; then
+        return 1
+      fi
+      if ((SECONDS + 1 >= deadline)); then
+        break
+      fi
+      sleep 1
+    done
+    return 1
   }
 
   fail() {
@@ -164,24 +202,24 @@ NODE
   fi
 
   test_map_out="$work_dir/test-map.json"
-  if inspect --method tools/call --tool-name tracedecay_test_map --tool-arg file=src/main.rs >"$test_map_out" 2>/dev/null &&
-    json_assert "$test_map_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+  test_map_err="$work_dir/test-map.err"
+  if call_tool_until_graph_ready "$test_map_out" "$test_map_err" \
+    --method tools/call --tool-name tracedecay_test_map --tool-arg file=src/main.rs; then
     ok "tools/call tracedecay_test_map returns typed evidence"
   else
+    if [[ -s "$test_map_out" ]]; then
+      echo "----- tracedecay_test_map -----" >&2
+      cat "$test_map_out" >&2 || true
+    fi
+    if [[ -s "$test_map_err" ]]; then
+      echo "----- tracedecay_test_map stderr -----" >&2
+      cat "$test_map_err" >&2 || true
+    fi
     fail "tools/call tracedecay_test_map returns typed evidence"
   fi
 
-  impact_ready=0
-  impact_deadline=$((SECONDS + CALL_TIMEOUT_SECS))
-  while [[ -n ${node_id:-} ]] && ((SECONDS < impact_deadline)); do
-    if inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>"$impact_err" &&
-      json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
-      impact_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if ((impact_ready == 1)); then
+  if [[ -n ${node_id:-} ]] && call_tool_until_graph_ready "$impact_out" "$impact_err" \
+    --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id"; then
     ok "tools/call tracedecay_impact returns typed evidence"
   else
     echo "mcp-conformance-smoke: impact node_id='${node_id:-}'" >&2

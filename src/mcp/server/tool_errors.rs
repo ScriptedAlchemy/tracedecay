@@ -141,7 +141,9 @@ pub(crate) fn tool_error_response(
         return JsonRpcResponse::error_with_data(
             id,
             code,
-            format!("tool project route failed: {detail}"),
+            format!(
+                "tool project route failed: reason_code={reason_code} retryable={retryable}: {detail}"
+            ),
             Some(data),
         );
     }

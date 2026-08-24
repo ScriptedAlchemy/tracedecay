@@ -266,6 +266,26 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
     assert_eq!(data["status"], "backpressured");
 }
 
+#[test]
+fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_data() {
+    let error = crate::errors::TraceDecayError::ProjectRoute {
+        reason_code: "code-graph-unavailable".to_owned(),
+        retryable: true,
+        detail: "the verified code graph is not ready for the exact project root".to_owned(),
+    };
+
+    let response = tool_error_response(serde_json::json!(9), "tracedecay_test_map", &error);
+    let rpc_error = response.error.expect("JSON-RPC error");
+
+    assert_eq!(
+        rpc_error.message,
+        "tool project route failed: reason_code=code-graph-unavailable retryable=true: the verified code graph is not ready for the exact project root"
+    );
+    let data = rpc_error.data.expect("structured project-route data");
+    assert_eq!(data["reason_code"], "code-graph-unavailable");
+    assert_eq!(data["retryable"], true);
+}
+
 // ---- ledger settle is bounded when a recorder task wedges ---------
 
 // A dedicated multi-thread runtime keeps the timer driver off the worker that
